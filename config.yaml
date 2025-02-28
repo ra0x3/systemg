@@ -1,0 +1,33 @@
+version: 1
+services:
+  postgres:
+    command: "postgres -D /var/lib/postgres"
+    env:
+      file: "/etc/myapp/database.env"
+    restart_policy: "always"
+    backoff: "5s"
+    hooks:
+      on_start: "echo 'Postgres started'"
+      on_error: "echo 'Postgres crashed'"
+
+  django:
+    command: "python manage.py runserver"
+    env:
+      vars:
+        DEBUG: "true"
+        DATABASE_URL: "postgres://user:password@localhost:5432/dbname"
+    restart_policy: "on-failure"
+    backoff: "5s"
+    depends_on:
+      - "postgres"
+    hooks:
+      on_start: "curl -X POST http://example.com/hook/django-start"
+      on_error: "curl -X POST http://example.com/hook/django-error"
+
+  ngrok:
+    command: "ngrok http 8000"
+    restart_policy: "on-failure"
+    backoff: "3s"
+    hooks:
+      on_start: "echo 'ngrok started'"
+      on_error: "echo 'ngrok crashed'"

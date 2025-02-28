@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Cargo Tools
+        run: |
+          cargo install cargo-sort
+          rustup component add rustfmt clippy
+
+      - name: Check Cargo.toml Formatting (cargo-sort)
+        run: cargo sort --check --workspace
+
+      - name: Run Clippy (Linting)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run Rustfmt (Code Formatting)
+        run: cargo fmt -- --check
+
+      - name: Check rustfmt.toml Formatting
+        run: test -f rustfmt.toml || { echo "rustfmt.toml not found"; exit 1; }
+
+      - name: Run Tests
+        run: cargo test --verbose
