@@ -9,8 +9,41 @@ on:
       - main
 
 jobs:
-  test:
-    name: Run Tests
+  docs:
+    name: Build & Test Docusaurus Docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install Dependencies
+        run: |
+          cd docs
+          npm ci
+
+      - name: Build Docs
+        run: |
+          cd docs
+          npm run build
+
+      - name: Run Tests
+        run: |
+          cd docs
+          npm test
+
+      - name: Lint Docs
+        run: |
+          cd docs
+          npm run lint
+  cargo-test:
+    name: SystemG CI
     runs-on: ubuntu-latest
 
     steps:
