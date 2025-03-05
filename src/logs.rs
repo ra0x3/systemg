@@ -20,13 +20,10 @@ impl LogManager {
     pub fn show_log(
         &self,
         service_name: &str,
+        pid: u32,
         lines: usize,
     ) -> Result<(), LogsManagerError> {
-        debug!("Fetching logs for service: {service_name}");
-        let pid_file = self.pid_file.lock().unwrap();
-        let pid = pid_file
-            .get(service_name)
-            .ok_or(LogsManagerError::ServiceNotFound(service_name.to_string()))?;
+        debug!("Showing log for service: {service_name}");
 
         println!(
             "\n+-----------------------------+\n\
@@ -35,10 +32,16 @@ impl LogManager {
             service_name, pid
         );
 
-        let command = format!(
-            "stdbuf -oL -eL tail -n {} -f /proc/{}/fd/1 /proc/{}/fd/2",
-            lines, pid, pid
-        );
+        // macOS: Find the TTY of the process and tail it
+        let command = if cfg!(target_os = "macos") {
+            format!(
+                r#"tty=$(ps -o tty= -p {pid} | tr -d ' '); \
+            [ -n "$tty" ] && tail -n {lines} -f /dev/"$tty""#
+            )
+        } else {
+            // Linux: Tail the process's stdout/stderr
+            format!("tail -n {} -f /proc/{}/fd/1 /proc/{}/fd/2", lines, pid, pid)
+        };
 
         let handle = thread::spawn(move || {
             debug!("Executing command: {command}");
@@ -63,7 +66,11 @@ impl LogManager {
         debug!("Services: {services:?}");
 
         for service in services {
-            let _ = self.show_log(&service, lines);
+            let pid = pid_file
+                .get(&service)
+                .ok_or(LogsManagerError::ServiceNotFound(service.clone()))?;
+            debug!("Service: {service}, PID: {pid}");
+            let _ = self.show_log(&service, pid, lines);
         }
 
         Ok(())

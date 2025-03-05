@@ -101,7 +101,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match service {
                 Some(service) => {
                     info!("Fetching logs for service: {service}");
-                    manager.show_log(&service, lines)?;
+                    let pid = pid.lock().unwrap().pid_for(&service).unwrap();
+                    manager.show_log(&service, pid, lines)?;
                 }
                 None => {
                     info!("Fetching logs for all services...");

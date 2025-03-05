@@ -45,6 +45,11 @@ impl PidFile {
         Ok(pid_data)
     }
 
+    /// Return the PID for a specific service
+    pub fn pid_for(&self, service: &str) -> Option<u32> {
+        self.services.get(service).copied()
+    }
+
     /// Reloads the PID file from disk
     pub fn reload() -> Result<Self, PidFileError> {
         let path = Self::path();
@@ -376,13 +381,11 @@ impl Daemon {
                     processes.lock().unwrap().remove(&name);
                 }
 
-                // Step 3: If no active services remain, exit systemg
                 if active_services == 0 {
                     info!("All services have exited. systemg is shutting down.");
                     std::process::exit(0);
                 }
 
-                // Step 4: Restart services that crashed
                 for name in restarted_services {
                     if let Some(service) = config.services.get(&name) {
                         Self::handle_restart(&name, service, Arc::clone(&processes));
