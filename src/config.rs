@@ -54,7 +54,7 @@ fn expand_env_vars(input: &str) -> Result<String, ProcessManagerError> {
         let var_name = &caps[1];
         match env::var(var_name) {
             Ok(value) => value,
-            Err(_) => panic!("Missing environment variable: {}", var_name),
+            Err(_) => panic!("Missing environment variable: {var_name}"),
         }
     });
     Ok(result.to_string())
@@ -139,7 +139,7 @@ mod tests {
         let mut yaml_file = std::fs::File::create(&yaml_path).unwrap();
         writeln!(
             yaml_file,
-            r#"f
+            r#"
         version: 1
         services:
           test_service:

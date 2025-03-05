@@ -24,18 +24,18 @@ fn main() {
 
     match args.command {
         Commands::Start { config } => {
-            info!("Loading configuration from: {}", config);
+            info!("Loading configuration from: {config:?}");
             match load_config(&config) {
                 Ok(parsed_config) => {
                     let daemon = Daemon::new(parsed_config);
 
                     if let Err(e) = daemon.start_services() {
-                        error!("Error starting services: {}", e);
+                        error!("Error starting services: {e}");
                         process::exit(1);
                     }
                 }
                 Err(e) => {
-                    error!("Failed to load config: {}", e);
+                    error!("Failed to load config: {e}");
                     process::exit(1);
                 }
             }
@@ -48,30 +48,30 @@ fn main() {
                     let mut daemon = Daemon::new(parsed_config);
 
                     if let Err(e) = daemon.stop_services() {
-                        error!("Error stopping services: {}", e);
+                        error!("Error stopping services: {e}");
                         process::exit(1);
                     }
                 }
                 Err(e) => {
-                    error!("Failed to load config for stopping services: {}", e);
+                    error!("Failed to load config for stopping services: {e}");
                     process::exit(1);
                 }
             }
         }
 
         Commands::Restart { config } => {
-            info!("Restarting services using config: {}", config);
+            info!("Restarting services using config: {config:?}");
             match load_config(&config) {
                 Ok(parsed_config) => {
                     let mut daemon = Daemon::new(parsed_config);
 
                     if let Err(e) = daemon.restart_services() {
-                        error!("Error restarting services: {}", e);
+                        error!("Error restarting services: {e}");
                         process::exit(1);
                     }
                 }
                 Err(e) => {
-                    error!("Failed to load config: {}", e);
+                    error!("Failed to load config: {e}");
                     process::exit(1);
                 }
             }
@@ -83,9 +83,9 @@ fn main() {
         }
 
         Commands::Logs { service, lines } => {
-            info!("Fetching logs for service: {}", service);
+            info!("Fetching logs for service: {service}");
             if let Err(e) = show_logs(&service, lines) {
-                error!("Error reading logs: {}", e);
+                error!("Error reading logs: {e}");
                 process::exit(1);
             }
         }

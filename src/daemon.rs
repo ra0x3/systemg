@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, ServiceConfig};
 use crate::error::ProcessManagerError;
@@ -15,8 +14,6 @@ pub struct Daemon {
     processes: Arc<Mutex<HashMap<String, Child>>>,
     /// Reference to the service configuration.
     config: Arc<Config>,
-    /// Handles for service monitoring threads.
-    service_threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl Daemon {
@@ -26,7 +23,6 @@ impl Daemon {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
-            service_threads: Mutex::new(Vec::new()),
         }
     }
 
@@ -36,7 +32,6 @@ impl Daemon {
         let config = Arc::clone(&self.config);
 
         for (name, service) in &config.services {
-            debug!("Starting service: {}", name);
             self.start_service(name, service)?;
         }
         info!("All services started successfully.");
@@ -63,11 +58,6 @@ impl Daemon {
             self.start_service(name, service)?;
         }
 
-        info!("Waiting for all services to stop...");
-        for handle in self.service_threads.lock()?.drain(..) {
-            handle.join().expect("Failed to join service thread");
-        }
-
         info!("All services restarted successfully.");
         Ok(())
     }
@@ -78,33 +68,63 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
     ) -> Result<(), ProcessManagerError> {
-        info!("Starting service: {}", name);
+        info!("Starting service: {name}");
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(&service.command);
-        debug!("Executing command: {}", service.command);
+        let processes = Arc::clone(&self.processes);
+        let service_command = service.command.clone();
+        let env_vars = service.env.clone();
+        let service_name = name.to_string();
 
-        if let Some(env) = &service.env {
-            if let Some(vars) = &env.vars {
-                debug!("Setting environment variables: {:?}", vars);
-                for (key, value) in vars {
-                    cmd.env(key, value);
+        let handle = thread::spawn(move || {
+            debug!("Starting service thread for '{service_name}'");
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(&service_command);
+            debug!("Executing command: {service_command}");
+
+            if let Some(env) = &env_vars {
+                if let Some(vars) = &env.vars {
+                    debug!("Setting environment variables: {vars:?}");
+                    for (key, value) in vars {
+                        cmd.env(key, value);
+                    }
                 }
             }
-        }
 
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-        let child = cmd.spawn().map_err(|e| {
-            error!("Failed to start service '{}': {}", name, e);
+            match cmd.spawn() {
+                Ok(child) => {
+                    debug!("Service '{service_name}' started with PID: {}", child.id());
+                    processes
+                        .lock()
+                        .expect("Poisoned lock")
+                        .insert(service_name.clone(), child);
+                    info!("Service '{service_name}' started successfully.");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("Failed to start service '{service_name}': {e}");
+                    Err(ProcessManagerError::ServiceStartError {
+                        service: service_name,
+                        source: e,
+                    })
+                }
+            }
+        });
+
+        // Wait for the thread to complete and propagate any errors
+        handle.join().map_err(|e| {
+            error!("Failed to join service thread for '{name}': {e:?}");
             ProcessManagerError::ServiceStartError {
                 service: name.to_string(),
-                source: e,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    format!("{e:?}"),
+                ),
             }
-        })?;
+        })??;
 
-        self.processes.lock()?.insert(name.to_string(), child);
-        info!("Service '{}' started successfully.", name);
+        debug!("Service thread for '{name}' completed");
 
         Ok(())
     }
@@ -117,7 +137,7 @@ impl Daemon {
         service_name: &str,
     ) -> Result<(), ProcessManagerError> {
         if let Some(mut child) = self.processes.lock()?.remove(service_name) {
-            info!("Stopping service: {}", service_name);
+            info!("Stopping service: {service_name}");
             child
                 .kill()
                 .map_err(|e| ProcessManagerError::ServiceStopError {
@@ -133,7 +153,7 @@ impl Daemon {
     /// Iterates over all active processes and terminates them.
     pub fn stop_services(&mut self) -> Result<(), ProcessManagerError> {
         if self.processes.lock()?.is_empty() {
-            info!("No services running to stop.");
+            debug!("No services running to stop.");
             return Ok(());
         }
         info!("Stopping all running services...");
@@ -147,90 +167,119 @@ impl Daemon {
 
     /// Monitors all running services and restarts them if they exit unexpectedly.
     fn monitor_services(&self) {
+        info!("Starting service monitoring thread...");
         let processes = Arc::clone(&self.processes);
         let config = Arc::clone(&self.config);
 
         let handle = thread::spawn(move || {
             loop {
-                let mut service_failures = Vec::new();
-
+                let mut restarted_services = Vec::new();
                 {
-                    let mut locked_processes =
-                        processes.lock().expect("Failed to lock processes");
+                    let mut locked_processes = processes.lock().unwrap();
+
+                    debug!("Checking service statuses: {locked_processes:?}");
 
                     for (name, child) in locked_processes.iter_mut() {
                         match child.try_wait() {
                             Ok(Some(status)) if !status.success() => {
-                                error!(
-                                    "Service '{}' exited with error: {:?}",
-                                    name, status
-                                );
-                                if let Some(service) = config.services.get(name) {
-                                    service_failures
-                                        .push((name.clone(), service.clone()));
-                                }
+                                error!("Service '{name}' exited with error: {status:?}");
+                                restarted_services.push(name.clone());
                             }
                             Ok(Some(_)) => {
-                                info!("Service '{}' exited normally.", name);
+                                debug!("Service '{name}' exited normally.");
                             }
                             Ok(None) => {
                                 // Process still running, do nothing
-                                debug!("Service '{}' is still running.", name);
+                                debug!("Service '{name}' is still running.");
                             }
                             Err(e) => {
-                                error!("Failed to check status of '{}': {}", name, e);
+                                error!("Failed to check status of '{name}': {e}");
                             }
                         }
                     }
+
+                    // Remove failed services from process list
+                    for name in &restarted_services {
+                        locked_processes.remove(name);
+                    }
                 }
 
-                // Handle restarts outside the locked scope
-                for (name, service) in service_failures {
-                    let mut locked_processes =
-                        processes.lock().expect("Failed to lock processes");
-                    Self::handle_restart(&name, &service, &mut locked_processes);
+                // Restart services after releasing the lock
+                for name in restarted_services {
+                    if let Some(service) = config.services.get(&name) {
+                        error!("Restarting service '{}'", name);
+                        // let mut locked_processes = processes.lock().unwrap();
+                        Self::handle_restart(&name, service, processes.clone());
+                    }
                 }
 
                 thread::sleep(Duration::from_secs(5));
             }
         });
 
-        self.service_threads.lock().unwrap().push(handle);
+        let _ = handle
+            .join()
+            .map_err(|e| error!("Failed to join service thread: {e:?}"));
     }
 
     /// Handles restarting a service if its restart policy allows.
     fn handle_restart(
         name: &str,
         service: &ServiceConfig,
-        processes: &mut HashMap<String, Child>,
+        processes: Arc<Mutex<HashMap<String, Child>>>,
     ) {
-        let restart_policy = service.restart_policy.as_deref().unwrap_or("never");
+        let service_name = name.to_string();
+        let restart_policy = service
+            .restart_policy
+            .clone()
+            .unwrap_or_else(|| "never".to_string());
+        let backoff = service
+            .backoff
+            .as_deref()
+            .unwrap_or("5s")
+            .trim_end_matches('s')
+            .parse::<u64>()
+            .unwrap_or(5);
+        let command = service.command.clone();
+        let env = service.env.clone();
 
-        if restart_policy == "always" || restart_policy == "on-failure" {
-            let backoff_time = service
-                .backoff
-                .as_deref()
-                .unwrap_or("5s")
-                .trim_end_matches('s')
-                .parse::<u64>()
-                .unwrap_or(5);
+        let handle = thread::spawn(move || {
+            debug!("Service '{service_name}' restart policy: {restart_policy}");
 
-            error!("Restarting '{}' after {} seconds...", name, backoff_time);
-            thread::sleep(Duration::from_secs(backoff_time));
+            if restart_policy == "always" || restart_policy == "on_failure" {
+                warn!("Restarting '{service_name}' after {backoff} seconds...");
+                thread::sleep(Duration::from_secs(backoff));
 
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg(&service.command);
-            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(&command);
+                cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-            match cmd.spawn() {
-                Ok(child) => {
-                    processes.insert(name.to_string(), child);
-                    info!("Service '{}' restarted successfully.", name);
+                if let Some(env) = env {
+                    if let Some(vars) = &env.vars {
+                        debug!("Setting environment variables: {vars:?}");
+                        for (key, value) in vars {
+                            cmd.env(key, value);
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to restart service '{}': {}", name, e);
+
+                match cmd.spawn() {
+                    Ok(child) => {
+                        processes
+                            .lock()
+                            .expect("poisoned lock")
+                            .insert(service_name.to_string(), child);
+                        info!("Service '{service_name}' restarted successfully.");
+                    }
+                    Err(e) => {
+                        error!("Failed to restart service '{service_name}': {e}");
+                    }
                 }
             }
-        }
+        });
+
+        let _ = handle
+            .join()
+            .map_err(|e| error!("Failed to join service thread: {e:?}"));
     }
 }

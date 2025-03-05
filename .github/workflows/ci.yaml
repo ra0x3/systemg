@@ -22,27 +22,33 @@ jobs:
         with:
           node-version: "18"
           cache: "npm"
+          cache-dependency-path: docs/package-lock.json
 
       - name: Install Dependencies
+        working-directory: docs
         run: |
           cd docs
           npm ci
 
       - name: Build Docs
+        working-directory: docs
         run: |
           cd docs
           npm run build
 
+      - name: Lint Docs
+        working-directory: docs
+        run: |
+          cd docs
+          npm run lint
+
       - name: Run Tests
+        working-directory: docs
         run: |
           cd docs
           npm test
 
-      - name: Lint Docs
-        run: |
-          cd docs
-          npm run lint
-  cargo-test:
+  cargo:
     name: SystemG CI
     runs-on: ubuntu-latest
 
