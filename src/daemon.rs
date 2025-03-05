@@ -1,4 +1,6 @@
+use libc;
 use std::collections::HashMap;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -90,6 +92,12 @@ impl Daemon {
                 }
             }
 
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
             cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
             match cmd.spawn() {

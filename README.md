@@ -5,7 +5,7 @@
 # ⚡ Systemg - A Lightweight Process Manager
 
 Systemg is a **simple, fast, and dependency-free process manager** written in Rust.  
-It aims to provide **a minimal alternative to systemd** and other heavyweight service managers, focusing on **ease of use**, **clarity**, and **performance**.
+It aims to provide **a minimal alternative to systdemd** and other heavyweight service managers, focusing on **ease of use**, **clarity**, and **performance**.
 
 ## 🚀 Why Systemg?
 
