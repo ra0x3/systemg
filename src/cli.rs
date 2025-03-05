@@ -18,10 +18,18 @@ pub enum Commands {
         /// Path to the configuration file (defaults to `config.yaml`).
         #[arg(short, long, default_value = "config.yaml")]
         config: String,
+
+        /// Whether to daemonize the process manager.
+        #[arg(short, long)]
+        daemonize: bool,
     },
 
     /// Stop the currently running process manager.
-    Stop,
+    Stop {
+        /// Name of service to stop (optional).
+        #[arg(short, long)]
+        service: Option<String>,
+    },
 
     /// Restart the process manager, optionally specifying a new configuration file.
     Restart {

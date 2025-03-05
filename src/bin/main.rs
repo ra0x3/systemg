@@ -19,16 +19,19 @@ use systemg::{
 /// # Errors
 /// - If the configuration file fails to load, it logs an error and exits.
 /// - If any daemon operation (start, stop, restart) fails, it logs the error and exits.
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     register_signal_handler();
     tracing_subscriber::fmt::init();
     let args = parse_args();
 
     match args.command {
-        Commands::Start { config } => {
+        Commands::Start { config, daemonize } => {
             info!("Loading configuration from: {config:?}");
             match load_config(&config) {
                 Ok(parsed_config) => {
+                    if daemonize {
+                        daemonize_systemg()?;
+                    }
                     let daemon = Daemon::new(parsed_config);
 
                     if let Err(e) = daemon.start_services() {
@@ -43,14 +46,19 @@ fn main() {
             }
         }
 
-        Commands::Stop => {
+        Commands::Stop { service } => {
             info!("Stopping all services...");
             match load_config("systemg.yaml") {
                 Ok(parsed_config) => {
                     let mut daemon = Daemon::new(parsed_config);
 
-                    if let Err(e) = daemon.stop_services() {
-                        error!("Error stopping services: {e}");
+                    if service.is_none() {
+                        if let Err(e) = daemon.stop_services() {
+                            error!("Error stopping services: {e}");
+                            std::process::exit(1);
+                        }
+                    } else if let Err(e) = daemon.stop_service(&service.unwrap()) {
+                        error!("Error stopping service: {e}");
                         std::process::exit(1);
                     }
                 }
@@ -92,6 +100,29 @@ fn main() {
             }
         }
     }
+
+    Ok(())
+}
+
+/// Daemonizes the systemg process.
+fn daemonize_systemg() -> std::io::Result<()> {
+    if unsafe { libc::fork() } > 0 {
+        std::process::exit(0); // Parent exits, child continues
+    }
+
+    unsafe {
+        libc::setsid(); // Create a new session
+    }
+
+    if unsafe { libc::fork() } > 0 {
+        std::process::exit(0); // First child exits, second child is fully detached
+    }
+
+    unsafe {
+        libc::setpgid(0, 0); // Ensure systemg retains control over its process group
+    }
+
+    Ok(())
 }
 
 /// Registers a signal handler to terminate child processes on `SIGTERM` or `SIGINT`.

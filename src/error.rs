@@ -55,10 +55,26 @@ pub enum ProcessManagerError {
     /// Error for poisoned mutex.
     #[error("Mutex is poisoned: {0}")]
     MutexPoisonError(String),
+
+    /// Error for PID file.
+    #[error("PID file error: {0}")]
+    PidFileError(#[from] PidFileError),
 }
 
 impl<T> From<std::sync::PoisonError<T>> for ProcessManagerError {
     fn from(err: std::sync::PoisonError<T>) -> Self {
         ProcessManagerError::MutexPoisonError(err.to_string())
     }
+}
+
+#[derive(Debug, Error)]
+pub enum PidFileError {
+    #[error("Failed to read PID file: {0}")]
+    ReadError(#[from] std::io::Error),
+
+    #[error("Failed to parse PID file: {0}")]
+    ParseError(#[from] serde_json::Error),
+
+    #[error("Service not found in PID file")]
+    ServiceNotFound,
 }

@@ -1,6 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    fs,
     os::unix::process::CommandExt,
+    path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -11,7 +14,61 @@ use libc::{getppid, setpgid};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, EnvConfig, ServiceConfig};
-use crate::error::ProcessManagerError;
+use crate::error::{PidFileError, ProcessManagerError};
+
+/// Represents the PID file structure
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct PidFile {
+    /// Map of service names to their respective PIDs.
+    services: HashMap<String, u32>,
+}
+
+impl PidFile {
+    /// Returns the PID file path
+    fn path() -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME not set");
+        PathBuf::from(format!("{}/.local/share/systemg/pid.json", home))
+    }
+
+    /// Loads the PID file from disk
+    pub fn load() -> Result<Self, PidFileError> {
+        let path = Self::path();
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let contents = fs::read_to_string(&path)?;
+        let pid_data = serde_json::from_str::<Self>(&contents)?;
+        Ok(pid_data)
+    }
+
+    /// Saves the current state to the PID file
+    pub fn save(&self) -> Result<(), PidFileError> {
+        let path = Self::path();
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    /// Inserts a new service PID and saves
+    pub fn insert(&mut self, service: &str, pid: u32) -> Result<(), PidFileError> {
+        self.services.insert(service.to_string(), pid);
+        self.save()
+    }
+
+    /// Removes a service and saves
+    pub fn remove(&mut self, service: &str) -> Result<(), PidFileError> {
+        if self.services.remove(service).is_some() {
+            self.save()
+        } else {
+            Err(PidFileError::ServiceNotFound)
+        }
+    }
+
+    /// Retrieves a service PID
+    pub fn get(&self, service: &str) -> Option<u32> {
+        self.services.get(service).copied()
+    }
+}
 
 /// Manages services, ensuring they start, stop, and restart as needed.
 pub struct Daemon {
@@ -19,15 +76,20 @@ pub struct Daemon {
     processes: Arc<Mutex<HashMap<String, Child>>>,
     /// Reference to the service configuration.
     config: Arc<Config>,
+    /// The PID file for tracking service PIDs.
+    pid: Arc<Mutex<PidFile>>,
 }
 
 impl Daemon {
     /// Initializes a new `Daemon` with an empty process map and a shared config reference.
     pub fn new(config: Config) -> Self {
         info!("Initializing daemon...");
+
+        let pid = PidFile::load().unwrap_or_default();
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
+            pid: Arc::new(Mutex::new(pid)),
         }
     }
 
@@ -50,7 +112,7 @@ impl Daemon {
         command: &str,
         env: Option<EnvConfig>,
         processes: Arc<Mutex<HashMap<String, Child>>>,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<u32, ProcessManagerError> {
         debug!("Launching service: {service_name}");
 
         let mut cmd = Command::new("sh");
@@ -94,13 +156,14 @@ impl Daemon {
 
         match cmd.spawn() {
             Ok(child) => {
-                debug!("Service '{service_name}' started with PID: {}", child.id());
+                let pid = child.id();
+                debug!("Service '{service_name}' started with PID: {pid}");
                 processes
                     .lock()
                     .expect("Poisoned lock")
                     .insert(service_name.to_string(), child);
                 info!("Service '{service_name}' started successfully.");
-                Ok(())
+                Ok(pid)
             }
             Err(e) => {
                 error!("Failed to start service '{service_name}': {e}");
@@ -164,13 +227,17 @@ impl Daemon {
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
 
-            if let Err(e) = Daemon::launch_attached_service(
+            match Daemon::launch_attached_service(
                 &service_name,
                 &command,
                 env,
                 processes.clone(),
             ) {
-                error!("Failed to start service '{service_name}': {e}");
+                Ok(pid) => {
+                    let mut pidf = PidFile::load().unwrap_or_default();
+                    pidf.insert(&service_name, pid).unwrap();
+                }
+                Err(e) => error!("Failed to start service '{service_name}': {e}"),
             }
         });
 
@@ -198,15 +265,32 @@ impl Daemon {
         &mut self,
         service_name: &str,
     ) -> Result<(), ProcessManagerError> {
-        if let Some(mut child) = self.processes.lock()?.remove(service_name) {
-            info!("Stopping service: {service_name}");
-            child
-                .kill()
-                .map_err(|e| ProcessManagerError::ServiceStopError {
-                    service: service_name.to_string(),
-                    source: e,
-                })?;
+        let mut pidf = self.pid.lock()?;
+
+        if let Some(pid) = pidf.get(service_name) {
+            let pid = nix::unistd::Pid::from_raw(pid as i32);
+
+            if nix::sys::signal::kill(pid, None).is_err() {
+                warn!("Service '{service_name}' is already stopped.");
+            } else {
+                debug!("Stopping service '{service_name}' (PID {pid})");
+                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).map_err(
+                    |e| ProcessManagerError::ServiceStopError {
+                        service: service_name.to_string(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e.to_string(),
+                        ),
+                    },
+                )?;
+            }
+
+            self.processes.lock()?.remove(service_name);
+            pidf.remove(service_name)?;
+        } else {
+            warn!("Service '{service_name}' not found in PID file.");
         }
+
         Ok(())
     }
 
@@ -214,16 +298,17 @@ impl Daemon {
     ///
     /// Iterates over all active processes and terminates them.
     pub fn stop_services(&mut self) -> Result<(), ProcessManagerError> {
-        if self.processes.lock()?.is_empty() {
-            debug!("No services running to stop.");
-            return Ok(());
+        let services: Vec<String> = {
+            let pidf = self.pid.lock()?;
+            pidf.services.keys().cloned().collect()
+        };
+
+        for service in services {
+            if let Err(e) = self.stop_service(&service) {
+                error!("Failed to stop service '{service}': {e}");
+            }
         }
-        info!("Stopping all running services...");
-        let service_names: Vec<String> = self.processes.lock()?.keys().cloned().collect();
-        for service in service_names {
-            self.stop_service(&service)?;
-        }
-        info!("All services have been stopped.");
+
         Ok(())
     }
 
@@ -312,13 +397,17 @@ impl Daemon {
                 warn!("Restarting '{service_name}' after {backoff} seconds...");
                 thread::sleep(Duration::from_secs(backoff));
 
-                if let Err(e) = Daemon::launch_attached_service(
+                match Daemon::launch_attached_service(
                     &service_name,
                     &command,
                     env,
                     processes.clone(),
                 ) {
-                    error!("Failed to restart '{service_name}': {e}");
+                    Ok(pid) => {
+                        let mut pidf = PidFile::load().unwrap_or_default();
+                        pidf.insert(&service_name, pid).unwrap();
+                    }
+                    Err(e) => error!("Failed to start service '{service_name}': {e}"),
                 }
             }
         });
