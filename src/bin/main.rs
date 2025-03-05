@@ -1,4 +1,6 @@
-use std::process;
+use libc::{SIGKILL, getpgrp, killpg};
+use tracing::{error, info};
+
 use systemg::{
     cli::{Commands, parse_args},
     config::load_config,
@@ -6,7 +8,6 @@ use systemg::{
     logs::show_logs,
     status::show_status,
 };
-use tracing::{error, info};
 
 /// Entry point for the Rust Process Manager.
 ///
@@ -19,6 +20,7 @@ use tracing::{error, info};
 /// - If the configuration file fails to load, it logs an error and exits.
 /// - If any daemon operation (start, stop, restart) fails, it logs the error and exits.
 fn main() {
+    register_signal_handler();
     tracing_subscriber::fmt::init();
     let args = parse_args();
 
@@ -31,12 +33,12 @@ fn main() {
 
                     if let Err(e) = daemon.start_services() {
                         error!("Error starting services: {e}");
-                        process::exit(1);
+                        std::process::exit(1);
                     }
                 }
                 Err(e) => {
                     error!("Failed to load config: {e}");
-                    process::exit(1);
+                    std::process::exit(1);
                 }
             }
         }
@@ -49,12 +51,12 @@ fn main() {
 
                     if let Err(e) = daemon.stop_services() {
                         error!("Error stopping services: {e}");
-                        process::exit(1);
+                        std::process::exit(1);
                     }
                 }
                 Err(e) => {
                     error!("Failed to load config for stopping services: {e}");
-                    process::exit(1);
+                    std::process::exit(1);
                 }
             }
         }
@@ -67,12 +69,12 @@ fn main() {
 
                     if let Err(e) = daemon.restart_services() {
                         error!("Error restarting services: {e}");
-                        process::exit(1);
+                        std::process::exit(1);
                     }
                 }
                 Err(e) => {
                     error!("Failed to load config: {e}");
-                    process::exit(1);
+                    std::process::exit(1);
                 }
             }
         }
@@ -86,8 +88,23 @@ fn main() {
             info!("Fetching logs for service: {service}");
             if let Err(e) = show_logs(&service, lines) {
                 error!("Error reading logs: {e}");
-                process::exit(1);
+                std::process::exit(1);
             }
         }
     }
+}
+
+/// Registers a signal handler to terminate child processes on `SIGTERM` or `SIGINT`.
+fn register_signal_handler() {
+    ctrlc::set_handler(move || {
+        println!("systemg is shutting down... killing all child processes");
+
+        unsafe {
+            let pgid = getpgrp();
+            killpg(pgid, SIGKILL); // Kill the entire process group
+        }
+
+        std::process::exit(0);
+    })
+    .expect("Failed to set signal handler");
 }

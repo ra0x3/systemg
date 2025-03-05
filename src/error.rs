@@ -1,4 +1,3 @@
-use std::io;
 use thiserror::Error;
 
 /// Defines all possible errors that can occur in the process manager.
@@ -6,7 +5,7 @@ use thiserror::Error;
 pub enum ProcessManagerError {
     /// Error reading or accessing a configuration file.
     #[error("Failed to read config file: {0}")]
-    ConfigReadError(#[from] io::Error),
+    ConfigReadError(#[from] std::io::Error),
 
     /// Error parsing YAML configuration.
     #[error("Invalid YAML format: {0}")]
@@ -19,7 +18,7 @@ pub enum ProcessManagerError {
         service: String,
         /// The underlying error that occurred.
         #[source]
-        source: io::Error,
+        source: std::io::Error,
     },
 
     /// Error stopping a service process.
@@ -29,7 +28,7 @@ pub enum ProcessManagerError {
         service: String,
         /// The underlying error that occurred.
         #[source]
-        source: io::Error,
+        source: std::io::Error,
     },
 
     /// Error executing a lifecycle hook (e.g., on_start, on_error).
@@ -39,7 +38,7 @@ pub enum ProcessManagerError {
         service: String,
         /// The underlying error that occurred.
         #[source]
-        source: io::Error,
+        source: std::io::Error,
     },
 
     /// Error when a required dependency service is not running.

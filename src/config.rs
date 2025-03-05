@@ -1,9 +1,8 @@
-use crate::error::ProcessManagerError;
 use regex::Regex;
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::env;
-use std::fs;
+use std::{collections::HashMap, env, fs};
+
+use crate::error::ProcessManagerError;
 
 /// Represents the structure of the configuration file.
 #[derive(Debug, Deserialize)]

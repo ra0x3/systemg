@@ -1,13 +1,16 @@
-use libc;
-use std::collections::HashMap;
-use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    os::unix::process::CommandExt,
+    process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
+
+use libc::{getppid, setpgid};
 use tracing::{debug, error, info, warn};
 
-use crate::config::{Config, ServiceConfig};
+use crate::config::{Config, EnvConfig, ServiceConfig};
 use crate::error::ProcessManagerError;
 
 /// Manages services, ensuring they start, stop, and restart as needed.
@@ -25,6 +28,87 @@ impl Daemon {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
+        }
+    }
+
+    /// Launches a service as a child process, ensuring it remains attached to `systemg`.
+    ///
+    /// On **Linux**, child processes receive `SIGTERM` when `systemg` exits using `prctl()`.
+    /// On **macOS**, this function ensures all child processes share the same process group,
+    /// allowing them to be killed when `systemg` terminates.
+    ///
+    /// # Arguments
+    /// * `service_name` - The name of the service.
+    /// * `command` - The command string to execute.
+    /// * `env` - Optional environment variables.
+    /// * `processes` - Shared process tracking map.
+    ///
+    /// # Returns
+    /// A [`Child`] process handle if successful.
+    fn launch_attached_service(
+        service_name: &str,
+        command: &str,
+        env: Option<EnvConfig>,
+        processes: Arc<Mutex<HashMap<String, Child>>>,
+    ) -> Result<(), ProcessManagerError> {
+        debug!("Launching service: {service_name}");
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+
+        debug!("Executing command: {cmd:?}");
+
+        // Inherit stdout and stderr for logging
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+        // Set environment variables if provided
+        if let Some(env) = env {
+            if let Some(vars) = &env.vars {
+                debug!("Setting environment variables: {vars:?}");
+                for (key, value) in vars {
+                    cmd.env(key, value);
+                }
+            }
+        }
+
+        unsafe {
+            cmd.pre_exec(|| {
+                let ppid = getppid();
+                if setpgid(0, ppid) < 0 {
+                    error!("Failed to set process group (setpgid)");
+                    return Err(std::io::Error::last_os_error());
+                }
+
+                #[cfg(target_os = "linux")]
+                {
+                    use libc::{PR_SET_PDEATHSIG, SIGTERM, prctl};
+                    if prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0) < 0 {
+                        error!("Failed to set PR_SET_PDEATHSIG");
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+
+                Ok(())
+            });
+        }
+
+        match cmd.spawn() {
+            Ok(child) => {
+                debug!("Service '{service_name}' started with PID: {}", child.id());
+                processes
+                    .lock()
+                    .expect("Poisoned lock")
+                    .insert(service_name.to_string(), child);
+                info!("Service '{service_name}' started successfully.");
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to start service '{service_name}': {e}");
+                Err(ProcessManagerError::ServiceStartError {
+                    service: service_name.to_string(),
+                    source: e,
+                })
+            }
         }
     }
 
@@ -73,50 +157,20 @@ impl Daemon {
         info!("Starting service: {name}");
 
         let processes = Arc::clone(&self.processes);
-        let service_command = service.command.clone();
-        let env_vars = service.env.clone();
+        let command = service.command.clone();
+        let env = service.env.clone();
         let service_name = name.to_string();
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg(&service_command);
-            debug!("Executing command: {service_command}");
 
-            if let Some(env) = &env_vars {
-                if let Some(vars) = &env.vars {
-                    debug!("Setting environment variables: {vars:?}");
-                    for (key, value) in vars {
-                        cmd.env(key, value);
-                    }
-                }
-            }
-
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-
-            match cmd.spawn() {
-                Ok(child) => {
-                    debug!("Service '{service_name}' started with PID: {}", child.id());
-                    processes
-                        .lock()
-                        .expect("Poisoned lock")
-                        .insert(service_name.clone(), child);
-                    info!("Service '{service_name}' started successfully.");
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("Failed to start service '{service_name}': {e}");
-                    Err(ProcessManagerError::ServiceStartError {
-                        service: service_name,
-                        source: e,
-                    })
-                }
+            if let Err(e) = Daemon::launch_attached_service(
+                &service_name,
+                &command,
+                env,
+                processes.clone(),
+            ) {
+                error!("Failed to start service '{service_name}': {e}");
             }
         });
 
@@ -130,7 +184,7 @@ impl Daemon {
                     format!("{e:?}"),
                 ),
             }
-        })??;
+        })?;
 
         debug!("Service thread for '{name}' completed");
 
@@ -258,30 +312,13 @@ impl Daemon {
                 warn!("Restarting '{service_name}' after {backoff} seconds...");
                 thread::sleep(Duration::from_secs(backoff));
 
-                let mut cmd = Command::new("sh");
-                cmd.arg("-c").arg(&command);
-                cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-
-                if let Some(env) = env {
-                    if let Some(vars) = &env.vars {
-                        debug!("Setting environment variables: {vars:?}");
-                        for (key, value) in vars {
-                            cmd.env(key, value);
-                        }
-                    }
-                }
-
-                match cmd.spawn() {
-                    Ok(child) => {
-                        processes
-                            .lock()
-                            .expect("poisoned lock")
-                            .insert(service_name.to_string(), child);
-                        info!("Service '{service_name}' restarted successfully.");
-                    }
-                    Err(e) => {
-                        error!("Failed to restart service '{service_name}': {e}");
-                    }
+                if let Err(e) = Daemon::launch_attached_service(
+                    &service_name,
+                    &command,
+                    env,
+                    processes.clone(),
+                ) {
+                    error!("Failed to restart '{service_name}': {e}");
                 }
             }
         });
