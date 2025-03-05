@@ -52,4 +52,14 @@ pub enum ProcessManagerError {
         /// The missing dependency.
         dependency: String,
     },
+
+    /// Error for poisoned mutex.
+    #[error("Mutex is poisoned: {0}")]
+    MutexPoisonError(String),
+}
+
+impl<T> From<std::sync::PoisonError<T>> for ProcessManagerError {
+    fn from(err: std::sync::PoisonError<T>) -> Self {
+        ProcessManagerError::MutexPoisonError(err.to_string())
+    }
 }

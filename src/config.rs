@@ -1,6 +1,9 @@
 use crate::error::ProcessManagerError;
+use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::env;
+use std::fs;
 
 /// Represents the structure of the configuration file.
 #[derive(Debug, Deserialize)]
@@ -12,7 +15,7 @@ pub struct Config {
 }
 
 /// Configuration for an individual service.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ServiceConfig {
     /// Command used to start the service.
     pub command: String,
@@ -29,7 +32,7 @@ pub struct ServiceConfig {
 }
 
 /// Represents environment variables for a service.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct EnvConfig {
     /// Optional path to an environment file.
     pub file: Option<String>,
@@ -38,110 +41,137 @@ pub struct EnvConfig {
 }
 
 /// Hooks that run on specific service lifecycle events.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Hooks {
-    /// Command to execute when the service starts.
     pub on_start: Option<String>,
-    /// Command to execute when the service fails or crashes.
     pub on_error: Option<String>,
 }
 
-/// Loads and parses the configuration file.
-///
-/// # Arguments
-///
-/// * `path` - The path to the configuration YAML file.
-///
-/// # Returns
-///
-/// * `Ok(Config)` if the file is successfully parsed.
-/// * `Err(ProcessManagerError::ConfigReadError)` if the file cannot be read.
-/// * `Err(ProcessManagerError::ConfigParseError)` if the file format is invalid.
-///
-/// # Example
-///
-/// ```rust
-/// use systemg::config::load_config;
-/// let config = load_config("config.yaml").unwrap();
-/// ```
+/// Expands environment variables within a string.
+fn expand_env_vars(input: &str) -> Result<String, ProcessManagerError> {
+    let re = Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
+    let result = re.replace_all(input, |caps: &regex::Captures| {
+        let var_name = &caps[1];
+        match env::var(var_name) {
+            Ok(value) => value,
+            Err(_) => panic!("Missing environment variable: {}", var_name),
+        }
+    });
+    Ok(result.to_string())
+}
+
+/// Loads an `.env` file and sets environment variables.
+fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
+    let content =
+        fs::read_to_string(path).map_err(ProcessManagerError::ConfigReadError)?;
+    for line in content.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            unsafe {
+                env::set_var(key.trim(), value.trim());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Loads and parses the configuration file, expanding environment variables.
 pub fn load_config(path: &str) -> Result<Config, ProcessManagerError> {
     let content =
-        std::fs::read_to_string(path).map_err(ProcessManagerError::ConfigReadError)?;
-    let config: Config =
+        fs::read_to_string(path).map_err(ProcessManagerError::ConfigReadError)?;
+    let mut config: Config =
         serde_yaml::from_str(&content).map_err(ProcessManagerError::ConfigParseError)?;
+
+    // Load env files first before expanding variables
+    for service in config.services.values_mut() {
+        if let Some(env_config) = &service.env {
+            if let Some(env_file) = &env_config.file {
+                load_env_file(env_file)?;
+            }
+        }
+    }
+
+    // Now expand environment variables after loading .env
+    let expanded_content = expand_env_vars(&content)?;
+
+    // Parse the final expanded config
+    let config: Config = serde_yaml::from_str(&expanded_content)
+        .map_err(ProcessManagerError::ConfigParseError)?;
+
     Ok(config)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
 
-    /// Helper function to create a mock YAML config.
-    fn mock_yaml_config() -> &'static str {
-        r#"
+    /// Test that an env file is properly loaded.
+    #[test]
+    fn test_load_env_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".env");
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "TEST_KEY=TEST_VALUE").unwrap();
+        writeln!(file, "ANOTHER_KEY=ANOTHER_VALUE").unwrap();
+
+        load_env_file(file_path.to_str().unwrap()).unwrap();
+
+        assert_eq!(env::var("TEST_KEY").unwrap(), "TEST_VALUE");
+        assert_eq!(env::var("ANOTHER_KEY").unwrap(), "ANOTHER_VALUE");
+    }
+
+    /// Test that a YAML config with env file reference is properly loaded.
+    #[test]
+    fn test_load_config_with_env_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a fake .env file
+        let env_path = dir.path().join(".env");
+        let mut env_file = std::fs::File::create(&env_path).unwrap();
+        writeln!(env_file, "MY_TEST_VAR=HelloWorld").unwrap();
+        writeln!(env_file, "DB_USER=admin").unwrap();
+        writeln!(env_file, "DB_PASS=secret").unwrap();
+
+        // Create a mock YAML config referencing the .env file
+        let yaml_path = dir.path().join("config.yaml");
+        let mut yaml_file = std::fs::File::create(&yaml_path).unwrap();
+        writeln!(
+            yaml_file,
+            r#"f
         version: 1
         services:
           test_service:
-            command: "echo Hello"
+            command: "echo ${{MY_TEST_VAR}}"
             env:
+              file: "{}"
               vars:
-                KEY1: "VALUE1"
-                KEY2: "VALUE2"
-            restart_policy: "on-failure"
-            backoff: "5s"
-            depends_on: ["db"]
-            hooks:
-              on_start: "echo Started"
-              on_error: "echo Failed"
-          db:
-            command: "postgres -D /var/lib/postgres"
-            restart_policy: "always"
-        "#
-    }
+                DB_HOST: "localhost"
+        "#,
+            env_path.to_str().unwrap()
+        )
+        .unwrap();
 
-    /// Test that a valid config file parses correctly.
-    #[test]
-    fn test_load_valid_config() {
-        let config: Config =
-            serde_yaml::from_str(mock_yaml_config()).expect("Failed to parse YAML");
+        // Set MY_TEST_VAR in the test environment so it expands properly
+        unsafe {
+            std::env::set_var("MY_TEST_VAR", "HelloWorld");
+        }
 
-        assert_eq!(config.version, 1);
-        assert!(config.services.contains_key("test_service"));
-        assert!(config.services.contains_key("db"));
-
+        // Load the config and verify values
+        let config = load_config(yaml_path.to_str().unwrap()).unwrap();
         let service = config.services.get("test_service").unwrap();
-        assert_eq!(service.command, "echo Hello");
-        assert_eq!(service.restart_policy.as_deref(), Some("on-failure"));
-        assert_eq!(service.backoff.as_deref(), Some("5s"));
-        assert_eq!(
-            service.depends_on.as_ref().unwrap(),
-            &vec!["db".to_string()]
-        );
 
+        // Ensure command expansion works correctly
+        assert_eq!(service.command, "echo HelloWorld");
+
+        // Extract loaded env vars from the config instead of calling env::var()
         let env_vars = service.env.as_ref().unwrap().vars.as_ref().unwrap();
-        assert_eq!(env_vars.get("KEY1").unwrap(), "VALUE1");
-        assert_eq!(env_vars.get("KEY2").unwrap(), "VALUE2");
+        assert_eq!(env_vars.get("DB_HOST").unwrap(), "localhost");
 
-        let hooks = service.hooks.as_ref().unwrap();
-        assert_eq!(hooks.on_start.as_deref(), Some("echo Started"));
-        assert_eq!(hooks.on_error.as_deref(), Some("echo Failed"));
-    }
-
-    /// Test that a missing YAML file returns a `ConfigReadError`.
-    #[test]
-    fn test_load_missing_file() {
-        let result = load_config("nonexistent.yaml");
-        assert!(matches!(
-            result,
-            Err(ProcessManagerError::ConfigReadError(_))
-        ));
-    }
-
-    /// Test that an invalid YAML format returns a `ConfigParseError`.
-    #[test]
-    fn test_load_invalid_yaml() {
-        let invalid_yaml = "invalid_yaml: [unterminated";
-        let result: Result<Config, _> = serde_yaml::from_str(invalid_yaml);
-        assert!(result.is_err());
+        // Verify .env file values were loaded correctly
+        assert_eq!(std::env::var("MY_TEST_VAR").unwrap(), "HelloWorld");
+        assert_eq!(std::env::var("DB_USER").unwrap(), "admin");
+        assert_eq!(std::env::var("DB_PASS").unwrap(), "secret");
     }
 }

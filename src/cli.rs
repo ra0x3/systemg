@@ -1,11 +1,8 @@
 use clap::{Parser, Subcommand};
 
 /// Command-line interface for the Rust Process Manager.
-///
-/// This module defines the structure of the CLI using `clap` and provides
-/// commands to start, stop, restart, and check the status of managed services.
 #[derive(Parser)]
-#[command(name = "rust_process_manager")]
+#[command(name = "systemg")]
 #[command(about = "A lightweight process manager for system services", long_about = None)]
 pub struct Cli {
     /// The command to execute.
@@ -34,28 +31,24 @@ pub enum Commands {
     },
 
     /// Show the status of currently running services.
-    Status,
+    Status {
+        /// Optionally specify a service name to check its status.
+        #[arg(short, long)]
+        service: Option<String>,
+    },
+
+    /// Show logs for a specific service.
+    Logs {
+        /// The name of the service whose logs should be displayed.
+        service: String,
+
+        /// Number of lines to show (default: 50).
+        #[arg(short, long, default_value = "50")]
+        lines: usize,
+    },
 }
 
 /// Parses command-line arguments and returns a `Cli` struct.
-///
-/// # Returns
-///
-/// * `Cli` - Parsed CLI arguments containing the command to execute.
-///
-/// # Example
-///
-/// ```no_run
-/// use systemg::cli::{parse_args, Commands};
-///
-/// let args = parse_args();
-/// match args.command {
-///     Commands::Start { config } => println!("Starting with config: {}", config),
-///     Commands::Stop => println!("Stopping process manager"),
-///     Commands::Restart { config } => println!("Restarting with config: {}", config),
-///     Commands::Status => println!("Showing service status"),
-/// }
-/// ```
 pub fn parse_args() -> Cli {
     Cli::parse()
 }
