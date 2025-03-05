@@ -8,7 +8,7 @@ use crate::error::ProcessManagerError;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// Configuration version.
-    pub version: u8,
+    pub version: String,
     /// Map of service names to their respective configurations.
     pub services: HashMap<String, ServiceConfig>,
 }
@@ -139,7 +139,7 @@ mod tests {
         writeln!(
             yaml_file,
             r#"
-        version: 1
+        version: "1"
         services:
           test_service:
             command: "echo ${{MY_TEST_VAR}}"
