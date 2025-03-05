@@ -47,8 +47,8 @@ pub enum Commands {
 
     /// Show logs for a specific service.
     Logs {
-        /// The name of the service whose logs should be displayed.
-        service: String,
+        /// The name of the service whose logs should be displayed (optional).
+        service: Option<String>,
 
         /// Number of lines to show (default: 50).
         #[arg(short, long, default_value = "50")]

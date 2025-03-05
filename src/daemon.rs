@@ -1,3 +1,4 @@
+use libc::{getppid, setpgid};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -9,8 +10,6 @@ use std::{
     thread,
     time::Duration,
 };
-
-use libc::{getppid, setpgid};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, EnvConfig, ServiceConfig};
@@ -18,7 +17,7 @@ use crate::error::{PidFileError, ProcessManagerError};
 
 /// Represents the PID file structure
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct PidFile {
+pub struct PidFile {
     /// Map of service names to their respective PIDs.
     services: HashMap<String, u32>,
 }
@@ -30,12 +29,25 @@ impl PidFile {
         PathBuf::from(format!("{}/.local/share/systemg/pid.json", home))
     }
 
+    /// Returns the services map.
+    pub fn services(&self) -> &HashMap<String, u32> {
+        &self.services
+    }
+
     /// Loads the PID file from disk
     pub fn load() -> Result<Self, PidFileError> {
         let path = Self::path();
         if !path.exists() {
             return Ok(Self::default());
         }
+        let contents = fs::read_to_string(&path)?;
+        let pid_data = serde_json::from_str::<Self>(&contents)?;
+        Ok(pid_data)
+    }
+
+    /// Reloads the PID file from disk
+    pub fn reload() -> Result<Self, PidFileError> {
+        let path = Self::path();
         let contents = fs::read_to_string(&path)?;
         let pid_data = serde_json::from_str::<Self>(&contents)?;
         Ok(pid_data)
@@ -82,14 +94,13 @@ pub struct Daemon {
 
 impl Daemon {
     /// Initializes a new `Daemon` with an empty process map and a shared config reference.
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, pid: Arc<Mutex<PidFile>>) -> Self {
         info!("Initializing daemon...");
 
-        let pid = PidFile::load().unwrap_or_default();
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
-            pid: Arc::new(Mutex::new(pid)),
+            pid,
         }
     }
 
@@ -120,10 +131,8 @@ impl Daemon {
 
         debug!("Executing command: {cmd:?}");
 
-        // Inherit stdout and stderr for logging
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-        // Set environment variables if provided
         if let Some(env) = env {
             if let Some(vars) = &env.vars {
                 debug!("Setting environment variables: {vars:?}");
@@ -223,6 +232,7 @@ impl Daemon {
         let command = service.command.clone();
         let env = service.env.clone();
         let service_name = name.to_string();
+        let pid_file = Arc::clone(&self.pid);
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -234,15 +244,18 @@ impl Daemon {
                 processes.clone(),
             ) {
                 Ok(pid) => {
-                    let mut pidf = PidFile::load().unwrap_or_default();
-                    pidf.insert(&service_name, pid).unwrap();
+                    pid_file.lock()?.insert(&service_name, pid).unwrap();
+                    Ok(pid)
                 }
-                Err(e) => error!("Failed to start service '{service_name}': {e}"),
+                Err(e) => {
+                    error!("Failed to start service '{service_name}': {e}");
+                    Err(e)
+                }
             }
         });
 
         // Wait for the thread to complete and propagate any errors
-        handle.join().map_err(|e| {
+        let _ = handle.join().map_err(|e| {
             error!("Failed to join service thread for '{name}': {e:?}");
             ProcessManagerError::ServiceStartError {
                 service: name.to_string(),
@@ -265,28 +278,27 @@ impl Daemon {
         &mut self,
         service_name: &str,
     ) -> Result<(), ProcessManagerError> {
-        let mut pidf = self.pid.lock()?;
+        // Step 1: Lock `pid` once to retrieve the PID, then release it
+        let pid = {
+            let pid_file = self.pid.lock()?;
+            pid_file.get(service_name)
+        };
 
-        if let Some(pid) = pidf.get(service_name) {
+        if let Some(pid) = pid {
             let pid = nix::unistd::Pid::from_raw(pid as i32);
 
             if nix::sys::signal::kill(pid, None).is_err() {
                 warn!("Service '{service_name}' is already stopped.");
             } else {
                 debug!("Stopping service '{service_name}' (PID {pid})");
-                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM).map_err(
-                    |e| ProcessManagerError::ServiceStopError {
-                        service: service_name.to_string(),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e.to_string(),
-                        ),
-                    },
-                )?;
+                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
+                    .expect("Failed to send SIGTERM");
+
+                self.processes.lock()?.remove(service_name);
+                self.pid.lock()?.remove(service_name)?;
             }
 
-            self.processes.lock()?.remove(service_name);
-            pidf.remove(service_name)?;
+            info!("Service '{service_name}' stopped successfully.");
         } else {
             warn!("Service '{service_name}' not found in PID file.");
         }
@@ -298,10 +310,7 @@ impl Daemon {
     ///
     /// Iterates over all active processes and terminates them.
     pub fn stop_services(&mut self) -> Result<(), ProcessManagerError> {
-        let services: Vec<String> = {
-            let pidf = self.pid.lock()?;
-            pidf.services.keys().cloned().collect()
-        };
+        let services: Vec<String> = self.pid.lock()?.services.keys().cloned().collect();
 
         for service in services {
             if let Err(e) = self.stop_service(&service) {
@@ -320,53 +329,71 @@ impl Daemon {
 
         let handle = thread::spawn(move || {
             loop {
+                let mut exited_services = Vec::new();
                 let mut restarted_services = Vec::new();
+                let mut active_services = 0;
+                let mut pid_file = PidFile::load().unwrap();
+
                 {
                     let mut locked_processes = processes.lock().unwrap();
-
-                    debug!("Checking service statuses: {locked_processes:?}");
-
                     for (name, child) in locked_processes.iter_mut() {
                         match child.try_wait() {
-                            Ok(Some(status)) if !status.success() => {
-                                error!("Service '{name}' exited with error: {status:?}");
-                                restarted_services.push(name.clone());
-                            }
-                            Ok(Some(_)) => {
-                                debug!("Service '{name}' exited normally.");
+                            Ok(Some(status)) => {
+                                let exited_normally = status.success();
+                                if exited_normally {
+                                    info!("Service '{name}' exited normally.");
+                                } else {
+                                    warn!("Service '{name}' exited unexpectedly.");
+                                }
+                                exited_services.push((name.clone(), exited_normally));
                             }
                             Ok(None) => {
-                                // Process still running, do nothing
                                 debug!("Service '{name}' is still running.");
+                                active_services += 1;
                             }
-                            Err(e) => {
-                                error!("Failed to check status of '{name}': {e}");
-                            }
+                            Err(e) => error!("Failed to check status of '{name}': {e}"),
                         }
                     }
-
-                    // Remove failed services from process list
-                    for name in &restarted_services {
-                        locked_processes.remove(name);
-                    }
                 }
 
-                // Restart services after releasing the lock
+                debug!("PID file: {pid_file:?}");
+
+                for (name, exited_normally) in exited_services {
+                    if pid_file.get(&name).is_none() {
+                        debug!(
+                            "Service '{name}' was manually stopped. Skipping restart."
+                        );
+                    } else if !exited_normally {
+                        warn!("Service '{name}' crashed. Restarting...");
+                        restarted_services.push(name.clone());
+                    } else {
+                        debug!(
+                            "Service '{name}' exited cleanly. Removing from PID file."
+                        );
+                        pid_file.remove(&name).unwrap();
+                    }
+
+                    processes.lock().unwrap().remove(&name);
+                }
+
+                // Step 3: If no active services remain, exit systemg
+                if active_services == 0 {
+                    info!("All services have exited. systemg is shutting down.");
+                    std::process::exit(0);
+                }
+
+                // Step 4: Restart services that crashed
                 for name in restarted_services {
                     if let Some(service) = config.services.get(&name) {
-                        error!("Restarting service '{}'", name);
-                        // let mut locked_processes = processes.lock().unwrap();
-                        Self::handle_restart(&name, service, processes.clone());
+                        Self::handle_restart(&name, service, Arc::clone(&processes));
                     }
                 }
 
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(2));
             }
         });
 
-        let _ = handle
-            .join()
-            .map_err(|e| error!("Failed to join service thread: {e:?}"));
+        handle.join().unwrap();
     }
 
     /// Handles restarting a service if its restart policy allows.
@@ -375,11 +402,10 @@ impl Daemon {
         service: &ServiceConfig,
         processes: Arc<Mutex<HashMap<String, Child>>>,
     ) {
-        let service_name = name.to_string();
-        let restart_policy = service
-            .restart_policy
-            .clone()
-            .unwrap_or_else(|| "never".to_string());
+        let name = name.to_string();
+        let command = service.command.clone();
+        let env = service.env.clone();
+
         let backoff = service
             .backoff
             .as_deref()
@@ -387,33 +413,17 @@ impl Daemon {
             .trim_end_matches('s')
             .parse::<u64>()
             .unwrap_or(5);
-        let command = service.command.clone();
-        let env = service.env.clone();
 
-        let handle = thread::spawn(move || {
-            debug!("Service '{service_name}' restart policy: {restart_policy}");
+        let _ = thread::spawn(move || {
+            warn!("Restarting '{name}' after {backoff} seconds...");
+            thread::sleep(Duration::from_secs(backoff));
 
-            if restart_policy == "always" || restart_policy == "on_failure" {
-                warn!("Restarting '{service_name}' after {backoff} seconds...");
-                thread::sleep(Duration::from_secs(backoff));
-
-                match Daemon::launch_attached_service(
-                    &service_name,
-                    &command,
-                    env,
-                    processes.clone(),
-                ) {
-                    Ok(pid) => {
-                        let mut pidf = PidFile::load().unwrap_or_default();
-                        pidf.insert(&service_name, pid).unwrap();
-                    }
-                    Err(e) => error!("Failed to start service '{service_name}': {e}"),
-                }
+            if let Err(e) =
+                Daemon::launch_attached_service(&name, &command, env, processes)
+            {
+                error!("Failed to restart '{name}': {e}");
             }
-        });
-
-        let _ = handle
-            .join()
-            .map_err(|e| error!("Failed to join service thread: {e:?}"));
+        })
+        .join();
     }
 }

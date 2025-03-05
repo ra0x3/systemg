@@ -1,11 +1,12 @@
 use libc::{SIGKILL, getpgrp, killpg};
+use std::sync::{Arc, Mutex};
 use tracing::{error, info};
 
 use systemg::{
     cli::{Commands, parse_args},
     config::load_config,
-    daemon::Daemon,
-    logs::show_logs,
+    daemon::{Daemon, PidFile},
+    logs::LogManager,
     status::show_status,
 };
 
@@ -24,15 +25,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     let args = parse_args();
 
+    let pid = PidFile::load().unwrap_or_default();
+    let pid = Arc::new(Mutex::new(pid));
+
     match args.command {
         Commands::Start { config, daemonize } => {
             info!("Loading configuration from: {config:?}");
             match load_config(&config) {
-                Ok(parsed_config) => {
+                Ok(config) => {
                     if daemonize {
                         daemonize_systemg()?;
                     }
-                    let daemon = Daemon::new(parsed_config);
+                    let daemon = Daemon::new(config, pid.clone());
 
                     if let Err(e) = daemon.start_services() {
                         error!("Error starting services: {e}");
@@ -49,8 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stop { service } => {
             info!("Stopping all services...");
             match load_config("systemg.yaml") {
-                Ok(parsed_config) => {
-                    let mut daemon = Daemon::new(parsed_config);
+                Ok(config) => {
+                    let mut daemon = Daemon::new(config, pid.clone());
 
                     if service.is_none() {
                         if let Err(e) = daemon.stop_services() {
@@ -72,8 +76,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Restart { config } => {
             info!("Restarting services using config: {config:?}");
             match load_config(&config) {
-                Ok(parsed_config) => {
-                    let mut daemon = Daemon::new(parsed_config);
+                Ok(config) => {
+                    let mut daemon = Daemon::new(config, pid.clone());
 
                     if let Err(e) = daemon.restart_services() {
                         error!("Error restarting services: {e}");
@@ -93,10 +97,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Logs { service, lines } => {
-            info!("Fetching logs for service: {service}");
-            if let Err(e) = show_logs(&service, lines) {
-                error!("Error reading logs: {e}");
-                std::process::exit(1);
+            let manager = LogManager::new(pid.clone());
+            match service {
+                Some(service) => {
+                    info!("Fetching logs for service: {service}");
+                    manager.show_log(&service, lines)?;
+                }
+                None => {
+                    info!("Fetching logs for all services...");
+                    manager.show_logs(lines)?;
+                }
             }
         }
     }

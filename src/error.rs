@@ -78,3 +78,12 @@ pub enum PidFileError {
     #[error("Service not found in PID file")]
     ServiceNotFound,
 }
+
+#[derive(Debug, Error)]
+pub enum LogsManagerError {
+    #[error("Failed to read logs: {0}")]
+    ReadError(#[from] std::io::Error),
+
+    #[error("Service '{0}' not found in PID file")]
+    ServiceNotFound(String),
+}

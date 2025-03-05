@@ -1,35 +1,71 @@
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
-use std::path::Path;
+use crate::daemon::PidFile;
+use crate::error::LogsManagerError;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use tracing::debug;
 
-/// Reads and displays the last `n` lines of a service's log file.
-///
-/// # Arguments
-/// * `service_name` - The name of the service.
-/// * `lines` - The number of log lines to display.
-///
-/// # Returns
-/// * `Ok(())` if successful, or an error message if logs are unavailable.
-pub fn show_logs(service_name: &str, lines: usize) -> io::Result<()> {
-    let log_path = format!("/var/log/systemg/{}.log", service_name);
+pub struct LogManager {
+    /// The PID file containing service names and their respective PIDs.
+    pid_file: Arc<Mutex<PidFile>>,
+}
 
-    if !Path::new(&log_path).exists() {
-        eprintln!("Error: Log file for service '{}' not found.", service_name);
-        return Ok(());
+impl LogManager {
+    /// Creates a new `LogManager` instance.
+    pub fn new(pid_file: Arc<Mutex<PidFile>>) -> Self {
+        Self { pid_file }
     }
 
-    let file = File::open(log_path)?;
-    let reader = BufReader::new(file);
-    let all_lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
+    /// Streams logs for a specific service's stdout/stderr in real-time.
+    pub fn show_log(
+        &self,
+        service_name: &str,
+        lines: usize,
+    ) -> Result<(), LogsManagerError> {
+        debug!("Fetching logs for service: {service_name}");
+        let pid_file = self.pid_file.lock().unwrap();
+        let pid = pid_file
+            .get(service_name)
+            .ok_or(LogsManagerError::ServiceNotFound(service_name.to_string()))?;
 
-    let start = if all_lines.len() > lines {
-        all_lines.len() - lines
-    } else {
-        0
-    };
-    for line in &all_lines[start..] {
-        println!("{}", line);
+        println!(
+            "\n+-----------------------------+\n\
+         |   {} ({})   |\n\
+         +-----------------------------+\n",
+            service_name, pid
+        );
+
+        let command = format!(
+            "stdbuf -oL -eL tail -n {} -f /proc/{}/fd/1 /proc/{}/fd/2",
+            lines, pid, pid
+        );
+
+        let handle = thread::spawn(move || {
+            debug!("Executing command: {command}");
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(command);
+            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+            let _ = cmd.spawn().map(|mut child| child.wait());
+        });
+
+        handle.join().expect("Failed to join thread");
+
+        Ok(())
     }
 
-    Ok(())
+    /// Streams logs for all active services in real-time.
+    pub fn show_logs(&self, lines: usize) -> Result<(), LogsManagerError> {
+        debug!("Fetching logs for all services...");
+        let pid_file = self.pid_file.lock().unwrap();
+        let services: Vec<String> = pid_file.services().keys().cloned().collect();
+
+        debug!("Services: {services:?}");
+
+        for service in services {
+            let _ = self.show_log(&service, lines);
+        }
+
+        Ok(())
+    }
 }
