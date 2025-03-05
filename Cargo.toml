@@ -16,10 +16,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 libc = "0.2.170"
 
-[lib]
-path = "src/lib.rs"
-name = "systemg"
-
 [[bin]]
 name = "systemg"
 path = "src/bin/main.rs"
