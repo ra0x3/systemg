@@ -65,8 +65,15 @@ fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
         fs::read_to_string(path).map_err(ProcessManagerError::ConfigReadError)?;
     for line in content.lines() {
         if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let mut value = value.trim();
+
+            if value.starts_with('"') && value.ends_with('"') {
+                value = &value[1..value.len() - 1];
+            }
+
             unsafe {
-                env::set_var(key.trim(), value.trim());
+                env::set_var(key, value);
             }
         }
     }
