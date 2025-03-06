@@ -7,7 +7,7 @@ use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile},
     logs::LogManager,
-    status::show_status,
+    status::StatusManager,
 };
 
 /// Entry point for the Rust Process Manager.
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Restart { config } => {
+        Commands::Restart { config, .. } => {
             info!("Restarting services using config: {config:?}");
             match load_config(&config) {
                 Ok(config) => {
@@ -97,7 +97,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Status { service } => {
             info!("Checking service status...");
-            show_status(service.as_deref());
+            let manager = StatusManager::new(pid.clone());
+            match service {
+                Some(service) => manager.show_status(&service),
+                None => manager.show_statuses(),
+            }
         }
 
         Commands::Logs { service, lines } => {

@@ -69,10 +69,10 @@ Start the process manager with the given configuration:
 sysg start
 
 # Start with a specific configuration file
-sysg start --config my-services.yaml
+sysg start --config systemg.yaml
 
 # Start as a daemon process
-sysg start --daemonize
+sysg start --config systemg.yaml --daemonize
 ```
 
 #### Stop

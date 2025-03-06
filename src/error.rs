@@ -65,7 +65,9 @@ pub enum ProcessManagerError {
     ErrNo(#[from] nix::errno::Errno),
 }
 
+/// Implement the `From` trait to convert a `std::sync::PoisonError` into a `ProcessManagerError`.
 impl<T> From<std::sync::PoisonError<T>> for ProcessManagerError {
+    /// Converts a `std::sync::PoisonError` into a `ProcessManagerError`.
     fn from(err: std::sync::PoisonError<T>) -> Self {
         ProcessManagerError::MutexPoisonError(err.to_string())
     }
@@ -73,21 +75,26 @@ impl<T> From<std::sync::PoisonError<T>> for ProcessManagerError {
 
 #[derive(Debug, Error)]
 pub enum PidFileError {
+    /// Error writing to a PID file.
     #[error("Failed to read PID file: {0}")]
     ReadError(#[from] std::io::Error),
 
+    /// Error writing to a PID file.
     #[error("Failed to parse PID file: {0}")]
     ParseError(#[from] serde_json::Error),
 
+    /// Error writing to a PID file.
     #[error("Service not found in PID file")]
     ServiceNotFound,
 }
 
 #[derive(Debug, Error)]
 pub enum LogsManagerError {
+    /// Error reading or accessing a configuration file.
     #[error("Failed to read logs: {0}")]
     ReadError(#[from] std::io::Error),
 
+    /// Error parsing YAML configuration.
     #[error("Service '{0}' not found in PID file")]
     ServiceNotFound(String),
 }

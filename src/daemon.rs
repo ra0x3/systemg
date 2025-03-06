@@ -94,18 +94,18 @@ pub struct Daemon {
     /// Reference to the service configuration.
     config: Arc<Config>,
     /// The PID file for tracking service PIDs.
-    pid: Arc<Mutex<PidFile>>,
+    pid_file: Arc<Mutex<PidFile>>,
 }
 
 impl Daemon {
     /// Initializes a new `Daemon` with an empty process map and a shared config reference.
-    pub fn new(config: Config, pid: Arc<Mutex<PidFile>>) -> Self {
+    pub fn new(config: Config, pid_file: Arc<Mutex<PidFile>>) -> Self {
         debug!("Initializing daemon...");
 
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
-            pid,
+            pid_file,
         }
     }
 
@@ -233,7 +233,7 @@ impl Daemon {
         let command = service.command.clone();
         let env = service.env.clone();
         let service_name = name.to_string();
-        let pid_file = Arc::clone(&self.pid);
+        let pid_file = Arc::clone(&self.pid_file);
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -280,10 +280,7 @@ impl Daemon {
         service_name: &str,
     ) -> Result<(), ProcessManagerError> {
         // Immediately release the lock after getting the PID
-        let pid = {
-            let pid_file = self.pid.lock()?;
-            pid_file.get(service_name)
-        };
+        let pid = self.pid_file.lock()?.get(service_name);
 
         if let Some(process_id) = pid {
             let pid = nix::unistd::Pid::from_raw(process_id as i32);
@@ -295,7 +292,7 @@ impl Daemon {
                 nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)?;
 
                 self.processes.lock()?.remove(service_name);
-                self.pid.lock()?.remove(service_name)?;
+                self.pid_file.lock()?.remove(service_name)?;
             }
 
             debug!("Service '{service_name}' stopped successfully.");
@@ -310,7 +307,8 @@ impl Daemon {
     ///
     /// Iterates over all active processes and terminates them.
     pub fn stop_services(&mut self) -> Result<(), ProcessManagerError> {
-        let services: Vec<String> = self.pid.lock()?.services.keys().cloned().collect();
+        let services: Vec<String> =
+            self.pid_file.lock()?.services.keys().cloned().collect();
 
         for service in services {
             if let Err(e) = self.stop_service(&service) {

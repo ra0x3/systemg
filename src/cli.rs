@@ -40,6 +40,10 @@ pub enum Commands {
         /// Path to the configuration file (defaults to `systemg.yaml`).
         #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
+
+        /// Optionally specify a service name to check its status.
+        #[arg(short, long)]
+        service: Option<String>,
     },
 
     /// Show the status of currently running services.
