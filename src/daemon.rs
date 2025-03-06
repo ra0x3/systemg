@@ -172,10 +172,7 @@ impl Daemon {
             Ok(child) => {
                 let pid = child.id();
                 debug!("Service '{service_name}' started with PID: {pid}");
-                processes
-                    .lock()
-                    .expect("Poisoned lock")
-                    .insert(service_name.to_string(), child);
+                processes.lock()?.insert(service_name.to_string(), child);
                 info!("Service '{service_name}' started successfully.");
                 Ok(pid)
             }
@@ -283,21 +280,20 @@ impl Daemon {
         &mut self,
         service_name: &str,
     ) -> Result<(), ProcessManagerError> {
-        // Step 1: Lock `pid` once to retrieve the PID, then release it
+        // Immediately release the lock after getting the PID
         let pid = {
             let pid_file = self.pid.lock()?;
             pid_file.get(service_name)
         };
 
-        if let Some(pid) = pid {
-            let pid = nix::unistd::Pid::from_raw(pid as i32);
+        if let Some(process_id) = pid {
+            let pid = nix::unistd::Pid::from_raw(process_id as i32);
 
             if nix::sys::signal::kill(pid, None).is_err() {
                 warn!("Service '{service_name}' is already stopped.");
             } else {
                 debug!("Stopping service '{service_name}' (PID {pid})");
-                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
-                    .expect("Failed to send SIGTERM");
+                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)?;
 
                 self.processes.lock()?.remove(service_name);
                 self.pid.lock()?.remove(service_name)?;
@@ -348,7 +344,9 @@ impl Daemon {
                                 if exited_normally {
                                     info!("Service '{name}' exited normally.");
                                 } else {
-                                    warn!("Service '{name}' exited unexpectedly.");
+                                    warn!(
+                                        "Service '{name}' was terminated with {status:?}."
+                                    );
                                 }
                                 exited_services.push((name.clone(), exited_normally));
                             }
@@ -365,9 +363,7 @@ impl Daemon {
 
                 for (name, exited_normally) in exited_services {
                     if pid_file.get(&name).is_none() {
-                        debug!(
-                            "Service '{name}' was manually stopped. Skipping restart."
-                        );
+                        info!("Service '{name}' was manually stopped. Skipping restart.");
                     } else if !exited_normally {
                         warn!("Service '{name}' crashed. Restarting...");
                         restarted_services.push(name.clone());

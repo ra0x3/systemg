@@ -59,6 +59,10 @@ pub enum ProcessManagerError {
     /// Error for PID file.
     #[error("PID file error: {0}")]
     PidFileError(#[from] PidFileError),
+
+    /// Error for logs manager.
+    #[error("Service not found in PID file")]
+    ErrNo(#[from] nix::errno::Errno),
 }
 
 impl<T> From<std::sync::PoisonError<T>> for ProcessManagerError {

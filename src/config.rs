@@ -141,7 +141,7 @@ mod tests {
         writeln!(env_file, "DB_PASS=secret").unwrap();
 
         // Create a mock YAML config referencing the .env file
-        let yaml_path = dir.path().join("config.yaml");
+        let yaml_path = dir.path().join("systemg.yaml");
         let mut yaml_file = std::fs::File::create(&yaml_path).unwrap();
         writeln!(
             yaml_file,

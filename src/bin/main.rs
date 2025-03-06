@@ -21,7 +21,11 @@ use systemg::{
 /// - If the configuration file fails to load, it logs an error and exits.
 /// - If any daemon operation (start, stop, restart) fails, it logs the error and exits.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    register_signal_handler();
+    if let Err(e) = register_signal_handler() {
+        error!("Failed to register signal handler: {e}");
+        std::process::exit(1);
+    }
+
     tracing_subscriber::fmt::init();
     let args = parse_args();
 
@@ -50,9 +54,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Stop { service } => {
+        Commands::Stop { service, config } => {
             info!("Stopping all services...");
-            match load_config("systemg.yaml") {
+            match load_config(&config) {
                 Ok(config) => {
                     let mut daemon = Daemon::new(config, pid.clone());
 
@@ -137,7 +141,7 @@ fn daemonize_systemg() -> std::io::Result<()> {
 }
 
 /// Registers a signal handler to terminate child processes on `SIGTERM` or `SIGINT`.
-fn register_signal_handler() {
+fn register_signal_handler() -> Result<(), Box<dyn std::error::Error>> {
     ctrlc::set_handler(move || {
         println!("systemg is shutting down... killing all child processes");
 
@@ -147,6 +151,7 @@ fn register_signal_handler() {
         }
 
         std::process::exit(0);
-    })
-    .expect("Failed to set signal handler");
+    })?;
+
+    Ok(())
 }

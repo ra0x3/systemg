@@ -15,8 +15,8 @@ pub struct Cli {
 pub enum Commands {
     /// Start the process manager with the given configuration.
     Start {
-        /// Path to the configuration file (defaults to `config.yaml`).
-        #[arg(short, long, default_value = "config.yaml")]
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
 
         /// Whether to daemonize the process manager.
@@ -26,6 +26,10 @@ pub enum Commands {
 
     /// Stop the currently running process manager.
     Stop {
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
+        config: String,
+
         /// Name of service to stop (optional).
         #[arg(short, long)]
         service: Option<String>,
@@ -33,8 +37,8 @@ pub enum Commands {
 
     /// Restart the process manager, optionally specifying a new configuration file.
     Restart {
-        /// Path to the configuration file (defaults to `config.yaml`).
-        #[arg(short, long, default_value = "config.yaml")]
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
     },
 
