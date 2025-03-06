@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 /// Command-line interface for the Rust Process Manager.
 #[derive(Parser)]
-#[command(name = "systemg")]
+#[command(name = "systemg", version, author)]
 #[command(about = "A lightweight process manager for system services", long_about = None)]
 pub struct Cli {
     /// The command to execute.

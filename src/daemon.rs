@@ -100,7 +100,7 @@ pub struct Daemon {
 impl Daemon {
     /// Initializes a new `Daemon` with an empty process map and a shared config reference.
     pub fn new(config: Config, pid: Arc<Mutex<PidFile>>) -> Self {
-        info!("Initializing daemon...");
+        debug!("Initializing daemon...");
 
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
@@ -173,7 +173,6 @@ impl Daemon {
                 let pid = child.id();
                 debug!("Service '{service_name}' started with PID: {pid}");
                 processes.lock()?.insert(service_name.to_string(), child);
-                info!("Service '{service_name}' started successfully.");
                 Ok(pid)
             }
             Err(e) => {
@@ -299,7 +298,7 @@ impl Daemon {
                 self.pid.lock()?.remove(service_name)?;
             }
 
-            info!("Service '{service_name}' stopped successfully.");
+            debug!("Service '{service_name}' stopped successfully.");
         } else {
             warn!("Service '{service_name}' not found in PID file.");
         }
@@ -324,7 +323,7 @@ impl Daemon {
 
     /// Monitors all running services and restarts them if they exit unexpectedly.
     fn monitor_services(&self) {
-        info!("Starting service monitoring thread...");
+        debug!("Starting service monitoring thread...");
         let processes = Arc::clone(&self.processes);
         let config = Arc::clone(&self.config);
 
