@@ -28,20 +28,32 @@ impl StatusManager {
     /// Parses an uptime string in "HH:MM" format and returns a human-readable string.
     pub fn format_uptime(uptime_str: &str) -> String {
         let parts: Vec<&str> = uptime_str.split(':').collect();
-        if parts.len() != 2 {
+        if parts.len() < 2 || parts.len() > 3 {
             return "Invalid uptime format".to_string();
         }
 
         let hours: u64 = parts[0].parse().unwrap_or(0);
         let minutes: u64 = parts[1].parse().unwrap_or(0);
-        let total_seconds = (hours * 3600) + (minutes * 60);
+        let seconds_and_millis: Vec<&str> = parts[2].split('.').collect();
 
-        match total_seconds {
-            0..=59 => format!("{} secs ago", total_seconds),
-            60..=3599 => format!("{} mins ago", total_seconds / 60),
-            3600..=86399 => format!("{} hours ago", total_seconds / 3600),
-            86400..=604799 => format!("{} days ago", total_seconds / 86400),
-            _ => format!("{} weeks ago", total_seconds / 604800),
+        let seconds: u64 = seconds_and_millis
+            .first()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let milliseconds: u64 = seconds_and_millis
+            .get(1)
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(0);
+
+        let total_milliseconds = (hours * 3600 * 1000) + (minutes * 60 * 1000) + (seconds * 1000) + milliseconds;
+
+        match total_milliseconds {
+            0..=999 => format!("{} ms ago", total_milliseconds),
+            1000..=59999 => format!("{} secs ago", total_milliseconds / 1000),
+            60000..=3599999 => format!("{} mins ago", total_milliseconds / 60000),
+            3600000..=86399999 => format!("{} hours ago", total_milliseconds / 3600000),
+            86400000..=604799999 => format!("{} days ago", total_milliseconds / 86400000),
+            _ => format!("{} weeks ago", total_milliseconds / 604800000),
         }
     }
 
@@ -103,7 +115,7 @@ impl StatusManager {
         let child_processes = Self::get_child_processes(pid, 6);
         let uptime_label = Self::format_uptime(&uptime);
 
-        println!("● {} - {}Running{}", service_name, GREEN_BOLD, RESET);
+        println!("{}● - {} Running{}", GREEN_BOLD, service_name, RESET);
         println!(
             "   Active: {}active (running){} since {}; {}",
             GREEN_BOLD, RESET, uptime, uptime_label
@@ -114,7 +126,7 @@ impl StatusManager {
         println!("      {}CPU: {:.3}s{}", MAGENTA_BOLD, cpu_time, RESET);
         println!(" Process Group: {}", process_group);
 
-        println!("     ├─{} {}", pid, command);
+        println!("     |-{} {}", pid, command.trim());
         for child in child_processes {
             println!("{}", child);
         }
@@ -179,6 +191,7 @@ impl StatusManager {
                 .output()
                 .ok()
                 .and_then(|out| String::from_utf8(out.stdout).ok())
+                .map(|s| s.trim().to_string()) // Strip newlines and any extra spaces
                 .unwrap_or_else(|| "Unknown".to_string())
         }
     }
