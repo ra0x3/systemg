@@ -80,4 +80,4 @@ jobs:
         run: test -f rustfmt.toml || { echo "rustfmt.toml not found"; exit 1; }
 
       - name: Run Tests
-        run: cargo test --verbose
+        run: cargo test --verbose --features linux

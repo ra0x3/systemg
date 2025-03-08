@@ -9,6 +9,12 @@ use tracing::debug;
 
 use crate::daemon::PidFile;
 
+#[cfg(target_os = "linux")]
+use std::time::UNIX_EPOCH;
+
+#[cfg(target_os = "linux")]
+use chrono::{DateTime, Utc};
+
 const GREEN_BOLD: &str = "\x1b[1;32m"; // Bright Green
 const MAGENTA_BOLD: &str = "\x1b[1;35m"; // Magenta
 const RESET: &str = "\x1b[0m"; // Reset color
@@ -45,7 +51,10 @@ impl StatusManager {
             .and_then(|ms| ms.parse().ok())
             .unwrap_or(0);
 
-        let total_milliseconds = (hours * 3600 * 1000) + (minutes * 60 * 1000) + (seconds * 1000) + milliseconds;
+        let total_milliseconds = (hours * 3600 * 1000)
+            + (minutes * 60 * 1000)
+            + (seconds * 1000)
+            + milliseconds;
 
         match total_milliseconds {
             0..=999 => format!("{} ms ago", total_milliseconds),
