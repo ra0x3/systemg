@@ -34,35 +34,21 @@ impl StatusManager {
     /// Parses an uptime string in "HH:MM" format and returns a human-readable string.
     pub fn format_uptime(uptime_str: &str) -> String {
         let parts: Vec<&str> = uptime_str.split(':').collect();
-        if parts.len() < 2 || parts.len() > 3 {
+        if parts.len() != 2 {
             return "Invalid uptime format".to_string();
         }
 
-        let hours: u64 = parts[0].parse().unwrap_or(0);
-        let minutes: u64 = parts[1].parse().unwrap_or(0);
-        let seconds_and_millis: Vec<&str> = parts[2].split('.').collect();
+        let minutes: u64 = parts[0].parse().unwrap_or(0);
+        let seconds: u64 = parts[1].parse().unwrap_or(0);
 
-        let seconds: u64 = seconds_and_millis
-            .first()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let milliseconds: u64 = seconds_and_millis
-            .get(1)
-            .and_then(|ms| ms.parse().ok())
-            .unwrap_or(0);
+        let total_seconds = (minutes * 60) + seconds;
 
-        let total_milliseconds = (hours * 3600 * 1000)
-            + (minutes * 60 * 1000)
-            + (seconds * 1000)
-            + milliseconds;
-
-        match total_milliseconds {
-            0..=999 => format!("{} ms ago", total_milliseconds),
-            1000..=59999 => format!("{} secs ago", total_milliseconds / 1000),
-            60000..=3599999 => format!("{} mins ago", total_milliseconds / 60000),
-            3600000..=86399999 => format!("{} hours ago", total_milliseconds / 3600000),
-            86400000..=604799999 => format!("{} days ago", total_milliseconds / 86400000),
-            _ => format!("{} weeks ago", total_milliseconds / 604800000),
+        match total_seconds {
+            0..=59 => format!("{} secs ago", total_seconds),
+            60..=3599 => format!("{} mins ago", total_seconds / 60),
+            3600..=86399 => format!("{} hours ago", total_seconds / 3600),
+            86400..=604799 => format!("{} days ago", total_seconds / 86400),
+            _ => format!("{} weeks ago", total_seconds / 604800),
         }
     }
 

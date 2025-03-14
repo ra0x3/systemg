@@ -4,10 +4,12 @@ version = "0.3.0"
 edition = "2024"
 license = "MIT"
 description = "A simple process manager."
+rust-version = "1.85.0"
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"], optional = true }
 clap = { version = "4.0", features = ["derive"] }
+colored = "3.0"
 ctrlc = "3.4"
 libc = "0.2.170"
 nix = { version = "0.29" }
