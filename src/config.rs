@@ -82,8 +82,12 @@ fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
 
 /// Loads and parses the configuration file, expanding environment variables.
 pub fn load_config(path: &str) -> Result<Config, ProcessManagerError> {
-    let content =
-        fs::read_to_string(path).map_err(ProcessManagerError::ConfigReadError)?;
+    let content = fs::read_to_string(path).map_err(|e| {
+        ProcessManagerError::ConfigReadError(std::io::Error::new(
+            e.kind(),
+            format!("{} ({})", e, path),
+        ))
+    })?;
     let mut config: Config =
         serde_yaml::from_str(&content).map_err(ProcessManagerError::ConfigParseError)?;
 

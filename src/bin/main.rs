@@ -46,6 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         error!("Error starting services: {e}");
                         std::process::exit(1);
                     }
+
+                    #[cfg(target_os = "linux")]
+                    std::thread::park();
                 }
                 Err(e) => {
                     error!("Failed to load config: {e}");

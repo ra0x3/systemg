@@ -90,11 +90,19 @@ pub enum PidFileError {
 
 #[derive(Debug, Error)]
 pub enum LogsManagerError {
-    /// Error reading or accessing a configuration file.
-    #[error("Failed to read logs: {0}")]
-    ReadError(#[from] std::io::Error),
-
     /// Error parsing YAML configuration.
     #[error("Service '{0}' not found in PID file")]
     ServiceNotFound(String),
+
+    /// Error executing the tail command for logs.
+    #[error("Log file unavailable for PID {0}")]
+    LogUnavailable(u32),
+
+    /// Error while tailing logs, such as command failure.
+    #[error("Log tailing failed: {0}")]
+    LogProcessError(#[from] std::io::Error),
+
+    /// Error when the log file is unavailable.
+    #[error("Unsupported platform for log tailing")]
+    UnsupportedPlatform,
 }
