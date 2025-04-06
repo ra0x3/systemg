@@ -6,6 +6,9 @@ license = "MIT"
 description = "A simple process manager."
 rust-version = "1.85.0"
 
+[package.metadata.docs.rs]
+features = ["linux"]
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"], optional = true }
 clap = { version = "4.0", features = ["derive"] }
