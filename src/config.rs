@@ -1,3 +1,4 @@
+//! Configuration management for Systemg.
 use regex::Regex;
 use serde::Deserialize;
 use std::{collections::HashMap, env, fs};

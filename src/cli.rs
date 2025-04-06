@@ -1,6 +1,7 @@
+//! Command-line interface for Systemg.
 use clap::{Parser, Subcommand};
 
-/// Command-line interface for the Rust Process Manager.
+/// Command-line interface for Systemg.
 #[derive(Parser)]
 #[command(name = "systemg", version, author)]
 #[command(about = "A lightweight process manager for system services", long_about = None)]
@@ -10,7 +11,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-/// Available commands for the process manager.
+/// Available commands for systemg.
 #[derive(Subcommand)]
 pub enum Commands {
     /// Start the process manager with the given configuration.
@@ -19,7 +20,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
 
-        /// Whether to daemonize the process manager.
+        /// Whether to daemonize systemg.
         #[arg(short, long)]
         daemonize: bool,
     },

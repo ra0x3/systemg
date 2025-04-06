@@ -1,3 +1,4 @@
+//! Error handling for systemg.
 use thiserror::Error;
 
 /// Defines all possible errors that can occur in the process manager.
@@ -73,6 +74,7 @@ impl<T> From<std::sync::PoisonError<T>> for ProcessManagerError {
     }
 }
 
+/// Error type for PID file operations.
 #[derive(Debug, Error)]
 pub enum PidFileError {
     /// Error writing to a PID file.
@@ -88,6 +90,7 @@ pub enum PidFileError {
     ServiceNotFound,
 }
 
+/// Error type for logs manager operations.
 #[derive(Debug, Error)]
 pub enum LogsManagerError {
     /// Error parsing YAML configuration.

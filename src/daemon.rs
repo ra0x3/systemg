@@ -1,3 +1,4 @@
+//! Module for managing and monitoring system services.
 use crate::logs::spawn_log_writer;
 use serde::{Deserialize, Serialize};
 use std::{

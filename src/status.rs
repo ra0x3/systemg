@@ -1,3 +1,4 @@
+//! Status management for services in the daemon.
 use nix::unistd::{Pid, getpgid};
 use std::{
     collections::HashMap,

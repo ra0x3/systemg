@@ -1,3 +1,4 @@
+//! Module for managing and displaying logs of system services.
 use crate::{daemon::PidFile, error::LogsManagerError};
 use std::{
     fs::{self, OpenOptions},
@@ -14,6 +15,7 @@ use std::process::{Command, Stdio};
 #[cfg(not(target_os = "linux"))]
 use colored::*;
 
+/// Returns the path to the log file for a given service and kind (stdout or stderr).
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(format!(
@@ -22,6 +24,7 @@ pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     ))
 }
 
+/// Creates the log directory if it doesn't exist.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
     let service = service.to_string();
     let kind = kind.to_string();
@@ -41,6 +44,7 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
     });
 }
 
+/// Initializes logging for a service by spawning threads to write stdout and stderr to log files.
 pub struct LogManager {
     /// The PID file containing service names and their respective PIDs.
     pid_file: Arc<Mutex<PidFile>>,
@@ -62,6 +66,7 @@ impl LogManager {
         self.show_logs_platform(service_name, pid, lines)
     }
 
+    /// Platform-specific implementation for showing logs.
     #[cfg(target_os = "linux")]
     fn show_logs_platform(
         &self,
@@ -111,6 +116,7 @@ impl LogManager {
         Ok(())
     }
 
+    /// Fallback implementation for macOS and other platforms where log tailing is not supported.
     #[cfg(target_os = "macos")]
     fn show_logs_platform(
         &self,
