@@ -1,12 +1,45 @@
 use crate::{daemon::PidFile, error::LogsManagerError};
-use colored::*;
 use std::{
-    fs,
-    process::{Command, Stdio},
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Read, Write},
+    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
 };
 use tracing::debug;
+
+#[cfg(target_os = "linux")]
+use std::process::{Command, Stdio};
+
+#[cfg(not(target_os = "linux"))]
+use colored::*;
+
+pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(format!(
+        "{}/.local/share/systemg/logs/{}_{}.log",
+        home, service, kind
+    ))
+}
+
+pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
+    let service = service.to_string();
+    let kind = kind.to_string();
+    thread::spawn(move || {
+        let path = get_log_path(&service, &kind);
+        fs::create_dir_all(path.parent().unwrap()).ok();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("Unable to open log file");
+
+        let reader = BufReader::new(reader);
+        for line in reader.lines().map_while(Result::ok) {
+            let _ = writeln!(file, "{line}");
+        }
+    });
+}
 
 pub struct LogManager {
     /// The PID file containing service names and their respective PIDs.
@@ -19,28 +52,83 @@ impl LogManager {
         Self { pid_file }
     }
 
-    /// Streams logs for a specific service's stdout/stderr in real-time.
+    /// Shows the logs for a specific service's stdout/stderr in real-time.
     pub fn show_log(
         &self,
         service_name: &str,
         pid: u32,
         lines: usize,
     ) -> Result<(), LogsManagerError> {
-        debug!("Showing log for service: {service_name} (PID: {pid})");
+        self.show_logs_platform(service_name, pid, lines)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn show_logs_platform(
+        &self,
+        service_name: &str,
+        pid: u32,
+        lines: usize,
+    ) -> Result<(), LogsManagerError> {
+        use std::path::Path;
 
         println!(
             "\n+{:-^33}+\n\
      | {:^31} |\n\
      +{:-^33}+\n",
-            "-",                                   // Top border
-            format!("{} ({})", service_name, pid), // Centered service name and PID
-            "-"                                    // Bottom border
+            "-",
+            format!("{} ({})", service_name, pid),
+            "-"
         );
 
-        let command = if cfg!(target_os = "macos") {
-            // macOS doesn't provide easy access to another process's stdout/stderr
-            let github_issue_url = "https://github.com/ra0x3/systemg/issues/new";
-            println!(
+        let stdout = format!("/proc/{}/fd/1", pid);
+        let stderr = format!("/proc/{}/fd/2", pid);
+
+        if !Path::new(&stdout).exists() || !Path::new(&stderr).exists() {
+            return Err(LogsManagerError::LogUnavailable(pid));
+        }
+
+        let stdout_path = get_log_path(service_name, "stdout");
+        let stderr_path = get_log_path(service_name, "stderr");
+
+        let command = format!(
+            "tail -n {} -f {} {}",
+            lines,
+            stdout_path.display(),
+            stderr_path.display()
+        );
+        debug!("Executing command: {command}");
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+        let child = cmd.spawn()?.wait();
+
+        if let Err(e) = child {
+            return Err(LogsManagerError::LogProcessError(e));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn show_logs_platform(
+        &self,
+        service_name: &str,
+        pid: u32,
+        _lines: usize,
+    ) -> Result<(), LogsManagerError> {
+        println!(
+            "\n+{:-^33}+\n\
+     | {:^31} |\n\
+     +{:-^33}+\n",
+            "-",
+            format!("{} ({})", service_name, pid),
+            "-"
+        );
+
+        let github_issue_url = "https://github.com/ra0x3/systemg/issues/new";
+        println!(
                 "\n{}\n{}\n{}\n{}\n{}\n{}\n\n",
                 "⚠️  WARNING: Log Tailing Not Supported on macOS".bold().yellow(),
                 "--------------------------------------------".yellow(),
@@ -49,33 +137,6 @@ impl LogManager {
                 github_issue_url.blue().underline(),
                 "Thank you for helping improve systemg!".yellow()
             );
-            return Ok(());
-        } else {
-            // On Linux, check if the process has a TTY
-            let tty_path = format!("/proc/{}/fd/0", pid);
-            if let Ok(tty_target) = fs::read_link(&tty_path) {
-                if tty_target.to_string_lossy().starts_with("/dev/pts/") {
-                    format!("tail -n {} -f {}", lines, tty_target.to_string_lossy())
-                } else {
-                    // Fallback: Tail stdout and stderr directly
-                    format!("tail -n {} -f /proc/{}/fd/1 /proc/{}/fd/2", lines, pid, pid)
-                }
-            } else {
-                // If no TTY found, just tail stdout/stderr
-                format!("tail -n {} -f /proc/{}/fd/1 /proc/{}/fd/2", lines, pid, pid)
-            }
-        };
-
-        let handle = thread::spawn(move || {
-            debug!("Executing command: {command}");
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c").arg(command);
-            cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-
-            let _ = cmd.spawn().map(|mut child| child.wait());
-        });
-
-        handle.join().expect("Failed to join thread");
 
         Ok(())
     }

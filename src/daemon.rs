@@ -1,4 +1,4 @@
-use libc::{getppid, setpgid};
+use crate::logs::spawn_log_writer;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -40,7 +40,7 @@ impl PidFile {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let contents = fs::read_to_string(&path)?;
+        let contents = fs::read_to_string(path)?;
         let pid_data = serde_json::from_str::<Self>(&contents)?;
         Ok(pid_data)
     }
@@ -129,14 +129,14 @@ impl Daemon {
         env: Option<EnvConfig>,
         processes: Arc<Mutex<HashMap<String, Child>>>,
     ) -> Result<u32, ProcessManagerError> {
-        debug!("Launching service: {service_name}");
+        debug!("Launching service: '{service_name}' with command: `{command}`");
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
 
         debug!("Executing command: {cmd:?}");
 
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         if let Some(env) = env {
             if let Some(vars) = &env.vars {
@@ -149,18 +149,22 @@ impl Daemon {
 
         unsafe {
             cmd.pre_exec(|| {
-                let ppid = getppid();
-                if setpgid(0, ppid) < 0 {
-                    error!("Failed to set process group (setpgid)");
-                    return Err(std::io::Error::last_os_error());
+                if libc::setpgid(0, 0) < 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("systemg pre_exec: setpgid failed: {:?}", err);
+                    return Err(err);
                 }
 
                 #[cfg(target_os = "linux")]
                 {
                     use libc::{PR_SET_PDEATHSIG, SIGTERM, prctl};
                     if prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0) < 0 {
-                        error!("Failed to set PR_SET_PDEATHSIG");
-                        return Err(std::io::Error::last_os_error());
+                        let err = std::io::Error::last_os_error();
+                        eprintln!(
+                            "systemg pre_exec: prctl PR_SET_PDEATHSIG failed: {:?}",
+                            err
+                        );
+                        return Err(err);
                     }
                 }
 
@@ -169,9 +173,20 @@ impl Daemon {
         }
 
         match cmd.spawn() {
-            Ok(child) => {
+            Ok(mut child) => {
                 let pid = child.id();
                 debug!("Service '{service_name}' started with PID: {pid}");
+
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+
+                if let Some(out) = stdout {
+                    spawn_log_writer(service_name, out, "stdout");
+                }
+                if let Some(err) = stderr {
+                    spawn_log_writer(service_name, err, "stderr");
+                }
+
                 processes.lock()?.insert(service_name.to_string(), child);
                 Ok(pid)
             }
@@ -195,7 +210,8 @@ impl Daemon {
         }
         info!("All services started successfully.");
 
-        // Start monitoring processes in a background thread
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
         self.monitor_services();
 
         Ok(())
@@ -222,6 +238,17 @@ impl Daemon {
     }
 
     /// Starts a single service and stores it in the process map.
+    ///
+    /// This implementation is intended for **Unix/macOS platforms only**.
+    ///
+    /// On these systems, services can be safely launched inside threads using `Command::spawn`,
+    /// and the thread may exit immediately after spawning the child process. The child will continue
+    /// running independently without issue.
+    ///
+    /// This function spawns the service in a dedicated thread, immediately joins that thread to ensure
+    /// errors are surfaced synchronously. The child process is inserted into the shared process map,
+    /// and its PID is recorded in the PID file.
+    #[cfg(not(target_os = "linux"))]
     pub fn start_service(
         &self,
         name: &str,
@@ -272,14 +299,84 @@ impl Daemon {
         Ok(())
     }
 
+    /// Starts a single service and stores it in the process map.
+    ///
+    /// This implementation is intended for **Linux platforms only**.
+    ///
+    /// On Linux, services are launched in their own process groups and configured with
+    /// `PR_SET_PDEATHSIG` to receive a `SIGTERM` if the parent thread exits. Because of this,
+    /// the thread that spawns the service must remain alive for the lifetime of the child
+    /// process to prevent premature termination.
+    ///
+    /// This function launches the service in a detached thread and inserts the child process
+    /// into the shared process map and PID file. After spawning, the thread enters a blocking
+    /// loop to ensure it stays alive, preserving the relationship required by `PR_SET_PDEATHSIG`.
+    ///
+    /// The service itself is monitored and managed separately, so the thread’s only responsibility
+    /// is to maintain parent liveness for the child process.
+    #[cfg(target_os = "linux")]
+    pub fn start_service(
+        &self,
+        name: &str,
+        service: &ServiceConfig,
+    ) -> Result<(), ProcessManagerError> {
+        use std::thread;
+
+        info!("Starting service: {name}");
+
+        let processes = Arc::clone(&self.processes);
+        let command = service.command.clone();
+        let env = service.env.clone();
+        let service_name = name.to_string();
+        let pid_file = Arc::clone(&self.pid_file);
+
+        // Spawn the thread, but DO NOT join it.
+        thread::spawn(move || {
+            debug!("Starting service thread for '{service_name}'");
+
+            match Daemon::launch_attached_service(
+                &service_name,
+                &command,
+                env,
+                processes.clone(),
+            ) {
+                Ok(pid) => {
+                    pid_file.lock().unwrap().insert(&service_name, pid).unwrap();
+
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to start service '{service_name}': {e}");
+                }
+            }
+        });
+
+        debug!("Service thread for '{name}' launched and detached (Linux)");
+
+        Ok(())
+    }
+
     /// Stops a specific service by name.
     ///
     /// If the service is running, it will be terminated and removed from the process map.
+    ///
+    /// On **Unix/macOS**, services are typically launched as individual processes.
+    /// Sending a `SIGTERM` to the recorded PID is sufficient to stop the service cleanly.
+    ///
+    /// On **Linux**, services are launched in their own process groups (via `setpgid`)
+    /// to support `PR_SET_PDEATHSIG` for parent-child death linkage. This means that
+    /// stopping a service requires sending a signal to the *entire process group*,
+    /// not just the root PID. This is done by sending a signal to the **negative** PID
+    /// (`-pid`) using Unix conventions.
+    ///
+    /// This function correctly handles both platforms, ensuring the full service tree
+    /// is terminated regardless of how it was spawned.
     pub fn stop_service(
         &mut self,
         service_name: &str,
     ) -> Result<(), ProcessManagerError> {
-        // Immediately release the lock after getting the PID
         let pid = self.pid_file.lock()?.get(service_name);
 
         if let Some(process_id) = pid {
@@ -289,7 +386,9 @@ impl Daemon {
                 warn!("Service '{service_name}' is already stopped.");
             } else {
                 debug!("Stopping service '{service_name}' (PID {pid})");
-                nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)?;
+
+                let pgid = nix::unistd::Pid::from_raw(-pid.as_raw()); // Negative = process group
+                nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGTERM)?;
 
                 self.processes.lock()?.remove(service_name);
                 self.pid_file.lock()?.remove(service_name)?;
