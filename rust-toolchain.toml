@@ -1,0 +1,11 @@
+[toolchain]
+channel = "1.85.0"
+
+components = [
+    "cargo",
+    "clippy",
+    "rust-docs",
+    "rust-std",
+    "rustc",
+    "rustfmt"
+]

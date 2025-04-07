@@ -26,6 +26,12 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
+[dev-dependencies]
+assert_cmd = { version = "2.0" }
+predicates = { version = "2.1" }
+tempfile = { version = "3.14.0" }
+
+
 [[bin]]
 name = "sysg"
 path = "src/bin/main.rs"
