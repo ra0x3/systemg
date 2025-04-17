@@ -20,6 +20,8 @@ regex = "1.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+strum = { version = "0.27", features = ["derive"] }
+strum_macros = "0.27"
 sysinfo = { version = "0.33" }
 tempfile = "3.14.0"
 thiserror = "1.0"
@@ -30,7 +32,6 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 assert_cmd = { version = "2.0" }
 predicates = { version = "2.1" }
 tempfile = { version = "3.14.0" }
-
 
 [[bin]]
 name = "sysg"

@@ -13,7 +13,7 @@ use std::{
 };
 use tracing::{debug, error, info, warn};
 
-use crate::config::{Config, EnvConfig, ServiceConfig};
+use crate::config::{Config, EnvConfig, HookType, Hooks, ServiceConfig};
 use crate::error::{PidFileError, ProcessManagerError};
 
 /// Represents the PID file structure
@@ -88,6 +88,51 @@ impl PidFile {
     }
 }
 
+/// Run a hook command with the provided environment variables.
+fn run_hook(
+    hook_cmd: &str,
+    env: &Option<EnvConfig>,
+    hook_type: HookType,
+    service_name: &str,
+) {
+    debug!(
+        "Running {} hook for '{}': `{}`",
+        hook_type.as_ref(),
+        service_name,
+        hook_cmd
+    );
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(hook_cmd);
+
+    if let Some(env_config) = env {
+        if let Some(vars) = &env_config.vars {
+            for (k, v) in vars {
+                cmd.env(k, v);
+            }
+        }
+    }
+
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let _ = child.wait();
+            debug!(
+                "{} hook for '{}' completed.",
+                hook_type.as_ref(),
+                service_name
+            );
+        }
+        Err(e) => {
+            error!(
+                "Failed to run {} hook for '{}': {}",
+                hook_type.as_ref(),
+                service_name,
+                e
+            );
+        }
+    }
+}
+
 /// Manages services, ensuring they start, stop, and restart as needed.
 pub struct Daemon {
     /// Shared map of running service processes.
@@ -129,6 +174,7 @@ impl Daemon {
         command: &str,
         env: Option<EnvConfig>,
         processes: Arc<Mutex<HashMap<String, Child>>>,
+        hooks: Option<Hooks>,
     ) -> Result<u32, ProcessManagerError> {
         debug!("Launching service: '{service_name}' with command: `{command}`");
 
@@ -139,7 +185,7 @@ impl Daemon {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        if let Some(env) = env {
+        if let Some(env) = env.clone() {
             if let Some(vars) = &env.vars {
                 debug!("Setting environment variables: {vars:?}");
                 for (key, value) in vars {
@@ -188,11 +234,22 @@ impl Daemon {
                     spawn_log_writer(service_name, err, "stderr");
                 }
 
+                if let Some(hooks) = hooks {
+                    if let Some(hook_cmd) = &hooks.on_start {
+                        run_hook(hook_cmd, &env, HookType::OnStart, service_name);
+                    }
+                }
+
                 processes.lock()?.insert(service_name.to_string(), child);
                 Ok(pid)
             }
             Err(e) => {
                 error!("Failed to start service '{service_name}': {e}");
+                if let Some(hooks) = hooks {
+                    if let Some(hook_cmd) = &hooks.on_start {
+                        run_hook(hook_cmd, &env, HookType::OnStart, service_name);
+                    }
+                }
                 Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),
                     source: e,
@@ -261,6 +318,7 @@ impl Daemon {
         let command = service.command.clone();
         let env = service.env.clone();
         let service_name = name.to_string();
+        let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
 
         let handle = thread::spawn(move || {
@@ -271,6 +329,7 @@ impl Daemon {
                 &command,
                 env,
                 processes.clone(),
+                hooks,
             ) {
                 Ok(pid) => {
                     pid_file.lock()?.insert(&service_name, pid).unwrap();
@@ -501,6 +560,7 @@ impl Daemon {
         let name = name.to_string();
         let command = service.command.clone();
         let env = service.env.clone();
+        let hooks = service.hooks.clone();
 
         let backoff = service
             .backoff
@@ -515,7 +575,7 @@ impl Daemon {
             thread::sleep(Duration::from_secs(backoff));
 
             if let Err(e) =
-                Daemon::launch_attached_service(&name, &command, env, processes)
+                Daemon::launch_attached_service(&name, &command, env, processes, hooks)
             {
                 error!("Failed to restart '{name}': {e}");
             }

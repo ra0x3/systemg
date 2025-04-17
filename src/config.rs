@@ -2,6 +2,7 @@
 use regex::Regex;
 use serde::Deserialize;
 use std::{collections::HashMap, env, fs};
+use strum_macros::{AsRefStr, EnumString};
 
 use crate::error::ProcessManagerError;
 
@@ -38,6 +39,13 @@ pub struct EnvConfig {
     pub file: Option<String>,
     /// Key-value pairs of environment variables.
     pub vars: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, EnumString, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum HookType {
+    OnStart,
+    OnError,
 }
 
 /// Hooks that run on specific service lifecycle events.
