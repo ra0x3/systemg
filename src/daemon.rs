@@ -388,6 +388,7 @@ impl Daemon {
         let command = service.command.clone();
         let env = service.env.clone();
         let service_name = name.to_string();
+        let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
 
         // Spawn the thread, but DO NOT join it.
@@ -399,6 +400,7 @@ impl Daemon {
                 &command,
                 env,
                 processes.clone(),
+                hooks,
             ) {
                 Ok(pid) => {
                     pid_file.lock().unwrap().insert(&service_name, pid).unwrap();
