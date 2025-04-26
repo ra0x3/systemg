@@ -1,0 +1,11 @@
+version: 1
+services:
+  sh__hello_world:
+    command: "sh hello-world.sh"
+    env:
+      file: ".env"
+      vars:
+        FOO: "foo"
+    restart_policy: "on_failure"
+    retries: 5
+    backoff: "5s"
