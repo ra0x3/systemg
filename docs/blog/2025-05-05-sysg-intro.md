@@ -1,7 +1,7 @@
 ---
 slug: introducing-systemg
 title: Introducing Systemg — systemd for busy people
-authors: [systemg-team]
+authors: [rashad]
 tags: [announcement, systemg, rust]
 ---
 
@@ -15,4 +15,4 @@ Unlike systemd, Systemg is:
 
 Perfect for developers who want sane defaults and simple commands.
 
-👉 [Check out the official docs](../docs/intro)
+👉 [Check out the official docs](/docs/intro)

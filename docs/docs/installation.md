@@ -9,3 +9,4 @@ Install using Cargo:
 
 ```bash
 cargo install sysg
+```
