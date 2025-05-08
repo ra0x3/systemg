@@ -9,39 +9,68 @@ Systemg uses a simple YAML-based configuration and supports the following comman
 
 ## Start
 
-```bash
+Start the process manager with the given configuration:
+
+```sh
+# Start with default configuration file (systemg.yaml)
 sysg start
-sysg start --config custom.yaml
+
+# Start with a specific configuration file
+sysg start --config systemg.yaml
+
+# Start as a daemon process
 sysg start --config systemg.yaml --daemonize
 ```
 
 ## Stop
 
-```bash
+Stop the process manager or a specific service:
+
+```sh
+# Stop all services
 sysg stop
+
+# Stop a specific service
 sysg stop --service myapp
 ```
 
 ## Restart
 
-```bash
+Restart the process manager:
+
+```sh
+# Restart with current configuration
 sysg restart
-sysg restart --config alt.yaml
+
+# Restart with a different configuration
+sysg restart --config new-config.yaml
 ```
 
 ## Status
 
-```bash
+Check the status of running services:
+
+```sh
+# Show status of all services
 sysg status
-sysg status --service myapp
+
+# Show status of a specific service
+sysg status --service webserver
 ```
 
 ## Logs
 
-```bash
+View logs for a specific service:
+
+```sh
+# View the last 50 lines of logs for all services
 sysg logs
+
+# View logs for a specific service
 sysg logs api-service
-sysg logs database --lines 100
+
+# View a custom number of log lines
+sysg logs database --lines 100Predictable. Fast.
 ```
 
-Elegant. Predictable. Fast.
+> Note that on Unix-like systems, the `logs` command is currently not supported.

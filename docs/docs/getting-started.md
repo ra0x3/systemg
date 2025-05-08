@@ -14,4 +14,8 @@ This guide walks you through installation and basic usage.
 - Rust (via [rustup](https://rustup.rs))
 - Unix-like system (macOS, Linux)
 
+## Crate Documentation
+
+https://crates.io/crates/systemg
+
 Ready? Let’s begin.

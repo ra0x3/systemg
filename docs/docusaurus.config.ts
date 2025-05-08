@@ -70,7 +70,7 @@ const config: Config = {
     navbar: {
       title: 'systemg',
       logo: {
-        alt: 'My Site Logo',
+        alt: 'Site Logo',
         src: 'https://i.imgur.com/BwszZ66.png',
       },
       items: [
@@ -131,7 +131,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} My Project, Inc. Built with Docusaurus.`,
+      copyright: `Copyright © ${new Date().getFullYear()} A. Labs, Inc.`,
     },
     prism: {
       theme: prismThemes.github,
