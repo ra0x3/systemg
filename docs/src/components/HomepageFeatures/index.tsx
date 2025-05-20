@@ -15,28 +15,28 @@ const FeatureList: FeatureItem[] = [
     Svg: require("@site/static/img/undraw_docusaurus_mountain.svg").default,
     description: (
       <>
-        Docusaurus was designed from the ground up to be easily installed and
-        used to get your website up and running quickly.
+        systemg's lightweight binary can be installed with a single simple command,
+          and the binary runs a simple no-fluff process.
       </>
     ),
   },
   {
-    title: "Focus on What Matters",
+    title: "Powerful feature set",
     Svg: require("@site/static/img/undraw_docusaurus_tree.svg").default,
     description: (
       <>
-        Docusaurus lets you focus on your docs, and we&apos;ll do the chores. Go
-        ahead and move your docs into the <code>docs</code> directory.
+        With simple commands, systemg allows users to start, stop, and monitor processes with
+          features including auto-restarts for failed processes, and webhook integrations.
       </>
     ),
   },
   {
-    title: "Powered by React",
+    title: "Modern features",
     Svg: require("@site/static/img/undraw_docusaurus_react.svg").default,
     description: (
       <>
-        Extend or customize your website layout by reusing React. Docusaurus can
-        be extended while reusing the same header and footer.
+        With features such webhooks, systemg is a modern process manager that lets users
+          integrate into their existing ecosystems.
       </>
     ),
   },

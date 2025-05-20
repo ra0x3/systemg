@@ -5,14 +5,26 @@ title: Installation
 
 # Installation
 
-Install binary:
+## Installation via binary
+
+> ⚠️ Note that the binary download method is not currently available.
+
+This will add the `sysg` path to your `PATH`.
 
 ```bash
 curl -X https://sysg.dev/download/latest | sh -c
 ```
 
-Install using Cargo:
+## Installation via `cargo`
+
+### Unix
 
 ```bash
 cargo install sysg
+```
+
+### Linux
+
+```bash
+cargo install sysg --features linux
 ```

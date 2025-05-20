@@ -9,13 +9,7 @@ Systemg is a lightweight, Rust-based process manager built for speed, simplicity
 
 This guide walks you through installation and basic usage.
 
-## Prerequisites
+## System dependencies
 
 - Rust (via [rustup](https://rustup.rs))
 - Unix-like system (macOS, Linux)
-
-## Crate Documentation
-
-https://crates.io/crates/systemg
-
-Ready? Let’s begin.
