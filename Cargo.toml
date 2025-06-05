@@ -9,6 +9,13 @@ rust-version = "1.85.0"
 [package.metadata.docs.rs]
 features = ["linux"]
 
+[[bin]]
+name = "sysg"
+path = "src/bin/main.rs"
+
+[features]
+linux = ["chrono"]
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"], optional = true }
 clap = { version = "4.0", features = ["derive"] }
@@ -32,10 +39,3 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 assert_cmd = { version = "2.0" }
 predicates = { version = "2.1" }
 tempfile = { version = "3.14.0" }
-
-[[bin]]
-name = "sysg"
-path = "src/bin/main.rs"
-
-[features]
-linux = ["chrono"]

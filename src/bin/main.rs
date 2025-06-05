@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
         Commands::Start { config, daemonize } => {
             info!("Loading configuration from: {config:?}");
-            match load_config(&config) {
+            match load_config(Some(&config)) {
                 Ok(config) => {
                     if daemonize {
                         daemonize_systemg()?;
@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Stop { service, config } => {
             info!("Stopping all services...");
-            match load_config(&config) {
+            match load_config(Some(&config)) {
                 Ok(config) => {
                     let mut daemon = Daemon::new(config, pid.clone());
 
@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Restart { config, .. } => {
             info!("Restarting services using config: {config:?}");
-            match load_config(&config) {
+            match load_config(Some(&config)) {
                 Ok(config) => {
                     let mut daemon = Daemon::new(config, pid.clone());
 
