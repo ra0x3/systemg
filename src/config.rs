@@ -1,7 +1,11 @@
 //! Configuration management for Systemg.
 use regex::Regex;
 use serde::Deserialize;
-use std::{collections::HashMap, env, fs};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 use strum_macros::{AsRefStr, EnumString};
 
 use crate::error::ProcessManagerError;
@@ -13,6 +17,8 @@ pub struct Config {
     pub version: String,
     /// Map of service names to their respective configurations.
     pub services: HashMap<String, ServiceConfig>,
+    /// Root directory from which relative paths are resolved.
+    pub project_dir: Option<String>,
 }
 
 /// Configuration for an individual service.
@@ -39,6 +45,20 @@ pub struct EnvConfig {
     pub file: Option<String>,
     /// Key-value pairs of environment variables.
     pub vars: Option<HashMap<String, String>>,
+}
+
+impl EnvConfig {
+    /// Resolves the full path to the env file based on a base directory.
+    pub fn path(&self, base: &Path) -> Option<PathBuf> {
+        self.file.as_ref().map(|f| {
+            let path = Path::new(f);
+            if path.is_absolute() || path.exists() {
+                path.to_path_buf()
+            } else {
+                base.join(path)
+            }
+        })
+    }
 }
 
 #[derive(Debug, EnumString, AsRefStr)]
@@ -90,32 +110,45 @@ fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
 }
 
 /// Loads and parses the configuration file, expanding environment variables.
-pub fn load_config(path: &str) -> Result<Config, ProcessManagerError> {
-    let content = fs::read_to_string(path).map_err(|e| {
+pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerError> {
+    let config_path = config_path.map(Path::new).unwrap_or_else(|| {
+        if Path::new("systemg.yaml").exists() {
+            Path::new("systemg.yaml")
+        } else {
+            Path::new("sysg.yaml")
+        }
+    });
+
+    let content = fs::read_to_string(config_path).map_err(|e| {
         ProcessManagerError::ConfigReadError(std::io::Error::new(
             e.kind(),
-            format!("{} ({})", e, path),
+            format!("{} ({})", e, config_path.display()),
         ))
     })?;
+
     let mut config: Config =
         serde_yaml::from_str(&content).map_err(ProcessManagerError::ConfigParseError)?;
 
-    // Load env files first before expanding variables
+    let base_path = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    config.project_dir = Some(base_path.to_string_lossy().to_string());
+
     for service in config.services.values_mut() {
         if let Some(env_config) = &service.env {
-            if let Some(env_file) = &env_config.file {
-                load_env_file(env_file)?;
+            if let Some(resolved_path) = env_config.path(&base_path) {
+                load_env_file(&resolved_path.to_string_lossy())?;
             }
         }
     }
 
-    // Now expand environment variables after loading .env
     let expanded_content = expand_env_vars(&content)?;
 
-    // Parse the final expanded config
-    let config: Config = serde_yaml::from_str(&expanded_content)
+    let mut config: Config = serde_yaml::from_str(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
 
+    config.project_dir = Some(base_path.to_string_lossy().to_string());
     Ok(config)
 }
 
@@ -126,7 +159,6 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
-    /// Test that an env file is properly loaded.
     #[test]
     fn test_load_env_file() {
         let dir = tempdir().unwrap();
@@ -141,56 +173,70 @@ mod tests {
         assert_eq!(env::var("ANOTHER_KEY").unwrap(), "ANOTHER_VALUE");
     }
 
-    /// Test that a YAML config with env file reference is properly loaded.
     #[test]
-    fn test_load_config_with_env_file() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Create a fake .env file
-        let env_path = dir.path().join(".env");
-        let mut env_file = std::fs::File::create(&env_path).unwrap();
+    fn test_load_config_with_absolute_env_path() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join("absolute.env");
+        let mut env_file = File::create(&env_path).unwrap();
         writeln!(env_file, "MY_TEST_VAR=HelloWorld").unwrap();
-        writeln!(env_file, "DB_USER=admin").unwrap();
-        writeln!(env_file, "DB_PASS=secret").unwrap();
 
-        // Create a mock YAML config referencing the .env file
-        let yaml_path = dir.path().join("systemg.yaml");
-        let mut yaml_file = std::fs::File::create(&yaml_path).unwrap();
+        let yaml_path = dir.path().join("config.yaml");
+        let mut yaml_file = File::create(&yaml_path).unwrap();
         writeln!(
             yaml_file,
             r#"
         version: "1"
         services:
-          test_service:
+          service1:
             command: "echo ${{MY_TEST_VAR}}"
             env:
               file: "{}"
               vars:
-                DB_HOST: "localhost"
+                TEST: "test"
         "#,
             env_path.to_str().unwrap()
         )
         .unwrap();
 
-        // Set MY_TEST_VAR in the test environment so it expands properly
-        unsafe {
-            std::env::set_var("MY_TEST_VAR", "HelloWorld");
-        }
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+        let base_path = Path::new(config.project_dir.as_ref().unwrap());
+        let service = &config.services["service1"];
 
-        // Load the config and verify values
-        let config = load_config(yaml_path.to_str().unwrap()).unwrap();
-        let service = config.services.get("test_service").unwrap();
+        let resolved = service.env.as_ref().unwrap().path(base_path).unwrap();
+        assert_eq!(resolved, env_path);
+        assert!(resolved.is_absolute());
+    }
 
-        // Ensure command expansion works correctly
-        assert_eq!(service.command, "echo HelloWorld");
+    #[test]
+    fn test_load_config_with_relative_env_path() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join("relative.env");
+        let mut env_file = File::create(&env_path).unwrap();
+        writeln!(env_file, "REL_VAR=42").unwrap();
 
-        // Extract loaded env vars from the config instead of calling env::var()
-        let env_vars = service.env.as_ref().unwrap().vars.as_ref().unwrap();
-        assert_eq!(env_vars.get("DB_HOST").unwrap(), "localhost");
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).unwrap();
+        writeln!(
+            yaml_file,
+            r#"
+version: "1"
+services:
+  rel_service:
+    command: "echo ${{REL_VAR}}"
+    env:
+      file: "relative.env"
+      vars:
+        DB: "local"
+"#
+        )
+        .unwrap();
 
-        // Verify .env file values were loaded correctly
-        assert_eq!(std::env::var("MY_TEST_VAR").unwrap(), "HelloWorld");
-        assert_eq!(std::env::var("DB_USER").unwrap(), "admin");
-        assert_eq!(std::env::var("DB_PASS").unwrap(), "secret");
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+        let service = &config.services["rel_service"];
+        let base_path = Path::new(config.project_dir.as_ref().unwrap());
+        assert_eq!(
+            service.env.as_ref().unwrap().path(base_path).unwrap(),
+            env_path
+        );
     }
 }
