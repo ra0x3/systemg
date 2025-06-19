@@ -196,12 +196,14 @@ impl Daemon {
 
         unsafe {
             cmd.pre_exec(|| {
-                if libc::setpgid(0, 0) < 0 {
+                // Create a new session (start a new process group)
+                if libc::setsid() < 0 {
                     let err = std::io::Error::last_os_error();
-                    eprintln!("systemg pre_exec: setpgid failed: {:?}", err);
+                    eprintln!("systemg pre_exec: setsid failed: {:?}", err);
                     return Err(err);
                 }
 
+                // Ensure service gets killed on parent death (Linux only)
                 #[cfg(target_os = "linux")]
                 {
                     use libc::{PR_SET_PDEATHSIG, SIGTERM, prctl};
@@ -449,8 +451,18 @@ impl Daemon {
             } else {
                 debug!("Stopping service '{service_name}' (PID {pid})");
 
-                let pgid = nix::unistd::Pid::from_raw(-pid.as_raw()); // Negative = process group
-                nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGTERM)?;
+                unsafe {
+                    if libc::killpg(pid.as_raw(), libc::SIGTERM) < 0 {
+                        let err = std::io::Error::last_os_error();
+                        error!(
+                            "Failed to kill process group of service '{service_name}': {err}"
+                        );
+                        return Err(ProcessManagerError::ServiceStopError {
+                            service: service_name.to_string(),
+                            source: err,
+                        });
+                    }
+                }
 
                 self.processes.lock()?.remove(service_name);
                 self.pid_file.lock()?.remove(service_name)?;
