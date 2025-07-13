@@ -8,6 +8,7 @@ on:
     branches:
       - main
   release:
+    environment: ci
     types:
       - published
 
@@ -79,7 +80,16 @@ jobs:
 
   release:
     name: Upload Release Binaries
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: systemg-linux.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: systemg-macos.tar.gz
+    runs-on: ${{ matrix.os }}
     if: github.event_name == 'release' && github.event.action == 'published'
     steps:
       - name: Checkout repository
@@ -88,38 +98,32 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: |
-            x86_64-unknown-linux-gnu
-            x86_64-apple-darwin
+          targets: ${{ matrix.target }}
 
-      - name: Build Linux Binary
-        run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
 
-      - name: Build macOS Binary
-        run: cargo build --release --target x86_64-apple-darwin
+      - name: Build Binary
+        run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Compress Binaries
+      - name: Compress Binary
         run: |
-          tar -czvf systemg-linux.tar.gz -C target/x86_64-unknown-linux-gnu/release systemg
-          tar -czvf systemg-macos.tar.gz -C target/x86_64-apple-darwin/release systemg
+          tar -czvf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release systemg
 
-      - name: Upload Linux Binary
+      - name: Upload Binary to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          files: systemg-linux.tar.gz
+          files: ${{ matrix.artifact }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload macOS Binary
-        uses: softprops/action-gh-release@v1
-        with:
-          files: systemg-macos.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
 
       - name: Install s3cmd
-        run: sudo apt-get install -y s3cmd
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sudo apt-get update && sudo apt-get install -y s3cmd
+          else
+            brew install s3cmd
+          fi
 
       - name: Configure s3cmd for R2
         run: |
@@ -127,12 +131,11 @@ jobs:
           [default]
           access_key = ${{ secrets.R2_ACCESS_KEY_ID }}
           secret_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          host_base = ${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
-          host_bucket = ${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+          host_base = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          host_bucket = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
           use_https = True
           EOF
 
       - name: Upload to Cloudflare R2
         run: |
-          s3cmd put systemg-linux.tar.gz s3://${{ secrets.R2_BUCKET_NAME }}/systemg-linux.tar.gz --acl-public
-          s3cmd put systemg-macos.tar.gz s3://${{ secrets.R2_BUCKET_NAME }}/systemg-macos.tar.gz --acl-public
+          s3cmd put ${{ matrix.artifact }} s3://${{ secrets.R2_BUCKET_NAME }}/${{ matrix.artifact }} --acl-public
