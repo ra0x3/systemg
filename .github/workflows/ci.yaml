@@ -7,6 +7,10 @@ on:
   pull_request:
     branches:
       - main
+  release:
+    environment: ci
+    types:
+      - published
 
 jobs:
   docs:
@@ -26,27 +30,19 @@ jobs:
 
       - name: Install Dependencies
         working-directory: docs
-        run: |
-          cd docs
-          npm ci
+        run: npm ci
 
       - name: Build Docs
         working-directory: docs
-        run: |
-          cd docs
-          npm run build
+        run: npm run build
 
       - name: Lint Docs
         working-directory: docs
-        run: |
-          cd docs
-          npm run lint
+        run: npm run lint
 
       - name: Run Tests
         working-directory: docs
-        run: |
-          cd docs
-          npm test
+        run: npm test
 
   cargo:
     name: SystemG CI
@@ -81,3 +77,65 @@ jobs:
 
       - name: Run Tests
         run: cargo test --verbose --features linux
+
+  release:
+    name: Upload Release Binaries
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: systemg-linux.tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: systemg-macos.tar.gz
+    runs-on: ${{ matrix.os }}
+    if: github.event_name == 'release' && github.event.action == 'published'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Compress Binary
+        run: |
+          tar -czvf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release systemg
+
+      - name: Upload Binary to GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ matrix.artifact }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install s3cmd
+        run: |
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sudo apt-get update && sudo apt-get install -y s3cmd
+          else
+            brew install s3cmd
+          fi
+
+      - name: Configure s3cmd for R2
+        run: |
+          cat > ~/.s3cfg <<EOF
+          [default]
+          access_key = ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          host_base = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          host_bucket = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          use_https = True
+          EOF
+
+      - name: Upload to Cloudflare R2
+        run: |
+          s3cmd put ${{ matrix.artifact }} s3://${{ secrets.R2_BUCKET_NAME }}/${{ matrix.artifact }} --acl-public
