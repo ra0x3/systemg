@@ -124,7 +124,8 @@ jobs:
   cargo-publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
+    #if: github.event_name == 'release' && github.event.action == 'published'
+    if: false
     needs: [release]
     environment: ci
     steps:
@@ -142,7 +143,8 @@ jobs:
   upload-r2:
     name: Upload to Cloudflare R2
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
+    #if: github.event_name == 'release' && github.event.action == 'published'
+    if: false
     needs: [cargo-publish]
     environment: ci
     steps:
