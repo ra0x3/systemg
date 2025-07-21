@@ -8,7 +8,6 @@ on:
     branches:
       - main
   release:
-    environment: ci
     types:
       - published
 
@@ -47,7 +46,7 @@ jobs:
   cargo:
     name: SystemG CI
     runs-on: ubuntu-latest
-
+    needs: [docs]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -72,9 +71,6 @@ jobs:
       - name: Run Rustfmt (Code Formatting)
         run: cargo fmt -- --check
 
-      - name: Check rustfmt.toml Formatting
-        run: test -f rustfmt.toml || { echo "rustfmt.toml not found"; exit 1; }
-
       - name: Run Tests
         run: cargo test --verbose --features linux
 
@@ -90,7 +86,9 @@ jobs:
             target: x86_64-apple-darwin
             artifact: systemg-macos.tar.gz
     runs-on: ${{ matrix.os }}
+    needs: [cargo]
     if: github.event_name == 'release' && github.event.action == 'published'
+    environment: ci
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -110,6 +108,12 @@ jobs:
         run: |
           tar -czvf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release systemg
 
+      - name: Upload artifact for R2
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
       - name: Upload Binary to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
@@ -117,13 +121,36 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  cargo-publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: [release]
+    environment: ci
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish Crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
+        run: cargo publish --locked --no-verify
+
+  upload-r2:
+    name: Upload to Cloudflare R2
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: [cargo-publish]
+    environment: ci
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Install s3cmd
-        run: |
-          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            sudo apt-get update && sudo apt-get install -y s3cmd
-          else
-            brew install s3cmd
-          fi
+        run: sudo apt-get update && sudo apt-get install -y s3cmd
 
       - name: Configure s3cmd for R2
         run: |
@@ -136,6 +163,13 @@ jobs:
           use_https = True
           EOF
 
+      - name: Download Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
       - name: Upload to Cloudflare R2
         run: |
-          s3cmd put ${{ matrix.artifact }} s3://${{ secrets.R2_BUCKET_NAME }}/${{ matrix.artifact }} --acl-public
+          find artifacts -name "*.tar.gz" -type f | while read file; do
+            s3cmd put "$file" s3://${{ secrets.R2_BUCKET_NAME }}/$(basename "$file") --acl-public
+          done
