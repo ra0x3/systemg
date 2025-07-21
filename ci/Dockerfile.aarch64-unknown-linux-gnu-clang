@@ -1,0 +1,20 @@
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main
+
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    binutils-aarch64-linux-gnu \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    gcc \
+    git \
+    libclang-8-dev \
+    libssl-dev:arm64 \
+    lld \
+    llvm \
+    pkg-config \
+    tzdata \
+    wget \
+    && apt-get clean

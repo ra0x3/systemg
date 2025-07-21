@@ -10,6 +10,15 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      test-release:
+        description: "Simulate a release"
+        required: false
+        default: "true"
+
+env:
+  RUSTC_VERSION: 1.88.0
 
 jobs:
   docs:
@@ -74,59 +83,145 @@ jobs:
       - name: Run Tests
         run: cargo test --verbose --features linux
 
-  release:
-    name: Upload Release Binaries
+  upload-release-binaries:
+    runs-on: ${{ matrix.job.os }}
+    needs: [cargo]
+    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
-        include:
+        job:
           - os: ubuntu-latest
+            platform: linux
             target: x86_64-unknown-linux-gnu
-            artifact: systemg-linux.tar.gz
+            cross_image: x86_64-linux-gnu
+            features: linux
+          - os: ubuntu-latest
+            platform: linux-arm
+            target: aarch64-unknown-linux-gnu
+            cross_image: aarch64-linux-gnu
+            features: linux
           - os: macos-latest
+            platform: darwin
             target: x86_64-apple-darwin
-            artifact: systemg-macos.tar.gz
-    runs-on: ${{ matrix.os }}
-    needs: [cargo]
-    if: github.event_name == 'release' && github.event.action == 'published'
-    environment: ci
+          - os: macos-latest
+            platform: darwin-arm
+            target: aarch64-apple-darwin
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Docker Buildx
+        if: matrix.job.cross_image
+        uses: docker/setup-buildx-action@v1
+
+      - name: Setup custom cross env ${{ matrix.job.cross_image }}
+        if: matrix.job.cross_image
+        uses: docker/build-push-action@v2
         with:
-          targets: ${{ matrix.target }}
+          context: ci
+          file: ci/Dockerfile.${{ matrix.job.target }}-clang
+          tags: ${{ matrix.job.cross_image }}:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Cache Cargo Dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build Binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Compress Binary
+      - name: Install packages (macOS)
+        if: matrix.job.os == 'macos-latest'
         run: |
-          tar -czvf ${{ matrix.artifact }} -C target/${{ matrix.target }}/release systemg
+          ci/macos-install-packages.sh
+      - uses: actions/checkout@v3
 
-      - name: Upload artifact for R2
-        uses: actions/upload-artifact@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          toolchain: ${{ env.RUSTC_VERSION }}
+          targets: ${{ matrix.job.target }}
 
-      - name: Upload Binary to GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: Install cross
+        uses: baptiste0928/cargo-install@v1
         with:
-          files: ${{ matrix.artifact }}
+          crate: cross
+          cache-key: ${{ matrix.job.target }}
+
+      - name: Build sysg
+        run: |
+          cross \
+            build \
+            --profile=release \
+            --target ${{ matrix.job.target }} \
+            --features ${{ matrix.job.features }}
+
+      - name: Strip release binary linux x86_64
+        if: matrix.job.platform == 'linux'
+        run: >
+          strip "target/${{ matrix.job.target }}/release/sysg"
+
+      - name: Strip release binary aarch64-linux-gnu
+        if: matrix.job.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          docker run --rm -v \
+          "$PWD/target:/target:Z" \
+          aarch64-linux-gnu:latest \
+          aarch64-linux-gnu-strip \
+          /target/aarch64-unknown-linux-gnu/release/sysg
+
+      - name: Strip release binary mac
+        if: matrix.job.os == 'macos-latest'
+        run: >
+          strip -x "target/${{ matrix.job.target }}/release/sysg"
+
+      - name: Prepare Binary Artifact
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLATFORM_NAME: ${{ matrix.job.platform }}
+          TARGET: ${{ matrix.job.target }}
+        run: >
+          # trim refs/tags/ prefix
+          SYSG_VERSION="${GITHUB_REF#refs/tags/}"
+
+          # optionally trim v from tag prefix
+          SYSG_VERSION="${SYSG_VERSION#v}"
+          echo "version is: SYSG_VERSION"
+
+          # setup artifact filename
+          SYSG_ARTIFACT="fuel-indexer-SYSG_VERSION-${{ env.TARGET }}"
+          SYSG_ZIP_FILE_NAME="$SYSG_ARTIFACT.tar.gz"
+          echo "SYSG_ZIP_FILE_NAME=$SYSG_ZIP_FILE_NAME" >> $GITHUB_ENV
+
+          # create zip file
+          mkdir -pv "$SYSG_ZIP_FILE_NAME"
+          cp "target/${{ matrix.job.target }}/release/sysg" "$SYSG_ZIP_FILE_NAME"
+          tar -czvf "$SYSG_ZIP_FILE_NAME" "$SYSG_ARTIFACT"
+
+      - name: Upload Sysg Artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./${{ env.SYSG_ZIP_FILE_NAME }}
+          asset_name: ${{ env.SYSG_ZIP_FILE_NAME }}
+          asset_content_type: application/gzip
+
+#      - name: Notify if Job Fails
+#        uses: ravsamhq/notify-slack-action@v2
+#        if: always() && (github.ref == 'refs/heads/master' || github.ref_type == 'tag')
+#          && matrix.job.os != 'macos-latest'
+#        with:
+#          status: ${{ job.status }}
+#          token: ${{ secrets.GITHUB_TOKEN }}
+#          notification_title: "{workflow} has {status_message}"
+#          message_format: "{emoji} *{workflow}* {status_message} in <{repo_url}|{repo}> :
+#            <{run_url}|View Run Results>"
+#          footer: ""
+#          notify_when: failure
+#        env:
+#          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_NOTIFY_BUILD }}
 
   cargo-publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    #if: github.event_name == 'release' && github.event.action == 'published'
-    if: false
-    needs: [release]
+    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
+    needs: [upload-release-binaries]
     environment: ci
     steps:
       - name: Checkout Repository
@@ -143,8 +238,7 @@ jobs:
   upload-r2:
     name: Upload to Cloudflare R2
     runs-on: ubuntu-latest
-    #if: github.event_name == 'release' && github.event.action == 'published'
-    if: false
+    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     needs: [cargo-publish]
     environment: ci
     steps:
