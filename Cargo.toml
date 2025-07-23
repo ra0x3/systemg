@@ -15,6 +15,7 @@ path = "src/bin/main.rs"
 
 [features]
 linux = ["chrono"]
+macos = []
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"], optional = true }
