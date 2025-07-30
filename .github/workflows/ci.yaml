@@ -86,6 +86,8 @@ jobs:
   upload-release-binaries:
     name: Upload Release Binaries
     runs-on: ${{ matrix.job.os }}
+    permissions:
+      contents: write
     needs: [cargo]
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     strategy:
@@ -180,20 +182,29 @@ jobs:
           TARGET: ${{ matrix.job.target }}
         run: >
           # trim refs/tags/ prefix
+          
           SYSG_VERSION="${GITHUB_REF#refs/tags/}"
 
           # optionally trim v from tag prefix
+          
           SYSG_VERSION="${SYSG_VERSION#v}"
-          echo "version is: SYSG_VERSION"
+          
+          echo "version is: $SYSG_VERSION"
 
           # setup artifact filename
-          SYSG_ARTIFACT="fuel-indexer-SYSG_VERSION-${{ env.TARGET }}"
+          
+          SYSG_ARTIFACT="sysg-$SYSG_VERSION-${{ env.TARGET }}"
+          
           SYSG_ZIP_FILE_NAME="$SYSG_ARTIFACT.tar.gz"
+          
           echo "SYSG_ZIP_FILE_NAME=$SYSG_ZIP_FILE_NAME" >> $GITHUB_ENV
 
           # create zip file
-          mkdir -pv "$SYSG_ZIP_FILE_NAME"
-          cp "target/${{ matrix.job.target }}/release/sysg" "$SYSG_ZIP_FILE_NAME"
+          
+          mkdir -pv "$SYSG_ARTIFACT"
+          
+          cp "target/${{ matrix.job.target }}/release/sysg" "$SYSG_ARTIFACT"
+          
           tar -czvf "$SYSG_ZIP_FILE_NAME" "$SYSG_ARTIFACT"
 
       - name: Upload Sysg Artifact
