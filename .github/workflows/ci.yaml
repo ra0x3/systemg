@@ -84,6 +84,7 @@ jobs:
         run: cargo test --verbose --features linux
 
   upload-release-binaries:
+    name: Upload Release Binaries
     runs-on: ${{ matrix.job.os }}
     needs: [cargo]
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
@@ -236,7 +237,12 @@ jobs:
       - name: Publish Crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
-        run: cargo publish --locked --no-verify
+        run: |
+          if [ "${{ github.event.inputs.test-release }}" == "true" ]; then
+            cargo publish --dry-run --locked --no-verify
+          else
+            cargo publish --locked --no-verify
+          fi
 
   upload-r2:
     name: Upload to Cloudflare R2
