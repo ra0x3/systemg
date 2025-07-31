@@ -7,12 +7,10 @@ title: Installation
 
 ## Installation via binary
 
-> ⚠️ Note that the binary download method is not currently available.
-
 This will add the `sysg` path to your `PATH`.
 
 ```bash
-curl -X https://sysg.dev/download/latest | sh -c
+curl -fsSL https://sysg.dev/download/latest | sh
 ```
 
 ## Installation via `cargo`

@@ -12,10 +12,15 @@ on:
       - published
   workflow_dispatch:
     inputs:
-      test-release:
-        description: "Simulate a release"
-        required: false
-        default: "true"
+      release-mode:
+        description: "Select release mode"
+        required: true
+        type: choice
+        options:
+          - full
+          - test
+          - dry_run
+        default: test
 
 env:
   RUSTC_VERSION: 1.88.0
@@ -89,7 +94,9 @@ jobs:
     permissions:
       contents: write
     needs: [cargo]
-    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
+    if: >
+      (github.event_name == 'release' && github.event.action == 'published')
+      || (github.event_name == 'workflow_dispatch')
     strategy:
       matrix:
         job:
@@ -103,14 +110,14 @@ jobs:
             target: aarch64-unknown-linux-gnu
             cross_image: aarch64-linux-gnu
             features: linux
-#          - os: macos-latest
-#            platform: darwin
-#            target: x86_64-apple-darwin
-#            features: macos
-#          - os: macos-latest
-#            platform: darwin-arm
-#            target: aarch64-apple-darwin
-#            features: macos
+    #          - os: macos-latest
+    #            platform: darwin
+    #            target: x86_64-apple-darwin
+    #            features: macos
+    #          - os: macos-latest
+    #            platform: darwin-arm
+    #            target: aarch64-apple-darwin
+    #            features: macos
 
     steps:
       - name: Checkout repository
@@ -181,30 +188,14 @@ jobs:
           PLATFORM_NAME: ${{ matrix.job.platform }}
           TARGET: ${{ matrix.job.target }}
         run: >
-          # trim refs/tags/ prefix
-          
           SYSG_VERSION="${GITHUB_REF#refs/tags/}"
-
-          # optionally trim v from tag prefix
-          
           SYSG_VERSION="${SYSG_VERSION#v}"
-          
           echo "version is: $SYSG_VERSION"
-
-          # setup artifact filename
-          
           SYSG_ARTIFACT="sysg-$SYSG_VERSION-${{ env.TARGET }}"
-          
           SYSG_ZIP_FILE_NAME="$SYSG_ARTIFACT.tar.gz"
-          
           echo "SYSG_ZIP_FILE_NAME=$SYSG_ZIP_FILE_NAME" >> $GITHUB_ENV
-
-          # create zip file
-          
           mkdir -pv "$SYSG_ARTIFACT"
-          
           cp "target/${{ matrix.job.target }}/release/sysg" "$SYSG_ARTIFACT"
-          
           tar -czvf "$SYSG_ZIP_FILE_NAME" "$SYSG_ARTIFACT"
 
       - name: Upload Sysg Artifact
@@ -217,49 +208,13 @@ jobs:
           asset_name: ${{ env.SYSG_ZIP_FILE_NAME }}
           asset_content_type: application/gzip
 
-#      - name: Notify if Job Fails
-#        uses: ravsamhq/notify-slack-action@v2
-#        if: always() && (github.ref == 'refs/heads/master' || github.ref_type == 'tag')
-#          && matrix.job.os != 'macos-latest'
-#        with:
-#          status: ${{ job.status }}
-#          token: ${{ secrets.GITHUB_TOKEN }}
-#          notification_title: "{workflow} has {status_message}"
-#          message_format: "{emoji} *{workflow}* {status_message} in <{repo_url}|{repo}> :
-#            <{run_url}|View Run Results>"
-#          footer: ""
-#          notify_when: failure
-#        env:
-#          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_NOTIFY_BUILD }}
-
-  cargo-publish:
-    name: Publish to crates.io
-    runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
-    needs: [upload-release-binaries]
-    environment: ci
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish Crate
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
-        run: |
-          if [ "${{ github.event.inputs.test-release }}" == "true" ]; then
-            cargo publish --dry-run --locked --no-verify
-          else
-            cargo publish --locked --no-verify
-          fi
-
   upload-r2:
     name: Upload to Cloudflare R2
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
-    needs: [cargo-publish]
+    if: >
+      (github.event_name == 'release' && github.event.action == 'published')
+      || (github.event_name == 'workflow_dispatch')
+    needs: [upload-release-binaries]
     environment: ci
     steps:
       - name: Checkout repository
@@ -283,10 +238,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get release info
           RELEASE_ID="${{ github.event.release.id }}"
-          
-          # Download all .tar.gz assets from the release
           curl -H "Authorization: token $GITHUB_TOKEN" \
                -H "Accept: application/vnd.github.v3+json" \
                "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
@@ -297,3 +249,36 @@ jobs:
             echo "Uploading $name to R2"
             s3cmd put "$name" "s3://${{ secrets.R2_BUCKET_NAME }}/$name" --acl-public
           done
+
+  cargo-publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'release' && github.event.action == 'published')
+      || (github.event_name == 'workflow_dispatch' && github.event.inputs.release-mode != 'test')
+    needs: [upload-r2]
+    environment: ci
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish Crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
+        run: |
+          case "${{ github.event.inputs.release-mode }}" in
+            "dry_run")
+              echo "Running cargo publish --dry-run"
+              cargo publish --dry-run --locked --no-verify
+              ;;
+            "full")
+              echo "Running full cargo publish"
+              cargo publish --locked --no-verify
+              ;;
+            *)
+              echo "Skipping crates.io publish for test mode"
+              ;;
+          esac
