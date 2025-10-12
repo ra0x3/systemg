@@ -4,7 +4,6 @@ set -e
 ARCH=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
-# Map architecture and OS to Rust target
 if [ "$OS" = "linux" ]; then
   if [ "$ARCH" = "x86_64" ]; then
     TARGET="x86_64-unknown-linux-gnu"
@@ -28,7 +27,6 @@ else
   exit 1
 fi
 
-# Get latest version from GitHub
 echo "🔍 Fetching latest version..."
 VERSION=$(curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
 
@@ -40,14 +38,15 @@ fi
 FILE="sysg-$VERSION-$TARGET.tar.gz"
 echo "📦 Downloading sysg $VERSION for $TARGET..."
 
-# Download and extract
-if ! curl -sSf "https://sh.sysg.dev/$FILE" > /dev/null; then
+if ! curl -sSfL "https://sh.sysg.dev/$FILE" -o "$FILE"; then
   echo "❌ Binary not available for $TARGET"
   echo "Available binaries: https://github.com/ra0x3/systemg/releases"
   exit 1
 fi
 
-# Find the binary (handle case where it might be in a subdirectory)
+tar -xzf "$FILE"
+rm "$FILE"
+
 if [ -f "sysg" ]; then
   BINARY="sysg"
 elif [ -f "sysg-$VERSION-$TARGET/sysg" ]; then
@@ -57,17 +56,11 @@ else
   exit 1
 fi
 
-# Create bin directory
 mkdir -p "$HOME/.sysg/bin"
-
-# Install
 chmod +x "$BINARY"
 mv "$BINARY" "$HOME/.sysg/bin/sysg"
-
-# Cleanup
 rm -rf sysg-* 2>/dev/null || true
 
-# Add to PATH if not already there
 SHELL_RC=""
 if [ -n "$BASH_VERSION" ]; then
   SHELL_RC="$HOME/.bashrc"
