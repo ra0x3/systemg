@@ -12,18 +12,13 @@ on:
       - published
   workflow_dispatch:
     inputs:
-      release-mode:
-        description: "Select release mode"
-        required: true
-        type: choice
-        options:
-          - full
-          - test
-          - dry_run
-        default: test
+      test-release:
+        description: "Simulate a release"
+        required: false
+        default: "true"
 
 env:
-  RUSTC_VERSION: 1.88.0
+  RUSTC_VERSION: 1.85.0
 
 jobs:
   docs:
@@ -76,6 +71,9 @@ jobs:
           cargo install cargo-sort
           rustup component add rustfmt clippy
 
+      - name: Cargo build
+        run: cargo build --locked
+
       - name: Check Cargo.toml Formatting (cargo-sort)
         run: cargo sort --check --workspace
 
@@ -86,7 +84,7 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run Tests
-        run: cargo test --verbose --features linux
+        run: cargo test --verbose
 
   upload-release-binaries:
     name: Upload Release Binaries
@@ -94,9 +92,7 @@ jobs:
     permissions:
       contents: write
     needs: [cargo]
-    if: >
-      (github.event_name == 'release' && github.event.action == 'published')
-      || (github.event_name == 'workflow_dispatch')
+    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
         job:
@@ -110,14 +106,14 @@ jobs:
             target: aarch64-unknown-linux-gnu
             cross_image: aarch64-linux-gnu
             features: linux
-    #          - os: macos-latest
-    #            platform: darwin
-    #            target: x86_64-apple-darwin
-    #            features: macos
-    #          - os: macos-latest
-    #            platform: darwin-arm
-    #            target: aarch64-apple-darwin
-    #            features: macos
+#          - os: macos-latest
+#            platform: darwin
+#            target: x86_64-apple-darwin
+#            features: macos
+#          - os: macos-latest
+#            platform: darwin-arm
+#            target: aarch64-apple-darwin
+#            features: macos
 
     steps:
       - name: Checkout repository
@@ -161,8 +157,7 @@ jobs:
           cross \
             build \
             --profile=release \
-            --target ${{ matrix.job.target }} \
-            --features ${{ matrix.job.features }}
+            --target ${{ matrix.job.target }}
 
       - name: Strip release binary linux x86_64
         if: matrix.job.platform == 'linux'
@@ -188,14 +183,30 @@ jobs:
           PLATFORM_NAME: ${{ matrix.job.platform }}
           TARGET: ${{ matrix.job.target }}
         run: >
+          # trim refs/tags/ prefix
+
           SYSG_VERSION="${GITHUB_REF#refs/tags/}"
+
+          # optionally trim v from tag prefix
+
           SYSG_VERSION="${SYSG_VERSION#v}"
+
           echo "version is: $SYSG_VERSION"
+
+          # setup artifact filename
+
           SYSG_ARTIFACT="sysg-$SYSG_VERSION-${{ env.TARGET }}"
+
           SYSG_ZIP_FILE_NAME="$SYSG_ARTIFACT.tar.gz"
+
           echo "SYSG_ZIP_FILE_NAME=$SYSG_ZIP_FILE_NAME" >> $GITHUB_ENV
+
+          # create zip file
+
           mkdir -pv "$SYSG_ARTIFACT"
+
           cp "target/${{ matrix.job.target }}/release/sysg" "$SYSG_ARTIFACT"
+
           tar -czvf "$SYSG_ZIP_FILE_NAME" "$SYSG_ARTIFACT"
 
       - name: Upload Sysg Artifact
@@ -208,55 +219,67 @@ jobs:
           asset_name: ${{ env.SYSG_ZIP_FILE_NAME }}
           asset_content_type: application/gzip
 
+#      - name: Notify if Job Fails
+#        uses: ravsamhq/notify-slack-action@v2
+#        if: always() && (github.ref == 'refs/heads/master' || github.ref_type == 'tag')
+#          && matrix.job.os != 'macos-latest'
+#        with:
+#          status: ${{ job.status }}
+#          token: ${{ secrets.GITHUB_TOKEN }}
+#          notification_title: "{workflow} has {status_message}"
+#          message_format: "{emoji} *{workflow}* {status_message} in <{repo_url}|{repo}> :
+#            <{run_url}|View Run Results>"
+#          footer: ""
+#          notify_when: failure
+#        env:
+#          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_NOTIFY_BUILD }}
+
   upload-r2:
-    name: Upload to Cloudflare R2
-    runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'release' && github.event.action == 'published')
-      || (github.event_name == 'workflow_dispatch')
-    needs: [upload-release-binaries]
+    # if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
+    if: false
+    needs: [ upload-release-binaries ]
     environment: ci
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install s3cmd and jq
-        run: sudo apt-get update && sudo apt-get install -y s3cmd jq
-
-      - name: Configure s3cmd for R2
-        run: |
-          cat > ~/.s3cfg <<EOF
-          [default]
-          access_key = ${{ secrets.R2_ACCESS_KEY_ID }}
-          secret_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          host_base = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          host_bucket = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          use_https = True
-          EOF
-
-      - name: Download and upload release assets to R2
+      - name: Download and upload release assets to Cloudflare R2 with Wrangler
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.R2_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET_NAME }}
+          RELEASE_ID: ${{ github.event.release.id }}
         run: |
-          RELEASE_ID="${{ github.event.release.id }}"
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3+json" \
-               "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
-               | jq -r '.[] | select(.name | endswith(".tar.gz")) | "\(.browser_download_url) \(.name)"' \
-               | while read url name; do
-            echo "Downloading $name from $url"
-            curl -L -H "Authorization: token $GITHUB_TOKEN" -o "$name" "$url"
-            echo "Uploading $name to R2"
-            s3cmd put "$name" "s3://${{ secrets.R2_BUCKET_NAME }}/$name" --acl-public
-          done
+          set -euo pipefail
+
+          # Install latest wrangler
+          npm install -g wrangler
+
+          echo "Fetching .tar.gz assets for release ID $RELEASE_ID ..."
+
+          while read -r url name; do
+            echo "Downloading $name from $url ..."
+            curl -sSL -H "Authorization: token $GITHUB_TOKEN" -o "$name" "$url"
+
+            echo "Uploading $name to Cloudflare R2 ..."
+            wrangler r2 object put "${R2_BUCKET}/${name}" --file="$name" --remote
+
+            echo "Uploaded $name successfully"
+          done < <(
+            curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                 -H "Accept: application/vnd.github.v3+json" \
+                 "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
+            | jq -r '.[] | select(.name | endswith(".tar.gz")) | "\(.browser_download_url) \(.name)"'
+          )
 
   cargo-publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    if: >
-      (github.event_name == 'release' && github.event.action == 'published')
-      || (github.event_name == 'workflow_dispatch' && github.event.inputs.release-mode != 'test')
-    needs: [upload-r2]
+    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
+    needs: [upload-release-binaries]
     environment: ci
     steps:
       - name: Checkout Repository
@@ -269,16 +292,8 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_TOKEN }}
         run: |
-          case "${{ github.event.inputs.release-mode }}" in
-            "dry_run")
-              echo "Running cargo publish --dry-run"
-              cargo publish --dry-run --locked --no-verify
-              ;;
-            "full")
-              echo "Running full cargo publish"
-              cargo publish --locked --no-verify
-              ;;
-            *)
-              echo "Skipping crates.io publish for test mode"
-              ;;
-          esac
+          if [ "${{ github.event.inputs.test-release }}" == "true" ]; then
+            cargo publish --dry-run --locked --no-verify
+          else
+            cargo publish --locked --no-verify
+          fi

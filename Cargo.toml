@@ -1,24 +1,23 @@
 [package]
 name = "systemg"
-version = "0.6.6"
+version = "0.6.8"
 edition = "2024"
 license = "MIT"
 description = "A simple process manager."
 rust-version = "1.85.0"
 
 [package.metadata.docs.rs]
-features = ["linux"]
+features = []
 
 [[bin]]
 name = "sysg"
 path = "src/bin/main.rs"
 
 [features]
-linux = ["chrono"]
+linux = []
 macos = []
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"], optional = true }
 clap = { version = "4.0", features = ["derive"] }
 colored = "3.0"
 ctrlc = "3.4"
@@ -36,7 +35,11 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+
 [dev-dependencies]
 assert_cmd = { version = "2.0" }
 predicates = { version = "2.1" }
 tempfile = { version = "3.14.0" }
+

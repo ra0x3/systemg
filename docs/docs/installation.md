@@ -10,7 +10,7 @@ title: Installation
 This will add the `sysg` path to your `PATH`.
 
 ```bash
-curl -fsSL https://sysg.dev/download/latest | sh
+curl -fsSL https://sh.sysg.dev | sh
 ```
 
 ## Installation via `cargo`
@@ -24,5 +24,5 @@ cargo install sysg
 ### Linux
 
 ```bash
-cargo install sysg --features linux
+cargo install sysg
 ```
