@@ -258,42 +258,43 @@ jobs:
   upload-r2:
     name: Upload to Cloudflare R2
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'release' && github.event.action == 'published') || (github.event_name == 'workflow_dispatch')
     needs: [cargo-publish]
     environment: ci
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install s3cmd and jq
-        run: sudo apt-get update && sudo apt-get install -y s3cmd jq
-
-      - name: Configure s3cmd for R2
+      - name: Install awscli v2 and jq
         run: |
-          cat > ~/.s3cfg <<EOF
-          [default]
-          access_key = ${{ secrets.R2_ACCESS_KEY_ID }}
-          secret_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          host_base = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          host_bucket = ${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          use_https = True
-          EOF
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y unzip jq
+          curl -fsSLo awscliv2.zip "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+          aws --version
+          rm -rf awscliv2.zip aws
 
-      - name: Download and upload release assets to R2
+      - name: Download and upload release assets to R2 using AWS CLI
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
         run: |
-          # Get release info
+          set -euo pipefail
+          ENDPOINT="https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
           RELEASE_ID="${{ github.event.release.id }}"
-          
-          # Download all .tar.gz assets from the release
-          curl -H "Authorization: token $GITHUB_TOKEN" \
+
+          curl -fSL -H "Authorization: token $GITHUB_TOKEN" \
                -H "Accept: application/vnd.github.v3+json" \
                "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
-               | jq -r '.[] | select(.name | endswith(".tar.gz")) | "\(.browser_download_url) \(.name)"' \
-               | while read url name; do
-            echo "Downloading $name from $url"
-            curl -L -H "Authorization: token $GITHUB_TOKEN" -o "$name" "$url"
-            echo "Uploading $name to R2"
-            s3cmd put "$name" "s3://${{ secrets.R2_BUCKET_NAME }}/$name" --acl-public
-          done
+            | jq -r '.[] | select(.name | endswith(".tar.gz")) | "\(.browser_download_url) \(.name)"' \
+            | while IFS=' ' read -r url name; do
+                echo "Downloading $name from $url"
+                curl -fSL -H "Authorization: token $GITHUB_TOKEN" -o "$name" "$url"
+
+                echo "Uploading $name to R2 via aws cli"
+                aws --endpoint-url "$ENDPOINT" s3 cp "$name" "s3://${{ secrets.R2_BUCKET_NAME }}/$name" --acl public-read
+              done
