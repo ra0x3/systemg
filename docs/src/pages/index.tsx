@@ -3,7 +3,7 @@ import clsx from "clsx";
 import Link from "@docusaurus/Link";
 import useDocusaurusContext from "@docusaurus/useDocusaurusContext";
 import Layout from "@theme/Layout";
-import HomepageFeatures from "@site/src/components/HomepageFeatures";
+import InstallationCode from "@site/src/components/InstallationCode";
 import Heading from "@theme/Heading";
 
 import styles from "./index.module.css";
@@ -17,14 +17,9 @@ function HomepageHeader() {
           {siteConfig.title}
         </Heading>
         <p className="hero__subtitle">{siteConfig.tagline}</p>
-        <div className={styles.buttons}>
-          <Link
-            className="button button--secondary button--lg"
-            to="/docs/intro"
-          >
-            Tutorial - 5min ⏱️
-          </Link>
-        </div>
+        <p className="hero__subtitle" style={{ fontSize: '0.9rem', opacity: 0.8, marginTop: '0.5rem' }}>
+          <code>systemg</code> is for people who need a <em>process manager</em>, not an <em>operating system</em>
+        </p>
       </div>
     </header>
   );
@@ -39,7 +34,7 @@ export default function Home(): ReactNode {
     >
       <HomepageHeader />
       <main>
-        <HomepageFeatures />
+        <InstallationCode />
       </main>
     </Layout>
   );

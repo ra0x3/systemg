@@ -5,24 +5,42 @@ title: Installation
 
 # Installation
 
-## Installation via binary
+Choose the installation method that works best for your system.
 
-This will add the `sysg` path to your `PATH`.
+## Quick Install (Recommended)
+
+The fastest way to get started with `systemg`:
 
 ```bash
 curl -fsSL https://sh.sysg.dev | sh
 ```
 
-## Installation via `cargo`
+This script will:
+- Download the latest `systemg` binary
+- Add `sysg` to your system PATH
+- Make the command available system-wide
 
-### Unix
+## Install from Source
+
+If you prefer to build from source or want the latest development version:
 
 ```bash
 cargo install sysg
 ```
 
-### Linux
+**Requirements:**
+- Rust toolchain (install via [rustup](https://rustup.rs))
+- Git (to clone the repository)
+
+## Verify Installation
+
+After installation, verify that `systemg` is working correctly:
 
 ```bash
-cargo install sysg
+sysg --version
+```
+
+You should see output similar to:
+```
+systemg 0.6.8
 ```

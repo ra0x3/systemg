@@ -3,7 +3,7 @@ sidebar_position: 0
 title: Introduction
 ---
 
-# Welcome to `systemg`
+# Introduction
 
 `systemg` is a simple, lightweight, fast alternative to systemd, designed for 
 developers and operators who want simplicity without sacrificing power and features.

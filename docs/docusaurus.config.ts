@@ -7,7 +7,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 const config: Config = {
   title: 'systemg',
   tagline: 'systemd, for busy people',
-  favicon: 'https://i.pinimg.com/736x/97/d8/e5/97d8e56b256185759ef1fd91fcabf952.jpg',
+  favicon: 'https://i.imgur.com/hqwS335.png',
 
   // Set the production url of your site here
   url: 'https://docs.systemg.dev',
@@ -105,15 +105,15 @@ const config: Config = {
           items: [
             {
               label: 'Stack Overflow',
-              href: 'https://stackoverflow.com/questions/tagged/docusaurus',
+              href: 'https://stackoverflow.com/questions/tagged/systemg',
             },
             {
               label: 'Discord',
-              href: 'https://discordapp.com/invite/docusaurus',
+              href: 'https://rashad.wiki',
             },
             {
               label: 'X',
-              href: 'https://x.com/docusaurus',
+              href: 'https://x.com/unusual_whales',
             },
           ],
         },
@@ -122,11 +122,11 @@ const config: Config = {
           items: [
             {
               label: 'Blog',
-              to: '/blog',
+              href: 'https://rashad.wiki',
             },
             {
               label: 'GitHub',
-              href: 'https://github.com/facebook/docusaurus',
+              href: 'https://github.com/ra0x3/systemg',
             },
           ],
         },
