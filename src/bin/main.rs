@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if daemonize {
                         daemonize_systemg()?;
                     }
-                    let daemon = Daemon::new(config, pid.clone());
+                    let daemon = Daemon::new(config, pid.clone(), daemonize);
 
                     if let Err(e) = daemon.start_services() {
                         error!("Error starting services: {e}");
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Stopping all services...");
             match load_config(Some(&config)) {
                 Ok(config) => {
-                    let mut daemon = Daemon::new(config, pid.clone());
+                    let mut daemon = Daemon::new(config, pid.clone(), false);
 
                     if service.is_none() {
                         if let Err(e) = daemon.stop_services() {
@@ -80,11 +80,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Restart { config, .. } => {
+        Commands::Restart {
+            config, daemonize, ..
+        } => {
             info!("Restarting services using config: {config:?}");
             match load_config(Some(&config)) {
                 Ok(config) => {
-                    let mut daemon = Daemon::new(config, pid.clone());
+                    let mut daemon = Daemon::new(config, pid.clone(), daemonize);
 
                     if let Err(e) = daemon.restart_services() {
                         error!("Error restarting services: {e}");
@@ -156,16 +158,6 @@ fn register_signal_handler() -> Result<(), Box<dyn std::error::Error>> {
             let pgid = getpgrp();
             killpg(pgid, SIGKILL); // Kill the entire process group
         }
-        
-        if let Ok(pid_file) = PidFile::load() {
-            for (service_name, pid) in pid_file.services() {
-                unsafe {
-                    // Kill the service's process group (negative PID)
-                    if libc::killpg(*pid as i32, libc::SIGKILL) < 0 {
-                        eprintln!("Failed to kill service '{}' process group", service_name);
-                    }
-                }
-            }
 
         std::process::exit(0);
     })?;
