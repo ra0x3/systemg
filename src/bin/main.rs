@@ -156,6 +156,16 @@ fn register_signal_handler() -> Result<(), Box<dyn std::error::Error>> {
             let pgid = getpgrp();
             killpg(pgid, SIGKILL); // Kill the entire process group
         }
+        
+        if let Ok(pid_file) = PidFile::load() {
+            for (service_name, pid) in pid_file.services() {
+                unsafe {
+                    // Kill the service's process group (negative PID)
+                    if libc::killpg(*pid as i32, libc::SIGKILL) < 0 {
+                        eprintln!("Failed to kill service '{}' process group", service_name);
+                    }
+                }
+            }
 
         std::process::exit(0);
     })?;

@@ -10,7 +10,7 @@ if [ "$OS" = "linux" ]; then
   elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-unknown-linux-gnu"
   else
-    echo "❌ Unsupported architecture: $ARCH"
+    echo "Unsupported architecture: $ARCH"
     exit 1
   fi
 elif [ "$OS" = "darwin" ]; then
@@ -19,27 +19,27 @@ elif [ "$OS" = "darwin" ]; then
   elif [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-apple-darwin"
   else
-    echo "❌ Unsupported architecture: $ARCH"
+    echo "Unsupported architecture: $ARCH"
     exit 1
   fi
 else
-  echo "❌ Unsupported OS: $OS"
+  echo "Unsupported OS: $OS"
   exit 1
 fi
 
-echo "🔍 Fetching latest version..."
+echo "Fetching latest version..."
 VERSION=$(curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
 
 if [ -z "$VERSION" ]; then
-  echo "❌ Failed to fetch latest version"
+  echo "Failed to fetch latest version"
   exit 1
 fi
 
 FILE="sysg-$VERSION-$TARGET.tar.gz"
-echo "📦 Downloading sysg $VERSION for $TARGET..."
+echo "Downloading sysg $VERSION for $TARGET..."
 
 if ! curl -sSfL "https://sh.sysg.dev/$FILE" -o "$FILE"; then
-  echo "❌ Binary not available for $TARGET"
+  echo "Binary not available for $TARGET"
   echo "Available binaries: https://github.com/ra0x3/systemg/releases"
   exit 1
 fi
@@ -52,7 +52,7 @@ if [ -f "sysg" ]; then
 elif [ -f "sysg-$VERSION-$TARGET/sysg" ]; then
   BINARY="sysg-$VERSION-$TARGET/sysg"
 else
-  echo "❌ Binary not found after extraction"
+  echo "Binary not found after extraction"
   exit 1
 fi
 
@@ -79,14 +79,14 @@ if [ -n "$SHELL_RC" ] && [ -f "$SHELL_RC" ]; then
     echo "" >> "$SHELL_RC"
     echo "# Added by sysg installer" >> "$SHELL_RC"
     echo "$PATH_LINE" >> "$SHELL_RC"
-    echo "📝 Added $HOME/.sysg/bin to PATH in $SHELL_RC"
+    echo "Added $HOME/.sysg/bin to PATH in $SHELL_RC"
   fi
 fi
 
-echo "✅ sysg installed successfully to $HOME/.sysg/bin!"
+echo "sysg installed successfully to $HOME/.sysg/bin!"
 echo ""
 echo "To use sysg, either:"
-echo "  1. Restart your shell, or"
+echo "  1. Restart your shell"
 echo "  2. Run: source $SHELL_RC"
 echo "  3. Run: export PATH=\"\$HOME/.sysg/bin:\$PATH\""
 echo ""
