@@ -21,7 +21,7 @@ pub enum Commands {
         config: String,
 
         /// Whether to daemonize systemg.
-        #[arg(short, long)]
+        #[arg(long)]
         daemonize: bool,
     },
 
@@ -45,6 +45,10 @@ pub enum Commands {
         /// Optionally specify a service name to check its status.
         #[arg(short, long)]
         service: Option<String>,
+
+        /// Whether to daemonize systemg.
+        #[arg(long)]
+        daemonize: bool,
     },
 
     /// Show the status of currently running services.

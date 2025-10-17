@@ -141,17 +141,20 @@ pub struct Daemon {
     config: Arc<Config>,
     /// The PID file for tracking service PIDs.
     pid_file: Arc<Mutex<PidFile>>,
+    /// Whether to daemonize the service.
+    daemonize: bool,
 }
 
 impl Daemon {
     /// Initializes a new `Daemon` with an empty process map and a shared config reference.
-    pub fn new(config: Config, pid_file: Arc<Mutex<PidFile>>) -> Self {
+    pub fn new(config: Config, pid_file: Arc<Mutex<PidFile>>, daemonize: bool) -> Self {
         debug!("Initializing daemon...");
 
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
             pid_file,
+            daemonize,
         }
     }
 
@@ -175,6 +178,7 @@ impl Daemon {
         env: Option<EnvConfig>,
         processes: Arc<Mutex<HashMap<String, Child>>>,
         hooks: Option<Hooks>,
+        daemonize: bool,
     ) -> Result<u32, ProcessManagerError> {
         debug!("Launching service: '{service_name}' with command: `{command}`");
 
@@ -195,12 +199,33 @@ impl Daemon {
         }
 
         unsafe {
-            cmd.pre_exec(|| {
-                // Create a new session (start a new process group)
-                if libc::setsid() < 0 {
-                    let err = std::io::Error::last_os_error();
-                    eprintln!("systemg pre_exec: setsid failed: {:?}", err);
-                    return Err(err);
+            cmd.pre_exec(move || {
+                if daemonize {
+                    // Fully detach the service when running in daemon mode
+                    if libc::setsid() < 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!("systemg pre_exec: setsid failed: {:?}", err);
+                        return Err(err);
+                    }
+                } else {
+                    // Keep the service in the same process group as systemg
+                    let parent_pgid = libc::getpgid(libc::getppid());
+                    if parent_pgid < 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!(
+                            "systemg pre_exec: getpgid(getppid()) failed: {:?}",
+                            err
+                        );
+                        return Err(err);
+                    }
+                    if libc::setpgid(0, parent_pgid) < 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!(
+                            "systemg pre_exec: setpgid(0, parent_pgid) failed: {:?}",
+                            err
+                        );
+                        return Err(err);
+                    }
                 }
 
                 // Ensure service gets killed on parent death (Linux only)
@@ -322,6 +347,7 @@ impl Daemon {
         let service_name = name.to_string();
         let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
+        let daemonize = self.daemonize;
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -332,6 +358,7 @@ impl Daemon {
                 env,
                 processes.clone(),
                 hooks,
+                daemonize,
             ) {
                 Ok(pid) => {
                     pid_file.lock()?.insert(&service_name, pid).unwrap();
@@ -392,7 +419,7 @@ impl Daemon {
         let service_name = name.to_string();
         let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
-
+        let daemonize = self.daemonize;
         // Spawn the thread, but DO NOT join it.
         thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -403,6 +430,7 @@ impl Daemon {
                 env,
                 processes.clone(),
                 hooks,
+                daemonize,
             ) {
                 Ok(pid) => {
                     pid_file.lock().unwrap().insert(&service_name, pid).unwrap();
@@ -497,6 +525,7 @@ impl Daemon {
         debug!("Starting service monitoring thread...");
         let processes = Arc::clone(&self.processes);
         let config = Arc::clone(&self.config);
+        let daemonize = self.daemonize;
 
         let handle = thread::spawn(move || {
             loop {
@@ -554,7 +583,12 @@ impl Daemon {
 
                 for name in restarted_services {
                     if let Some(service) = config.services.get(&name) {
-                        Self::handle_restart(&name, service, Arc::clone(&processes));
+                        Self::handle_restart(
+                            &name,
+                            service,
+                            Arc::clone(&processes),
+                            daemonize,
+                        );
                     }
                 }
 
@@ -570,6 +604,7 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
         processes: Arc<Mutex<HashMap<String, Child>>>,
+        daemonize: bool,
     ) {
         let name = name.to_string();
         let command = service.command.clone();
@@ -588,9 +623,9 @@ impl Daemon {
             warn!("Restarting '{name}' after {backoff} seconds...");
             thread::sleep(Duration::from_secs(backoff));
 
-            if let Err(e) =
-                Daemon::launch_attached_service(&name, &command, env, processes, hooks)
-            {
+            if let Err(e) = Daemon::launch_attached_service(
+                &name, &command, env, processes, hooks, daemonize,
+            ) {
                 error!("Failed to restart '{name}': {e}");
             }
         })
