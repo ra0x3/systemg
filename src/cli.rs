@@ -42,11 +42,11 @@ pub enum Commands {
         #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
 
-        /// Optionally specify a service name to check its status.
+        /// Optionally restart only the named service.
         #[arg(short, long)]
         service: Option<String>,
 
-        /// Whether to daemonize systemg.
+        /// Start the supervisor before restarting if it isn't already running.
         #[arg(long)]
         daemonize: bool,
     },

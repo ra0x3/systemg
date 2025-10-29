@@ -155,6 +155,11 @@ impl LogManager {
 
         debug!("Services: {services:?}");
 
+        if services.is_empty() {
+            println!("No active services");
+            return Ok(());
+        }
+
         for service in services {
             let pid = pid_file
                 .get(&service)

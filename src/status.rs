@@ -34,22 +34,69 @@ impl StatusManager {
 
     /// Parses an uptime string in "HH:MM" format and returns a human-readable string.
     pub fn format_uptime(uptime_str: &str) -> String {
-        let parts: Vec<&str> = uptime_str.split(':').collect();
-        if parts.len() != 2 {
-            return "Invalid uptime format".to_string();
+        if let Some(total_seconds) = Self::parse_elapsed_seconds(uptime_str) {
+            return Self::format_elapsed(total_seconds);
         }
 
-        let minutes: u64 = parts[0].parse().unwrap_or(0);
-        let seconds: u64 = parts[1].parse().unwrap_or(0);
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(parsed) =
+                chrono::DateTime::parse_from_str(uptime_str, "%a %Y-%m-%d %H:%M:%S %Z")
+            {
+                if let Ok(duration) = chrono::Utc::now()
+                    .signed_duration_since(parsed.with_timezone(&chrono::Utc))
+                    .to_std()
+                {
+                    return Self::format_elapsed(duration.as_secs());
+                }
+            }
+        }
 
-        let total_seconds = (minutes * 60) + seconds;
+        "Unknown".to_string()
+    }
 
+    fn parse_elapsed_seconds(uptime_str: &str) -> Option<u64> {
+        let trimmed = uptime_str.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // Handle optional day component in formats like "2-03:04:05" emitted by `ps -o etime`
+        let (day_component, time_part) = match trimmed.split_once('-') {
+            Some((days, rest)) => (days.trim().parse::<u64>().ok()?, rest),
+            None => (0, trimmed),
+        };
+
+        let segments: Vec<&str> = time_part.split(':').collect();
+        if segments.is_empty() || segments.len() > 3 {
+            return None;
+        }
+
+        let mut values = [0u64; 3];
+        // Right-align parsed values into [hours, minutes, seconds]
+        for (idx, segment) in segments.iter().rev().enumerate() {
+            values[2 - idx] = segment.trim().parse::<u64>().ok()?;
+        }
+
+        let hours = values[0];
+        let minutes = values[1];
+        let seconds = values[2];
+
+        let total_seconds = seconds
+            + minutes.saturating_mul(60)
+            + hours.saturating_mul(3600)
+            + day_component.saturating_mul(86_400);
+
+        Some(total_seconds)
+    }
+
+    fn format_elapsed(total_seconds: u64) -> String {
         match total_seconds {
             0..=59 => format!("{} secs ago", total_seconds),
-            60..=3599 => format!("{} mins ago", total_seconds / 60),
-            3600..=86399 => format!("{} hours ago", total_seconds / 3600),
-            86400..=604799 => format!("{} days ago", total_seconds / 86400),
-            _ => format!("{} weeks ago", total_seconds / 604800),
+            60..=3_599 => format!("{} mins ago", total_seconds / 60),
+            3_600..=86_399 => format!("{} hours ago", total_seconds / 3_600),
+            86_400..=604_799 => format!("{} days ago", total_seconds / 86_400),
+            _ => format!("{} weeks ago", total_seconds / 604_800),
         }
     }
 

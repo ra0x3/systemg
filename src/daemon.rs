@@ -7,7 +7,10 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -17,7 +20,7 @@ use crate::config::{Config, EnvConfig, HookType, Hooks, ServiceConfig};
 use crate::error::{PidFileError, ProcessManagerError};
 
 /// Represents the PID file structure
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct PidFile {
     /// Map of service names to their respective PIDs.
     services: HashMap<String, u32>,
@@ -141,21 +144,49 @@ pub struct Daemon {
     config: Arc<Config>,
     /// The PID file for tracking service PIDs.
     pid_file: Arc<Mutex<PidFile>>,
-    /// Whether to daemonize the service.
-    daemonize: bool,
+    /// Whether child services should be detached from systemg (legacy behavior).
+    detach_children: bool,
+    /// Base directory for resolving relative service commands and assets.
+    project_root: PathBuf,
+    /// Flag indicating whether the monitoring loop should remain active.
+    running: Arc<AtomicBool>,
+    /// Handle to the background monitoring thread once spawned.
+    monitor_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
 }
 
 impl Daemon {
     /// Initializes a new `Daemon` with an empty process map and a shared config reference.
-    pub fn new(config: Config, pid_file: Arc<Mutex<PidFile>>, daemonize: bool) -> Self {
+    pub fn new(
+        config: Config,
+        pid_file: Arc<Mutex<PidFile>>,
+        detach_children: bool,
+    ) -> Self {
         debug!("Initializing daemon...");
+
+        let project_root = config
+            .project_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
 
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
             pid_file,
-            daemonize,
+            detach_children,
+            running: Arc::new(AtomicBool::new(false)),
+            monitor_handle: Arc::new(Mutex::new(None)),
+            project_root,
         }
+    }
+
+    /// Convenience constructor that loads the PID file automatically.
+    pub fn from_config(
+        config: Config,
+        detach_children: bool,
+    ) -> Result<Self, ProcessManagerError> {
+        let pid_file = Arc::new(Mutex::new(PidFile::load()?));
+        Ok(Self::new(config, pid_file, detach_children))
     }
 
     /// Launches a service as a child process, ensuring it remains attached to `systemg`.
@@ -176,14 +207,16 @@ impl Daemon {
         service_name: &str,
         command: &str,
         env: Option<EnvConfig>,
+        working_dir: PathBuf,
         processes: Arc<Mutex<HashMap<String, Child>>>,
         hooks: Option<Hooks>,
-        daemonize: bool,
+        detach_children: bool,
     ) -> Result<u32, ProcessManagerError> {
         debug!("Launching service: '{service_name}' with command: `{command}`");
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
+        cmd.current_dir(&working_dir);
 
         debug!("Executing command: {cmd:?}");
 
@@ -200,30 +233,19 @@ impl Daemon {
 
         unsafe {
             cmd.pre_exec(move || {
-                if daemonize {
-                    // Fully detach the service when running in daemon mode
+                if detach_children {
+                    // Legacy mode: allow services to continue if systemg exits abruptly.
                     if libc::setsid() < 0 {
                         let err = std::io::Error::last_os_error();
                         eprintln!("systemg pre_exec: setsid failed: {:?}", err);
                         return Err(err);
                     }
                 } else {
-                    // Keep the service in the same process group as systemg
-                    let parent_pgid = libc::getpgid(libc::getppid());
-                    if parent_pgid < 0 {
+                    // Place each service in its own process group so we can signal the entire
+                    // tree without touching the supervisor's group.
+                    if libc::setpgid(0, 0) < 0 {
                         let err = std::io::Error::last_os_error();
-                        eprintln!(
-                            "systemg pre_exec: getpgid(getppid()) failed: {:?}",
-                            err
-                        );
-                        return Err(err);
-                    }
-                    if libc::setpgid(0, parent_pgid) < 0 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!(
-                            "systemg pre_exec: setpgid(0, parent_pgid) failed: {:?}",
-                            err
-                        );
+                        eprintln!("systemg pre_exec: setpgid(0, 0) failed: {:?}", err);
                         return Err(err);
                     }
                 }
@@ -285,39 +307,40 @@ impl Daemon {
         }
     }
 
-    /// Starts all services and begins monitoring them in the background.
-    pub fn start_services(&self) -> Result<(), ProcessManagerError> {
-        info!("Starting all services...");
-        let config = Arc::clone(&self.config);
+    /// Starts all services and blocks until they exit.
+    pub fn start_services_blocking(&self) -> Result<(), ProcessManagerError> {
+        self.start_all_services()?;
+        self.spawn_monitor_thread()?;
+        self.wait_for_monitor();
+        Ok(())
+    }
 
-        for (name, service) in &config.services {
+    /// Starts all services and returns immediately, keeping the monitor loop alive in the
+    /// background. Intended for the long-lived supervisor process.
+    pub fn start_services_nonblocking(&self) -> Result<(), ProcessManagerError> {
+        self.start_all_services()?;
+        self.spawn_monitor_thread()
+    }
+
+    /// Executes the start workflow without waiting on the monitor thread.
+    fn start_all_services(&self) -> Result<(), ProcessManagerError> {
+        info!("Starting all services...");
+        for (name, service) in &self.config.services {
             self.start_service(name, service)?;
         }
         info!("All services started successfully.");
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        self.monitor_services();
-
+        thread::sleep(Duration::from_millis(200));
         Ok(())
     }
 
-    /// Restarts all services by stopping and then starting them again.
-    ///
-    /// Maintains dependency order and applies restart policies where necessary.
-    ///
-    /// # Errors
-    /// Returns `ProcessManagerError` if a service fails to restart.
-    pub fn restart_services(&mut self) -> Result<(), ProcessManagerError> {
+    /// Restarts all services by stopping and then starting them again, reusing the existing
+    /// monitor thread if available.
+    pub fn restart_services(&self) -> Result<(), ProcessManagerError> {
         info!("Restarting all services...");
         self.stop_services()?;
-
-        let config = Arc::clone(&self.config);
-        for (name, service) in &config.services {
-            debug!("Restarting service: {}", name);
-            self.start_service(name, service)?;
-        }
-
+        self.start_all_services()?;
+        self.spawn_monitor_thread()?;
         info!("All services restarted successfully.");
         Ok(())
     }
@@ -347,7 +370,8 @@ impl Daemon {
         let service_name = name.to_string();
         let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
-        let daemonize = self.daemonize;
+        let detach_children = self.detach_children;
+        let working_dir = self.project_root.clone();
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -356,9 +380,10 @@ impl Daemon {
                 &service_name,
                 &command,
                 env,
+                working_dir.clone(),
                 processes.clone(),
                 hooks,
-                daemonize,
+                detach_children,
             ) {
                 Ok(pid) => {
                     pid_file.lock()?.insert(&service_name, pid).unwrap();
@@ -419,7 +444,8 @@ impl Daemon {
         let service_name = name.to_string();
         let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
-        let daemonize = self.daemonize;
+        let detach_children = self.detach_children;
+        let working_dir = self.project_root.clone();
         // Spawn the thread, but DO NOT join it.
         thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -428,9 +454,10 @@ impl Daemon {
                 &service_name,
                 &command,
                 env,
+                working_dir.clone(),
                 processes.clone(),
                 hooks,
-                daemonize,
+                detach_children,
             ) {
                 Ok(pid) => {
                     pid_file.lock().unwrap().insert(&service_name, pid).unwrap();
@@ -465,35 +492,143 @@ impl Daemon {
     ///
     /// This function correctly handles both platforms, ensuring the full service tree
     /// is terminated regardless of how it was spawned.
-    pub fn stop_service(
-        &mut self,
-        service_name: &str,
-    ) -> Result<(), ProcessManagerError> {
+    pub fn stop_service(&self, service_name: &str) -> Result<(), ProcessManagerError> {
         let pid = self.pid_file.lock()?.get(service_name);
 
         if let Some(process_id) = pid {
             let pid = nix::unistd::Pid::from_raw(process_id as i32);
 
-            if nix::sys::signal::kill(pid, None).is_err() {
-                warn!("Service '{service_name}' is already stopped.");
-            } else {
-                debug!("Stopping service '{service_name}' (PID {pid})");
+            fn nix_error_to_io(err: nix::errno::Errno) -> std::io::Error {
+                std::io::Error::from_raw_os_error(err as i32)
+            }
 
-                unsafe {
-                    if libc::killpg(pid.as_raw(), libc::SIGTERM) < 0 {
-                        let err = std::io::Error::last_os_error();
+            let mut process_running = true;
+
+            match nix::sys::signal::kill(pid, None) {
+                Ok(_) => {
+                    debug!("Stopping service '{service_name}' (PID {pid})");
+                }
+                Err(err) => {
+                    if err == nix::errno::Errno::ESRCH {
+                        debug!("Service '{service_name}' no longer has a live process");
+                        process_running = false;
+                    } else {
+                        let source = nix_error_to_io(err);
                         error!(
-                            "Failed to kill process group of service '{service_name}': {err}"
+                            "Failed to probe service '{service_name}' before stopping: {source}"
                         );
                         return Err(ProcessManagerError::ServiceStopError {
                             service: service_name.to_string(),
-                            source: err,
+                            source,
                         });
                     }
                 }
+            }
 
-                self.processes.lock()?.remove(service_name);
-                self.pid_file.lock()?.remove(service_name)?;
+            if process_running {
+                let supervisor_pgid = unsafe { libc::getpgid(0) };
+                let child_pgid = unsafe { libc::getpgid(pid.as_raw()) };
+
+                if child_pgid >= 0 && child_pgid != supervisor_pgid {
+                    let kill_result = unsafe { libc::killpg(child_pgid, libc::SIGTERM) };
+                    if kill_result < 0 {
+                        let err = std::io::Error::last_os_error();
+                        match err.raw_os_error() {
+                            Some(code) if code == libc::ESRCH => {
+                                debug!(
+                                    "Process group for service '{service_name}' missing; falling back to direct signal"
+                                );
+                            }
+                            Some(code) if code == libc::EPERM => {
+                                warn!(
+                                    "Insufficient permissions to signal process group {child_pgid} for '{service_name}'. Falling back to direct signal"
+                                );
+                            }
+                            _ => {
+                                error!(
+                                    "Failed to kill process group {child_pgid} of service '{service_name}': {err}"
+                                );
+                                return Err(ProcessManagerError::ServiceStopError {
+                                    service: service_name.to_string(),
+                                    source: err,
+                                });
+                            }
+                        }
+                    } else {
+                        debug!(
+                            "Sent SIGTERM to process group {child_pgid} for service '{service_name}'"
+                        );
+                    }
+                }
+
+                if let Err(kill_err) =
+                    nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGTERM))
+                {
+                    if kill_err == nix::errno::Errno::ESRCH {
+                        process_running = false;
+                        debug!(
+                            "Service '{service_name}' exited before SIGTERM could be delivered"
+                        );
+                    } else {
+                        let source = nix_error_to_io(kill_err);
+                        error!(
+                            "Failed to signal service '{service_name}' directly: {source}"
+                        );
+                        return Err(ProcessManagerError::ServiceStopError {
+                            service: service_name.to_string(),
+                            source,
+                        });
+                    }
+                }
+            }
+
+            if process_running {
+                // Give the service a brief window to exit gracefully before escalating.
+                const CHECKS: usize = 10;
+                const INTERVAL: Duration = Duration::from_millis(100);
+
+                for _ in 0..CHECKS {
+                    std::thread::sleep(INTERVAL);
+                    if matches!(
+                        nix::sys::signal::kill(pid, None),
+                        Err(nix::errno::Errno::ESRCH)
+                    ) {
+                        process_running = false;
+                        break;
+                    }
+                }
+
+                if process_running {
+                    warn!(
+                        "Service '{service_name}' did not exit after SIGTERM; sending SIGKILL"
+                    );
+                    if let Err(kill_err) =
+                        nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGKILL))
+                    {
+                        if kill_err != nix::errno::Errno::ESRCH {
+                            let source = nix_error_to_io(kill_err);
+                            error!(
+                                "Failed to forcefully terminate service '{service_name}': {source}"
+                            );
+                            return Err(ProcessManagerError::ServiceStopError {
+                                service: service_name.to_string(),
+                                source,
+                            });
+                        }
+                    } else {
+                        let _ = nix::sys::signal::kill(pid, None);
+                    }
+                }
+            }
+
+            self.processes.lock()?.remove(service_name);
+            if let Err(err) = self.pid_file.lock()?.remove(service_name) {
+                match err {
+                    PidFileError::ServiceNotFound => {
+                        debug!("Service '{service_name}' already cleared from PID file");
+                    }
+                    _ => return Err(err.into()),
+                }
             }
 
             debug!("Service '{service_name}' stopped successfully.");
@@ -507,7 +642,7 @@ impl Daemon {
     /// Stops all running services.
     ///
     /// Iterates over all active processes and terminates them.
-    pub fn stop_services(&mut self) -> Result<(), ProcessManagerError> {
+    pub fn stop_services(&self) -> Result<(), ProcessManagerError> {
         let services: Vec<String> =
             self.pid_file.lock()?.services.keys().cloned().collect();
 
@@ -520,48 +655,96 @@ impl Daemon {
         Ok(())
     }
 
+    /// Ensures that the monitor thread is running, spawning it if necessary.
+    fn spawn_monitor_thread(&self) -> Result<(), ProcessManagerError> {
+        let mut handle_slot = self.monitor_handle.lock().unwrap();
+        let should_spawn = match handle_slot.as_ref() {
+            Some(handle) => handle.is_finished(),
+            None => true,
+        };
+
+        if should_spawn {
+            debug!("Starting service monitoring thread...");
+            self.running.store(true, Ordering::SeqCst);
+
+            let processes = Arc::clone(&self.processes);
+            let config = Arc::clone(&self.config);
+            let running = Arc::clone(&self.running);
+            let pid_file = Arc::clone(&self.pid_file);
+            let detach_children = self.detach_children;
+            let project_root = self.project_root.clone();
+
+            let handle = thread::spawn(move || {
+                Self::monitor_loop(
+                    processes,
+                    config,
+                    pid_file,
+                    running,
+                    detach_children,
+                    project_root,
+                );
+            });
+
+            *handle_slot = Some(handle);
+        }
+
+        Ok(())
+    }
+
+    /// Blocks on the monitoring thread if it is running.
+    fn wait_for_monitor(&self) {
+        if let Some(handle) = self.monitor_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+    }
+
+    /// Signals the monitoring thread to exit and waits for it to finish.
+    pub fn shutdown_monitor(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.wait_for_monitor();
+    }
+
     /// Monitors all running services and restarts them if they exit unexpectedly.
-    fn monitor_services(&self) {
-        debug!("Starting service monitoring thread...");
-        let processes = Arc::clone(&self.processes);
-        let config = Arc::clone(&self.config);
-        let daemonize = self.daemonize;
+    fn monitor_loop(
+        processes: Arc<Mutex<HashMap<String, Child>>>,
+        config: Arc<Config>,
+        pid_file: Arc<Mutex<PidFile>>,
+        running: Arc<AtomicBool>,
+        detach_children: bool,
+        project_root: PathBuf,
+    ) {
+        while running.load(Ordering::SeqCst) {
+            let mut exited_services = Vec::new();
+            let mut restarted_services = Vec::new();
+            let mut active_services = 0;
 
-        let handle = thread::spawn(move || {
-            loop {
-                let mut exited_services = Vec::new();
-                let mut restarted_services = Vec::new();
-                let mut active_services = 0;
-                let mut pid_file = PidFile::load().unwrap();
-
-                {
-                    let mut locked_processes = processes.lock().unwrap();
-                    for (name, child) in locked_processes.iter_mut() {
-                        match child.try_wait() {
-                            Ok(Some(status)) => {
-                                let exited_normally = status.success();
-                                if exited_normally {
-                                    info!("Service '{name}' exited normally.");
-                                } else {
-                                    warn!(
-                                        "Service '{name}' was terminated with {status:?}."
-                                    );
-                                }
-                                exited_services.push((name.clone(), exited_normally));
+            {
+                let mut locked_processes = processes.lock().unwrap();
+                for (name, child) in locked_processes.iter_mut() {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            let exited_normally = status.success();
+                            if exited_normally {
+                                info!("Service '{name}' exited normally.");
+                            } else {
+                                warn!("Service '{name}' was terminated with {status:?}.");
                             }
-                            Ok(None) => {
-                                debug!("Service '{name}' is still running.");
-                                active_services += 1;
-                            }
-                            Err(e) => error!("Failed to check status of '{name}': {e}"),
+                            exited_services.push((name.clone(), exited_normally));
                         }
+                        Ok(None) => {
+                            debug!("Service '{name}' is still running.");
+                            active_services += 1;
+                        }
+                        Err(e) => error!("Failed to check status of '{name}': {e}"),
                     }
                 }
+            }
 
-                debug!("PID file: {pid_file:?}");
+            if !exited_services.is_empty() {
+                let mut pid_file_guard = pid_file.lock().unwrap();
 
                 for (name, exited_normally) in exited_services {
-                    if pid_file.get(&name).is_none() {
+                    if pid_file_guard.get(&name).is_none() {
                         info!("Service '{name}' was manually stopped. Skipping restart.");
                     } else if !exited_normally {
                         warn!("Service '{name}' crashed. Restarting...");
@@ -570,33 +753,36 @@ impl Daemon {
                         debug!(
                             "Service '{name}' exited cleanly. Removing from PID file."
                         );
-                        pid_file.remove(&name).unwrap();
+                        if let Err(e) = pid_file_guard.remove(&name) {
+                            error!("Failed to remove '{name}' from PID file: {e}");
+                        }
                     }
 
                     processes.lock().unwrap().remove(&name);
                 }
-
-                if active_services == 0 {
-                    info!("All services have exited. systemg is shutting down.");
-                    std::process::exit(0);
-                }
-
-                for name in restarted_services {
-                    if let Some(service) = config.services.get(&name) {
-                        Self::handle_restart(
-                            &name,
-                            service,
-                            Arc::clone(&processes),
-                            daemonize,
-                        );
-                    }
-                }
-
-                thread::sleep(Duration::from_secs(2));
             }
-        });
 
-        handle.join().unwrap();
+            if active_services == 0 {
+                debug!("No active services detected in monitor loop.");
+            }
+
+            for name in restarted_services {
+                if let Some(service) = config.services.get(&name) {
+                    Self::handle_restart(
+                        &name,
+                        service,
+                        Arc::clone(&processes),
+                        detach_children,
+                        Arc::clone(&pid_file),
+                        project_root.clone(),
+                    );
+                }
+            }
+
+            thread::sleep(Duration::from_secs(2));
+        }
+
+        debug!("Monitor loop terminating.");
     }
 
     /// Handles restarting a service if its restart policy allows.
@@ -604,7 +790,9 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
         processes: Arc<Mutex<HashMap<String, Child>>>,
-        daemonize: bool,
+        detach_children: bool,
+        pid_file: Arc<Mutex<PidFile>>,
+        project_root: PathBuf,
     ) {
         let name = name.to_string();
         let command = service.command.clone();
@@ -624,9 +812,19 @@ impl Daemon {
             thread::sleep(Duration::from_secs(backoff));
 
             if let Err(e) = Daemon::launch_attached_service(
-                &name, &command, env, processes, hooks, daemonize,
+                &name,
+                &command,
+                env.clone(),
+                project_root.clone(),
+                Arc::clone(&processes),
+                hooks.clone(),
+                detach_children,
             ) {
                 error!("Failed to restart '{name}': {e}");
+            } else if let Ok(mut pid_file_guard) = pid_file.lock() {
+                if let Ok(latest) = PidFile::reload() {
+                    *pid_file_guard = latest;
+                }
             }
         })
         .join();

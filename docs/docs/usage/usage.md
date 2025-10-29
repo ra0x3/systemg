@@ -21,15 +21,19 @@ Start with a specific configuration file:
 sysg start --config systemg.yaml
 ```
 
-Start as a daemon process with a specific configuration file:
+Start the long-lived supervisor with a specific configuration file:
 
 ```sh
 sysg start --config systemg.yaml --daemonize
 ```
 
+Once the supervisor is running it stays alive after you log out and subsequent
+commands (status, restart, logs, stop) communicate with the same background
+process rather than re-spawning services.
+
 ## Stop
 
-Stop all services:
+Stop the supervisor and all managed services:
 
 ```sh
 sysg stop
@@ -43,7 +47,7 @@ sysg stop --service myapp
 
 ## Restart
 
-Restart with the current configuration:
+Restart all services managed by the supervisor:
 
 ```sh
 sysg restart
