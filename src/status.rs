@@ -42,13 +42,11 @@ impl StatusManager {
         {
             if let Ok(parsed) =
                 chrono::DateTime::parse_from_str(uptime_str, "%a %Y-%m-%d %H:%M:%S %Z")
-            {
-                if let Ok(duration) = chrono::Utc::now()
+                && let Ok(duration) = chrono::Utc::now()
                     .signed_duration_since(parsed.with_timezone(&chrono::Utc))
                     .to_std()
-                {
-                    return Self::format_elapsed(duration.as_secs());
-                }
+            {
+                return Self::format_elapsed(duration.as_secs());
             }
         }
 
@@ -107,23 +105,23 @@ impl StatusManager {
         let mut children = Vec::new();
 
         for (proc_pid, process) in system.processes() {
-            if let Some(parent) = process.parent() {
-                if parent.as_u32() == pid {
-                    //let proc_name = process.name().to_string_lossy().to_string();
-                    let proc_name = Self::get_process_cmdline(proc_pid.as_u32());
-                    let formatted = format!(
-                        "{} ├─{} {}",
-                        " ".repeat(indent),
-                        proc_pid.as_u32(),
-                        proc_name
-                    );
-                    children.push(formatted);
+            if let Some(parent) = process.parent()
+                && parent.as_u32() == pid
+            {
+                //let proc_name = process.name().to_string_lossy().to_string();
+                let proc_name = Self::get_process_cmdline(proc_pid.as_u32());
+                let formatted = format!(
+                    "{} ├─{} {}",
+                    " ".repeat(indent),
+                    proc_pid.as_u32(),
+                    proc_name
+                );
+                children.push(formatted);
 
-                    // Recursively add grandchildren, increasing indentation
-                    let grand_children =
-                        Self::get_child_processes(proc_pid.as_u32(), indent + 4);
-                    children.extend(grand_children);
-                }
+                // Recursively add grandchildren, increasing indentation
+                let grand_children =
+                    Self::get_child_processes(proc_pid.as_u32(), indent + 4);
+                children.extend(grand_children);
             }
         }
 

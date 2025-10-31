@@ -88,7 +88,7 @@ services:
     .unwrap();
 
     // Start systemg.
-    let mut cmd = Command::cargo_bin("systemg").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     cmd.current_dir(dir)
         .arg("start")
         .arg("-c")
@@ -99,7 +99,7 @@ services:
     thread::sleep(Duration::from_secs(3));
 
     // Check general status.
-    let mut status = Command::cargo_bin("systemg").unwrap();
+    let mut status = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     status.current_dir(dir).arg("status");
     status
         .assert()
@@ -107,7 +107,7 @@ services:
         .stdout(contains("perl").and(contains("py")));
 
     // Check specific service status.
-    let mut short_status = Command::cargo_bin("systemg").unwrap();
+    let mut short_status = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     short_status.current_dir(dir).arg("status").arg("-s");
     short_status
         .assert()
@@ -115,14 +115,14 @@ services:
         .stdout(contains("perl").and(contains("py")));
 
     // Check general logs.
-    let mut logs = Command::cargo_bin("systemg").unwrap();
+    let mut logs = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     logs.current_dir(dir).arg("logs").arg("-l").arg("10");
     logs.assert()
         .success()
         .stdout(contains("Hello World").or(contains("foo")));
 
     // Check specific service logs.
-    let mut logs_py = Command::cargo_bin("systemg").unwrap();
+    let mut logs_py = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     logs_py
         .current_dir(dir)
         .arg("logs")

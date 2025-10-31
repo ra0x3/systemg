@@ -18,7 +18,7 @@ on:
         default: "true"
 
 env:
-  RUSTC_VERSION: 1.85.0
+  RUSTC_VERSION: 1.90.0
 
 jobs:
   docs:

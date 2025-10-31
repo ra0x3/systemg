@@ -136,10 +136,10 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
     config.project_dir = Some(base_path.to_string_lossy().to_string());
 
     for service in config.services.values_mut() {
-        if let Some(env_config) = &service.env {
-            if let Some(resolved_path) = env_config.path(&base_path) {
-                load_env_file(&resolved_path.to_string_lossy())?;
-            }
+        if let Some(env_config) = &service.env
+            && let Some(resolved_path) = env_config.path(&base_path)
+        {
+            load_env_file(&resolved_path.to_string_lossy())?;
         }
     }
 
