@@ -40,7 +40,7 @@ By participating in this project, you agree to abide by our Code of Conduct. Ple
 
 ### Setting Up the Development Environment
 
-```bash
+```sh
 # Clone your fork of the repository
 git clone https://github.com/YOUR_USERNAME/systemg.git
 cd systemg

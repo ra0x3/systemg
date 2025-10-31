@@ -12,6 +12,9 @@ pub mod config;
 /// Daemon process management.
 pub mod daemon;
 
+/// IPC helpers for communicating with the resident supervisor.
+pub mod ipc;
+
 /// Error handling.
 pub mod error;
 
@@ -20,3 +23,6 @@ pub mod logs;
 
 /// Status manager.
 pub mod status;
+
+/// Supervisor runtime that powers daemonised deployments.
+pub mod supervisor;

@@ -48,6 +48,12 @@ Systemg offers a **lightweight**, **configuration-driven** solution that's **eas
 
 ### Installation
 
+Install the system binary:
+
+```sh
+curl -fsSL https://sh.sysg.dev | sh
+```
+
 Install systemg using cargo:
 
 ```sh
@@ -71,16 +77,24 @@ sysg start
 # Start with a specific configuration file
 sysg start --config systemg.yaml
 
-# Start as a daemon process
+# Start the long-lived supervisor (persists after you log out)
 sysg start --config systemg.yaml --daemonize
+
+# Subsequent commands talk to the supervisor without re-spawning it
+sysg status
 ```
+
+When the supervisor is running it remains active in the background, holding service
+processes in the same process group so `sysg stop`, `sysg restart`, `sysg status`,
+and `sysg logs` can coordinate them even after you disconnect from the shell that
+started them.
 
 #### Stop
 
 Stop the process manager or a specific service:
 
 ```sh
-# Stop all services
+# Stop the supervisor and every managed service
 sysg stop
 
 # Stop a specific service
@@ -92,7 +106,7 @@ sysg stop --service myapp
 Restart the process manager:
 
 ```sh
-# Restart with current configuration
+# Restart all services managed by the supervisor
 sysg restart
 
 # Restart with a different configuration
