@@ -35,6 +35,16 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
+if command -v sysg >/dev/null 2>&1; then
+  CURRENT_VERSION=$(sysg --version 2>/dev/null | awk '{print $2}' | sed 's/^v//')
+  if [ "$CURRENT_VERSION" = "$VERSION" ]; then
+    echo "sysg $VERSION is already up to date."
+    exit 0
+  else
+    echo "Upgrading sysg from $CURRENT_VERSION to $VERSION..."
+  fi
+fi
+
 FILE="sysg-$VERSION-$TARGET.tar.gz"
 echo "Downloading sysg $VERSION for $TARGET..."
 
