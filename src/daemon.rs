@@ -108,11 +108,11 @@ fn run_hook(
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(hook_cmd);
 
-    if let Some(env_config) = env {
-        if let Some(vars) = &env_config.vars {
-            for (k, v) in vars {
-                cmd.env(k, v);
-            }
+    if let Some(env_config) = env
+        && let Some(vars) = &env_config.vars
+    {
+        for (k, v) in vars {
+            cmd.env(k, v);
         }
     }
 
@@ -222,12 +222,12 @@ impl Daemon {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        if let Some(env) = env.clone() {
-            if let Some(vars) = &env.vars {
-                debug!("Setting environment variables: {vars:?}");
-                for (key, value) in vars {
-                    cmd.env(key, value);
-                }
+        if let Some(env) = env.clone()
+            && let Some(vars) = &env.vars
+        {
+            debug!("Setting environment variables: {vars:?}");
+            for (key, value) in vars {
+                cmd.env(key, value);
             }
         }
 
@@ -283,10 +283,10 @@ impl Daemon {
                     spawn_log_writer(service_name, err, "stderr");
                 }
 
-                if let Some(hooks) = hooks {
-                    if let Some(hook_cmd) = &hooks.on_start {
-                        run_hook(hook_cmd, &env, HookType::OnStart, service_name);
-                    }
+                if let Some(hooks) = hooks
+                    && let Some(hook_cmd) = &hooks.on_start
+                {
+                    run_hook(hook_cmd, &env, HookType::OnStart, service_name);
                 }
 
                 processes.lock()?.insert(service_name.to_string(), child);
@@ -294,10 +294,10 @@ impl Daemon {
             }
             Err(e) => {
                 error!("Failed to start service '{service_name}': {e}");
-                if let Some(hooks) = hooks {
-                    if let Some(hook_cmd) = &hooks.on_start {
-                        run_hook(hook_cmd, &env, HookType::OnStart, service_name);
-                    }
+                if let Some(hooks) = hooks
+                    && let Some(hook_cmd) = &hooks.on_start
+                {
+                    run_hook(hook_cmd, &env, HookType::OnStart, service_name);
                 }
                 Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),
@@ -821,10 +821,10 @@ impl Daemon {
                 detach_children,
             ) {
                 error!("Failed to restart '{name}': {e}");
-            } else if let Ok(mut pid_file_guard) = pid_file.lock() {
-                if let Ok(latest) = PidFile::reload() {
-                    *pid_file_guard = latest;
-                }
+            } else if let Ok(mut pid_file_guard) = pid_file.lock()
+                && let Ok(latest) = PidFile::reload()
+            {
+                *pid_file_guard = latest;
             }
         })
         .join();

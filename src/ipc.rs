@@ -141,16 +141,16 @@ pub fn read_supervisor_pid() -> Result<Option<libc::pid_t>, ControlError> {
 
 /// Clears the supervisor PID and removes the socket file.
 pub fn cleanup_runtime() -> Result<(), ControlError> {
-    if let Ok(path) = socket_path() {
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
+    if let Ok(path) = socket_path()
+        && path.exists()
+    {
+        let _ = fs::remove_file(path);
     }
 
-    if let Ok(pid_path) = supervisor_pid_path() {
-        if pid_path.exists() {
-            let _ = fs::remove_file(pid_path);
-        }
+    if let Ok(pid_path) = supervisor_pid_path()
+        && pid_path.exists()
+    {
+        let _ = fs::remove_file(pid_path);
     }
 
     Ok(())

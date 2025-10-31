@@ -18,7 +18,7 @@ on:
         default: "true"
 
 env:
-  RUSTC_VERSION: 1.85.0
+  RUSTC_VERSION: 1.90.0
 
 jobs:
   docs:
@@ -263,7 +263,7 @@ jobs:
             curl -sSL -H "Authorization: token $GITHUB_TOKEN" -o "$name" "$url"
 
             echo "Uploading $name to s3://${S3_BUCKET}/${name} ..."
-            aws s3 cp "$name" "s3://${S3_BUCKET}/${name}" --acl public-read
+            aws s3 cp "$name" "s3://${S3_BUCKET}/${name}" --content-type "application/gzip"
 
             echo "Uploaded $name successfully"
           done < <(
@@ -278,7 +278,7 @@ jobs:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
-    needs: [upload-release-binaries]
+    needs: [upload-s3]
     environment: ci
     steps:
       - name: Checkout Repository

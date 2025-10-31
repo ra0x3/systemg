@@ -1,10 +1,10 @@
 [package]
 name = "systemg"
-version = "0.6.8"
+version = "0.7.1"
 edition = "2024"
 license = "MIT"
 description = "A simple process manager."
-rust-version = "1.85.0"
+rust-version = "1.90.0"
 
 [package.metadata.docs.rs]
 features = []
