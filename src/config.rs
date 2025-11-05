@@ -2,7 +2,7 @@
 use regex::Regex;
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -73,6 +73,86 @@ pub enum HookType {
 pub struct Hooks {
     pub on_start: Option<String>,
     pub on_error: Option<String>,
+}
+
+impl Config {
+    /// Returns services ordered so dependencies start before dependents.
+    pub fn service_start_order(&self) -> Result<Vec<String>, ProcessManagerError> {
+        let mut indegree: HashMap<String, usize> =
+            self.services.keys().map(|name| (name.clone(), 0)).collect();
+        let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (service, cfg) in &self.services {
+            if let Some(deps) = &cfg.depends_on {
+                for dep in deps {
+                    if !self.services.contains_key(dep) {
+                        return Err(ProcessManagerError::UnknownDependency {
+                            service: service.clone(),
+                            dependency: dep.clone(),
+                        });
+                    }
+                    *indegree.get_mut(service).expect("service must exist") += 1;
+                    graph.entry(dep.clone()).or_default().push(service.clone());
+                }
+            }
+        }
+
+        let mut ready: BTreeSet<String> = indegree
+            .iter()
+            .filter(|&(_, &deg)| deg == 0)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        let mut order = Vec::with_capacity(self.services.len());
+
+        while let Some(service) = ready.pop_first() {
+            order.push(service.clone());
+
+            if let Some(children) = graph.get(&service) {
+                for child in children {
+                    if let Some(deg) = indegree.get_mut(child) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            ready.insert(child.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if order.len() != self.services.len() {
+            let remaining: Vec<String> = indegree
+                .into_iter()
+                .filter(|(_, deg)| *deg > 0)
+                .map(|(name, _)| name)
+                .collect();
+
+            return Err(ProcessManagerError::DependencyCycle {
+                cycle: remaining.join(" -> "),
+            });
+        }
+
+        Ok(order)
+    }
+
+    /// Returns a map of each service to the services that depend on it.
+    pub fn reverse_dependencies(&self) -> HashMap<String, Vec<String>> {
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (service, cfg) in &self.services {
+            if let Some(deps) = &cfg.depends_on {
+                for dep in deps {
+                    map.entry(dep.clone()).or_default().push(service.clone());
+                }
+            }
+        }
+
+        for dependents in map.values_mut() {
+            dependents.sort();
+        }
+
+        map
+    }
 }
 
 /// Expands environment variables within a string.
@@ -149,6 +229,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         .map_err(ProcessManagerError::ConfigParseError)?;
 
     config.project_dir = Some(base_path.to_string_lossy().to_string());
+    config.service_start_order()?;
     Ok(config)
 }
 
@@ -238,5 +319,78 @@ services:
             service.env.as_ref().unwrap().path(base_path).unwrap(),
             env_path
         );
+    }
+
+    fn minimal_service(depends_on: Option<Vec<&str>>) -> ServiceConfig {
+        ServiceConfig {
+            command: "echo ok".into(),
+            env: None,
+            restart_policy: None,
+            backoff: None,
+            depends_on: depends_on
+                .map(|deps| deps.into_iter().map(String::from).collect()),
+            hooks: None,
+        }
+    }
+
+    #[test]
+    fn service_start_order_resolves_dependencies() {
+        let mut services = HashMap::new();
+        services.insert("a".into(), minimal_service(None));
+        services.insert("b".into(), minimal_service(Some(vec!["a"])));
+        services.insert("c".into(), minimal_service(Some(vec!["b"])));
+
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+        };
+
+        let order = config.service_start_order().unwrap();
+        assert_eq!(order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn service_start_order_unknown_dependency_error() {
+        let mut services = HashMap::new();
+        services.insert("a".into(), minimal_service(Some(vec!["missing"])));
+
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+        };
+
+        match config.service_start_order() {
+            Err(ProcessManagerError::UnknownDependency {
+                service,
+                dependency,
+            }) => {
+                assert_eq!(service, "a");
+                assert_eq!(dependency, "missing");
+            }
+            other => panic!("expected unknown dependency error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_start_order_cycle_error() {
+        let mut services = HashMap::new();
+        services.insert("a".into(), minimal_service(Some(vec!["b"])));
+        services.insert("b".into(), minimal_service(Some(vec!["a"])));
+
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+        };
+
+        match config.service_start_order() {
+            Err(ProcessManagerError::DependencyCycle { cycle }) => {
+                assert!(cycle.contains("a"));
+                assert!(cycle.contains("b"));
+            }
+            other => panic!("expected dependency cycle error, got {other:?}"),
+        }
     }
 }

@@ -61,3 +61,24 @@ services:
       on_start: "echo 'ngrok started'"
       on_error: "echo 'ngrok crashed'"
 ```
+
+## Service dependencies
+
+Use the `depends_on` field to express service prerequisites. Systemg evaluates the dependency graph before launching processes and enforces the following rules:
+
+- **Topological startup** – services are started in an order that guarantees every dependency is already running (or has exited successfully for one-shot jobs) before its dependents launch.
+- **Fail fast on unhealthy prerequisites** – if a dependency fails to start, dependents are skipped and the failure is surfaced instead of allowing a partial boot.
+- **Cascading shutdowns** – when a running service crashes, all services that depend on it are stopped automatically to keep the environment consistent.
+
+```yaml title="Example"
+services:
+  redis:
+    command: "redis-server"
+
+  worker:
+    command: "node worker.js"
+    depends_on:
+      - redis
+```
+
+If `redis` exits with a non-zero status, `worker` will not start (or will be stopped if it is already running) until `redis` is healthy again.

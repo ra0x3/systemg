@@ -25,6 +25,7 @@ Systemg offers a **lightweight**, **configuration-driven** solution that's **eas
 
 - **Declarative YAML Configuration** - Define services, dependencies, and restart policies easily.
 - **Automatic Process Monitoring** - Restart crashed services based on custom policies.
+- **Dependency-Aware Startup** - Honour `depends_on` chains, skip unhealthy dependencies, and cascade stop dependents on failure.
 - **Environment Variable Support** - Load variables from `.env` files and per-service configurations.
 - **Minimal & Fast** - Built with Rust, designed for performance and low resource usage.
 - **No Root Required** - Unlike systemd, it doesn't take over PID 1.
@@ -139,6 +140,29 @@ sysg logs api-service
 # View a custom number of log lines
 sysg logs database --lines 100
 ```
+
+### Dependency handling
+
+Declare service relationships with the `depends_on` field to coordinate startup order and health checks. Systemg will:
+
+- start services in a topologically sorted order so each dependency is running or has exited successfully before its dependents launch;
+- skip dependents whose prerequisites fail to start, surfacing a clear dependency error instead of allowing a partial boot;
+- stop running dependents automatically when an upstream service crashes, preventing workloads from running against unhealthy backends.
+
+For example:
+
+```yaml
+services:
+  database:
+    command: "postgres -D /var/lib/postgres"
+
+  web:
+    command: "python app.py"
+    depends_on:
+      - database
+```
+
+If `database` fails to come up, `web` will remain stopped and log the dependency failure until the database is healthy again.
 
 ## Testing
 

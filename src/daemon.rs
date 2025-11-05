@@ -2,11 +2,12 @@
 use crate::logs::spawn_log_writer;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
+    io::ErrorKind,
     os::unix::process::CommandExt,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -134,6 +135,21 @@ fn run_hook(
             );
         }
     }
+}
+
+/// Snapshot of the currently observed state for a managed service during readiness probing.
+#[derive(Debug)]
+enum ServiceProbe {
+    NotStarted,
+    Running,
+    Exited(ExitStatus),
+}
+
+/// Indicates when a service is considered ready for dependents or has already completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceReadyState {
+    Running,
+    CompletedSuccess,
 }
 
 /// Manages services, ensuring they start, stop, and restart as needed.
@@ -325,13 +341,194 @@ impl Daemon {
     /// Executes the start workflow without waiting on the monitor thread.
     fn start_all_services(&self) -> Result<(), ProcessManagerError> {
         info!("Starting all services...");
-        for (name, service) in &self.config.services {
-            self.start_service(name, service)?;
+
+        let order = self.config.service_start_order()?;
+        let mut healthy_services = HashSet::new();
+        let mut failed_services = HashSet::new();
+        let mut first_error: Option<ProcessManagerError> = None;
+
+        'service_loop: for service_name in order {
+            let service = match self.config.services.get(&service_name) {
+                Some(service) => service,
+                None => continue,
+            };
+
+            if let Some(deps) = &service.depends_on {
+                for dep in deps {
+                    if failed_services.contains(dep) {
+                        error!(
+                            "Skipping start of '{service_name}' because dependency '{dep}' failed."
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(ProcessManagerError::DependencyFailed {
+                                service: service_name.clone(),
+                                dependency: dep.clone(),
+                            });
+                        }
+                        failed_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
+
+                    if !healthy_services.contains(dep) {
+                        error!(
+                            "Skipping start of '{service_name}' because dependency '{dep}' is not running."
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(ProcessManagerError::DependencyError {
+                                service: service_name.clone(),
+                                dependency: dep.clone(),
+                            });
+                        }
+                        failed_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
+                }
+            }
+
+            match self.start_service(&service_name, service) {
+                Ok(_) => match self.wait_for_service_ready(&service_name) {
+                    Ok(ServiceReadyState::Running) => {
+                        healthy_services.insert(service_name.clone());
+                    }
+                    Ok(ServiceReadyState::CompletedSuccess) => {
+                        info!("Service '{service_name}' completed successfully.");
+                        healthy_services.insert(service_name.clone());
+                    }
+                    Err(err) => {
+                        error!(
+                            "Service '{service_name}' failed immediately after launch: {err}"
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(err);
+                        }
+                        failed_services.insert(service_name.clone());
+                    }
+                },
+                Err(err) => {
+                    error!("Failed to start service '{service_name}': {err}");
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    failed_services.insert(service_name.clone());
+                }
+            }
         }
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
         info!("All services started successfully.");
 
         thread::sleep(Duration::from_millis(200));
         Ok(())
+    }
+
+    /// Polls the newly spawned service until it is confirmed running or exits.
+    ///
+    /// Returns [`ServiceReadyState::Running`] once the process stays alive across consecutive
+    /// polls, [`ServiceReadyState::CompletedSuccess`] for one-shot services that exit cleanly,
+    /// or a [`ProcessManagerError::ServiceStartError`] if the process terminates with failure or
+    /// fails to signal readiness within the allotted time window.
+    fn wait_for_service_ready(
+        &self,
+        service_name: &str,
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
+        const MAX_WAIT: Duration = Duration::from_secs(5);
+        const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+        let mut waited = Duration::ZERO;
+        let mut seen_running_once = false;
+
+        while waited <= MAX_WAIT {
+            match Self::probe_service_state(
+                service_name,
+                &self.processes,
+                &self.pid_file,
+            )? {
+                ServiceProbe::Running => {
+                    if seen_running_once {
+                        return Ok(ServiceReadyState::Running);
+                    }
+
+                    seen_running_once = true;
+                    thread::sleep(POLL_INTERVAL);
+                    waited += POLL_INTERVAL;
+                    continue;
+                }
+                ServiceProbe::Exited(status) => {
+                    if status.success() {
+                        return Ok(ServiceReadyState::CompletedSuccess);
+                    }
+
+                    let message = match status.code() {
+                        Some(code) => format!("process exited with status {code}"),
+                        None => format!("process terminated unexpectedly: {status:?}"),
+                    };
+
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source: std::io::Error::other(message),
+                    });
+                }
+                ServiceProbe::NotStarted => {
+                    thread::sleep(POLL_INTERVAL);
+                    waited += POLL_INTERVAL;
+                    continue;
+                }
+            }
+        }
+
+        Err(ProcessManagerError::ServiceStartError {
+            service: service_name.to_string(),
+            source: std::io::Error::new(
+                ErrorKind::TimedOut,
+                "service did not report a running state in time",
+            ),
+        })
+    }
+
+    /// Attempts to determine the current state of a tracked service without blocking.
+    ///
+    /// Uses `try_wait` to check the underlying child process and updates the PID file if the
+    /// service has exited. To avoid holding the process map lock longer than necessary, the child
+    /// handle is temporarily removed and inserted back when still running.
+    fn probe_service_state(
+        service_name: &str,
+        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        pid_file: &Arc<Mutex<PidFile>>,
+    ) -> Result<ServiceProbe, ProcessManagerError> {
+        let mut processes_guard = processes.lock()?;
+
+        if let Some(mut child) = processes_guard.remove(service_name) {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    drop(processes_guard);
+
+                    let mut pid_guard = pid_file.lock()?;
+                    if let Err(err) = pid_guard.remove(service_name)
+                        && !matches!(err, PidFileError::ServiceNotFound)
+                    {
+                        return Err(err.into());
+                    }
+
+                    return Ok(ServiceProbe::Exited(status));
+                }
+                Ok(None) => {
+                    processes_guard.insert(service_name.to_string(), child);
+                    return Ok(ServiceProbe::Running);
+                }
+                Err(e) => {
+                    processes_guard.insert(service_name.to_string(), child);
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source: e,
+                    });
+                }
+            }
+        }
+
+        Ok(ServiceProbe::NotStarted)
     }
 
     /// Restarts all services by stopping and then starting them again, reusing the existing
@@ -477,23 +674,14 @@ impl Daemon {
         Ok(())
     }
 
-    /// Stops a specific service by name.
-    ///
-    /// If the service is running, it will be terminated and removed from the process map.
-    ///
-    /// On **Unix/macOS**, services are typically launched as individual processes.
-    /// Sending a `SIGTERM` to the recorded PID is sufficient to stop the service cleanly.
-    ///
-    /// On **Linux**, services are launched in their own process groups (via `setpgid`)
-    /// to support `PR_SET_PDEATHSIG` for parent-child death linkage. This means that
-    /// stopping a service requires sending a signal to the *entire process group*,
-    /// not just the root PID. This is done by sending a signal to the **negative** PID
-    /// (`-pid`) using Unix conventions.
-    ///
-    /// This function correctly handles both platforms, ensuring the full service tree
-    /// is terminated regardless of how it was spawned.
-    pub fn stop_service(&self, service_name: &str) -> Result<(), ProcessManagerError> {
-        let pid = self.pid_file.lock()?.get(service_name);
+    /// Shared stop implementation that accepts explicit handles, making it reusable from helpers
+    /// that already hold references to the daemon's shared state.
+    fn stop_service_with_handles(
+        service_name: &str,
+        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        pid_file: &Arc<Mutex<PidFile>>,
+    ) -> Result<(), ProcessManagerError> {
+        let pid = pid_file.lock()?.get(service_name);
 
         if let Some(process_id) = pid {
             let pid = nix::unistd::Pid::from_raw(process_id as i32);
@@ -583,7 +771,6 @@ impl Daemon {
             }
 
             if process_running {
-                // Give the service a brief window to exit gracefully before escalating.
                 const CHECKS: usize = 10;
                 const INTERVAL: Duration = Duration::from_millis(100);
 
@@ -621,8 +808,8 @@ impl Daemon {
                 }
             }
 
-            self.processes.lock()?.remove(service_name);
-            if let Err(err) = self.pid_file.lock()?.remove(service_name) {
+            processes.lock()?.remove(service_name);
+            if let Err(err) = pid_file.lock()?.remove(service_name) {
                 match err {
                     PidFileError::ServiceNotFound => {
                         debug!("Service '{service_name}' already cleared from PID file");
@@ -637,6 +824,48 @@ impl Daemon {
         }
 
         Ok(())
+    }
+
+    /// Stops a specific service by name.
+    ///
+    /// If the service is running, it will be terminated and removed from the process map.
+    /// This function correctly handles both Unix/macOS and Linux semantics for process groups.
+    pub fn stop_service(&self, service_name: &str) -> Result<(), ProcessManagerError> {
+        Self::stop_service_with_handles(service_name, &self.processes, &self.pid_file)
+    }
+
+    /// Recursively stops any services that depend (directly or indirectly) on the specified root
+    /// service. Used when a dependency crashes so downstream workloads do not continue in a broken
+    /// state.
+    fn stop_dependents(
+        root: &str,
+        reverse_dependencies: &HashMap<String, Vec<String>>,
+        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        pid_file: &Arc<Mutex<PidFile>>,
+    ) {
+        let mut stack: Vec<String> =
+            reverse_dependencies.get(root).cloned().unwrap_or_default();
+        let mut visited: HashSet<String> = stack.iter().cloned().collect();
+
+        while let Some(service) = stack.pop() {
+            warn!("Stopping dependent service '{service}' because '{root}' failed.");
+
+            if let Err(err) =
+                Self::stop_service_with_handles(&service, processes, pid_file)
+            {
+                error!(
+                    "Failed to stop dependent service '{service}' after '{root}' failure: {err}"
+                );
+            }
+
+            if let Some(children) = reverse_dependencies.get(&service) {
+                for child in children {
+                    if visited.insert(child.clone()) {
+                        stack.push(child.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Stops all running services.
@@ -716,6 +945,7 @@ impl Daemon {
         while running.load(Ordering::SeqCst) {
             let mut exited_services = Vec::new();
             let mut restarted_services = Vec::new();
+            let mut failed_services = Vec::new();
             let mut active_services = 0;
 
             {
@@ -748,6 +978,7 @@ impl Daemon {
                         info!("Service '{name}' was manually stopped. Skipping restart.");
                     } else if !exited_normally {
                         warn!("Service '{name}' crashed. Restarting...");
+                        failed_services.push(name.clone());
                         restarted_services.push(name.clone());
                     } else {
                         debug!(
@@ -759,6 +990,13 @@ impl Daemon {
                     }
 
                     processes.lock().unwrap().remove(&name);
+                }
+            }
+
+            if !failed_services.is_empty() {
+                let reverse = config.reverse_dependencies();
+                for failed in failed_services {
+                    Self::stop_dependents(&failed, &reverse, &processes, &pid_file);
                 }
             }
 
@@ -828,5 +1066,139 @@ impl Daemon {
             }
         })
         .join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::HashMap, env, fs, thread, time::Duration};
+    use tempfile::tempdir_in;
+
+    /// Helper to build a minimal service definition for unit tests.
+    fn make_service(command: &str, deps: &[&str]) -> ServiceConfig {
+        ServiceConfig {
+            command: command.to_string(),
+            env: None,
+            restart_policy: None,
+            backoff: None,
+            depends_on: if deps.is_empty() {
+                None
+            } else {
+                Some(deps.iter().map(|d| d.to_string()).collect())
+            },
+            hooks: None,
+        }
+    }
+
+    /// Constructs a daemon instance for tests with the provided service map rooted in `dir`.
+    fn create_daemon(
+        dir: &std::path::Path,
+        services: HashMap<String, ServiceConfig>,
+    ) -> Daemon {
+        let pid_file = Arc::new(Mutex::new(PidFile::default()));
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: Some(dir.to_string_lossy().to_string()),
+        };
+
+        // Validate order to mirror load_config behaviour.
+        config.service_start_order().unwrap();
+
+        Daemon::new(config, pid_file, false)
+    }
+
+    /// Executes a test callback with a temporary HOME directory to contain PID and log files.
+    fn with_temp_home<F: FnOnce(&std::path::Path)>(test: F) {
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create tmp-home base");
+        let temp = tempdir_in(base).expect("tempdir");
+        let original = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", temp.path());
+        }
+        test(temp.path());
+        match original {
+            Some(val) => unsafe {
+                env::set_var("HOME", val);
+            },
+            None => unsafe {
+                env::remove_var("HOME");
+            },
+        }
+    }
+
+    #[test]
+    fn services_start_in_dependency_order() {
+        with_temp_home(|dir| {
+            fs::write(dir.join("db.sh"), "echo db >> order.log\n").unwrap();
+            fs::write(dir.join("web.sh"), "echo web >> order.log\n").unwrap();
+            fs::write(dir.join("worker.sh"), "echo worker >> order.log\n").unwrap();
+
+            let mut services = HashMap::new();
+            services.insert("db".into(), make_service("sh db.sh", &[]));
+            services.insert("web".into(), make_service("sh web.sh", &["db"]));
+            services.insert("worker".into(), make_service("sh worker.sh", &["web"]));
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services_nonblocking().unwrap();
+            daemon.shutdown_monitor();
+
+            let content = fs::read_to_string(dir.join("order.log")).unwrap();
+            let lines: Vec<_> = content.lines().collect();
+            assert_eq!(lines, vec!["db", "web", "worker"]);
+        });
+    }
+
+    #[test]
+    fn dependent_not_started_when_dependency_fails() {
+        with_temp_home(|dir| {
+            fs::write(dir.join("fail.sh"), "exit 1\n").unwrap();
+            fs::write(dir.join("dependent.sh"), "echo dependent >> started.log\n")
+                .unwrap();
+
+            let mut services = HashMap::new();
+            services.insert("fail".into(), make_service("sh fail.sh", &[]));
+            services.insert(
+                "dependent".into(),
+                make_service("sh dependent.sh", &["fail"]),
+            );
+
+            let daemon = create_daemon(dir, services);
+            let result = daemon.start_services_nonblocking();
+            assert!(result.is_err());
+            assert!(!dir.join("started.log").exists());
+            daemon.shutdown_monitor();
+        });
+    }
+
+    #[test]
+    fn dependents_stopped_when_dependency_crashes() {
+        with_temp_home(|dir| {
+            fs::write(
+                dir.join("parent.sh"),
+                "echo parent >> events.log\nsleep 1\nexit 1\n",
+            )
+            .unwrap();
+            fs::write(dir.join("child.sh"), "echo child >> events.log\nsleep 30\n")
+                .unwrap();
+
+            let mut services = HashMap::new();
+            services.insert("parent".into(), make_service("sh parent.sh", &[]));
+            services.insert("child".into(), make_service("sh child.sh", &["parent"]));
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services_nonblocking().unwrap();
+
+            thread::sleep(Duration::from_secs(4));
+
+            let child_pid = daemon.pid_file.lock().unwrap().get("child");
+            assert!(child_pid.is_none());
+
+            daemon.shutdown_monitor();
+        });
     }
 }
