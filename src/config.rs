@@ -99,7 +99,8 @@ impl Config {
 
         let mut ready: BTreeSet<String> = indegree
             .iter()
-            .filter_map(|(name, &deg)| (deg == 0).then(|| name.clone()))
+            .filter(|&(_, &deg)| deg == 0)
+            .map(|(name, _)| name.clone())
             .collect();
 
         let mut order = Vec::with_capacity(self.services.len());
@@ -122,7 +123,8 @@ impl Config {
         if order.len() != self.services.len() {
             let remaining: Vec<String> = indegree
                 .into_iter()
-                .filter_map(|(name, deg)| (deg > 0).then(|| name))
+                .filter(|(_, deg)| *deg > 0)
+                .map(|(name, _)| name)
                 .collect();
 
             return Err(ProcessManagerError::DependencyCycle {
@@ -317,5 +319,78 @@ services:
             service.env.as_ref().unwrap().path(base_path).unwrap(),
             env_path
         );
+    }
+
+    fn minimal_service(depends_on: Option<Vec<&str>>) -> ServiceConfig {
+        ServiceConfig {
+            command: "echo ok".into(),
+            env: None,
+            restart_policy: None,
+            backoff: None,
+            depends_on: depends_on
+                .map(|deps| deps.into_iter().map(String::from).collect()),
+            hooks: None,
+        }
+    }
+
+    #[test]
+    fn service_start_order_resolves_dependencies() {
+        let mut services = HashMap::new();
+        services.insert("a".into(), minimal_service(None));
+        services.insert("b".into(), minimal_service(Some(vec!["a"])));
+        services.insert("c".into(), minimal_service(Some(vec!["b"])));
+
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+        };
+
+        let order = config.service_start_order().unwrap();
+        assert_eq!(order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn service_start_order_unknown_dependency_error() {
+        let mut services = HashMap::new();
+        services.insert("a".into(), minimal_service(Some(vec!["missing"])));
+
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+        };
+
+        match config.service_start_order() {
+            Err(ProcessManagerError::UnknownDependency {
+                service,
+                dependency,
+            }) => {
+                assert_eq!(service, "a");
+                assert_eq!(dependency, "missing");
+            }
+            other => panic!("expected unknown dependency error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn service_start_order_cycle_error() {
+        let mut services = HashMap::new();
+        services.insert("a".into(), minimal_service(Some(vec!["b"])));
+        services.insert("b".into(), minimal_service(Some(vec!["a"])));
+
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+        };
+
+        match config.service_start_order() {
+            Err(ProcessManagerError::DependencyCycle { cycle }) => {
+                assert!(cycle.contains("a"));
+                assert!(cycle.contains("b"));
+            }
+            other => panic!("expected dependency cycle error, got {other:?}"),
+        }
     }
 }
