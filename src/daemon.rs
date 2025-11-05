@@ -2,11 +2,12 @@
 use crate::logs::spawn_log_writer;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
+    io::ErrorKind,
     os::unix::process::CommandExt,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -134,6 +135,19 @@ fn run_hook(
             );
         }
     }
+}
+
+#[derive(Debug)]
+enum ServiceProbe {
+    NotStarted,
+    Running,
+    Exited(ExitStatus),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceReadyState {
+    Running,
+    CompletedSuccess,
 }
 
 /// Manages services, ensuring they start, stop, and restart as needed.
@@ -325,13 +339,169 @@ impl Daemon {
     /// Executes the start workflow without waiting on the monitor thread.
     fn start_all_services(&self) -> Result<(), ProcessManagerError> {
         info!("Starting all services...");
-        for (name, service) in &self.config.services {
-            self.start_service(name, service)?;
+
+        let order = self.config.service_start_order()?;
+        let mut healthy_services = HashSet::new();
+        let mut failed_services = HashSet::new();
+        let mut first_error: Option<ProcessManagerError> = None;
+
+        'service_loop: for service_name in order {
+            let service = match self.config.services.get(&service_name) {
+                Some(service) => service,
+                None => continue,
+            };
+
+            if let Some(deps) = &service.depends_on {
+                for dep in deps {
+                    if failed_services.contains(dep) {
+                        error!(
+                            "Skipping start of '{service_name}' because dependency '{dep}' failed."
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(ProcessManagerError::DependencyFailed {
+                                service: service_name.clone(),
+                                dependency: dep.clone(),
+                            });
+                        }
+                        failed_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
+
+                    if !healthy_services.contains(dep) {
+                        error!(
+                            "Skipping start of '{service_name}' because dependency '{dep}' is not running."
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(ProcessManagerError::DependencyError {
+                                service: service_name.clone(),
+                                dependency: dep.clone(),
+                            });
+                        }
+                        failed_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
+                }
+            }
+
+            match self.start_service(&service_name, service) {
+                Ok(_) => {
+                    match self.wait_for_service_ready(&service_name) {
+                        Ok(ServiceReadyState::Running) => {
+                            healthy_services.insert(service_name.clone());
+                        }
+                        Ok(ServiceReadyState::CompletedSuccess) => {
+                            info!("Service '{service_name}' completed successfully.");
+                            healthy_services.insert(service_name.clone());
+                        }
+                        Err(err) => {
+                            error!(
+                                "Service '{service_name}' failed immediately after launch: {err}"
+                            );
+                            if first_error.is_none() {
+                                first_error = Some(err);
+                            }
+                            failed_services.insert(service_name.clone());
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to start service '{service_name}': {err}");
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    failed_services.insert(service_name.clone());
+                }
+            }
         }
+
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+
         info!("All services started successfully.");
 
         thread::sleep(Duration::from_millis(200));
         Ok(())
+    }
+
+    fn wait_for_service_ready(
+        &self,
+        service_name: &str,
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
+        const MAX_WAIT: Duration = Duration::from_secs(5);
+        const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+        let mut waited = Duration::from_millis(0);
+
+        while waited <= MAX_WAIT {
+            match Self::probe_service_state(service_name, &self.processes, &self.pid_file)? {
+                ServiceProbe::Running => return Ok(ServiceReadyState::Running),
+                ServiceProbe::Exited(status) => {
+                    if status.success() {
+                        return Ok(ServiceReadyState::CompletedSuccess);
+                    }
+
+                    let message = match status.code() {
+                        Some(code) => format!("process exited with status {code}"),
+                        None => format!("process terminated unexpectedly: {status:?}"),
+                    };
+
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source: std::io::Error::new(ErrorKind::Other, message),
+                    });
+                }
+                ServiceProbe::NotStarted => {
+                    thread::sleep(POLL_INTERVAL);
+                    waited += POLL_INTERVAL;
+                }
+            }
+        }
+
+        Err(ProcessManagerError::ServiceStartError {
+            service: service_name.to_string(),
+            source: std::io::Error::new(
+                ErrorKind::TimedOut,
+                "service did not report a running state in time",
+            ),
+        })
+    }
+
+    fn probe_service_state(
+        service_name: &str,
+        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        pid_file: &Arc<Mutex<PidFile>>,
+    ) -> Result<ServiceProbe, ProcessManagerError> {
+        let mut processes_guard = processes.lock()?;
+
+        if let Some(child) = processes_guard.get_mut(service_name) {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    processes_guard.remove(service_name);
+                    drop(processes_guard);
+
+                    let mut pid_guard = pid_file.lock()?;
+                    if let Err(err) = pid_guard.remove(service_name) {
+                        if !matches!(err, PidFileError::ServiceNotFound) {
+                            return Err(err.into());
+                        }
+                    }
+
+                    return Ok(ServiceProbe::Exited(status));
+                }
+                Ok(None) => {
+                    return Ok(ServiceProbe::Running);
+                }
+                Err(e) => {
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source: e,
+                    });
+                }
+            }
+        }
+
+        Ok(ServiceProbe::NotStarted)
     }
 
     /// Restarts all services by stopping and then starting them again, reusing the existing

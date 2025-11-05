@@ -53,6 +53,31 @@ pub enum ProcessManagerError {
         dependency: String,
     },
 
+    /// Error when a dependency has failed during startup.
+    #[error("Service '{service}' cannot start because dependency '{dependency}' failed")]
+    DependencyFailed {
+        /// The service that cannot be started.
+        service: String,
+        /// The dependency that failed.
+        dependency: String,
+    },
+
+    /// Error when a dependency reference is undefined in the configuration.
+    #[error("Service '{service}' declares unknown dependency '{dependency}'")]
+    UnknownDependency {
+        /// The service with an invalid dependency reference.
+        service: String,
+        /// The missing dependency name.
+        dependency: String,
+    },
+
+    /// Error when dependency graph contains a cycle.
+    #[error("Detected dependency cycle: {cycle}")]
+    DependencyCycle {
+        /// Human-readable cycle description (e.g. `a -> b -> a`).
+        cycle: String,
+    },
+
     /// Error for poisoned mutex.
     #[error("Mutex is poisoned: {0}")]
     MutexPoisonError(String),
