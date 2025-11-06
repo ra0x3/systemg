@@ -6,11 +6,11 @@ title: restart
 Restart the process manager using the current configuration.
 
 ```sh
-sysg restart
+$ sysg restart
 ```
 
 Restart the process manager using a different configuration file.
 
 ```sh
-sysg restart --config new-config.yaml
+$ sysg restart --config new-config.yaml
 ```
