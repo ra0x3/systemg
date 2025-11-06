@@ -7,6 +7,15 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 if [ "$OS" = "linux" ]; then
   if [ "$ARCH" = "x86_64" ]; then
     TARGET="x86_64-unknown-linux-gnu"
+    if [ -r /etc/os-release ]; then
+      # shellcheck disable=SC1091
+      . /etc/os-release
+      case "${ID:-}:${ID_LIKE:-}" in
+        debian:*|*:debian*|debian:debian*)
+          TARGET="${TARGET}-debian"
+          ;;
+      esac
+    fi
   elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-unknown-linux-gnu"
   else

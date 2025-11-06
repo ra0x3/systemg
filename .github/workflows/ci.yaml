@@ -100,12 +100,21 @@ jobs:
             platform: linux
             target: x86_64-unknown-linux-gnu
             cross_image: x86_64-linux-gnu
+            cross_dockerfile: ci/Dockerfile.x86_64-unknown-linux-gnu-clang
             features: linux
           - os: ubuntu-latest
             platform: linux-arm
             target: aarch64-unknown-linux-gnu
             cross_image: aarch64-linux-gnu
+            cross_dockerfile: ci/Dockerfile.aarch64-unknown-linux-gnu-clang
             features: linux
+          - os: ubuntu-latest
+            platform: debian
+            target: x86_64-unknown-linux-gnu
+            cross_image: debian-x86_64-linux-gnu
+            cross_dockerfile: ci/Dockerfile.debian-x86_64-unknown-linux-gnu-clang
+            features: linux
+            artifact_suffix: -debian
 #          - os: macos-latest
 #            platform: darwin
 #            target: x86_64-apple-darwin
@@ -128,7 +137,7 @@ jobs:
         uses: docker/build-push-action@v2
         with:
           context: ci
-          file: ci/Dockerfile.${{ matrix.job.target }}-clang
+          file: ${{ matrix.job.cross_dockerfile }}
           tags: ${{ matrix.job.cross_image }}:latest
           load: true
           cache-from: type=gha
@@ -160,7 +169,7 @@ jobs:
             --target ${{ matrix.job.target }}
 
       - name: Strip release binary linux x86_64
-        if: matrix.job.platform == 'linux'
+        if: matrix.job.target == 'x86_64-unknown-linux-gnu'
         run: >
           strip "target/${{ matrix.job.target }}/release/sysg"
 
@@ -182,6 +191,7 @@ jobs:
         env:
           PLATFORM_NAME: ${{ matrix.job.platform }}
           TARGET: ${{ matrix.job.target }}
+          ARTIFACT_SUFFIX: ${{ matrix.job.artifact_suffix || '' }}
         run: >
           # trim refs/tags/ prefix
 
@@ -195,7 +205,7 @@ jobs:
 
           # setup artifact filename
 
-          SYSG_ARTIFACT="sysg-$SYSG_VERSION-${{ env.TARGET }}"
+          SYSG_ARTIFACT="sysg-$SYSG_VERSION-$TARGET$ARTIFACT_SUFFIX"
 
           SYSG_ZIP_FILE_NAME="$SYSG_ARTIFACT.tar.gz"
 

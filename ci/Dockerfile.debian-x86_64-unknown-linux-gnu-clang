@@ -1,0 +1,32 @@
+FROM debian:12-slim
+
+ARG RUST_VERSION=1.90.0
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup \
+    PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    curl \
+    git \
+    libclang-dev \
+    libssl-dev \
+    lld \
+    llvm \
+    pkg-config \
+    tzdata \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION}
+
+RUN rustup component add rustfmt clippy && \
+    rustup target add x86_64-unknown-linux-gnu
+
+CMD ["bash"]
