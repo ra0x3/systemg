@@ -15,7 +15,7 @@ $ sysg logs
 View the logs for a specific service.
 
 ```sh
-$ sysg logs --lines 100
+$ sysg logs api-service --lines 100
 ```
 
 ```sh
@@ -42,3 +42,17 @@ $ sysg logs
 2025-11-06T15:21:42.429297Z DEBUG request{method=GET uri=/api/v1/schedule?cache=true&date=2025-11-06&league=nfl version=HTTP/1.1}: reqwest::connect: starting new connection: https://api.sportsdata.io/
 ```
 
+```
+$ sysg logs --help
+Show logs for a specific service
+
+Usage: sysg logs [OPTIONS] [SERVICE]
+
+Arguments:
+  [SERVICE]  The name of the service whose logs should be displayed (optional)
+
+Options:
+  -l, --lines <LINES>      Number of lines to show (default: 50) [default: 50]
+      --log-level <LEVEL>  Override the logging verbosity for this invocation only
+  -h, --help               Print help
+```

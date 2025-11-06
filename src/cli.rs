@@ -1,11 +1,79 @@
 //! Command-line interface for Systemg.
 use clap::{Parser, Subcommand};
+use std::str::FromStr;
+use tracing::level_filters::LevelFilter;
+
+/// Wrapper around `LevelFilter` so clap can parse log levels from either
+/// string names ("info", "debug", etc.) or numeric shorthands (0-5).
+#[derive(Clone, Copy, Debug)]
+pub struct LogLevelArg(LevelFilter);
+
+impl LogLevelArg {
+    /// String representation suitable for `RUST_LOG`.
+    pub fn as_str(&self) -> &'static str {
+        match self.0 {
+            LevelFilter::OFF => "off",
+            LevelFilter::ERROR => "error",
+            LevelFilter::WARN => "warn",
+            LevelFilter::INFO => "info",
+            LevelFilter::DEBUG => "debug",
+            LevelFilter::TRACE => "trace",
+        }
+    }
+}
+
+impl FromStr for LogLevelArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err("log level cannot be empty".into());
+        }
+
+        if let Ok(number) = trimmed.parse::<u8>() {
+            let level = match number {
+                0 => LevelFilter::OFF,
+                1 => LevelFilter::ERROR,
+                2 => LevelFilter::WARN,
+                3 => LevelFilter::INFO,
+                4 => LevelFilter::DEBUG,
+                5 => LevelFilter::TRACE,
+                _ => {
+                    return Err(format!(
+                        "unsupported log level number '{number}' (expected 0-5)"
+                    ));
+                }
+            };
+
+            return Ok(LogLevelArg(level));
+        }
+
+        let lowercase = trimmed.to_ascii_lowercase();
+        let level = match lowercase.as_str() {
+            "off" => Some(LevelFilter::OFF),
+            "error" | "err" => Some(LevelFilter::ERROR),
+            "warn" | "warning" => Some(LevelFilter::WARN),
+            "info" | "information" => Some(LevelFilter::INFO),
+            "debug" => Some(LevelFilter::DEBUG),
+            "trace" => Some(LevelFilter::TRACE),
+            _ => None,
+        }
+        .ok_or_else(|| format!("invalid log level '{trimmed}'"))?;
+
+        Ok(LogLevelArg(level))
+    }
+}
 
 /// Command-line interface for Systemg.
 #[derive(Parser)]
 #[command(name = "systemg", version, author)]
 #[command(about = "A lightweight process manager for system services", long_about = None)]
 pub struct Cli {
+    /// Override the logging verbosity for this invocation only.
+    #[arg(long, value_name = "LEVEL", global = true)]
+    pub log_level: Option<LogLevelArg>,
+
     /// The command to execute.
     #[command(subcommand)]
     pub command: Commands,

@@ -9,15 +9,22 @@ Show the status of all currently running services.
 $ sysg status
 ```
 
-Show the status of a specific service.
+```
+$ sysg status --help
+Show the status of currently running services
 
-```sh
-$ sysg status --service webserver
+Usage: sysg status [OPTIONS]
+
+Options:
+      --log-level <LEVEL>  Override the logging verbosity for this invocation only
+  -s, --service <SERVICE>  Optionally specify a service name to check its status
+  -h, --help               Print help
 ```
 
 ```sh
 
-$ sysg status
+$ sysg status -s arb-rs
+
 Active services:
 ● - arb-rs Running
    Active: active (running) since Tue 2025-11-04 11:30:52 UTC; Unknown

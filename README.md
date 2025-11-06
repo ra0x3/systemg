@@ -83,6 +83,10 @@ sysg start --config systemg.yaml --daemonize
 
 # Subsequent commands talk to the supervisor without re-spawning it
 sysg status
+
+# Override logging verbosity for the current run (works with every subcommand; names or 0-5)
+sysg start --log-level debug
+sysg start --log-level 4
 ```
 
 When the supervisor is running it remains active in the background, holding service

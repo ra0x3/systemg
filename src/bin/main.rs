@@ -7,9 +7,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 use systemg::{
-    cli::{Commands, parse_args},
+    cli::{Cli, Commands, parse_args},
     config::load_config,
     daemon::{Daemon, PidFile},
     ipc::{self, ControlCommand, ControlError, ControlResponse},
@@ -19,11 +20,13 @@ use systemg::{
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt::init();
     let args = parse_args();
+    init_logging(&args);
 
     match args.command {
-        Commands::Start { config, daemonize } => {
+        Commands::Start {
+            config, daemonize, ..
+        } => {
             if daemonize {
                 if supervisor_running() {
                     warn!("systemg supervisor already running; aborting duplicate start");
@@ -112,6 +115,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn init_logging(args: &Cli) {
+    let filter = if let Some(level) = args.log_level {
+        EnvFilter::new(level.as_str())
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+    };
+
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
 fn start_foreground(config_path: &str) -> Result<(), Box<dyn Error>> {
