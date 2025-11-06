@@ -7,6 +7,8 @@ title: Usage
 
 Systemg uses a simple YAML-based configuration and supports the following commands:
 
+Every command accepts `--log-level <LEVEL>` (string names like `info`/`debug` or numbers 0-5) if you want to change tracing output for a single invocation. For example, `sysg status --log-level debug`.
+
 ## Start
 
 Start with the default configuration file:
@@ -25,6 +27,13 @@ Start the long-lived supervisor with a specific configuration file:
 
 ```sh
 sysg start --config systemg.yaml --daemonize
+```
+
+Adjust the logging verbosity for the current invocation (string or numeric levels 0-5):
+
+```sh
+sysg start --log-level info
+sysg start --log-level 4
 ```
 
 Once the supervisor is running it stays alive after you log out and subsequent
