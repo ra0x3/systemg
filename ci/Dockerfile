@@ -27,6 +27,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 2: build binaries
 FROM chef AS builder
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV RUSTFLAGS="-C strip=symbols -C opt-level=z -C codegen-units=1 -C lto=yes"
 COPY --from=planner /build/recipe.json recipe.json
 
 COPY . .
@@ -42,7 +43,6 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -y \
     tzdata \
     ca-certificates \
     wget \
-    # Clean up
     && apt-get autoremove -y \
     && apt-get clean -y
 
