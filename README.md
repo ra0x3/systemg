@@ -81,6 +81,7 @@ Systemg offers a **lightweight**, **configuration-driven** solution that's **eas
 - **Automatic Process Monitoring** - Restart crashed services based on custom policies.
 - **Dependency-Aware Startup** - Honour `depends_on` chains, skip unhealthy dependencies, and cascade stop dependents on failure.
 - **Environment Variable Support** - Load variables from `.env` files and per-service configurations.
+- **Rolling Deployments** - Orchestrate zero-downtime restarts with pre-start commands, health probes, and grace periods.
 - **Minimal & Fast** - Built with Rust, designed for performance and low resource usage.
 - **No Root Required** - Unlike systemd, it doesn't take over PID 1.
 
@@ -107,6 +108,33 @@ services:
 ```
 
 If `database` fails to come up, `web` will remain stopped and log the dependency failure until the database is healthy again.
+
+#### Rolling Deployments
+
+Services can opt into rolling restarts so existing instances keep serving traffic until replacements are healthy. Add a `deployment` block to configure the behaviour:
+
+```yaml
+version: "1"
+services:
+  api:
+    command: "./target/release/api"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"          # default is "immediate"
+      pre_start: "cargo build --release"
+      health_check:
+        url: "http://localhost:8080/health"
+        timeout: "60s"
+        retries: 5
+      grace_period: "5s"
+```
+
+- `strategy` — set to `rolling` to enable the zero-downtime workflow, or omit to keep the traditional stop/start cycle.
+- `pre_start` — optional shell command executed before the new instance launches (perfect for build or migrate steps).
+- `health_check` — optional HTTP probe the replacement must pass before traffic flips; configure timeout and retry budget per service.
+- `grace_period` — optional delay to keep the old instance alive after the new one passes health checks, giving load balancers time to rebalance.
+
+If any rolling step fails, systemg restores the original instance and surfaces the error so unhealthy builds never replace running services.
 
 #### Additional Commands
 

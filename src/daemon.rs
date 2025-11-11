@@ -1,6 +1,9 @@
 //! Module for managing and monitoring system services.
 use crate::logs::spawn_log_writer;
+use reqwest::blocking::Client;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
+use serde_yaml;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -13,11 +16,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tracing::{debug, error, info, warn};
 
-use crate::config::{Config, EnvConfig, HookType, Hooks, ServiceConfig};
+use crate::config::{
+    Config, EnvConfig, HealthCheckConfig, HookType, Hooks, ServiceConfig,
+};
 use crate::error::{PidFileError, ProcessManagerError};
 
 /// Represents the PID file structure
@@ -150,6 +155,13 @@ enum ServiceProbe {
 enum ServiceReadyState {
     Running,
     CompletedSuccess,
+}
+
+/// Represents an existing service instance that has been temporarily detached while a
+/// replacement is brought up during a rolling restart.
+struct DetachedService {
+    child: Child,
+    pid: u32,
 }
 
 /// Manages services, ensuring they start, stop, and restart as needed.
@@ -535,10 +547,473 @@ impl Daemon {
     /// monitor thread if available.
     pub fn restart_services(&self) -> Result<(), ProcessManagerError> {
         info!("Restarting all services...");
-        self.stop_services()?;
-        self.start_all_services()?;
+
+        let order = self.config.service_start_order()?;
+
+        for service_name in order {
+            let service = match self.config.services.get(&service_name) {
+                Some(service) => service,
+                None => continue,
+            };
+
+            let strategy = service
+                .deployment
+                .as_ref()
+                .and_then(|deployment| deployment.strategy.as_deref())
+                .unwrap_or("immediate");
+
+            match strategy {
+                "rolling" => {
+                    self.rolling_restart_service(&service_name, service)?;
+                }
+                "immediate" => {
+                    self.immediate_restart_service(&service_name, service)?;
+                }
+                other => {
+                    warn!(
+                        "Unknown deployment strategy '{other}' for service '{service_name}', falling back to immediate restart."
+                    );
+                    self.immediate_restart_service(&service_name, service)?;
+                }
+            }
+        }
+
         self.spawn_monitor_thread()?;
         info!("All services restarted successfully.");
+        Ok(())
+    }
+
+    /// Performs a rolling restart keeping the previous instance alive until the replacement is
+    /// verified healthy.
+    fn rolling_restart_service(
+        &self,
+        name: &str,
+        service: &ServiceConfig,
+    ) -> Result<(), ProcessManagerError> {
+        info!("Performing rolling restart for service: {name}");
+
+        let mut previous = self.detach_service_handle(name)?;
+
+        if let Some(pre_start) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.pre_start.as_ref())
+        {
+            info!("Running pre-start command for '{name}': {pre_start}");
+            if let Err(err) = self.run_pre_start_command(name, pre_start) {
+                if let Some(detached) = previous.take() {
+                    self.restore_detached_service(name, detached)?;
+                }
+                return Err(err);
+            }
+        }
+
+        if let Err(err) = self.start_service(name, service) {
+            if let Some(detached) = previous.take() {
+                self.restore_detached_service(name, detached)?;
+            }
+            return Err(err);
+        }
+
+        let readiness = self.wait_for_service_ready(name);
+        match readiness {
+            Ok(ServiceReadyState::Running) => {}
+            Ok(ServiceReadyState::CompletedSuccess) => {
+                info!("Service '{name}' exited successfully immediately after restart.");
+            }
+            Err(err) => {
+                error!("Service '{name}' failed to become ready after restart: {err}");
+                if let Err(stop_err) = self.stop_service(name) {
+                    warn!(
+                        "Failed to stop new instance of '{name}' after readiness failure: {stop_err}"
+                    );
+                }
+                if let Some(detached) = previous.take() {
+                    self.restore_detached_service(name, detached)?;
+                }
+                return Err(err);
+            }
+        }
+
+        if let Some(health_check) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.health_check.as_ref())
+            && let Err(err) = self.wait_for_health_check(name, health_check)
+        {
+            error!("Health check failed for '{name}' during rolling restart: {err}");
+            if let Err(stop_err) = self.stop_service(name) {
+                warn!(
+                    "Failed to stop new instance of '{name}' after health check failure: {stop_err}"
+                );
+            }
+            if let Some(detached) = previous.take() {
+                self.restore_detached_service(name, detached)?;
+            }
+            return Err(err);
+        }
+
+        if let Some(grace_period) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.grace_period.as_ref())
+        {
+            let duration = match Self::parse_duration(grace_period) {
+                Ok(duration) => duration,
+                Err(err) => {
+                    error!(
+                        "Failed to parse grace period '{grace_period}' for '{name}': {err}"
+                    );
+                    if let Err(stop_err) = self.stop_service(name) {
+                        warn!(
+                            "Failed to stop new instance of '{name}' after grace period parse error: {stop_err}"
+                        );
+                    }
+                    if let Some(detached) = previous.take() {
+                        self.restore_detached_service(name, detached)?;
+                    }
+                    return Err(err);
+                }
+            };
+
+            if !duration.is_zero() {
+                info!(
+                    "Waiting {:?} before stopping previous instance of '{name}'",
+                    duration
+                );
+                thread::sleep(duration);
+            }
+        }
+
+        if let Some(detached) = previous.take() {
+            self.terminate_detached_service(name, detached)?;
+        }
+
+        Ok(())
+    }
+
+    /// Performs an immediate restart by stopping and starting the service sequentially.
+    fn immediate_restart_service(
+        &self,
+        name: &str,
+        service: &ServiceConfig,
+    ) -> Result<(), ProcessManagerError> {
+        info!("Performing immediate restart for service: {name}");
+
+        self.stop_service(name)?;
+        self.start_service(name, service)?;
+
+        match self.wait_for_service_ready(name) {
+            Ok(ServiceReadyState::Running) => Ok(()),
+            Ok(ServiceReadyState::CompletedSuccess) => {
+                info!(
+                    "Service '{name}' completed successfully immediately after restart."
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Runs the configured pre-start command prior to launching a replacement service instance.
+    fn run_pre_start_command(
+        &self,
+        service_name: &str,
+        command: &str,
+    ) -> Result<(), ProcessManagerError> {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.project_root)
+            .output()
+            .map_err(|source| ProcessManagerError::ServiceStartError {
+                service: service_name.to_string(),
+                source,
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let message = if stderr.is_empty() {
+                format!("Pre-start command exited with status {}", output.status)
+            } else {
+                format!("Pre-start command failed: {stderr}")
+            };
+
+            return Err(ProcessManagerError::ServiceStartError {
+                service: service_name.to_string(),
+                source: std::io::Error::other(message),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Waits for the configured health check to report success before completing the rolling
+    /// restart.
+    fn wait_for_health_check(
+        &self,
+        service_name: &str,
+        health_check: &HealthCheckConfig,
+    ) -> Result<(), ProcessManagerError> {
+        let timeout = if let Some(raw_timeout) = &health_check.timeout {
+            Self::parse_duration(raw_timeout)?
+        } else {
+            Duration::from_secs(30)
+        };
+
+        let retries = health_check.retries.unwrap_or(3).max(1);
+        let retry_interval = Duration::from_secs(2);
+        let client = Client::builder().timeout(timeout).build().map_err(|err| {
+            ProcessManagerError::ServiceStartError {
+                service: service_name.to_string(),
+                source: std::io::Error::other(err.to_string()),
+            }
+        })?;
+
+        let deadline = Instant::now() + timeout;
+
+        for attempt in 1..=retries {
+            match self.perform_health_check(&client, &health_check.url) {
+                Ok(true) => {
+                    info!(
+                        "Health check passed for '{service_name}' on attempt {attempt}"
+                    );
+                    return Ok(());
+                }
+                Ok(false) => {
+                    debug!(
+                        "Health check attempt {attempt} failed for '{service_name}', retrying in {:?}",
+                        retry_interval
+                    );
+                }
+                Err(err) => {
+                    debug!(
+                        "Health check attempt {attempt} returned error for '{service_name}': {err}",
+                    );
+                }
+            }
+
+            if Instant::now() >= deadline {
+                break;
+            }
+
+            if attempt != retries {
+                thread::sleep(retry_interval);
+            }
+        }
+
+        Err(ProcessManagerError::ServiceStartError {
+            service: service_name.to_string(),
+            source: std::io::Error::other(format!(
+                "Health check did not succeed within {:?} after {} attempts",
+                timeout, retries
+            )),
+        })
+    }
+
+    /// Performs a single health check request and evaluates the response.
+    fn perform_health_check(
+        &self,
+        client: &Client,
+        url: &str,
+    ) -> Result<bool, std::io::Error> {
+        let response = client
+            .get(url)
+            .send()
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+        Ok(response.status().is_success())
+    }
+
+    /// Parses a user-facing duration string in the format `<number>[s|m|h]`.
+    fn parse_duration(raw: &str) -> Result<Duration, ProcessManagerError> {
+        let value = raw.trim();
+        if value.is_empty() {
+            return Err(Self::config_error("Duration value cannot be empty"));
+        }
+
+        let (amount_str, multiplier) = if let Some(stripped) = value.strip_suffix('s') {
+            (stripped.trim(), 1)
+        } else if let Some(stripped) = value.strip_suffix('m') {
+            (stripped.trim(), 60)
+        } else if let Some(stripped) = value.strip_suffix('h') {
+            (stripped.trim(), 3600)
+        } else {
+            (value, 1)
+        };
+
+        let amount: u64 = amount_str.parse().map_err(|_| {
+            Self::config_error(format!("Invalid duration value: '{raw}'"))
+        })?;
+
+        Ok(Duration::from_secs(amount.saturating_mul(multiplier)))
+    }
+
+    /// Helper for constructing a configuration parse error wrapped in our domain error type.
+    fn config_error(message: impl Into<String>) -> ProcessManagerError {
+        ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(message.into()))
+    }
+
+    /// Removes the current child handle for a service while keeping the underlying process alive.
+    fn detach_service_handle(
+        &self,
+        service_name: &str,
+    ) -> Result<Option<DetachedService>, ProcessManagerError> {
+        let detached_child = self.processes.lock()?.remove(service_name);
+
+        if let Some(child) = detached_child {
+            let pid = self
+                .pid_file
+                .lock()?
+                .pid_for(service_name)
+                .unwrap_or(child.id());
+
+            Ok(Some(DetachedService { child, pid }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Restores a previously detached service handle back into normal supervision.
+    fn restore_detached_service(
+        &self,
+        service_name: &str,
+        detached: DetachedService,
+    ) -> Result<(), ProcessManagerError> {
+        self.processes
+            .lock()?
+            .insert(service_name.to_string(), detached.child);
+
+        self.pid_file.lock()?.insert(service_name, detached.pid)?;
+
+        info!("Restored original instance of '{service_name}' after restart failure.");
+
+        Ok(())
+    }
+
+    /// Terminates the detached instance once the replacement is known healthy.
+    fn terminate_detached_service(
+        &self,
+        service_name: &str,
+        mut detached: DetachedService,
+    ) -> Result<(), ProcessManagerError> {
+        let pid = detached.pid;
+        if let Err(err) = Self::terminate_pid(pid, service_name) {
+            error!("Failed to terminate previous instance of '{service_name}': {err}");
+            return Err(err);
+        }
+
+        // Best-effort wait to reap the child and avoid zombies.
+        if let Err(err) = detached.child.wait() {
+            warn!(
+                "Failed to wait on previous instance of '{service_name}' after termination: {err}"
+            );
+        }
+
+        info!(
+            "Old instance of '{service_name}' terminated successfully during rolling restart."
+        );
+
+        Ok(())
+    }
+
+    /// Sends termination signals mirroring the standard stop workflow for a specific PID.
+    fn terminate_pid(pid: u32, service_name: &str) -> Result<(), ProcessManagerError> {
+        fn nix_error_to_io(err: nix::errno::Errno) -> std::io::Error {
+            std::io::Error::from_raw_os_error(err as i32)
+        }
+
+        let pid = nix::unistd::Pid::from_raw(pid as i32);
+        let mut process_running = true;
+
+        match nix::sys::signal::kill(pid, None) {
+            Ok(_) => {
+                debug!("Stopping previous instance of '{service_name}' (PID {pid})");
+            }
+            Err(err) => {
+                if err == nix::errno::Errno::ESRCH {
+                    process_running = false;
+                } else {
+                    let source = nix_error_to_io(err);
+                    return Err(ProcessManagerError::ServiceStopError {
+                        service: service_name.to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+
+        if process_running {
+            let supervisor_pgid = unsafe { libc::getpgid(0) };
+            let child_pgid = unsafe { libc::getpgid(pid.as_raw()) };
+
+            if child_pgid >= 0 && child_pgid != supervisor_pgid {
+                let kill_result = unsafe { libc::killpg(child_pgid, libc::SIGTERM) };
+                if kill_result < 0 {
+                    let err = std::io::Error::last_os_error();
+                    match err.raw_os_error() {
+                        Some(code) if code == libc::ESRCH => {}
+                        Some(code) if code == libc::EPERM => {
+                            warn!(
+                                "Insufficient permissions to signal process group {child_pgid} for '{service_name}'. Falling back to direct signal"
+                            );
+                        }
+                        _ => {
+                            return Err(ProcessManagerError::ServiceStopError {
+                                service: service_name.to_string(),
+                                source: err,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if let Err(err) = nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGTERM))
+            {
+                if err == nix::errno::Errno::ESRCH {
+                    process_running = false;
+                } else {
+                    let source = nix_error_to_io(err);
+                    return Err(ProcessManagerError::ServiceStopError {
+                        service: service_name.to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+
+        if process_running {
+            const CHECKS: usize = 10;
+            const INTERVAL: Duration = Duration::from_millis(100);
+
+            for _ in 0..CHECKS {
+                thread::sleep(INTERVAL);
+                if matches!(
+                    nix::sys::signal::kill(pid, None),
+                    Err(nix::errno::Errno::ESRCH)
+                ) {
+                    process_running = false;
+                    break;
+                }
+            }
+
+            if process_running {
+                warn!(
+                    "Previous instance of '{service_name}' did not exit after SIGTERM; sending SIGKILL"
+                );
+                if let Err(err) =
+                    nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGKILL))
+                    && err != nix::errno::Errno::ESRCH
+                {
+                    let source = nix_error_to_io(err);
+                    return Err(ProcessManagerError::ServiceStopError {
+                        service: service_name.to_string(),
+                        source,
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1087,6 +1562,7 @@ mod tests {
             } else {
                 Some(deps.iter().map(|d| d.to_string()).collect())
             },
+            deployment: None,
             hooks: None,
         }
     }
@@ -1129,6 +1605,38 @@ mod tests {
                 env::remove_var("HOME");
             },
         }
+    }
+
+    #[test]
+    fn parse_duration_supports_common_units() {
+        assert_eq!(
+            Daemon::parse_duration("10s").unwrap(),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            Daemon::parse_duration("5m").unwrap(),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            Daemon::parse_duration("2h").unwrap(),
+            Duration::from_secs(7200)
+        );
+        assert_eq!(
+            Daemon::parse_duration("15").unwrap(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid_strings() {
+        assert!(matches!(
+            Daemon::parse_duration(""),
+            Err(ProcessManagerError::ConfigParseError(_))
+        ));
+        assert!(matches!(
+            Daemon::parse_duration("abc"),
+            Err(ProcessManagerError::ConfigParseError(_))
+        ));
     }
 
     #[test]
