@@ -66,7 +66,7 @@ for my $i (1..100) {
     fs::write(
         dir.join("config.yaml"),
         r#"
-version: 1
+version: "1"
 services:
   perl:
     command: "perl main.pl"

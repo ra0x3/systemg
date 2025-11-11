@@ -8,7 +8,7 @@ Below is an example of a complete `systemg` configuration file.
 
 ```yaml
 # Configuration file version
-version: 1
+version: "1"
 
 services:
   # Name of the service
@@ -43,6 +43,19 @@ services:
 
     restart_policy: "on-failure"
     backoff: "5s"
+
+    deployment:
+      # Keep the existing instance running until a replacement passes its checks
+      strategy: "rolling"
+      # Optional build or migration step executed before the new process launches
+      pre_start: "python manage.py migrate"
+      # Optional health probe the new instance must satisfy
+      health_check:
+        url: "http://localhost:8000/health"
+        timeout: "45s"
+        retries: 4
+      # Optional grace window before the old instance is terminated
+      grace_period: "5s"
 
     # List of services this one depends on (must be started before this)
     depends_on:
@@ -82,3 +95,36 @@ services:
 ```
 
 If `redis` exits with a non-zero status, `worker` will not start (or will be stopped if it is already running) until `redis` is healthy again.
+
+## Deployment strategies
+
+Systemg supports two deployment strategies per service:
+
+- `immediate` *(default)* – stop the running instance and start a fresh copy right away. This matches the behaviour in earlier releases and requires no additional configuration.
+- `rolling` – launch a replacement alongside the existing instance, verify it is healthy, optionally wait for a grace period, and only then terminate the previous process. This keeps services available throughout a restart.
+
+Enable rolling restarts by adding a `deployment` block to a service definition:
+
+```yaml
+services:
+  api:
+    command: "./target/release/api"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"
+      pre_start: "cargo build --release"
+      health_check:
+        url: "http://localhost:8080/health"
+        timeout: "60s"
+        retries: 5
+      grace_period: "5s"
+```
+
+### Rolling restart settings
+
+- **`strategy`** – set to `rolling` to opt in; omit or set to `immediate` to keep the classic stop/start cycle.
+- **`pre_start`** *(optional)* – shell command executed before the new process launches. Useful for builds, migrations, or asset preparation. Non-zero exit codes abort the deployment and preserve the old instance.
+- **`health_check`** *(optional)* – HTTP probe the new instance must pass. Systemg retries based on `retries` (default 3) until the total elapsed time exceeds `timeout` (default 30s).
+- **`grace_period`** *(optional)* – additional delay to keep the old instance alive after the new one passes health checks. Handy for draining load balancer connections.
+
+If any step of the rolling restart fails, the new process is halted and the previous instance is restored automatically. This ensures unhealthy builds never displace a working service.
