@@ -40,7 +40,7 @@ It aims to provide **a minimal alternative to systemd** and other heavyweight se
 Install the system binary:
 
 ```sh
-$ curl -fsSL https://sh.sysg.dev | sh
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
 Install systemg using cargo:

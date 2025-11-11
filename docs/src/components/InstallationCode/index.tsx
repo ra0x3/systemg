@@ -14,13 +14,13 @@ export default function InstallationCode(): ReactNode {
               </div>
               <div className={styles.codeContent}>
                 <code className={styles.codeText}>
-                  $ curl -fsSL https://sh.sysg.dev | sh
+                  $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
                 </code>
                 <button
                   className={styles.copyButton}
                   onClick={() => {
                     navigator.clipboard.writeText(
-                      "curl -fsSL https://sh.sysg.dev | sh",
+                      "curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh",
                     );
                   }}
                   title="Copy to clipboard"
