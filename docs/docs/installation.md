@@ -12,7 +12,7 @@ Choose the installation method that works best for your system.
 The fastest way to get started with `systemg`:
 
 ```bash
-curl -fsSL https://sh.sysg.dev | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
 This script will:

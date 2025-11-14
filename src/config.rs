@@ -34,8 +34,34 @@ pub struct ServiceConfig {
     pub backoff: Option<String>,
     /// List of services that must start before this service.
     pub depends_on: Option<Vec<String>>,
+    /// Deployment strategy configuration.
+    pub deployment: Option<DeploymentConfig>,
     /// Hooks for lifecycle events (e.g., on_start, on_error).
     pub hooks: Option<Hooks>,
+}
+
+/// Deployment strategy configuration for a service.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DeploymentConfig {
+    /// Deployment strategy: "rolling" or "immediate".
+    pub strategy: Option<String>,
+    /// Command to run before starting the new service.
+    pub pre_start: Option<String>,
+    /// Health check configuration.
+    pub health_check: Option<HealthCheckConfig>,
+    /// Grace period before stopping the old service instance.
+    pub grace_period: Option<String>,
+}
+
+/// Health check configuration used during rolling deployments.
+#[derive(Debug, Deserialize, Clone)]
+pub struct HealthCheckConfig {
+    /// Health check URL.
+    pub url: String,
+    /// Health check timeout duration (e.g., "30s").
+    pub timeout: Option<String>,
+    /// Number of retries before giving up.
+    pub retries: Option<u32>,
 }
 
 /// Represents environment variables for a service.
@@ -329,6 +355,7 @@ services:
             backoff: None,
             depends_on: depends_on
                 .map(|deps| deps.into_iter().map(String::from).collect()),
+            deployment: None,
             hooks: None,
         }
     }
