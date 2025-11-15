@@ -11,7 +11,7 @@ use strum_macros::{AsRefStr, EnumString};
 use crate::error::ProcessManagerError;
 
 /// Represents the structure of the configuration file.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// Configuration version.
     pub version: String,
@@ -38,6 +38,8 @@ pub struct ServiceConfig {
     pub deployment: Option<DeploymentConfig>,
     /// Hooks for lifecycle events (e.g., on_start, on_error).
     pub hooks: Option<Hooks>,
+    /// Cron configuration for scheduled service execution.
+    pub cron: Option<CronConfig>,
 }
 
 /// Deployment strategy configuration for a service.
@@ -99,6 +101,15 @@ pub enum HookType {
 pub struct Hooks {
     pub on_start: Option<String>,
     pub on_error: Option<String>,
+}
+
+/// Cron configuration for scheduled service execution.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CronConfig {
+    /// Cron expression defining the schedule (e.g., "0 * * * * *").
+    pub expression: String,
+    /// Optional timezone for cron scheduling (defaults to system timezone).
+    pub timezone: Option<String>,
 }
 
 impl Config {
@@ -357,6 +368,7 @@ services:
                 .map(|deps| deps.into_iter().map(String::from).collect()),
             deployment: None,
             hooks: None,
+            cron: None,
         }
     }
 

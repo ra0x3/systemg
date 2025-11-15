@@ -73,6 +73,13 @@ services:
     hooks:
       on_start: "echo 'ngrok started'"
       on_error: "echo 'ngrok crashed'"
+
+  backup:
+    # Cron job that runs a backup script every hour
+    command: "sh /scripts/backup.sh"
+    cron:
+      expression: "0 0 * * * *"  # Every hour at minute 0
+      timezone: "America/New_York"  # Optional, defaults to system timezone
 ```
 
 ## Service dependencies

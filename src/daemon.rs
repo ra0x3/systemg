@@ -1564,6 +1564,7 @@ mod tests {
             },
             deployment: None,
             hooks: None,
+            cron: None,
         }
     }
 
