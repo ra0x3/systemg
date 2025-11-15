@@ -128,8 +128,9 @@ fn init_logging(args: &Cli) {
 }
 
 fn start_foreground(config_path: &str) -> Result<(), Box<dyn Error>> {
-    let daemon = build_daemon(config_path)?;
-    daemon.start_services_blocking()?;
+    let resolved_path = resolve_config_path(config_path)?;
+    let mut supervisor = Supervisor::new(resolved_path, false)?;
+    supervisor.run()?;
     Ok(())
 }
 
@@ -230,7 +231,46 @@ fn daemonize_systemg() -> std::io::Result<()> {
 
 fn register_signal_handler() -> Result<(), Box<dyn Error>> {
     ctrlc::set_handler(move || {
-        println!("systemg is shutting down... killing child process group");
+        println!("systemg is shutting down... terminating child services");
+
+        let mut service_pids: Vec<(String, libc::pid_t)> = Vec::new();
+        if let Ok(pid_file) = PidFile::load() {
+            for (service, pid) in pid_file.services() {
+                service_pids.push((service.clone(), *pid as libc::pid_t));
+            }
+        }
+
+        for (service, pgid) in &service_pids {
+            unsafe {
+                if libc::killpg(*pgid, libc::SIGTERM) == -1 {
+                    let err = std::io::Error::last_os_error();
+                    match err.raw_os_error() {
+                        Some(code) if code == libc::ESRCH => {}
+                        Some(code) if code == libc::EPERM => {
+                            let _ = libc::kill(*pgid, libc::SIGTERM);
+                        }
+                        _ => eprintln!(
+                            "systemg: failed to send SIGTERM to '{service}' (pgid {pgid}): {err}"
+                        ),
+                    }
+                }
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        for (service, pgid) in &service_pids {
+            unsafe {
+                if libc::killpg(*pgid, libc::SIGKILL) == -1 {
+                    let err = std::io::Error::last_os_error();
+                    if !matches!(err.raw_os_error(), Some(code) if code == libc::ESRCH) {
+                        eprintln!(
+                            "systemg: failed to send SIGKILL to '{service}' (pgid {pgid}): {err}"
+                        );
+                    }
+                }
+            }
+        }
 
         unsafe {
             let pgid = getpgrp();

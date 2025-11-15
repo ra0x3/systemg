@@ -82,6 +82,7 @@ Systemg offers a **lightweight**, **configuration-driven** solution that's **eas
 - **Dependency-Aware Startup** - Honour `depends_on` chains, skip unhealthy dependencies, and cascade stop dependents on failure.
 - **Environment Variable Support** - Load variables from `.env` files and per-service configurations.
 - **Rolling Deployments** - Orchestrate zero-downtime restarts with pre-start commands, health probes, and grace periods.
+- **Cron Scheduling** - Run short-lived, recurring tasks on a cron schedule with overlap detection and execution history.
 - **Minimal & Fast** - Built with Rust, designed for performance and low resource usage.
 - **No Root Required** - Unlike systemd, it doesn't take over PID 1.
 
@@ -135,6 +136,28 @@ services:
 - `grace_period` — optional delay to keep the old instance alive after the new one passes health checks, giving load balancers time to rebalance.
 
 If any rolling step fails, systemg restores the original instance and surfaces the error so unhealthy builds never replace running services.
+
+#### Cron Scheduling
+
+Services can be configured to run on a cron schedule for short-lived, recurring tasks. Cron jobs are managed by the supervisor and run independently of regular services:
+
+```yaml
+version: "1"
+services:
+  backup:
+    command: "sh backup-script.sh"
+    cron:
+      expression: "0 0 * * * *"  # Run every hour at minute 0
+      timezone: "America/New_York"  # Optional, defaults to system timezone
+```
+
+Key features:
+- **Standard cron syntax** - Uses 6-field cron expressions (second, minute, hour, day, month, day of week).
+- **Overlap detection** - If a cron job is scheduled to run while a previous execution is still running, the new execution is skipped and an error is logged.
+- **Execution history** - The last 10 executions are tracked with their start time, completion time, and status.
+- **Service separation** - A service cannot have both a `command` for continuous running and a `cron` configuration; cron is opt-in via the `cron` field.
+
+Note: Cron jobs do not support restart policies, as they are designed to be short-lived tasks that complete and exit.
 
 #### Additional Commands
 

@@ -9,6 +9,9 @@ pub mod cli;
 /// Configuration management.
 pub mod config;
 
+/// Cron scheduling for services.
+pub mod cron;
+
 /// Daemon process management.
 pub mod daemon;
 

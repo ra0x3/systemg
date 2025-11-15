@@ -194,7 +194,14 @@ impl Daemon {
         let project_root = config
             .project_dir
             .as_ref()
-            .map(PathBuf::from)
+            .and_then(|dir| {
+                let trimmed = dir.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(trimmed))
+                }
+            })
             .unwrap_or_else(|| PathBuf::from("."));
 
         Self {
@@ -1564,6 +1571,7 @@ mod tests {
             },
             deployment: None,
             hooks: None,
+            cron: None,
         }
     }
 
