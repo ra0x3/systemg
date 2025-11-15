@@ -410,6 +410,11 @@ impl Supervisor {
                 Ok(WaitStatus::Stopped(..)) | Ok(WaitStatus::Continued(_)) => {
                     thread::sleep(POLL_INTERVAL);
                 }
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                Ok(WaitStatus::PtraceEvent(_, _, _))
+                | Ok(WaitStatus::PtraceSyscall(_)) => {
+                    thread::sleep(POLL_INTERVAL);
+                }
                 Err(nix::errno::Errno::ECHILD) => {
                     // Already reaped elsewhere; assume success.
                     debug!(
