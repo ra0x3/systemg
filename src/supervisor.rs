@@ -367,7 +367,7 @@ impl Supervisor {
         pid: u32,
         job_name: &str,
     ) -> Result<bool, SupervisorError> {
-        use nix::sys::wait::{WaitStatus, waitpid};
+        use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
         use nix::unistd::Pid;
 
         let pid = Pid::from_raw(pid as i32);
@@ -376,10 +376,8 @@ impl Supervisor {
         let start = std::time::Instant::now();
 
         loop {
-            // Check if process is still running using kill with signal 0
-            match nix::sys::signal::kill(pid, None) {
-                Ok(_) => {
-                    // Process is still running
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) => {
                     if start.elapsed() > MAX_WAIT_TIME {
                         warn!(
                             "Cron job '{}' exceeded maximum wait time of 1 hour",
@@ -395,36 +393,33 @@ impl Supervisor {
                             },
                         ));
                     }
+
                     thread::sleep(POLL_INTERVAL);
                 }
-                Err(nix::errno::Errno::ESRCH) => {
-                    // Process no longer exists, try to get exit status
-                    match waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
-                        Ok(WaitStatus::Exited(_, exit_code)) => {
-                            debug!(
-                                "Cron job '{}' exited with code {}",
-                                job_name, exit_code
-                            );
-                            return Ok(exit_code == 0);
-                        }
-                        Ok(WaitStatus::Signaled(_, signal, _)) => {
-                            warn!(
-                                "Cron job '{}' was terminated by signal {:?}",
-                                job_name, signal
-                            );
-                            return Ok(false);
-                        }
-                        Ok(_) | Err(_) => {
-                            // Process is gone but we couldn't get status, assume failure
-                            return Ok(false);
-                        }
-                    }
+                Ok(WaitStatus::Exited(_, exit_code)) => {
+                    debug!("Cron job '{}' exited with code {}", job_name, exit_code);
+                    return Ok(exit_code == 0);
+                }
+                Ok(WaitStatus::Signaled(_, signal, _)) => {
+                    warn!(
+                        "Cron job '{}' was terminated by signal {:?}",
+                        job_name, signal
+                    );
+                    return Ok(false);
+                }
+                Ok(WaitStatus::Stopped(..)) | Ok(WaitStatus::Continued(_)) => {
+                    thread::sleep(POLL_INTERVAL);
+                }
+                Err(nix::errno::Errno::ECHILD) => {
+                    // Already reaped elsewhere; assume success.
+                    debug!(
+                        "Cron job '{}' already reaped before wait, assuming success",
+                        job_name
+                    );
+                    return Ok(true);
                 }
                 Err(e) => {
-                    error!(
-                        "Error checking process status for cron job '{}': {}",
-                        job_name, e
-                    );
+                    error!("Error waiting for cron job '{}': {}", job_name, e);
                     return Err(SupervisorError::Process(
                         ProcessManagerError::ServiceStartError {
                             service: job_name.to_string(),
