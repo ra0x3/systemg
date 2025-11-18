@@ -349,8 +349,7 @@ impl Supervisor {
             .into());
         };
 
-        self.daemon.stop_service(name)?;
-        self.daemon.start_service(name, service_config)?;
+        self.daemon.restart_service(name, service_config)?;
         Ok(())
     }
 

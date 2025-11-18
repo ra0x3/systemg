@@ -3,9 +3,6 @@ sidebar_position: 4
 title: logs
 ---
 
-| ⚠️ Note that on Unix-like systems, the logs command is currently not supported.   |
-|----------------------------------------------|
-
 View the last 50 lines of logs for all services.
 
 ```sh

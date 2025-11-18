@@ -101,5 +101,3 @@ View a custom number of log lines for a service:
 ```sh
 sysg logs database --lines 100
 ```
-
-> ⚠️ Note: On Unix-like systems, the logs command is currently not supported.

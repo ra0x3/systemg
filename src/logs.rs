@@ -12,9 +12,6 @@ use tracing::debug;
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
-#[cfg(not(target_os = "linux"))]
-use colored::*;
-
 /// Returns the path to the log file for a given service and kind (stdout or stderr).
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
@@ -116,14 +113,16 @@ impl LogManager {
         Ok(())
     }
 
-    /// Fallback implementation for macOS and other platforms where log tailing is not supported.
+    /// macOS implementation for showing logs using log files.
     #[cfg(target_os = "macos")]
     fn show_logs_platform(
         &self,
         service_name: &str,
         pid: u32,
-        _lines: usize,
+        lines: usize,
     ) -> Result<(), LogsManagerError> {
+        use std::process::{Command, Stdio};
+
         println!(
             "\n+{:-^33}+\n\
      | {:^31} |\n\
@@ -133,16 +132,26 @@ impl LogManager {
             "-"
         );
 
-        let github_issue_url = "https://github.com/ra0x3/systemg/issues/new";
-        println!(
-                "\n{}\n{}\n{}\n{}\n{}\n{}\n\n",
-                "⚠️  WARNING: Log Tailing Not Supported on macOS".bold().yellow(),
-                "--------------------------------------------".yellow(),
-                "MacOS does not provide a straightforward way to tail stdout/stderr of an existing process.".yellow(),
-                "If you believe this should be supported, please open an issue at:".yellow(),
-                github_issue_url.blue().underline(),
-                "Thank you for helping improve systemg!".yellow()
-            );
+        let stdout_path = get_log_path(service_name, "stdout");
+        let stderr_path = get_log_path(service_name, "stderr");
+
+        let command = format!(
+            "tail -n {} -f {} {}",
+            lines,
+            stdout_path.display(),
+            stderr_path.display()
+        );
+        debug!("Executing command: {command}");
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(command);
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+
+        let child = cmd.spawn()?.wait();
+
+        if let Err(e) = child {
+            return Err(LogsManagerError::LogProcessError(e));
+        }
 
         Ok(())
     }

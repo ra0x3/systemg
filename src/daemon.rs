@@ -590,6 +590,36 @@ impl Daemon {
         Ok(())
     }
 
+    /// Restarts a single service, honoring its deployment strategy.
+    pub fn restart_service(
+        &self,
+        name: &str,
+        service: &ServiceConfig,
+    ) -> Result<(), ProcessManagerError> {
+        let strategy = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.strategy.as_deref())
+            .unwrap_or("immediate");
+
+        match strategy {
+            "rolling" => {
+                self.rolling_restart_service(name, service)?;
+            }
+            "immediate" => {
+                self.immediate_restart_service(name, service)?;
+            }
+            other => {
+                warn!(
+                    "Unknown deployment strategy '{other}' for service '{name}', falling back to immediate restart."
+                );
+                self.immediate_restart_service(name, service)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Performs a rolling restart keeping the previous instance alive until the replacement is
     /// verified healthy.
     fn rolling_restart_service(
@@ -728,24 +758,65 @@ impl Daemon {
         service_name: &str,
         command: &str,
     ) -> Result<(), ProcessManagerError> {
-        let output = Command::new("sh")
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        use std::thread;
+
+        let mut child = Command::new("sh")
             .arg("-c")
             .arg(command)
             .current_dir(&self.project_root)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|source| ProcessManagerError::ServiceStartError {
                 service: service_name.to_string(),
                 source,
             })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            let message = if stderr.is_empty() {
-                format!("Pre-start command exited with status {}", output.status)
-            } else {
-                format!("Pre-start command failed: {stderr}")
-            };
+        let service_name_owned = service_name.to_string();
 
+        // Stream stdout in a separate thread
+        let stdout_handle = child.stdout.take().map(|stdout| {
+            let service_name = service_name_owned.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().map_while(Result::ok) {
+                    info!("[{service_name} pre-start] {line}");
+                }
+            })
+        });
+
+        // Stream stderr in a separate thread
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            let service_name = service_name_owned.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    warn!("[{service_name} pre-start] {line}");
+                }
+            })
+        });
+
+        // Wait for the process to complete
+        let status =
+            child
+                .wait()
+                .map_err(|source| ProcessManagerError::ServiceStartError {
+                    service: service_name.to_string(),
+                    source,
+                })?;
+
+        // Wait for output threads to finish
+        if let Some(handle) = stdout_handle {
+            let _ = handle.join();
+        }
+        if let Some(handle) = stderr_handle {
+            let _ = handle.join();
+        }
+
+        if !status.success() {
+            let message = format!("Pre-start command exited with status {}", status);
             return Err(ProcessManagerError::ServiceStartError {
                 service: service_name.to_string(),
                 source: std::io::Error::other(message),
