@@ -95,7 +95,7 @@ For each service in dependency order:
    - Separate threads write logs to files in `~/.local/share/systemg/logs/` followed by the service name and `_stdout.log` or `_stderr.log`
    - Logs are written asynchronously to avoid blocking the service
 
-5. **Lifecycle Hooks**: If configured, `on_start.success` hooks are executed after the process is spawned, while `on_start.error` hooks run if the spawn fails
+5. **Lifecycle Hooks**: If configured, `on_start.success` hooks are executed after the process is spawned, while `on_start.error` hooks run if the spawn fails. Learn more in the [Webhooks guide](../webhooks.md).
 
 6. **Readiness Verification**: Systemg polls the service to confirm it's running:
    - Polls every 50ms for up to 5 seconds
@@ -149,8 +149,8 @@ After services are started, systemg spawns a monitoring thread that:
 2. **Crash Detection**: Detects when services exit unexpectedly
 3. **Restart Handling**: For services with `restart_policy: "always"` or `restart_policy: "on-failure"`:
    - Waits for the configured `backoff` duration (default: 5 seconds)
-   - Runs any `on_stop.error` hooks to report the crash
-   - Restarts the service if the policy allows and fires `on_restart.success` hooks on success (or `on_restart.error` if the restart attempt fails)
+   - Runs any `on_stop.error` webhooks to report the crash
+   - Restarts the service if the policy allows and fires `on_restart.success` webhooks on success (or `on_restart.error` if the restart attempt fails)
 4. **Dependency Cascading**: When a service crashes, all services that depend on it are automatically stopped to prevent workloads from running against unhealthy backends
 
 ### Cron Services
@@ -176,7 +176,7 @@ If a prerequisite service fails to start:
 
 If a service fails to start:
 - The error is logged
-- `on_start.error` hooks are executed if configured
+- `on_start.error` webhooks are executed if configured
 - Dependent services are skipped
 - The first error encountered is returned
 

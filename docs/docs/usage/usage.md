@@ -5,7 +5,9 @@ title: Usage
 
 # Usage
 
-Systemg uses a simple YAML-based configuration and supports the following commands:
+Systemg uses a simple YAML-based configuration and supports the following commands.
+Beyond lifecycle management, you can attach [webhooks](../webhooks.md) to service
+events or run [cron-scheduled](../cron.md) jobs alongside long-lived processes.
 
 Every command accepts `--log-level <LEVEL>` (string names like `info`/`debug` or numbers 0-5) if you want to change tracing output for a single invocation. For example, `sysg status --log-level debug`.
 
