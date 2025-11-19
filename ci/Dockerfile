@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM lukemathwalker/cargo-chef:latest-rust-1.90.0 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1.75.0 AS chef
 
 WORKDIR /build/
 
@@ -20,6 +20,7 @@ RUN apt-get update -y && \
 
 FROM chef AS planner
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV RUSTFLAGS="-C strip=symbols -C opt-level=z -C codegen-units=1 -C lto=yes
 
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
@@ -27,7 +28,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 # Stage 2: build binaries
 FROM chef AS builder
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-ENV RUSTFLAGS="-C strip=symbols -C opt-level=z -C codegen-units=1 -C lto=yes"
 COPY --from=planner /build/recipe.json recipe.json
 
 COPY . .
@@ -43,6 +43,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update -y \
     tzdata \
     ca-certificates \
     wget \
+    # Clean up
     && apt-get autoremove -y \
     && apt-get clean -y
 
