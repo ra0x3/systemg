@@ -3,94 +3,225 @@ sidebar_position: 4
 title: Configuration
 ---
 
-Below is an example of a complete `systemg` configuration file.
+## Overview
 
+Systemg uses a YAML-based configuration file to define services, their dependencies, restart policies, and deployment strategies. The configuration file is typically named `systemg.yaml` or `sysg.yaml` and should be placed in your project root.
+
+## Configuration Structure
+
+### Top-Level Configuration
+
+The configuration file has two main sections:
+
+- **`version`** – Configuration file version (currently `"1"`)
+- **`services`** – Map of service names to their configurations
+
+### Complete Example
+
+Below is a comprehensive example showing all available configuration options:
 
 ```yaml
 # Configuration file version
 version: "1"
 
 services:
-  # Name of the service
+  # Example service with environment file
   postgres:
-    # The command to start the service
+    # The command to start the service (required)
     command: "postgres -D /var/lib/postgres"
 
+    # Environment variable configuration (optional)
     env:
       # Path to a file containing environment variables for this service
       file: "/etc/myapp/database.env"
 
-    # Policy for restarting the service: "always", "on-failure", or "never"
+    # Policy for restarting the service: "always", "on-failure", or "never" (optional)
     restart_policy: "always"
 
-    # Time to wait before attempting a restart (backoff duration)
+    # Time to wait before attempting a restart (backoff duration) (optional)
     backoff: "5s"
 
+    # Lifecycle hooks (optional)
     hooks:
-      # Command to run when the service starts successfully
-      on_start: "echo 'Postgres started'"
-      # Command to run if the service crashes or fails to start
-      on_error: "echo 'Postgres crashed'"
+      # Commands to run when the service starts
+      on_start:
+        success:
+          command: "echo 'Postgres started'"
+        error:
+          command: "echo 'Postgres failed to start'"
+      # Commands to run when the service stops unexpectedly
+      on_stop:
+        error:
+          command: "echo 'Postgres crashed'"
 
+  # Example service with inline environment variables and deployment configuration
   django:
+    # The command to start the service (required)
     command: "python manage.py runserver"
 
+    # Environment variable configuration (optional)
     env:
+      # Inline environment variables for the service
       vars:
-        # Inline environment variables for the service
         DEBUG: "true"
         DATABASE_URL: "postgres://user:password@localhost:5432/dbname"
 
+    # Policy for restarting the service: "always", "on-failure", or "never" (optional)
     restart_policy: "on-failure"
+
+    # Time to wait before attempting a restart (backoff duration) (optional)
     backoff: "5s"
 
+    # Deployment strategy configuration (optional)
     deployment:
-      # Keep the existing instance running until a replacement passes its checks
+      # Deployment strategy: "rolling" or "immediate" (default: "immediate")
       strategy: "rolling"
       # Optional build or migration step executed before the new process launches
       pre_start: "python manage.py migrate"
       # Optional health probe the new instance must satisfy
       health_check:
+        # Health check URL (required if health_check is specified)
         url: "http://localhost:8000/health"
+        # Health check timeout duration (e.g., "30s") (optional, default: "30s")
         timeout: "45s"
+        # Number of retries before giving up (optional, default: 3)
         retries: 4
       # Optional grace window before the old instance is terminated
       grace_period: "5s"
 
-    # List of services this one depends on (must be started before this)
+    # List of services this one depends on (must be started before this) (optional)
     depends_on:
       - "postgres"
 
+    # Lifecycle hooks (optional)
     hooks:
-      on_start: "curl -X POST http://example.com/hook/django-start"
-      on_error: "curl -X POST http://example.com/hook/django-error"
+      on_start:
+        success:
+          command: "curl -X POST http://example.com/hook/django-start"
+        error:
+          command: "curl -X POST http://example.com/hook/django-error"
+      on_stop:
+        success:
+          command: "curl -X POST http://example.com/hook/django-stop"
 
+  # Example service with minimal configuration
   ngrok:
+    # The command to start the service (required)
     command: "ngrok http 8000"
+
+    # Policy for restarting the service: "always", "on-failure", or "never" (optional)
     restart_policy: "on-failure"
+
+    # Time to wait before attempting a restart (backoff duration) (optional)
     backoff: "3s"
 
+    # Lifecycle hooks (optional)
     hooks:
-      on_start: "echo 'ngrok started'"
-      on_error: "echo 'ngrok crashed'"
+      on_start:
+        success:
+          command: "echo 'ngrok started'"
+      on_restart:
+        success:
+          command: "echo 'ngrok restarted'"
 
+  # Example service with cron scheduling
   backup:
-    # Cron job that runs a backup script every hour
+    # The command to start the service (required)
     command: "sh /scripts/backup.sh"
+
+    # Cron configuration for scheduled service execution (optional)
     cron:
+      # Cron expression defining the schedule (e.g., "0 * * * * *") (required if cron is specified)
       expression: "0 0 * * * *"  # Every hour at minute 0
-      timezone: "America/New_York"  # Optional, defaults to system timezone
+      # Optional timezone for cron scheduling (defaults to system timezone)
+      timezone: "America/New_York"
 ```
 
-## Service dependencies
+## Service Configuration Options
 
-Use the `depends_on` field to express service prerequisites. Systemg evaluates the dependency graph before launching processes and enforces the following rules:
+### Basic Service Properties
+
+#### `command` (required)
+
+The command to start the service. This is the only required field for each service.
+
+```yaml
+services:
+  myapp:
+    command: "./target/release/myapp"
+```
+
+#### `restart_policy` (optional)
+
+Policy for restarting the service when it exits. Valid values:
+
+- `"always"` – Always restart the service when it exits
+- `"on-failure"` – Only restart if the service exits with a non-zero status code
+- `"never"` – Never restart the service automatically
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    restart_policy: "always"
+```
+
+#### `backoff` (optional)
+
+Time to wait before attempting a restart after a service fails. Accepts duration strings like `"5s"`, `"1m"`, `"30s"`, etc.
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    restart_policy: "on-failure"
+    backoff: "5s"
+```
+
+### Environment Variables
+
+#### `env` (optional)
+
+Configuration for environment variables. You can use either a file or inline variables, or both.
+
+#### `env.file` (optional)
+
+Path to a file containing environment variables. Can be absolute or relative to the configuration file location.
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    env:
+      file: "/etc/myapp/.env"
+```
+
+#### `env.vars` (optional)
+
+Inline key-value pairs of environment variables.
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    env:
+      vars:
+        DEBUG: "true"
+        PORT: "8080"
+        DATABASE_URL: "postgres://localhost/mydb"
+```
+
+### Service Dependencies
+
+#### `depends_on` (optional)
+
+List of service names that must be started before this service. Systemg evaluates the dependency graph before launching processes and enforces the following rules:
 
 - **Topological startup** – services are started in an order that guarantees every dependency is already running (or has exited successfully for one-shot jobs) before its dependents launch.
 - **Fail fast on unhealthy prerequisites** – if a dependency fails to start, dependents are skipped and the failure is surfaced instead of allowing a partial boot.
 - **Cascading shutdowns** – when a running service crashes, all services that depend on it are stopped automatically to keep the environment consistent.
 
-```yaml title="Example"
+```yaml
 services:
   redis:
     command: "redis-server"
@@ -103,14 +234,18 @@ services:
 
 If `redis` exits with a non-zero status, `worker` will not start (or will be stopped if it is already running) until `redis` is healthy again.
 
-## Deployment strategies
+### Deployment Configuration
 
-Systemg supports two deployment strategies per service:
+#### `deployment` (optional)
 
-- `immediate` *(default)* – stop the running instance and start a fresh copy right away. This matches the behaviour in earlier releases and requires no additional configuration.
-- `rolling` – launch a replacement alongside the existing instance, verify it is healthy, optionally wait for a grace period, and only then terminate the previous process. This keeps services available throughout a restart.
+Deployment strategy configuration for managing service restarts and updates.
 
-Enable rolling restarts by adding a `deployment` block to a service definition:
+#### `deployment.strategy` (optional)
+
+Deployment strategy for the service. Valid values:
+
+- `"immediate"` *(default)* – stop the running instance and start a fresh copy right away. This matches the behaviour in earlier releases and requires no additional configuration.
+- `"rolling"` – launch a replacement alongside the existing instance, verify it is healthy, optionally wait for a grace period, and only then terminate the previous process. This keeps services available throughout a restart.
 
 ```yaml
 services:
@@ -119,19 +254,175 @@ services:
     restart_policy: "always"
     deployment:
       strategy: "rolling"
+```
+
+#### `deployment.pre_start` (optional)
+
+Shell command executed before the new process launches. Useful for builds, migrations, or asset preparation. Non-zero exit codes abort the deployment and preserve the old instance.
+
+```yaml
+services:
+  api:
+    command: "./target/release/api"
+    deployment:
+      strategy: "rolling"
       pre_start: "cargo build --release"
+```
+
+#### `deployment.health_check` (optional)
+
+HTTP probe configuration that the new instance must pass before the old instance is terminated.
+
+#### `deployment.health_check.url` (required if `health_check` is specified)
+
+The URL to check for health. Must return a successful HTTP status code (2xx).
+
+```yaml
+services:
+  api:
+    command: "./api"
+    deployment:
+      strategy: "rolling"
+      health_check:
+        url: "http://localhost:8080/health"
+```
+
+#### `deployment.health_check.timeout` (optional)
+
+Maximum time to wait for health checks to pass. Defaults to `"30s"` if not specified.
+
+```yaml
+services:
+  api:
+    command: "./api"
+    deployment:
+      strategy: "rolling"
+      health_check:
+        url: "http://localhost:8080/health"
+        timeout: "60s"
+```
+
+#### `deployment.health_check.retries` (optional)
+
+Number of retry attempts before giving up. Defaults to `3` if not specified.
+
+```yaml
+services:
+  api:
+    command: "./api"
+    deployment:
+      strategy: "rolling"
       health_check:
         url: "http://localhost:8080/health"
         timeout: "60s"
         retries: 5
+```
+
+#### `deployment.grace_period` (optional)
+
+Additional delay to keep the old instance alive after the new one passes health checks. Handy for draining load balancer connections.
+
+```yaml
+services:
+  api:
+    command: "./api"
+    deployment:
+      strategy: "rolling"
+      health_check:
+        url: "http://localhost:8080/health"
       grace_period: "5s"
 ```
 
-### Rolling restart settings
-
-- **`strategy`** – set to `rolling` to opt in; omit or set to `immediate` to keep the classic stop/start cycle.
-- **`pre_start`** *(optional)* – shell command executed before the new process launches. Useful for builds, migrations, or asset preparation. Non-zero exit codes abort the deployment and preserve the old instance.
-- **`health_check`** *(optional)* – HTTP probe the new instance must pass. Systemg retries based on `retries` (default 3) until the total elapsed time exceeds `timeout` (default 30s).
-- **`grace_period`** *(optional)* – additional delay to keep the old instance alive after the new one passes health checks. Handy for draining load balancer connections.
-
 If any step of the rolling restart fails, the new process is halted and the previous instance is restored automatically. This ensures unhealthy builds never displace a working service.
+
+### Lifecycle Hooks
+
+#### `hooks` (optional)
+
+Commands to run at specific points in the service lifecycle. Each lifecycle stage supports
+`success` and `error` handlers with a required `command` and an optional `timeout`
+(`"10s"`, `"2m"`, etc.). Hook commands inherit the service environment; values defined in
+`env.vars` override those loaded from `.env` files.
+
+#### `hooks.on_start` (optional)
+
+Runs after Systemg attempts to start the service. `success` handlers fire when the process is
+spawned successfully, while `error` handlers run if the spawn fails (for example, when the
+binary is missing or permissions are insufficient).
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    hooks:
+      on_start:
+        success:
+          command: "curl -X POST https://example.com/hooks/myapp-started"
+          timeout: "10s"
+        error:
+          command: "curl -X POST https://example.com/hooks/myapp-start-failed"
+```
+
+#### `hooks.on_stop` (optional)
+
+Runs whenever the service exits. `success` handlers execute for graceful shutdowns (including
+operator-initiated stops), while `error` handlers execute if the process crashes or exits with a
+non-zero status.
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    hooks:
+      on_stop:
+        success:
+          command: "curl -X POST https://example.com/hooks/myapp-stopped"
+        error:
+          command: "curl -X POST https://example.com/hooks/myapp-crashed"
+```
+
+#### `hooks.on_restart` (optional)
+
+Runs when Systemg automatically restarts a crashed service. Use this to surface self-healing
+events to external systems.
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    hooks:
+      on_restart:
+        success:
+          command: "curl -X POST https://example.com/hooks/myapp-restarted"
+```
+
+### Cron Scheduling
+
+#### `cron` (optional)
+
+Configuration for scheduled service execution. When specified, the service runs on a cron schedule rather than continuously.
+
+#### `cron.expression` (required if `cron` is specified)
+
+Cron expression defining the schedule. Uses standard cron format with seconds: `"second minute hour day month weekday"`.
+
+```yaml
+services:
+  backup:
+    command: "sh /scripts/backup.sh"
+    cron:
+      expression: "0 0 * * * *"  # Every hour at minute 0
+```
+
+#### `cron.timezone` (optional)
+
+Timezone for cron scheduling. Defaults to system timezone if not specified.
+
+```yaml
+services:
+  backup:
+    command: "sh /scripts/backup.sh"
+    cron:
+      expression: "0 0 * * * *"
+      timezone: "America/New_York"
+```

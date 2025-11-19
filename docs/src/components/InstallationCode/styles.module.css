@@ -10,7 +10,7 @@
   border: 1px solid var(--ifm-color-emphasis-300);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  max-width: 600px;
+  max-width: 900px;
   margin: 0 auto;
   overflow: hidden;
 }
@@ -44,7 +44,8 @@
   padding: 0;
   margin: 0;
   flex: 1;
-  word-break: break-all;
+  white-space: nowrap;
+  overflow-x: auto;
 }
 
 .copyButton {
