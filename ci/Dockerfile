@@ -1,51 +1,70 @@
 # Stage 1: Build
-FROM lukemathwalker/cargo-chef:latest-rust-1.75.0 AS chef
+FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
+FROM --platform=$BUILDPLATFORM rust:1.90.0-bookworm AS chef
 
+ARG TARGETPLATFORM
+RUN cargo install cargo-chef
 WORKDIR /build/
 
+COPY --from=xx / /
+
 # hadolint ignore=DL3008
-RUN apt-get update -y && \
+RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    build-essential \
-    clang \
-    cmake \
-    gcc \
-    git \
-    libclang-dev \
     lld \
-    llvm \
-    libssl-dev \
-    pkg-config \
-    && apt-get clean
+    clang \
+    libclang-dev \
+    && xx-apt-get update  \
+    && xx-apt-get install -y libc6-dev g++ binutils \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 
 FROM chef AS planner
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-ENV RUSTFLAGS="-C strip=symbols -C opt-level=z -C codegen-units=1 -C lto=yes
-
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# Stage 2: build binaries
-FROM chef AS builder
-ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
-COPY --from=planner /build/recipe.json recipe.json
 
+FROM chef AS builder
+ARG DEBUG_SYMBOLS=false
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV CARGO_PROFILE_RELEASE_DEBUG=$DEBUG_SYMBOLS
+COPY --from=planner /build/recipe.json recipe.json
+RUN echo $CARGO_PROFILE_RELEASE_DEBUG
+# Build our project dependencies, not our application!
+RUN \
+  --mount=type=cache,target=/usr/local/cargo/registry/index \
+  --mount=type=cache,target=/usr/local/cargo/registry/cache \
+  --mount=type=cache,target=/usr/local/cargo/git/db \
+  --mount=type=cache,target=/build/target \
+  xx-cargo chef cook --release --recipe-path recipe.json
+# Up to this point, if our dependency tree stays the same,
+# all layers should be cached.
 COPY . .
-RUN cargo build --release --all-targets
+# build application
+# note this puts the builds outside of the cache dirs so the run image can copy them
+RUN \
+  --mount=type=cache,target=/usr/local/cargo/registry/index \
+  --mount=type=cache,target=/usr/local/cargo/registry/cache \
+  --mount=type=cache,target=/usr/local/cargo/git/db \
+  --mount=type=cache,target=/build/target \
+  xx-cargo build --release \
+    && xx-verify ./target/$(xx-cargo --print-target-triple)/release/sysg \
+    && cp ./target/$(xx-cargo --print-target-triple)/release/sysg /root/sysg \
+    && cp ./target/$(xx-cargo --print-target-triple)/release/sysg.d /root/sysg.d
 
 # Stage 3: Run
-FROM ubuntu:22.04 AS run
+FROM debian:bookworm-slim AS run
 
 WORKDIR /root/
 
-RUN DEBIAN_FRONTEND=noninteractive apt-get update -y \
-    && apt-get install -y --no-install-recommends \
-    tzdata \
-    ca-certificates \
-    wget \
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends ca-certificates \
     # Clean up
     && apt-get autoremove -y \
-    && apt-get clean -y
+    && apt-get clean -y \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/sysg .
-COPY --from=builder /build/target/release/sysg.d .
+COPY --from=builder /root/sysg .
+COPY --from=builder /root/sysg.d .

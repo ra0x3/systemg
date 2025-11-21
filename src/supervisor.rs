@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::load_config,
     cron::CronManager,
-    daemon::Daemon,
+    daemon::{Daemon, ServiceReadyState},
     error::ProcessManagerError,
     ipc::{self, ControlCommand, ControlResponse},
 };
@@ -121,7 +121,21 @@ impl Supervisor {
                                                 &job_name_clone,
                                                 &service_config,
                                             ) {
-                                                Ok(_) => {
+                                                Ok(
+                                                    ServiceReadyState::CompletedSuccess,
+                                                ) => {
+                                                    info!(
+                                                        "Cron job '{}' completed successfully",
+                                                        job_name_clone
+                                                    );
+                                                    cron_manager_clone
+                                                        .mark_job_completed(
+                                                            &job_name_clone,
+                                                            true,
+                                                            None,
+                                                        );
+                                                }
+                                                Ok(ServiceReadyState::Running) => {
                                                     // Give the process a moment to register in the PID file
                                                     thread::sleep(Duration::from_millis(
                                                         50,

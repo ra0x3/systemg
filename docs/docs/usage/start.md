@@ -95,7 +95,7 @@ For each service in dependency order:
    - Separate threads write logs to files in `~/.local/share/systemg/logs/` followed by the service name and `_stdout.log` or `_stderr.log`
    - Logs are written asynchronously to avoid blocking the service
 
-5. **Lifecycle Hooks**: If configured, `on_start.success` hooks are executed after the process is spawned, while `on_start.error` hooks run if the spawn fails. Learn more in the [Webhooks guide](../webhooks.md).
+5. **Lifecycle Hooks**: If configured, `on_start.success` hooks fire once the service survives the initial readiness probe (or exits successfully immediately), while `on_start.error` hooks run if the spawn fails or the process dies before reaching that state. Learn more in the [Webhooks guide](../webhooks.md).
 
 6. **Readiness Verification**: Systemg polls the service to confirm it's running:
    - Polls every 50ms for up to 5 seconds

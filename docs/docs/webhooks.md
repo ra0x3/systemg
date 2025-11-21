@@ -26,6 +26,11 @@ Each webhook belongs to a **lifecycle stage** and fires with a distinct
 - `error` indicates the lifecycle failed (e.g. spawn failed, the process
   crashed, or the restart attempt errored).
 
+`on_start.success` fires once Systemg observes the service remain running across
+consecutive readiness probes (or when a one-shot service exits cleanly during
+startup). If the spawn fails outright or the process terminates before reaching
+that ready state, `on_start.error` is emitted instead.
+
 Manual `sysg stop --service foo` invocations count as an `on_stop.success`
 because the supervisor observed a clean, operator-initiated shutdown. Crashes or
 non-zero exit codes generate `on_stop.error` before the restart workflow runs.
@@ -71,11 +76,11 @@ services:
 Webhook commands inherit the service environment that Systemg prepares before
 launching the main process:
 
-1. Variables declared in `env.vars` are applied first.
-2. Variables loaded from the optional `env.file` fill in any gaps.
+1. Variables loaded from the optional `env.file` form the base environment.
+2. Inline key/value pairs in `env.vars` then override any duplicates.
 3. The supervisor’s own process environment provides final fallbacks.
 
-This order means inline variables in `env.vars` override values defined in the
+This order means inline overrides in `env.vars` win over values defined in the
 `.env` file, matching the behaviour of the services themselves. Values are also
 available for `${VAR}` expansions during configuration parsing, so hooks can
 safely reference the same secrets and settings as the main service command.
