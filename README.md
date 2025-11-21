@@ -82,6 +82,7 @@ Systemg offers a **lightweight**, **configuration-driven** solution that's **eas
 - **Dependency-Aware Startup** - Honour `depends_on` chains, skip unhealthy dependencies, and cascade stop dependents on failure.
 - **Environment Variable Support** - Load variables from `.env` files and per-service configurations.
 - **Rolling Deployments** - Orchestrate zero-downtime restarts with pre-start commands, health probes, and grace periods.
+- **Lifecycle Webhooks** - Trigger outbound notifications or remediation scripts on start/stop/restart outcomes with per-hook timeouts. See [Webhooks documentation](docs/docs/webhooks.md).
 - **Cron Scheduling** - Run short-lived, recurring tasks on a cron schedule with overlap detection and execution history.
 - **Minimal & Fast** - Built with Rust, designed for performance and low resource usage.
 - **No Root Required** - Unlike systemd, it doesn't take over PID 1.

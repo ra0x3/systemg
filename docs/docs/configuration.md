@@ -342,13 +342,15 @@ If any step of the rolling restart fails, the new process is halted and the prev
 Commands to run at specific points in the service lifecycle. Each lifecycle stage supports
 `success` and `error` handlers with a required `command` and an optional `timeout`
 (`"10s"`, `"2m"`, etc.). Hook commands inherit the service environment; values defined in
-`env.vars` override those loaded from `.env` files.
+`env.vars` override those loaded from `.env` files. See the dedicated
+[Webhooks](./webhooks.md) guide for a deeper reference and best practices.
 
 #### `hooks.on_start` (optional)
 
-Runs after Systemg attempts to start the service. `success` handlers fire when the process is
-spawned successfully, while `error` handlers run if the spawn fails (for example, when the
-binary is missing or permissions are insufficient).
+Runs after Systemg attempts to start the service. `success` handlers fire once the process
+survives the initial readiness window (or exits cleanly immediately for one-shot tasks), while
+`error` handlers run if the spawn fails or the process exits before reaching that state (for
+example, when the binary is missing or crashes instantly).
 
 ```yaml
 services:

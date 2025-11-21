@@ -9,7 +9,7 @@ use std::{
     fs,
     io::ErrorKind,
     os::unix::process::CommandExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
@@ -21,9 +21,65 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 use crate::config::{
-    Config, EnvConfig, HealthCheckConfig, HookType, Hooks, ServiceConfig,
+    Config, EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage,
+    ServiceConfig,
 };
 use crate::error::{PidFileError, ProcessManagerError};
+
+/// Build the environment map for a service, giving inline `env.vars` precedence over entries loaded
+/// from `env.file`.
+fn collect_service_env(
+    env: &Option<EnvConfig>,
+    project_root: &Path,
+    service_name: &str,
+) -> HashMap<String, String> {
+    let mut resolved = HashMap::new();
+
+    if let Some(env_config) = env {
+        if let Some(file_path) = env_config.path(project_root) {
+            match fs::read_to_string(&file_path) {
+                Ok(content) => {
+                    for raw_line in content.lines() {
+                        let line = raw_line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+
+                        if let Some((key, value)) = line.split_once('=') {
+                            let key = key.trim().to_string();
+                            let mut value = value.trim().to_string();
+
+                            if value.starts_with('"')
+                                && value.ends_with('"')
+                                && value.len() >= 2
+                            {
+                                value = value[1..value.len() - 1].to_string();
+                            }
+
+                            resolved.entry(key).or_insert(value);
+                        } else {
+                            warn!(
+                                "Ignoring malformed line in env file for '{}': {}",
+                                service_name, line
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!("Failed to read env file for '{}': {}", service_name, err);
+                }
+            }
+        }
+
+        if let Some(vars) = &env_config.vars {
+            for (key, value) in vars {
+                resolved.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    resolved
+}
 
 /// Represents the PID file structure
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -99,45 +155,114 @@ impl PidFile {
 
 /// Run a hook command with the provided environment variables.
 fn run_hook(
-    hook_cmd: &str,
+    action: &HookAction,
     env: &Option<EnvConfig>,
-    hook_type: HookType,
+    stage: HookStage,
+    outcome: HookOutcome,
     service_name: &str,
+    project_root: &Path,
 ) {
+    let hook_label = format!("{}.{}", stage.as_ref(), outcome.as_ref());
     debug!(
         "Running {} hook for '{}': `{}`",
-        hook_type.as_ref(),
-        service_name,
-        hook_cmd
+        hook_label, service_name, action.command
     );
 
     let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(hook_cmd);
+    cmd.arg("-c").arg(&action.command);
 
-    if let Some(env_config) = env
-        && let Some(vars) = &env_config.vars
-    {
-        for (k, v) in vars {
-            cmd.env(k, v);
-        }
+    for (key, value) in collect_service_env(env, project_root, service_name) {
+        cmd.env(key, value);
     }
+
+    let timeout = match action.timeout.as_deref() {
+        Some(raw_timeout) => match Daemon::parse_duration(raw_timeout) {
+            Ok(duration) => Some(duration),
+            Err(err) => {
+                error!(
+                    "Invalid timeout '{}' for hook {} on '{}': {}",
+                    raw_timeout, hook_label, service_name, err
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
     match cmd.spawn() {
         Ok(mut child) => {
-            let _ = child.wait();
-            debug!(
-                "{} hook for '{}' completed.",
-                hook_type.as_ref(),
-                service_name
-            );
+            let wait_result = match timeout {
+                Some(duration) => wait_with_timeout(&mut child, duration),
+                None => child.wait().map(Some),
+            };
+
+            match wait_result {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        debug!(
+                            "{} hook for '{}' completed successfully.",
+                            hook_label, service_name
+                        );
+                    } else {
+                        warn!(
+                            "{} hook for '{}' exited with status: {:?}",
+                            hook_label, service_name, status
+                        );
+                    }
+                }
+                Ok(None) => {
+                    if let Some(duration) = timeout {
+                        warn!(
+                            "{} hook for '{}' timed out after {:?}. Terminating hook process.",
+                            hook_label, service_name, duration
+                        );
+                    } else {
+                        warn!(
+                            "{} hook for '{}' did not complete but no timeout was configured.",
+                            hook_label, service_name
+                        );
+                    }
+                    if let Err(err) = child.kill() {
+                        error!(
+                            "Failed to terminate timed-out hook {} for '{}': {}",
+                            hook_label, service_name, err
+                        );
+                    }
+                    let _ = child.wait();
+                }
+                Err(err) => {
+                    error!(
+                        "Failed while waiting for hook {} on '{}': {}",
+                        hook_label, service_name, err
+                    );
+                }
+            }
         }
         Err(e) => {
             error!(
                 "Failed to run {} hook for '{}': {}",
-                hook_type.as_ref(),
-                service_name,
-                e
+                hook_label, service_name, e
             );
+        }
+    }
+}
+
+/// Wait for a child process with a timeout, returning `Ok(None)` on timeout.
+fn wait_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(Some(status)),
+            None => {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
         }
     }
 }
@@ -152,7 +277,7 @@ enum ServiceProbe {
 
 /// Indicates when a service is considered ready for dependents or has already completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServiceReadyState {
+pub enum ServiceReadyState {
     Running,
     CompletedSuccess,
 }
@@ -244,7 +369,6 @@ impl Daemon {
         env: Option<EnvConfig>,
         working_dir: PathBuf,
         processes: Arc<Mutex<HashMap<String, Child>>>,
-        hooks: Option<Hooks>,
         detach_children: bool,
     ) -> Result<u32, ProcessManagerError> {
         debug!("Launching service: '{service_name}' with command: `{command}`");
@@ -257,11 +381,11 @@ impl Daemon {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        if let Some(env) = env.clone()
-            && let Some(vars) = &env.vars
-        {
-            debug!("Setting environment variables: {vars:?}");
-            for (key, value) in vars {
+        let merged_env = collect_service_env(&env, &working_dir, service_name);
+        if !merged_env.is_empty() {
+            let keys: Vec<_> = merged_env.keys().cloned().collect();
+            debug!("Setting environment variables: {:?}", keys);
+            for (key, value) in merged_env {
                 cmd.env(key, value);
             }
         }
@@ -318,22 +442,11 @@ impl Daemon {
                     spawn_log_writer(service_name, err, "stderr");
                 }
 
-                if let Some(hooks) = hooks
-                    && let Some(hook_cmd) = &hooks.on_start
-                {
-                    run_hook(hook_cmd, &env, HookType::OnStart, service_name);
-                }
-
                 processes.lock()?.insert(service_name.to_string(), child);
                 Ok(pid)
             }
             Err(e) => {
                 error!("Failed to start service '{service_name}': {e}");
-                if let Some(hooks) = hooks
-                    && let Some(hook_cmd) = &hooks.on_start
-                {
-                    run_hook(hook_cmd, &env, HookType::OnStart, service_name);
-                }
                 Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),
                     source: e,
@@ -405,24 +518,13 @@ impl Daemon {
             }
 
             match self.start_service(&service_name, service) {
-                Ok(_) => match self.wait_for_service_ready(&service_name) {
-                    Ok(ServiceReadyState::Running) => {
-                        healthy_services.insert(service_name.clone());
-                    }
-                    Ok(ServiceReadyState::CompletedSuccess) => {
-                        info!("Service '{service_name}' completed successfully.");
-                        healthy_services.insert(service_name.clone());
-                    }
-                    Err(err) => {
-                        error!(
-                            "Service '{service_name}' failed immediately after launch: {err}"
-                        );
-                        if first_error.is_none() {
-                            first_error = Some(err);
-                        }
-                        failed_services.insert(service_name.clone());
-                    }
-                },
+                Ok(ServiceReadyState::Running) => {
+                    healthy_services.insert(service_name.clone());
+                }
+                Ok(ServiceReadyState::CompletedSuccess) => {
+                    info!("Service '{service_name}' completed successfully.");
+                    healthy_services.insert(service_name.clone());
+                }
                 Err(err) => {
                     error!("Failed to start service '{service_name}': {err}");
                     if first_error.is_none() {
@@ -453,6 +555,18 @@ impl Daemon {
         &self,
         service_name: &str,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
+        Self::wait_for_service_ready_with_handles(
+            service_name,
+            &self.processes,
+            &self.pid_file,
+        )
+    }
+
+    fn wait_for_service_ready_with_handles(
+        service_name: &str,
+        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        pid_file: &Arc<Mutex<PidFile>>,
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
         const MAX_WAIT: Duration = Duration::from_secs(5);
         const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -460,11 +574,7 @@ impl Daemon {
         let mut seen_running_once = false;
 
         while waited <= MAX_WAIT {
-            match Self::probe_service_state(
-                service_name,
-                &self.processes,
-                &self.pid_file,
-            )? {
+            match Self::probe_service_state(service_name, processes, pid_file)? {
                 ServiceProbe::Running => {
                     if seen_running_once {
                         return Ok(ServiceReadyState::Running);
@@ -645,24 +755,12 @@ impl Daemon {
             }
         }
 
-        if let Err(err) = self.start_service(name, service) {
-            if let Some(detached) = previous.take() {
-                self.restore_detached_service(name, detached)?;
-            }
-            return Err(err);
-        }
-
-        let readiness = self.wait_for_service_ready(name);
-        match readiness {
-            Ok(ServiceReadyState::Running) => {}
-            Ok(ServiceReadyState::CompletedSuccess) => {
-                info!("Service '{name}' exited successfully immediately after restart.");
-            }
+        let start_state = match self.start_service(name, service) {
+            Ok(state) => state,
             Err(err) => {
-                error!("Service '{name}' failed to become ready after restart: {err}");
                 if let Err(stop_err) = self.stop_service(name) {
                     warn!(
-                        "Failed to stop new instance of '{name}' after readiness failure: {stop_err}"
+                        "Failed to stop new instance of '{name}' after restart error: {stop_err}"
                     );
                 }
                 if let Some(detached) = previous.take() {
@@ -670,6 +768,10 @@ impl Daemon {
                 }
                 return Err(err);
             }
+        };
+
+        if matches!(start_state, ServiceReadyState::CompletedSuccess) {
+            info!("Service '{name}' exited successfully immediately after restart.");
         }
 
         if let Some(health_check) = service
@@ -738,18 +840,13 @@ impl Daemon {
         info!("Performing immediate restart for service: {name}");
 
         self.stop_service(name)?;
-        self.start_service(name, service)?;
+        let start_state = self.start_service(name, service)?;
 
-        match self.wait_for_service_ready(name) {
-            Ok(ServiceReadyState::Running) => Ok(()),
-            Ok(ServiceReadyState::CompletedSuccess) => {
-                info!(
-                    "Service '{name}' completed successfully immediately after restart."
-                );
-                Ok(())
-            }
-            Err(err) => Err(err),
+        if let ServiceReadyState::CompletedSuccess = start_state {
+            info!("Service '{name}' completed successfully immediately after restart.");
         }
+
+        Ok(())
     }
 
     /// Runs the configured pre-start command prior to launching a replacement service instance.
@@ -1111,14 +1208,13 @@ impl Daemon {
         &self,
         name: &str,
         service: &ServiceConfig,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
         info!("Starting service: {name}");
 
         let processes = Arc::clone(&self.processes);
         let command = service.command.clone();
         let env = service.env.clone();
         let service_name = name.to_string();
-        let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
@@ -1132,7 +1228,6 @@ impl Daemon {
                 env,
                 working_dir.clone(),
                 processes.clone(),
-                hooks,
                 detach_children,
             ) {
                 Ok(pid) => {
@@ -1147,7 +1242,7 @@ impl Daemon {
         });
 
         // Wait for the thread to complete and propagate any errors
-        let _ = handle.join().map_err(|e| {
+        let launch_result = handle.join().map_err(|e| {
             error!("Failed to join service thread for '{name}': {e:?}");
             ProcessManagerError::ServiceStartError {
                 service: name.to_string(),
@@ -1160,7 +1255,62 @@ impl Daemon {
 
         debug!("Service thread for '{name}' completed");
 
-        Ok(())
+        if let Err(err) = launch_result {
+            if let Some(action) = service
+                .hooks
+                .as_ref()
+                .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
+            {
+                run_hook(
+                    action,
+                    &service.env,
+                    HookStage::OnStart,
+                    HookOutcome::Error,
+                    name,
+                    &self.project_root,
+                );
+            }
+            return Err(err);
+        }
+
+        let readiness = self.wait_for_service_ready(name);
+
+        match readiness {
+            Ok(state) => {
+                if let Some(action) = service
+                    .hooks
+                    .as_ref()
+                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Success))
+                {
+                    run_hook(
+                        action,
+                        &service.env,
+                        HookStage::OnStart,
+                        HookOutcome::Success,
+                        name,
+                        &self.project_root,
+                    );
+                }
+                Ok(state)
+            }
+            Err(err) => {
+                if let Some(action) = service
+                    .hooks
+                    .as_ref()
+                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
+                {
+                    run_hook(
+                        action,
+                        &service.env,
+                        HookStage::OnStart,
+                        HookOutcome::Error,
+                        name,
+                        &self.project_root,
+                    );
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Starts a single service and stores it in the process map.
@@ -1183,7 +1333,8 @@ impl Daemon {
         &self,
         name: &str,
         service: &ServiceConfig,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
+        use std::sync::mpsc;
         use std::thread;
 
         info!("Starting service: {name}");
@@ -1192,25 +1343,49 @@ impl Daemon {
         let command = service.command.clone();
         let env = service.env.clone();
         let service_name = name.to_string();
-        let hooks = service.hooks.clone();
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
+        let (tx, rx) = mpsc::channel();
         // Spawn the thread, but DO NOT join it.
         thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
 
-            match Daemon::launch_attached_service(
+            let launch_result = Daemon::launch_attached_service(
                 &service_name,
                 &command,
                 env,
                 working_dir.clone(),
                 processes.clone(),
-                hooks,
                 detach_children,
-            ) {
+            );
+
+            match launch_result {
                 Ok(pid) => {
-                    pid_file.lock().unwrap().insert(&service_name, pid).unwrap();
+                    match pid_file.lock() {
+                        Ok(mut guard) => {
+                            if let Err(err) = guard.insert(&service_name, pid) {
+                                error!(
+                                    "Failed to record PID for service '{service_name}': {}",
+                                    err
+                                );
+                                let _ = tx.send(Err(err.into()));
+                                return;
+                            }
+                        }
+                        Err(poison) => {
+                            error!(
+                                "Pid file mutex poisoned while starting '{}': {}",
+                                service_name, poison
+                            );
+                            let _ = tx.send(Err(ProcessManagerError::from(poison)));
+                            return;
+                        }
+                    }
+
+                    if tx.send(Ok(pid)).is_err() {
+                        return;
+                    }
 
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(60));
@@ -1218,13 +1393,79 @@ impl Daemon {
                 }
                 Err(e) => {
                     error!("Failed to start service '{service_name}': {e}");
+                    let _ = tx.send(Err(e));
                 }
             }
         });
 
         debug!("Service thread for '{name}' launched and detached (Linux)");
 
-        Ok(())
+        let launch_result =
+            rx.recv()
+                .map_err(|recv_err| ProcessManagerError::ServiceStartError {
+                    service: name.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        format!("thread failed to report launch status: {recv_err}"),
+                    ),
+                })?;
+
+        if let Err(err) = launch_result {
+            if let Some(action) = service
+                .hooks
+                .as_ref()
+                .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
+            {
+                run_hook(
+                    action,
+                    &service.env,
+                    HookStage::OnStart,
+                    HookOutcome::Error,
+                    name,
+                    &self.project_root,
+                );
+            }
+            return Err(err);
+        }
+
+        let readiness = self.wait_for_service_ready(name);
+
+        match readiness {
+            Ok(state) => {
+                if let Some(action) = service
+                    .hooks
+                    .as_ref()
+                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Success))
+                {
+                    run_hook(
+                        action,
+                        &service.env,
+                        HookStage::OnStart,
+                        HookOutcome::Success,
+                        name,
+                        &self.project_root,
+                    );
+                }
+                Ok(state)
+            }
+            Err(err) => {
+                if let Some(action) = service
+                    .hooks
+                    .as_ref()
+                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
+                {
+                    run_hook(
+                        action,
+                        &service.env,
+                        HookStage::OnStart,
+                        HookOutcome::Error,
+                        name,
+                        &self.project_root,
+                    );
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Shared stop implementation that accepts explicit handles, making it reusable from helpers
@@ -1384,7 +1625,31 @@ impl Daemon {
     /// If the service is running, it will be terminated and removed from the process map.
     /// This function correctly handles both Unix/macOS and Linux semantics for process groups.
     pub fn stop_service(&self, service_name: &str) -> Result<(), ProcessManagerError> {
-        Self::stop_service_with_handles(service_name, &self.processes, &self.pid_file)
+        let was_running = { self.pid_file.lock()?.get(service_name).is_some() };
+
+        let result = Self::stop_service_with_handles(
+            service_name,
+            &self.processes,
+            &self.pid_file,
+        );
+
+        if was_running
+            && result.is_ok()
+            && let Some(service) = self.config.services.get(service_name)
+            && let Some(hooks) = &service.hooks
+            && let Some(action) = hooks.action(HookStage::OnStop, HookOutcome::Success)
+        {
+            run_hook(
+                action,
+                &service.env,
+                HookStage::OnStop,
+                HookOutcome::Success,
+                service_name,
+                &self.project_root,
+            );
+        }
+
+        result
     }
 
     /// Recursively stops any services that depend (directly or indirectly) on the specified root
@@ -1527,7 +1792,32 @@ impl Daemon {
                 let mut pid_file_guard = pid_file.lock().unwrap();
 
                 for (name, exited_normally) in exited_services {
-                    if pid_file_guard.get(&name).is_none() {
+                    let manually_stopped = pid_file_guard.get(&name).is_none();
+                    let hook_outcome = if manually_stopped || exited_normally {
+                        HookOutcome::Success
+                    } else {
+                        HookOutcome::Error
+                    };
+
+                    if let Some(service) = config.services.get(&name) {
+                        let env = service.env.clone();
+                        if let Some(action) = service
+                            .hooks
+                            .as_ref()
+                            .and_then(|cfg| cfg.action(HookStage::OnStop, hook_outcome))
+                        {
+                            run_hook(
+                                action,
+                                &env,
+                                HookStage::OnStop,
+                                hook_outcome,
+                                &name,
+                                &project_root,
+                            );
+                        }
+                    }
+
+                    if manually_stopped {
                         info!("Service '{name}' was manually stopped. Skipping restart.");
                     } else if !exited_normally {
                         warn!("Service '{name}' crashed. Restarting...");
@@ -1602,20 +1892,123 @@ impl Daemon {
             warn!("Restarting '{name}' after {backoff} seconds...");
             thread::sleep(Duration::from_secs(backoff));
 
-            if let Err(e) = Daemon::launch_attached_service(
+            let restart_result = Daemon::launch_attached_service(
                 &name,
                 &command,
                 env.clone(),
                 project_root.clone(),
                 Arc::clone(&processes),
-                hooks.clone(),
                 detach_children,
-            ) {
-                error!("Failed to restart '{name}': {e}");
-            } else if let Ok(mut pid_file_guard) = pid_file.lock()
-                && let Ok(latest) = PidFile::reload()
-            {
-                *pid_file_guard = latest;
+            );
+
+            match restart_result {
+                Ok(_) => {
+                    match Self::wait_for_service_ready_with_handles(
+                        &name,
+                        &processes,
+                        &pid_file,
+                    ) {
+                        Ok(_) => {
+                            if let Some(hooks_cfg) = hooks.as_ref()
+                                && let Some(action) =
+                                    hooks_cfg.action(HookStage::OnStart, HookOutcome::Success)
+                            {
+                                run_hook(
+                                    action,
+                                    &env,
+                                    HookStage::OnStart,
+                                    HookOutcome::Success,
+                                    &name,
+                                    &project_root,
+                                );
+                            }
+
+                            if let Some(hooks_cfg) = hooks.as_ref()
+                                && let Some(action) =
+                                    hooks_cfg.action(HookStage::OnRestart, HookOutcome::Success)
+                            {
+                                run_hook(
+                                    action,
+                                    &env,
+                                    HookStage::OnRestart,
+                                    HookOutcome::Success,
+                                    &name,
+                                    &project_root,
+                                );
+                            }
+
+                            if let Ok(mut pid_file_guard) = pid_file.lock()
+                                && let Ok(latest) = PidFile::reload()
+                            {
+                                *pid_file_guard = latest;
+                            }
+                        }
+                        Err(err) => {
+                            error!(
+                                "Service '{name}' failed to become ready after restart: {err}"
+                            );
+
+                            if let Some(hooks_cfg) = hooks.as_ref()
+                                && let Some(action) =
+                                    hooks_cfg.action(HookStage::OnStart, HookOutcome::Error)
+                            {
+                                run_hook(
+                                    action,
+                                    &env,
+                                    HookStage::OnStart,
+                                    HookOutcome::Error,
+                                    &name,
+                                    &project_root,
+                                );
+                            }
+
+                            if let Some(hooks_cfg) = hooks.as_ref()
+                                && let Some(action) =
+                                    hooks_cfg.action(HookStage::OnRestart, HookOutcome::Error)
+                            {
+                                run_hook(
+                                    action,
+                                    &env,
+                                    HookStage::OnRestart,
+                                    HookOutcome::Error,
+                                    &name,
+                                    &project_root,
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to restart '{name}': {e}");
+
+                    if let Some(hooks_cfg) = hooks.as_ref()
+                        && let Some(action) =
+                            hooks_cfg.action(HookStage::OnStart, HookOutcome::Error)
+                    {
+                        run_hook(
+                            action,
+                            &env,
+                            HookStage::OnStart,
+                            HookOutcome::Error,
+                            &name,
+                            &project_root,
+                        );
+                    }
+
+                    if let Some(hooks_cfg) = hooks.as_ref()
+                        && let Some(action) =
+                            hooks_cfg.action(HookStage::OnRestart, HookOutcome::Error)
+                    {
+                        run_hook(
+                            action,
+                            &env,
+                            HookStage::OnRestart,
+                            HookOutcome::Error,
+                            &name,
+                            &project_root,
+                        );
+                    }
+                }
             }
         })
         .join();

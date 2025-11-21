@@ -6,7 +6,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
 };
-use strum_macros::{AsRefStr, EnumString};
+use strum_macros::AsRefStr;
 
 use crate::error::ProcessManagerError;
 
@@ -89,18 +89,60 @@ impl EnvConfig {
     }
 }
 
-#[derive(Debug, EnumString, AsRefStr)]
+/// Lifecycle stages for service hooks.
+#[derive(Debug, Clone, Copy, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
-pub enum HookType {
+pub enum HookStage {
     OnStart,
-    OnError,
+    OnStop,
+    OnRestart,
+}
+
+/// Outcomes recorded for a lifecycle stage.
+#[derive(Debug, Clone, Copy, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum HookOutcome {
+    Success,
+    Error,
+}
+
+/// Command executed for a hook outcome.
+#[derive(Debug, Deserialize, Clone)]
+pub struct HookAction {
+    pub command: String,
+    pub timeout: Option<String>,
+}
+
+/// Hook commands grouped by outcome for a lifecycle stage.
+#[derive(Debug, Deserialize, Clone)]
+pub struct HookLifecycleConfig {
+    pub success: Option<HookAction>,
+    pub error: Option<HookAction>,
 }
 
 /// Hooks that run on specific service lifecycle events.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Hooks {
-    pub on_start: Option<String>,
-    pub on_error: Option<String>,
+    pub on_start: Option<HookLifecycleConfig>,
+    pub on_stop: Option<HookLifecycleConfig>,
+    #[serde(default)]
+    pub on_restart: Option<HookLifecycleConfig>,
+}
+
+impl Hooks {
+    /// Returns the configured hook action for a lifecycle stage and outcome.
+    pub fn action(&self, stage: HookStage, outcome: HookOutcome) -> Option<&HookAction> {
+        let lifecycle = match stage {
+            HookStage::OnStart => self.on_start.as_ref(),
+            HookStage::OnStop => self.on_stop.as_ref(),
+            HookStage::OnRestart => self.on_restart.as_ref(),
+        }?;
+
+        match outcome {
+            HookOutcome::Success => lifecycle.success.as_ref(),
+            HookOutcome::Error => lifecycle.error.as_ref(),
+        }
+    }
 }
 
 /// Cron configuration for scheduled service execution.
@@ -257,6 +299,18 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
             && let Some(resolved_path) = env_config.path(&base_path)
         {
             load_env_file(&resolved_path.to_string_lossy())?;
+        }
+
+        if let Some(env_config) = &service.env
+            && let Some(vars) = &env_config.vars
+        {
+            // Inline environment variables take precedence over values loaded from env files
+            // when expanding the YAML template.
+            for (key, value) in vars {
+                unsafe {
+                    env::set_var(key, value);
+                }
+            }
         }
     }
 

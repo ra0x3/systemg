@@ -6,6 +6,8 @@ title: Getting Started
 # Getting Started
 
 `systemg` is a lightweight, Rust-based process manager built for speed, simplicity, and clarity.
+It manages long-running services, fires lifecycle [webhooks](./webhooks.md), and can operate
+cron-style automation alongside your always-on workloads.
 
 This guide walks you through installation and basic usage.
 
