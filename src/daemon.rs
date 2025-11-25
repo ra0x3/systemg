@@ -485,6 +485,31 @@ impl Daemon {
                 None => continue,
             };
 
+            if let Some(skip_command) = &service.skip {
+                match self.evaluate_skip_condition(&service_name, skip_command) {
+                    Ok(true) => {
+                        info!("Skipping service '{service_name}' due to skip condition");
+                        healthy_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
+                    Ok(false) => {
+                        debug!(
+                            "Skip condition for '{service_name}' evaluated to false, starting service"
+                        );
+                    }
+                    Err(err) => {
+                        error!(
+                            "Failed to evaluate skip condition for '{service_name}': {err}"
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(err);
+                        }
+                        failed_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
+                }
+            }
+
             if let Some(deps) = &service.depends_on {
                 for dep in deps {
                     if failed_services.contains(dep) {
@@ -543,6 +568,41 @@ impl Daemon {
 
         thread::sleep(Duration::from_millis(200));
         Ok(())
+    }
+
+    /// Evaluates a skip condition command for a service.
+    /// Returns Ok(true) if the service should be skipped (command exits with status 0),
+    /// Ok(false) if the service should not be skipped (command exits with non-zero status),
+    /// or Err if the command fails to execute.
+    fn evaluate_skip_condition(
+        &self,
+        service_name: &str,
+        skip_command: &str,
+    ) -> Result<bool, ProcessManagerError> {
+        debug!("Evaluating skip condition for '{service_name}': `{skip_command}`");
+
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(skip_command);
+        cmd.current_dir(&self.project_root);
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+
+        match cmd.status() {
+            Ok(status) => {
+                let should_skip = status.success();
+                debug!(
+                    "Skip condition for '{service_name}' evaluated to: {should_skip} (exit code: {:?})",
+                    status.code()
+                );
+                Ok(should_skip)
+            }
+            Err(e) => {
+                error!("Failed to execute skip condition for '{service_name}': {e}");
+                Err(ProcessManagerError::ServiceStartError {
+                    service: service_name.to_string(),
+                    source: e,
+                })
+            }
+        }
     }
 
     /// Polls the newly spawned service until it is confirmed running or exits.
@@ -2036,6 +2096,7 @@ mod tests {
             deployment: None,
             hooks: None,
             cron: None,
+            skip: None,
         }
     }
 

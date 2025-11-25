@@ -40,6 +40,9 @@ pub struct ServiceConfig {
     pub hooks: Option<Hooks>,
     /// Cron configuration for scheduled service execution.
     pub cron: Option<CronConfig>,
+    /// Optional command that determines if the service should be skipped.
+    /// If the command exits with status 0, the service is skipped.
+    pub skip: Option<String>,
 }
 
 /// Deployment strategy configuration for a service.
@@ -423,6 +426,7 @@ services:
             deployment: None,
             hooks: None,
             cron: None,
+            skip: None,
         }
     }
 

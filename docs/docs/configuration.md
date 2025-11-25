@@ -135,6 +135,15 @@ services:
       expression: "0 0 * * * *"  # Every hour at minute 0
       # Optional timezone for cron scheduling (defaults to system timezone)
       timezone: "America/New_York"
+
+  # Example service with skip condition
+  optional-service:
+    # The command to start the service (required)
+    command: "./optional-service"
+
+    # Skip this service if a condition is met (optional)
+    # If the command exits with status 0, the service is skipped
+    skip: "test -z \"$ENABLE_OPTIONAL\""
 ```
 
 ## Service Configuration Options
@@ -177,6 +186,30 @@ services:
     restart_policy: "on-failure"
     backoff: "5s"
 ```
+
+#### `skip` (optional)
+
+A shell command that determines whether the service should be skipped. If the command exits with status code 0 (success), the service is skipped and will not be started. If the command exits with a non-zero status code, the service proceeds normally.
+
+This is useful for conditional service execution based on environment conditions, feature flags, or other runtime criteria.
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    # Skip this service if a feature flag file doesn't exist
+    skip: "test ! -f /etc/myapp/feature-enabled"
+
+  postgres:
+    command: "postgres -D /var/lib/postgres"
+    # Skip if running in CI environment
+    skip: "test -n \"$CI\""
+```
+
+When a service is skipped:
+- The service is treated as successfully started for dependency resolution
+- Dependent services can still start normally
+- A log message is emitted indicating the service was skipped
 
 ### Environment Variables
 
