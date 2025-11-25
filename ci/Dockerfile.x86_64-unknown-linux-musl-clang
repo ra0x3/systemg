@@ -1,0 +1,18 @@
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    gcc \
+    git \
+    libclang-dev \
+    lld \
+    llvm \
+    musl-tools \
+    pkg-config \
+    tzdata \
+    wget \
+    && apt-get clean

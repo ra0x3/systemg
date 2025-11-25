@@ -13,14 +13,19 @@ This guide walks you through installation and basic usage.
 
 ## System requirements
 
-`systemg` has minimal system dependencies, which is one of its key advantages over systemd.
+> `systemg` has minimal system dependencies, which is one of its key advantages over systemd.
 
 **Currently supported:**
-- Linux (all major distributions)
 
-**Coming soon:**
-- Alpine Linux
-- macOS
+| OS | Distribution | Architecture | Supported |
+|---|---|---|---|
+| Linux | Generic | x86_64 | ✅ |
+| Linux | Generic | aarch64 | ✅ |
+| Linux | Debian | x86_64 | ✅ |
+| Linux | Alpine | x86_64 | ✅ |
+| Linux | Alpine | aarch64 | ✅ |
+| macOS | - | x86_64 | ✅ |
+| macOS | - | aarch64 (Apple Silicon) | ✅ |
 
 **Installation requirements:**
 - No additional packages or dependencies to install

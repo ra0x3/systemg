@@ -39,6 +39,9 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
 

@@ -1,0 +1,19 @@
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    binutils-aarch64-linux-gnu \
+    build-essential \
+    ca-certificates \
+    clang \
+    cmake \
+    gcc \
+    git \
+    libclang-dev \
+    lld \
+    llvm \
+    musl-tools \
+    pkg-config \
+    tzdata \
+    wget \
+    && apt-get clean
