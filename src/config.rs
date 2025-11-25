@@ -19,6 +19,9 @@ pub struct Config {
     pub services: HashMap<String, ServiceConfig>,
     /// Root directory from which relative paths are resolved.
     pub project_dir: Option<String>,
+    /// Optional environment variables that apply to all services by default.
+    /// Service-level env configurations override these root-level settings.
+    pub env: Option<EnvConfig>,
 }
 
 /// Configuration for an individual service.
@@ -89,6 +92,39 @@ impl EnvConfig {
                 base.join(path)
             }
         })
+    }
+
+    /// Merges two EnvConfig instances, with the service-level config taking precedence.
+    /// Returns a new EnvConfig that combines root and service-level settings.
+    pub fn merge(
+        root: Option<&EnvConfig>,
+        service: Option<&EnvConfig>,
+    ) -> Option<EnvConfig> {
+        match (root, service) {
+            (None, None) => None,
+            (Some(r), None) => Some(r.clone()),
+            (None, Some(s)) => Some(s.clone()),
+            (Some(root_cfg), Some(service_cfg)) => {
+                let mut merged_vars = root_cfg.vars.clone().unwrap_or_default();
+
+                // Service-level vars override root-level vars
+                if let Some(service_vars) = &service_cfg.vars {
+                    merged_vars.extend(service_vars.clone());
+                }
+
+                // Service-level file takes precedence over root-level file
+                let file = service_cfg.file.clone().or_else(|| root_cfg.file.clone());
+
+                Some(EnvConfig {
+                    file,
+                    vars: if merged_vars.is_empty() {
+                        None
+                    } else {
+                        Some(merged_vars)
+                    },
+                })
+            }
+        }
     }
 }
 
@@ -297,14 +333,36 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         .to_path_buf();
     config.project_dir = Some(base_path.to_string_lossy().to_string());
 
+    // Load root-level env file if present
+    if let Some(env_config) = &config.env
+        && let Some(resolved_path) = env_config.path(&base_path)
+    {
+        load_env_file(&resolved_path.to_string_lossy())?;
+    }
+
+    // Load root-level env vars if present
+    if let Some(env_config) = &config.env
+        && let Some(vars) = &env_config.vars
+    {
+        for (key, value) in vars {
+            unsafe {
+                env::set_var(key, value);
+            }
+        }
+    }
+
+    // Merge root-level env with service-level env and load service-specific env
     for service in config.services.values_mut() {
-        if let Some(env_config) = &service.env
+        // Merge root env with service env (service takes precedence)
+        let merged_env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
+
+        if let Some(env_config) = &merged_env
             && let Some(resolved_path) = env_config.path(&base_path)
         {
             load_env_file(&resolved_path.to_string_lossy())?;
         }
 
-        if let Some(env_config) = &service.env
+        if let Some(env_config) = &merged_env
             && let Some(vars) = &env_config.vars
         {
             // Inline environment variables take precedence over values loaded from env files
@@ -315,6 +373,9 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
                 }
             }
         }
+
+        // Update service env to the merged version
+        service.env = merged_env;
     }
 
     let expanded_content = expand_env_vars(&content)?;
@@ -323,6 +384,12 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         .map_err(ProcessManagerError::ConfigParseError)?;
 
     config.project_dir = Some(base_path.to_string_lossy().to_string());
+
+    // Apply the env merge again after re-parsing
+    for service in config.services.values_mut() {
+        service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
+    }
+
     config.service_start_order()?;
     Ok(config)
 }
@@ -441,6 +508,7 @@ services:
             version: "1".into(),
             services,
             project_dir: None,
+            env: None,
         };
 
         let order = config.service_start_order().unwrap();
@@ -456,6 +524,7 @@ services:
             version: "1".into(),
             services,
             project_dir: None,
+            env: None,
         };
 
         match config.service_start_order() {
@@ -480,6 +549,7 @@ services:
             version: "1".into(),
             services,
             project_dir: None,
+            env: None,
         };
 
         match config.service_start_order() {
@@ -489,5 +559,193 @@ services:
             }
             other => panic!("expected dependency cycle error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_env_merge_both_none() {
+        let result = EnvConfig::merge(None, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_env_merge_root_only() {
+        let root = EnvConfig {
+            file: Some("root.env".into()),
+            vars: Some(HashMap::from([("ROOT_VAR".into(), "root_value".into())])),
+        };
+
+        let result = EnvConfig::merge(Some(&root), None).unwrap();
+        assert_eq!(result.file, Some("root.env".into()));
+        assert_eq!(
+            result.vars.as_ref().unwrap().get("ROOT_VAR"),
+            Some(&"root_value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_env_merge_service_only() {
+        let service = EnvConfig {
+            file: Some("service.env".into()),
+            vars: Some(HashMap::from([(
+                "SERVICE_VAR".into(),
+                "service_value".into(),
+            )])),
+        };
+
+        let result = EnvConfig::merge(None, Some(&service)).unwrap();
+        assert_eq!(result.file, Some("service.env".into()));
+        assert_eq!(
+            result.vars.as_ref().unwrap().get("SERVICE_VAR"),
+            Some(&"service_value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_env_merge_service_overrides_root() {
+        let root = EnvConfig {
+            file: Some("root.env".into()),
+            vars: Some(HashMap::from([
+                ("SHARED_VAR".into(), "root_value".into()),
+                ("ROOT_ONLY".into(), "root_only_value".into()),
+            ])),
+        };
+
+        let service = EnvConfig {
+            file: Some("service.env".into()),
+            vars: Some(HashMap::from([
+                ("SHARED_VAR".into(), "service_value".into()),
+                ("SERVICE_ONLY".into(), "service_only_value".into()),
+            ])),
+        };
+
+        let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();
+
+        // Service file should take precedence
+        assert_eq!(result.file, Some("service.env".into()));
+
+        // Service vars should override root vars
+        let vars = result.vars.unwrap();
+        assert_eq!(vars.get("SHARED_VAR"), Some(&"service_value".to_string()));
+        assert_eq!(vars.get("ROOT_ONLY"), Some(&"root_only_value".to_string()));
+        assert_eq!(
+            vars.get("SERVICE_ONLY"),
+            Some(&"service_only_value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_env_merge_service_file_only_overrides_root() {
+        let root = EnvConfig {
+            file: Some("root.env".into()),
+            vars: Some(HashMap::from([("ROOT_VAR".into(), "root_value".into())])),
+        };
+
+        let service = EnvConfig {
+            file: Some("service.env".into()),
+            vars: None,
+        };
+
+        let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();
+
+        // Service file should take precedence
+        assert_eq!(result.file, Some("service.env".into()));
+
+        // Root vars should be preserved
+        let vars = result.vars.unwrap();
+        assert_eq!(vars.get("ROOT_VAR"), Some(&"root_value".to_string()));
+    }
+
+    #[test]
+    fn test_load_config_with_root_env() {
+        let dir = tempdir().unwrap();
+        let root_env_path = dir.path().join("root.env");
+        let mut root_env_file = File::create(&root_env_path).unwrap();
+        writeln!(root_env_file, "ROOT_VAR=from_root_file").unwrap();
+
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).unwrap();
+        writeln!(
+            yaml_file,
+            r#"
+version: "1"
+env:
+  file: "root.env"
+  vars:
+    GLOBAL_VAR: "global_value"
+services:
+  service1:
+    command: "echo ${{ROOT_VAR}} ${{GLOBAL_VAR}}"
+  service2:
+    command: "echo ${{ROOT_VAR}} ${{GLOBAL_VAR}}"
+"#
+        )
+        .unwrap();
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+
+        // Both services should have the root env
+        for service_name in ["service1", "service2"] {
+            let service = &config.services[service_name];
+            let env = service.env.as_ref().unwrap();
+            let vars = env.vars.as_ref().unwrap();
+            assert_eq!(vars.get("GLOBAL_VAR"), Some(&"global_value".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_load_config_service_env_overrides_root() {
+        let dir = tempdir().unwrap();
+        let root_env_path = dir.path().join("root.env");
+        let mut root_env_file = File::create(&root_env_path).unwrap();
+        writeln!(root_env_file, "ROOT_FILE_VAR=root").unwrap();
+
+        let service_env_path = dir.path().join("service.env");
+        let mut service_env_file = File::create(&service_env_path).unwrap();
+        writeln!(service_env_file, "SERVICE_FILE_VAR=service").unwrap();
+
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).unwrap();
+        writeln!(
+            yaml_file,
+            r#"
+version: "1"
+env:
+  file: "root.env"
+  vars:
+    SHARED: "root_value"
+    ROOT_ONLY: "root"
+services:
+  service1:
+    command: "echo test"
+    env:
+      file: "service.env"
+      vars:
+        SHARED: "service_value"
+        SERVICE_ONLY: "service"
+  service2:
+    command: "echo test"
+"#
+        )
+        .unwrap();
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+
+        // Service1 should have merged env with service overrides
+        let service1 = &config.services["service1"];
+        let env1 = service1.env.as_ref().unwrap();
+        assert_eq!(env1.file, Some("service.env".into()));
+        let vars1 = env1.vars.as_ref().unwrap();
+        assert_eq!(vars1.get("SHARED"), Some(&"service_value".to_string()));
+        assert_eq!(vars1.get("ROOT_ONLY"), Some(&"root".to_string()));
+        assert_eq!(vars1.get("SERVICE_ONLY"), Some(&"service".to_string()));
+
+        // Service2 should have only root env
+        let service2 = &config.services["service2"];
+        let env2 = service2.env.as_ref().unwrap();
+        assert_eq!(env2.file, Some("root.env".into()));
+        let vars2 = env2.vars.as_ref().unwrap();
+        assert_eq!(vars2.get("SHARED"), Some(&"root_value".to_string()));
+        assert_eq!(vars2.get("ROOT_ONLY"), Some(&"root".to_string()));
+        assert!(vars2.get("SERVICE_ONLY").is_none());
     }
 }

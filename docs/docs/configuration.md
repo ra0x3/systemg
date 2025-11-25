@@ -11,9 +11,10 @@ Systemg uses a YAML-based configuration file to define services, their dependenc
 
 ### Top-Level Configuration
 
-The configuration file has two main sections:
+The configuration file has the following top-level sections:
 
 - **`version`** – Configuration file version (currently `"1"`)
+- **`env`** – Optional environment configuration shared by all services (see [Root-Level Environment Variables](#root-level-environment-variables))
 - **`services`** – Map of service names to their configurations
 
 ### Complete Example
@@ -23,6 +24,13 @@ Below is a comprehensive example showing all available configuration options:
 ```yaml
 # Configuration file version
 version: "1"
+
+# Optional root-level environment variables (shared across all services)
+env:
+  file: "/etc/myapp/common.env"
+  vars:
+    LOG_LEVEL: "info"
+    APP_ENV: "production"
 
 services:
   # Example service with environment file
@@ -213,13 +221,77 @@ When a service is skipped:
 
 ### Environment Variables
 
+Environment variables can be configured at two levels: root-level (applying to all services by default) or service-level (applying to a specific service). Service-level environment configuration overrides root-level configuration.
+
+#### Root-Level Environment Variables
+
+You can define environment variables at the top level of your configuration file that apply to all services by default. This is useful when you have common environment variables shared across multiple services.
+
+```yaml
+version: "1"
+
+# Root-level environment variables
+env:
+  file: "/etc/myapp/common.env"
+  vars:
+    LOG_LEVEL: "info"
+    APP_ENV: "production"
+
+services:
+  api:
+    command: "./api"
+    # api inherits LOG_LEVEL=info and APP_ENV=production from root env
+
+  worker:
+    command: "./worker"
+    # worker also inherits LOG_LEVEL=info and APP_ENV=production from root env
+```
+
+**Override Behavior:**
+
+When both root-level and service-level environment configurations are present, service-level configuration takes precedence:
+
+- **Service-level `env.file`** overrides root-level `env.file`
+- **Service-level `env.vars`** override root-level `env.vars` for matching keys
+- Variables defined only at the root level are inherited by all services
+- Variables defined only at the service level apply only to that service
+
+```yaml
+version: "1"
+
+# Root-level environment variables
+env:
+  file: "/etc/myapp/common.env"
+  vars:
+    LOG_LEVEL: "info"
+    APP_ENV: "production"
+    TIMEOUT: "30s"
+
+services:
+  api:
+    command: "./api"
+    env:
+      # Service-level env overrides root-level env
+      vars:
+        LOG_LEVEL: "debug"  # Overrides root LOG_LEVEL
+        PORT: "8080"        # Additional service-specific variable
+    # Result: LOG_LEVEL=debug, APP_ENV=production, TIMEOUT=30s, PORT=8080
+
+  worker:
+    command: "./worker"
+    # worker uses root-level env without modifications
+    # Result: LOG_LEVEL=info, APP_ENV=production, TIMEOUT=30s
+```
+
+#### Service-Level Environment Variables
+
 #### `env` (optional)
 
-Configuration for environment variables. You can use either a file or inline variables, or both.
+Configuration for environment variables specific to a service. You can use either a file or inline variables, or both.
 
 #### `env.file` (optional)
 
-Path to a file containing environment variables. Can be absolute or relative to the configuration file location.
+Path to a file containing environment variables. Can be absolute or relative to the configuration file location. If specified, this overrides any root-level `env.file`.
 
 ```yaml
 services:
@@ -231,7 +303,7 @@ services:
 
 #### `env.vars` (optional)
 
-Inline key-value pairs of environment variables.
+Inline key-value pairs of environment variables. These override any matching root-level `env.vars`.
 
 ```yaml
 services:

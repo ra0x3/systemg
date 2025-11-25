@@ -2110,6 +2110,7 @@ mod tests {
             version: "1".into(),
             services,
             project_dir: Some(dir.to_string_lossy().to_string()),
+            env: None,
         };
 
         // Validate order to mirror load_config behaviour.
