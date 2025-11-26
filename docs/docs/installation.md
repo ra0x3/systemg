@@ -44,3 +44,7 @@ You should see output similar to:
 ```
 systemg 0.6.8
 ```
+
+## Next Steps
+
+After installation, check out the [Examples](/docs/examples) to see `systemg` in action with real-world use cases.

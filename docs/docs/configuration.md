@@ -81,7 +81,7 @@ services:
     backoff: "5s"
 
     # Deployment strategy configuration (optional)
-    deployment:
+    py__deployment:
       # Deployment strategy: "rolling" or "immediate" (default: "immediate")
       strategy: "rolling"
       # Optional build or migration step executed before the new process launches
@@ -133,7 +133,7 @@ services:
           command: "echo 'ngrok restarted'"
 
   # Example service with cron scheduling
-  backup:
+  sh__backup:
     # The command to start the service (required)
     command: "sh /scripts/backup.sh"
 
@@ -145,9 +145,9 @@ services:
       timezone: "America/New_York"
 
   # Example service with skip condition
-  optional-service:
+  sh__optional:
     # The command to start the service (required)
-    command: "./optional-service"
+    command: "sh optional.sh"
 
     # Skip this service if a condition is met (optional)
     # If the command exits with status 0, the service is skipped

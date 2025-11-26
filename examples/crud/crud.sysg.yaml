@@ -1,0 +1,180 @@
+version: "1"
+
+# Environment configuration loaded from .env.example file
+# This allows sensitive configuration values to be kept separate from the config
+env:
+  file: ".env.example"
+
+services:
+  # Main web server service
+  # Runs the Node.js Express server that handles CRUD operations
+  node__web_server:
+    command: "node server.js"
+    # rolling_start ensures zero-downtime deployments by starting the new version
+    # before stopping the old one, preventing service interruption
+    deployment_strategy: "rolling_start"
+    env:
+      vars:
+        # Node environment - typically 'development', 'staging', or 'production'
+        NODE_ENV: "${NODE_ENV}"
+        # Port the web server listens on
+        PORT: "${PORT}"
+        # Database connection string for PostgreSQL
+        DATABASE_URL: "${DATABASE_URL}"
+    # Restart the service if it crashes with a non-zero exit code
+    restart_policy: "on_failure"
+    # Maximum number of restart attempts before giving up
+    retries: "10"
+    # Wait time between restart attempts to avoid rapid restart loops
+    backoff: "10s"
+    # Webhook notifications for deployment lifecycle events
+    webhooks:
+      # Notify Slack when the service successfully starts
+      on_success:
+        url: "${SLACK_WEBHOOK_SUCCESS_URL}"
+        method: "POST"
+        headers:
+          Content-Type: "application/json"
+        body: |
+          {
+            "text": "✅ CRUD API deployment successful - Web server is running",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*CRUD API Deployment*\n✅ Status: Success\n🌐 Service: Web Server\n⏰ Time: $(date)"
+                }
+              }
+            ]
+          }
+      # Notify Slack when the service fails to start
+      on_error:
+        url: "${SLACK_WEBHOOK_ERROR_URL}"
+        method: "POST"
+        headers:
+          Content-Type: "application/json"
+        body: |
+          {
+            "text": "❌ CRUD API deployment failed - Web server encountered an error",
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*CRUD API Deployment*\n❌ Status: Failed\n🌐 Service: Web Server\n⏰ Time: $(date)\n\n<!channel> Immediate attention required!"
+                }
+              }
+            ]
+          }
+
+# Scheduled jobs using cron syntax
+# These run at specified intervals independently of the main services
+cron:
+  # Automated test suite that runs every hour
+  # Ensures the API is functioning correctly and catches regressions early
+  test_suite:
+    # Cron schedule: minute hour day month weekday
+    # "0 * * * *" = run at minute 0 of every hour (hourly)
+    schedule: "0 * * * *"
+    command: "npm test"
+    env:
+      vars:
+        # Use test database to avoid affecting production data
+        DATABASE_URL: "${TEST_DATABASE_URL}"
+        NODE_ENV: "test"
+    # Webhook notification when tests complete successfully
+    on_success:
+      url: "${SLACK_WEBHOOK_SUCCESS_URL}"
+      method: "POST"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "text": "✅ Hourly test suite passed",
+          "blocks": [
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*Automated Test Suite*\n✅ Status: All tests passed\n⏰ Time: $(date)"
+              }
+            }
+          ]
+        }
+    # Webhook notification when tests fail
+    on_error:
+      url: "${SLACK_WEBHOOK_ERROR_URL}"
+      method: "POST"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "text": "❌ Hourly test suite failed - requires investigation",
+          "blocks": [
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*Automated Test Suite*\n❌ Status: Tests failed\n⏰ Time: $(date)\n\n<!here> Please review test failures"
+              }
+            }
+          ]
+        }
+
+  # Database backup job that runs every 6 hours
+  # Creates a PostgreSQL dump and uploads it to backup storage
+  database_backup:
+    # Cron schedule: "0 */6 * * *" = run at minute 0 of every 6th hour
+    # This runs at 00:00, 06:00, 12:00, and 18:00 daily
+    schedule: "0 */6 * * *"
+    command: "bash scripts/backup-database.sh"
+    env:
+      vars:
+        # Database connection for backup operations
+        DATABASE_URL: "${DATABASE_URL}"
+        # S3 bucket where backups are stored
+        BACKUP_S3_BUCKET: "${BACKUP_S3_BUCKET}"
+        # AWS credentials for S3 upload
+        AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+        AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+        # Optional: retention period for old backups (in days)
+        BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS}"
+    # Notify when backup completes successfully
+    on_success:
+      url: "${SLACK_WEBHOOK_SUCCESS_URL}"
+      method: "POST"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "text": "✅ Database backup completed successfully",
+          "blocks": [
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*Database Backup*\n✅ Status: Backup successful\n💾 Location: S3 Bucket\n⏰ Time: $(date)"
+              }
+            }
+          ]
+        }
+    # Alert immediately if backup fails (critical operation)
+    on_error:
+      url: "${SLACK_WEBHOOK_ERROR_URL}"
+      method: "POST"
+      headers:
+        Content-Type: "application/json"
+      body: |
+        {
+          "text": "❌ CRITICAL: Database backup failed",
+          "blocks": [
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*Database Backup*\n❌ Status: Backup failed\n⏰ Time: $(date)\n\n<!channel> URGENT: Database backup failure requires immediate investigation"
+              }
+            }
+          ]
+        }

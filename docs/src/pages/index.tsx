@@ -17,8 +17,12 @@ function HomepageHeader() {
           {siteConfig.title}
         </Heading>
         <p className="hero__subtitle">{siteConfig.tagline}</p>
-        <p className="hero__subtitle" style={{ fontSize: '0.9rem', opacity: 0.8, marginTop: '0.5rem' }}>
-          <code>systemg</code> is for people who need a <em>process manager</em>, not an <em>operating system</em>
+        <p
+          className="hero__subtitle"
+          style={{ fontSize: "0.9rem", opacity: 0.8, marginTop: "0.5rem" }}
+        >
+          <code>systemg</code> is for people who need a <em>process manager</em>
+          , not an <em>operating system</em>
         </p>
       </div>
     </header>
