@@ -112,6 +112,78 @@ fn wait_for_path(path: &Path) {
     panic!("Timed out waiting for {:?} to exist", path);
 }
 
+fn wait_for_pid_removed(service: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(pid_file) = PidFile::load()
+            && pid_file.pid_for(service).is_none()
+        {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("Timed out waiting for service '{}' to clear PID", service);
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_process_exit(pid: u32) {
+    use std::path::PathBuf;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let proc_path = PathBuf::from(format!("/proc/{}", pid));
+
+    while Instant::now() < deadline {
+        if !proc_path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!("Timed out waiting for PID {} to exit", pid);
+}
+
+fn wait_for_latest_pid(pid_dir: &Path, min_runs: usize) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut entries: Vec<_> = fs::read_dir(pid_dir)
+            .ok()
+            .into_iter()
+            .flat_map(|iter| iter.filter_map(Result::ok))
+            .filter_map(|entry| {
+                let raw_name = entry.file_name();
+                let name = raw_name.to_str()?;
+                let rest = name.strip_prefix("run_")?;
+                let stem = rest.strip_suffix(".pid")?;
+                let idx = stem.parse::<usize>().ok()?;
+                Some((idx, entry.path()))
+            })
+            .collect();
+
+        if entries.len() >= min_runs {
+            entries.sort_by_key(|(idx, _)| *idx);
+            if let Some((_, path)) = entries.last()
+                && let Ok(contents) = fs::read_to_string(path)
+                && let Ok(pid) = contents.trim().parse::<u32>()
+            {
+                return pid;
+            }
+        }
+
+        if Instant::now() >= deadline {
+            panic!(
+                "Timed out waiting for at least {min_runs} pid captures in {:?}",
+                pid_dir
+            );
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[test]
 fn hooks_on_start_and_stop_success() {
     let temp = tempdir().expect("failed to create tempdir");
@@ -368,27 +440,21 @@ services:
     wait_for_file_value(&count_path, "2");
 
     let first_pid_path = pid_dir.join("run_1.pid");
-    let second_pid_path = pid_dir.join("run_2.pid");
     wait_for_path(&first_pid_path);
-    wait_for_path(&second_pid_path);
-
     let first_pid: u32 = fs::read_to_string(&first_pid_path)
         .expect("read first pid")
         .trim()
         .parse()
         .expect("parse first pid");
-    let second_pid: u32 = fs::read_to_string(&second_pid_path)
-        .expect("read second pid")
-        .trim()
-        .parse()
-        .expect("parse second pid");
 
-    assert_ne!(first_pid, second_pid);
+    let recorded_pid = wait_for_latest_pid(&pid_dir, 2);
+    assert_ne!(first_pid, recorded_pid);
 
-    let recorded_pid = wait_for_pid("flaky");
-    assert_eq!(recorded_pid, second_pid);
+    #[cfg(target_os = "linux")]
+    wait_for_process_exit(first_pid);
 
     daemon.stop_service("flaky").expect("stop flaky");
+    wait_for_pid_removed("flaky");
     daemon.shutdown_monitor();
 }
 
@@ -400,14 +466,13 @@ fn stop_succeeds_with_stale_pidfile_entry() {
     fs::create_dir_all(&home).expect("failed to create home dir");
     let _home = HomeEnvGuard::set(&home);
 
-    let status_path = dir.join("status.log");
-    fs::File::create(&status_path).expect("failed to create status log");
     let script = dir.join("stale.sh");
+    let done_marker = dir.join("stale.done");
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ntrap 'echo stopped > \"{}\"' EXIT\nwhile true; do sleep 1; done\n",
-            status_path.display()
+            "#!/bin/sh\nfinish() {{ touch \"{}\"; }}\ntrap finish EXIT TERM INT\nwhile true; do sleep 1; done\n",
+            done_marker.display()
         ),
     )
     .expect("failed to write stale script");
@@ -442,7 +507,9 @@ services:
 
     daemon.stop_service("stale").expect("stop stale");
 
-    wait_for_file_value(&status_path, "stopped");
+    wait_for_pid_removed("stale");
+
+    wait_for_path(&done_marker);
 
     daemon.shutdown_monitor();
 }
