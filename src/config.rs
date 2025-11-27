@@ -24,6 +24,17 @@ pub struct Config {
     pub env: Option<EnvConfig>,
 }
 
+/// Skip configuration for a service.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum SkipConfig {
+    /// Boolean flag that, when `true`, always skips the service.
+    Flag(bool),
+    /// Command that decides whether the service should be skipped.
+    /// A zero exit status means the service is skipped.
+    Command(String),
+}
+
 /// Configuration for an individual service.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServiceConfig {
@@ -43,9 +54,8 @@ pub struct ServiceConfig {
     pub hooks: Option<Hooks>,
     /// Cron configuration for scheduled service execution.
     pub cron: Option<CronConfig>,
-    /// Optional command that determines if the service should be skipped.
-    /// If the command exits with status 0, the service is skipped.
-    pub skip: Option<String>,
+    /// Optional skip configuration that determines if the service should be skipped.
+    pub skip: Option<SkipConfig>,
 }
 
 /// Deployment strategy configuration for a service.

@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{
     Config, EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage,
-    ServiceConfig,
+    ServiceConfig, SkipConfig,
 };
 use crate::error::{PidFileError, ProcessManagerError};
 
@@ -485,27 +485,43 @@ impl Daemon {
                 None => continue,
             };
 
-            if let Some(skip_command) = &service.skip {
-                match self.evaluate_skip_condition(&service_name, skip_command) {
-                    Ok(true) => {
-                        info!("Skipping service '{service_name}' due to skip condition");
+            if let Some(skip_config) = &service.skip {
+                match skip_config {
+                    SkipConfig::Flag(true) => {
+                        info!("Skipping service '{service_name}' due to skip flag");
                         healthy_services.insert(service_name.clone());
                         continue 'service_loop;
                     }
-                    Ok(false) => {
+                    SkipConfig::Flag(false) => {
                         debug!(
-                            "Skip condition for '{service_name}' evaluated to false, starting service"
+                            "Skip flag for '{service_name}' disabled; starting service"
                         );
                     }
-                    Err(err) => {
-                        error!(
-                            "Failed to evaluate skip condition for '{service_name}': {err}"
-                        );
-                        if first_error.is_none() {
-                            first_error = Some(err);
+                    SkipConfig::Command(skip_command) => {
+                        match self.evaluate_skip_condition(&service_name, skip_command) {
+                            Ok(true) => {
+                                info!(
+                                    "Skipping service '{service_name}' due to skip condition"
+                                );
+                                healthy_services.insert(service_name.clone());
+                                continue 'service_loop;
+                            }
+                            Ok(false) => {
+                                debug!(
+                                    "Skip condition for '{service_name}' evaluated to false, starting service"
+                                );
+                            }
+                            Err(err) => {
+                                error!(
+                                    "Failed to evaluate skip condition for '{service_name}': {err}"
+                                );
+                                if first_error.is_none() {
+                                    first_error = Some(err);
+                                }
+                                failed_services.insert(service_name.clone());
+                                continue 'service_loop;
+                            }
                         }
-                        failed_services.insert(service_name.clone());
-                        continue 'service_loop;
                     }
                 }
             }
@@ -1535,7 +1551,16 @@ impl Daemon {
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
     ) -> Result<(), ProcessManagerError> {
-        let pid = pid_file.lock()?.get(service_name);
+        let active_pid = {
+            let processes_guard = processes.lock()?;
+            processes_guard.get(service_name).map(|child| child.id())
+        };
+
+        let pid = if let Some(pid) = active_pid {
+            Some(pid)
+        } else {
+            pid_file.lock()?.get(service_name)
+        };
 
         if let Some(process_id) = pid {
             let pid = nix::unistd::Pid::from_raw(process_id as i32);
@@ -1962,7 +1987,54 @@ impl Daemon {
             );
 
             match restart_result {
-                Ok(_) => {
+                Ok(pid) => {
+                    let record_result = pid_file
+                        .lock()
+                        .map_err(ProcessManagerError::from)
+                        .and_then(|mut guard| guard.insert(&name, pid).map_err(ProcessManagerError::from));
+
+                    if let Err(err) = record_result {
+                        error!(
+                            "Failed to record PID {pid} for restarted service '{name}': {err}"
+                        );
+
+                        if let Err(stop_err) = Self::terminate_pid(pid, &name) {
+                            warn!(
+                                "Also failed to terminate untracked restart of '{name}': {stop_err}"
+                            );
+                        }
+
+                        if let Some(hooks_cfg) = hooks.as_ref()
+                            && let Some(action) =
+                                hooks_cfg.action(HookStage::OnStart, HookOutcome::Error)
+                        {
+                            run_hook(
+                                action,
+                                &env,
+                                HookStage::OnStart,
+                                HookOutcome::Error,
+                                &name,
+                                &project_root,
+                            );
+                        }
+
+                        if let Some(hooks_cfg) = hooks.as_ref()
+                            && let Some(action) =
+                                hooks_cfg.action(HookStage::OnRestart, HookOutcome::Error)
+                        {
+                            run_hook(
+                                action,
+                                &env,
+                                HookStage::OnRestart,
+                                HookOutcome::Error,
+                                &name,
+                                &project_root,
+                            );
+                        }
+
+                        return;
+                    }
+
                     match Self::wait_for_service_ready_with_handles(
                         &name,
                         &processes,

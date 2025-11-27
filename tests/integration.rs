@@ -6,7 +6,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use systemg::{config::load_config, daemon::Daemon};
+use systemg::{
+    config::load_config,
+    daemon::{Daemon, PidFile},
+};
 use tempfile::tempdir;
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -18,7 +21,10 @@ struct HomeEnvGuard {
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
-        let lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let lock = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = env::var("HOME").ok();
         unsafe {
             env::set_var("HOME", home);
@@ -59,6 +65,51 @@ fn wait_for_lines(path: &Path, expected: usize) -> Vec<String> {
 
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn wait_for_file_value(path: &Path, expected: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(content) = fs::read_to_string(path)
+            && content.trim() == expected
+        {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("Timed out waiting for value '{}' in {:?}", expected, path);
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_pid(service: &str) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(pid_file) = PidFile::load()
+            && let Some(pid) = pid_file.pid_for(service)
+        {
+            return pid;
+        }
+
+        if Instant::now() >= deadline {
+            panic!("Timed out waiting for PID entry for service '{service}'");
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("Timed out waiting for {:?} to exist", path);
 }
 
 #[test]
@@ -224,6 +275,174 @@ services:
             "on_stop.success".to_string(),
         ]
     );
+
+    daemon.shutdown_monitor();
+}
+
+#[test]
+fn skip_flag_prevents_service_start() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let marker = dir.join("skipped.log");
+    let script = dir.join("service.sh");
+    fs::write(&script, "#!/bin/sh\necho started > ./skipped.log\n")
+        .expect("failed to write script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  skipped:
+    command: "sh ./service.sh"
+    skip: true
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    thread::sleep(Duration::from_millis(250));
+
+    assert!(
+        !marker.exists(),
+        "skip flag should prevent the service command from executing"
+    );
+
+    daemon.shutdown_monitor();
+}
+
+#[test]
+fn restart_records_new_pid() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let count_path = dir.join("count.txt");
+    let pid_dir = dir.join("pids");
+    fs::create_dir_all(&pid_dir).expect("failed to create pid dir");
+
+    let script = dir.join("flaky.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nset -eu\ncount=0\nif [ -f \"$COUNT_PATH\" ]; then\n  count=$(cat \"$COUNT_PATH\")\nfi\ncount=$((count + 1))\necho \"$count\" > \"$COUNT_PATH\"\nmkdir -p \"$PID_DIR\"\necho \"$$\" > \"$PID_DIR/run_$count.pid\"\n\nif [ \"$count\" -eq 1 ]; then\n  sleep 1\n  exit 1\nfi\n\nsleep 30\n",
+    )
+    .expect("failed to write flaky script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  flaky:
+    command: "sh {}"
+    restart_policy: "always"
+    backoff: "1s"
+    env:
+      vars:
+        COUNT_PATH: "{}"
+        PID_DIR: "{}"
+"#,
+            script.display(),
+            count_path.display(),
+            pid_dir.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    wait_for_file_value(&count_path, "2");
+
+    let first_pid_path = pid_dir.join("run_1.pid");
+    let second_pid_path = pid_dir.join("run_2.pid");
+    wait_for_path(&first_pid_path);
+    wait_for_path(&second_pid_path);
+
+    let first_pid: u32 = fs::read_to_string(&first_pid_path)
+        .expect("read first pid")
+        .trim()
+        .parse()
+        .expect("parse first pid");
+    let second_pid: u32 = fs::read_to_string(&second_pid_path)
+        .expect("read second pid")
+        .trim()
+        .parse()
+        .expect("parse second pid");
+
+    assert_ne!(first_pid, second_pid);
+
+    let recorded_pid = wait_for_pid("flaky");
+    assert_eq!(recorded_pid, second_pid);
+
+    daemon.stop_service("flaky").expect("stop flaky");
+    daemon.shutdown_monitor();
+}
+
+#[test]
+fn stop_succeeds_with_stale_pidfile_entry() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let status_path = dir.join("status.log");
+    fs::File::create(&status_path).expect("failed to create status log");
+    let script = dir.join("stale.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntrap 'echo stopped > \"{}\"' EXIT\nwhile true; do sleep 1; done\n",
+            status_path.display()
+        ),
+    )
+    .expect("failed to write stale script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  stale:
+    command: "sh ./stale.sh"
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    let real_pid = wait_for_pid("stale");
+
+    let bogus_pid = real_pid.saturating_add(10_000);
+    let pid_file_path = home.join(".local/share/systemg/pid.json");
+    fs::create_dir_all(pid_file_path.parent().unwrap())
+        .expect("failed to create pid directory");
+    let fake_contents = format!(
+        "{{\n  \"services\": {{\n    \"stale\": {}\n  }}\n}}\n",
+        bogus_pid
+    );
+    fs::write(&pid_file_path, fake_contents).expect("failed to corrupt pid file");
+
+    daemon.stop_service("stale").expect("stop stale");
+
+    wait_for_file_value(&status_path, "stopped");
 
     daemon.shutdown_monitor();
 }
