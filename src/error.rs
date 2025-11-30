@@ -89,6 +89,13 @@ pub enum ProcessManagerError {
     /// Error for logs manager.
     #[error("Service not found in PID file")]
     ErrNo(#[from] nix::errno::Errno),
+
+    /// Error when services fail to remain running after a restart completes.
+    #[error("Service(s) failed to remain running after restart: {services:?}")]
+    ServicesNotRunning {
+        /// List of services that were expected to be running but were not.
+        services: Vec<String>,
+    },
 }
 
 /// Implement the `From` trait to convert a `std::sync::PoisonError` into a `ProcessManagerError`.
@@ -129,6 +136,10 @@ pub enum LogsManagerError {
     /// Error while tailing logs, such as command failure.
     #[error("Log tailing failed: {0}")]
     LogProcessError(#[from] std::io::Error),
+
+    /// Error when the tail command exits with a non-zero status.
+    #[error("Log tail command exited with status {0:?}")]
+    TailCommandFailed(Option<i32>),
 
     /// Error when the log file is unavailable.
     #[error("Unsupported platform for log tailing")]

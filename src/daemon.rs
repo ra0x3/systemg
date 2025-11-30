@@ -1,13 +1,13 @@
 //! Module for managing and monitoring system services.
-use crate::logs::spawn_log_writer;
+use crate::logs::{resolve_log_path, spawn_log_writer};
 use reqwest::blocking::Client;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
 use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    io::ErrorKind,
+    collections::{HashMap, HashSet, VecDeque},
+    fs::{self, File},
+    io::{BufRead, BufReader, ErrorKind},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -742,12 +742,15 @@ impl Daemon {
         info!("Restarting all services...");
 
         let order = self.config.service_start_order()?;
+        let mut restarted_services = Vec::new();
 
         for service_name in order {
             let service = match self.config.services.get(&service_name) {
                 Some(service) => service,
                 None => continue,
             };
+
+            restarted_services.push(service_name.clone());
 
             let strategy = service
                 .deployment
@@ -772,6 +775,7 @@ impl Daemon {
         }
 
         self.spawn_monitor_thread()?;
+        self.verify_services_running(&restarted_services)?;
         info!("All services restarted successfully.");
         Ok(())
     }
@@ -802,6 +806,8 @@ impl Daemon {
                 self.immediate_restart_service(name, service)?;
             }
         }
+
+        self.verify_services_running(&[name.to_string()])?;
 
         Ok(())
     }
@@ -839,10 +845,23 @@ impl Daemon {
                         "Failed to stop new instance of '{name}' after restart error: {stop_err}"
                     );
                 }
-                if let Some(detached) = previous.take() {
-                    self.restore_detached_service(name, detached)?;
+
+                if previous.is_some() && Self::logs_indicate_port_conflict(name) {
+                    warn!(
+                        "Detected port conflict while restarting '{name}'. Falling back to immediate restart semantics."
+                    );
+
+                    if let Some(detached) = previous.take() {
+                        self.terminate_detached_service(name, detached)?;
+                    }
+
+                    self.start_service(name, service)?
+                } else {
+                    if let Some(detached) = previous.take() {
+                        self.restore_detached_service(name, detached)?;
+                    }
+                    return Err(err);
                 }
-                return Err(err);
             }
         };
 
@@ -1098,6 +1117,119 @@ impl Daemon {
         })?;
 
         Ok(Duration::from_secs(amount.saturating_mul(multiplier)))
+    }
+
+    fn logs_indicate_port_conflict(service_name: &str) -> bool {
+        const MAX_LINES: usize = 50;
+
+        let path = resolve_log_path(service_name, "stderr");
+        if !path.exists() {
+            return false;
+        }
+
+        match File::open(&path) {
+            Ok(file) => {
+                let reader = BufReader::new(file);
+                let mut buffer: VecDeque<String> = VecDeque::with_capacity(MAX_LINES);
+
+                for line in reader.lines().map_while(Result::ok) {
+                    if buffer.len() == MAX_LINES {
+                        buffer.pop_front();
+                    }
+                    buffer.push_back(line);
+                }
+
+                buffer.iter().rev().any(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    lower.contains("address already in use")
+                        || lower.contains("os error 48")
+                        || lower.contains("os error 98")
+                        || lower.contains("eaddrinuse")
+                })
+            }
+            Err(err) => {
+                debug!(
+                    "Unable to inspect stderr logs for '{}' while detecting port conflicts: {err}",
+                    service_name
+                );
+                false
+            }
+        }
+    }
+
+    fn should_verify_service(service: &ServiceConfig) -> bool {
+        if matches!(service.restart_policy.as_deref(), Some("never")) {
+            return false;
+        }
+
+        if service.cron.is_some() {
+            return false;
+        }
+
+        true
+    }
+
+    fn verify_services_running(
+        &self,
+        services: &[String],
+    ) -> Result<(), ProcessManagerError> {
+        const POST_RESTART_VERIFY_ATTEMPTS: usize = 2;
+        const POST_RESTART_VERIFY_DELAY: Duration = Duration::from_millis(200);
+
+        let mut failed = Vec::new();
+
+        for service_name in services {
+            let Some(service_cfg) = self.config.services.get(service_name) else {
+                continue;
+            };
+
+            if !Self::should_verify_service(service_cfg) {
+                continue;
+            }
+
+            let mut stable = true;
+
+            for attempt in 0..POST_RESTART_VERIFY_ATTEMPTS {
+                if attempt > 0 {
+                    thread::sleep(POST_RESTART_VERIFY_DELAY);
+                }
+
+                match Self::probe_service_state(
+                    service_name,
+                    &self.processes,
+                    &self.pid_file,
+                )? {
+                    ServiceProbe::Running => continue,
+                    ServiceProbe::NotStarted => {
+                        stable = false;
+                        break;
+                    }
+                    ServiceProbe::Exited(status) => {
+                        if status.success() {
+                            info!(
+                                "Service '{service_name}' exited immediately after restart with status {status}"
+                            );
+                        } else {
+                            warn!(
+                                "Service '{service_name}' crashed immediately after restart with status {status}"
+                            );
+                        }
+                        stable = false;
+                        break;
+                    }
+                }
+            }
+
+            if !stable {
+                failed.push(service_name.clone());
+            }
+        }
+
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(ProcessManagerError::ServicesNotRunning { services: failed })
+        }
     }
 
     /// Helper for constructing a configuration parse error wrapped in our domain error type.
@@ -2150,7 +2282,13 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, env, fs, thread, time::Duration};
+    use std::{
+        collections::HashMap,
+        env, fs,
+        sync::{Mutex, OnceLock},
+        thread,
+        time::Duration,
+    };
     use tempfile::tempdir_in;
 
     /// Helper to build a minimal service definition for unit tests.
@@ -2193,6 +2331,9 @@ mod tests {
 
     /// Executes a test callback with a temporary HOME directory to contain PID and log files.
     fn with_temp_home<F: FnOnce(&std::path::Path)>(test: F) {
+        static HOME_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = HOME_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+
         let base = std::env::current_dir()
             .expect("current_dir")
             .join("target/tmp-home");
@@ -2211,6 +2352,82 @@ mod tests {
                 env::remove_var("HOME");
             },
         }
+    }
+
+    #[test]
+    fn logs_indicate_port_conflict_detects_common_errors() {
+        with_temp_home(|_| {
+            let log_path = resolve_log_path("web", "stderr");
+            if let Some(dir) = log_path.parent() {
+                fs::create_dir_all(dir).unwrap();
+            }
+            fs::write(
+                &log_path,
+                "Error: Server(\"Address already in use (os error 98)\")\n",
+            )
+            .unwrap();
+
+            assert!(Daemon::logs_indicate_port_conflict("web"));
+        });
+    }
+
+    #[test]
+    fn logs_indicate_port_conflict_returns_false_when_not_present() {
+        with_temp_home(|_| {
+            let log_path = resolve_log_path("api", "stderr");
+            if let Some(dir) = log_path.parent() {
+                fs::create_dir_all(dir).unwrap();
+            }
+            fs::write(&log_path, "Some other failure\n").unwrap();
+
+            assert!(!Daemon::logs_indicate_port_conflict("api"));
+        });
+    }
+
+    #[test]
+    fn restart_service_reports_failure_when_process_stops_immediately() {
+        with_temp_home(|dir| {
+            fs::write(dir.join("mode.txt"), "initial\n").unwrap();
+            fs::write(
+                dir.join("app.sh"),
+                r#"
+MODE=$(cat mode.txt)
+if [ "$MODE" = "initial" ]; then
+  sleep 5
+else
+  echo 'Error: Server("Address already in use (os error 98)")' >&2
+  sleep 0.05
+  exit 0
+fi
+"#,
+            )
+            .unwrap();
+
+            let mut services = HashMap::new();
+            let mut service = make_service("sh app.sh", &[]);
+            service.restart_policy = Some("always".into());
+            services.insert("app".into(), service);
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services_nonblocking().unwrap();
+
+            // Ensure the initial instance is running.
+            thread::sleep(Duration::from_millis(100));
+
+            fs::write(dir.join("mode.txt"), "restart\n").unwrap();
+
+            let svc = daemon.config.services.get("app").unwrap();
+            let err = daemon.restart_service("app", svc).unwrap_err();
+
+            match err {
+                ProcessManagerError::ServicesNotRunning { services } => {
+                    assert_eq!(services, vec!["app".to_string()]);
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+
+            daemon.shutdown_monitor();
+        });
     }
 
     #[test]

@@ -14,11 +14,63 @@ use std::process::{Command, Stdio};
 
 /// Returns the path to the log file for a given service and kind (stdout or stderr).
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
+    resolve_log_path(service, kind)
+}
+
+/// Returns the canonical path for a service log without performing any existence checks.
+fn canonical_log_path(service: &str, kind: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(format!(
-        "{}/.local/share/systemg/logs/{}_{}.log",
-        home, service, kind
-    ))
+    let mut path = PathBuf::from(home);
+    path.push(".local/share/systemg/logs");
+    path.push(format!("{service}_{kind}.log"));
+    path
+}
+
+fn normalize(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn locate_existing_log(service: &str, kind: &str) -> Option<PathBuf> {
+    let canonical = canonical_log_path(service, kind);
+    let directory = canonical.parent()?;
+    let needle = normalize(service);
+    let suffix = format!("_{kind}.log");
+
+    let entries = fs::read_dir(directory).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let file_name = path.file_name()?.to_str()?;
+        if !file_name.ends_with(&suffix) {
+            continue;
+        }
+
+        if let Some(service_name) = file_name.strip_suffix(&suffix)
+            && normalize(service_name) == needle
+        {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+/// Attempts to resolve an on-disk log path for the given service and kind, falling back to the
+/// canonical location when no existing file can be found.
+pub fn resolve_log_path(service: &str, kind: &str) -> PathBuf {
+    let canonical = canonical_log_path(service, kind);
+    if canonical.exists() {
+        return canonical;
+    }
+
+    locate_existing_log(service, kind).unwrap_or(canonical)
 }
 
 /// Creates the log directory if it doesn't exist.
@@ -71,8 +123,6 @@ impl LogManager {
         pid: u32,
         lines: usize,
     ) -> Result<(), LogsManagerError> {
-        use std::path::Path;
-
         println!(
             "\n+{:-^33}+\n\
      | {:^31} |\n\
@@ -85,29 +135,28 @@ impl LogManager {
         let stdout = format!("/proc/{}/fd/1", pid);
         let stderr = format!("/proc/{}/fd/2", pid);
 
-        if !Path::new(&stdout).exists() || !Path::new(&stderr).exists() {
+        if !std::path::Path::new(&stdout).exists()
+            || !std::path::Path::new(&stderr).exists()
+        {
             return Err(LogsManagerError::LogUnavailable(pid));
         }
 
-        let stdout_path = get_log_path(service_name, "stdout");
-        let stderr_path = get_log_path(service_name, "stderr");
+        let stdout_path = resolve_log_path(service_name, "stdout");
+        let stderr_path = resolve_log_path(service_name, "stderr");
 
-        let command = format!(
-            "tail -n {} -f {} {}",
-            lines,
-            stdout_path.display(),
-            stderr_path.display()
-        );
-        debug!("Executing command: {command}");
+        debug!("Streaming logs via tail for '{}'", service_name);
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
+        let mut cmd = Command::new("tail");
+        cmd.arg("-n")
+            .arg(lines.to_string())
+            .arg("-F")
+            .arg(&stdout_path)
+            .arg(&stderr_path);
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-        let child = cmd.spawn()?.wait();
-
-        if let Err(e) = child {
-            return Err(LogsManagerError::LogProcessError(e));
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(LogsManagerError::TailCommandFailed(status.code()));
         }
 
         Ok(())
@@ -132,25 +181,22 @@ impl LogManager {
             "-"
         );
 
-        let stdout_path = get_log_path(service_name, "stdout");
-        let stderr_path = get_log_path(service_name, "stderr");
+        let stdout_path = resolve_log_path(service_name, "stdout");
+        let stderr_path = resolve_log_path(service_name, "stderr");
 
-        let command = format!(
-            "tail -n {} -f {} {}",
-            lines,
-            stdout_path.display(),
-            stderr_path.display()
-        );
-        debug!("Executing command: {command}");
+        debug!("Streaming logs via tail for '{}'", service_name);
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
+        let mut cmd = Command::new("tail");
+        cmd.arg("-n")
+            .arg(lines.to_string())
+            .arg("-F")
+            .arg(&stdout_path)
+            .arg(&stderr_path);
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
-        let child = cmd.spawn()?.wait();
-
-        if let Err(e) = child {
-            return Err(LogsManagerError::LogProcessError(e));
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(LogsManagerError::TailCommandFailed(status.code()));
         }
 
         Ok(())
@@ -174,9 +220,57 @@ impl LogManager {
                 .get(&service)
                 .ok_or(LogsManagerError::ServiceNotFound(service.clone()))?;
             debug!("Service: {service}, PID: {pid}");
-            let _ = self.show_log(&service, pid, lines);
+            if let Err(err) = self.show_log(&service, pid, lines) {
+                eprintln!("Failed to stream logs for '{}': {}", service, err);
+            }
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File};
+    use std::path::Path;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir_in;
+
+    #[test]
+    fn resolve_log_path_matches_hyphenated_files() {
+        static HOME_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = HOME_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+
+        let log_dir = canonical_log_path("dummy", "stdout")
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap();
+        fs::create_dir_all(&log_dir).unwrap();
+
+        let target = log_dir.join("arb-rs_stdout.log");
+        File::create(&target).unwrap();
+
+        let resolved = resolve_log_path("arb_rs", "stdout");
+        assert_eq!(resolved, target);
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
     }
 }
