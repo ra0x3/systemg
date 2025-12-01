@@ -10,6 +10,11 @@ use tracing::debug;
 
 use crate::daemon::PidFile;
 
+#[cfg(not(target_os = "linux"))]
+use nix::sys::signal;
+#[cfg(target_os = "linux")]
+use std::{fs, path::Path};
+
 #[cfg(target_os = "linux")]
 use std::time::UNIX_EPOCH;
 
@@ -19,6 +24,14 @@ use chrono::{DateTime, Utc};
 const GREEN_BOLD: &str = "\x1b[1;32m"; // Bright Green
 const MAGENTA_BOLD: &str = "\x1b[1;35m"; // Magenta
 const RESET: &str = "\x1b[0m"; // Reset color
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessState {
+    Running,
+    Zombie,
+    Missing,
+}
 
 /// Manages service status information.
 pub struct StatusManager {
@@ -30,6 +43,66 @@ impl StatusManager {
     /// Creates a new `StatusManager` instance.
     pub fn new(pid_file: Arc<Mutex<PidFile>>) -> Self {
         Self { pid_file }
+    }
+
+    fn clear_service_pid(&self, service_name: &str) {
+        if let Ok(mut guard) = self.pid_file.lock() {
+            let _ = guard.remove(service_name);
+        }
+    }
+
+    fn process_state(pid: u32) -> ProcessState {
+        #[cfg(target_os = "linux")]
+        {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                return ProcessState::Missing;
+            }
+
+            if let Some(state) = Self::read_proc_state(pid)
+                && matches!(state, 'Z' | 'X')
+            {
+                return ProcessState::Zombie;
+            }
+
+            ProcessState::Running
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let target = Pid::from_raw(pid as i32);
+            match signal::kill(target, None) {
+                Ok(_) => ProcessState::Running,
+                Err(err) => {
+                    if err == nix::Error::from(nix::errno::Errno::ESRCH) {
+                        ProcessState::Missing
+                    } else {
+                        ProcessState::Running
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_proc_state(pid: u32) -> Option<char> {
+        let stat_path_str = format!("/proc/{pid}/stat");
+        let stat_path = Path::new(&stat_path_str);
+        let contents = fs::read_to_string(stat_path).ok()?;
+        let mut parts = contents.split_whitespace();
+        parts.next()?; // pid
+        let mut name_part = parts.next()?; // (comm)
+        // The state follows the command, but command may contain spaces. The stat format ensures
+        // the executable name is wrapped in parentheses, so consume until the closing ')'.
+        if !name_part.ends_with(')') {
+            for part in parts.by_ref() {
+                name_part = part;
+                if name_part.ends_with(')') {
+                    break;
+                }
+            }
+        }
+
+        parts.next()?.chars().next()
     }
 
     /// Parses an uptime string in "HH:MM" format and returns a human-readable string.
@@ -131,20 +204,34 @@ impl StatusManager {
     /// Shows the status of a **single service**.
     pub fn show_status(&self, service_name: &str) {
         debug!("Checking status for service: {service_name}");
-        let pid_file = self.pid_file.lock().expect("Failed to lock PID file");
-        let pid = match pid_file.get(service_name) {
-            Some(pid) => pid,
-            None => {
-                println!("● {} - Not running", service_name);
-                return;
+        let pid = {
+            let pid_file = self.pid_file.lock().expect("Failed to lock PID file");
+            match pid_file.get(service_name) {
+                Some(pid) => pid,
+                None => {
+                    println!("● {} - Not running", service_name);
+                    return;
+                }
             }
         };
 
         debug!("Checking status for PID: {pid}");
 
-        if !Self::is_process_running(pid) {
-            println!("● {} - Process {} not found", service_name, pid);
-            return;
+        match Self::process_state(pid) {
+            ProcessState::Running => {}
+            ProcessState::Zombie => {
+                println!(
+                    "● {} - Process {} is zombie (defunct); service is no longer running",
+                    service_name, pid
+                );
+                self.clear_service_pid(service_name);
+                return;
+            }
+            ProcessState::Missing => {
+                println!("● {} - Process {} not found", service_name, pid);
+                self.clear_service_pid(service_name);
+                return;
+            }
         }
 
         let uptime = Self::get_process_uptime(pid);
@@ -190,24 +277,6 @@ impl StatusManager {
         println!("Active services:");
         for (service, _) in services.iter() {
             self.show_status(service);
-        }
-    }
-
-    /// Checks if a process is still running.
-    fn is_process_running(pid: u32) -> bool {
-        #[cfg(target_os = "linux")]
-        {
-            std::path::Path::new(&format!("/proc/{}", pid)).exists()
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            Command::new("ps")
-                .arg("-p")
-                .arg(pid.to_string())
-                .output()
-                .map(|output| output.status.success())
-                .unwrap_or(false)
         }
     }
 

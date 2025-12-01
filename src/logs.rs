@@ -1,16 +1,17 @@
 //! Module for managing and displaying logs of system services.
 use crate::{daemon::PidFile, error::LogsManagerError};
 use std::{
+    env,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
 };
 use tracing::debug;
 
-#[cfg(target_os = "linux")]
-use std::process::{Command, Stdio};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::Command;
 
 /// Returns the path to the log file for a given service and kind (stdout or stderr).
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
@@ -73,6 +74,83 @@ pub fn resolve_log_path(service: &str, kind: &str) -> PathBuf {
     locate_existing_log(service, kind).unwrap_or(canonical)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TailMode {
+    Follow,
+    OneShot,
+}
+
+impl TailMode {
+    fn current() -> Self {
+        match env::var("SYSTEMG_TAIL_MODE") {
+            Ok(value) if value.eq_ignore_ascii_case("oneshot") => TailMode::OneShot,
+            _ => TailMode::Follow,
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn configure_command(
+        self,
+        cmd: &mut Command,
+        lines: usize,
+        stdout_path: &Path,
+        stderr_path: &Path,
+    ) {
+        cmd.arg("-n").arg(lines.to_string());
+        if matches!(self, TailMode::Follow) {
+            cmd.arg("-F");
+        }
+        cmd.arg(stdout_path).arg(stderr_path);
+    }
+}
+
+fn touch_log_file(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let _ = OpenOptions::new().create(true).append(true).open(path);
+}
+
+#[cfg(target_os = "linux")]
+fn process_fds_present(pid: u32) -> bool {
+    let stdout_fd_path = format!("/proc/{pid}/fd/1");
+    let stderr_fd_path = format!("/proc/{pid}/fd/2");
+    let stdout_fd = Path::new(&stdout_fd_path);
+    let stderr_fd = Path::new(&stderr_fd_path);
+    stdout_fd.exists() || stderr_fd.exists()
+}
+
+fn resolve_tail_targets(
+    service_name: &str,
+    pid: u32,
+) -> Result<(PathBuf, PathBuf), LogsManagerError> {
+    let stdout_path = resolve_log_path(service_name, "stdout");
+    let stderr_path = resolve_log_path(service_name, "stderr");
+
+    let stdout_exists = stdout_path.exists();
+    let stderr_exists = stderr_path.exists();
+
+    if !stdout_exists {
+        touch_log_file(&stdout_path);
+    }
+    if !stderr_exists {
+        touch_log_file(&stderr_path);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if !(stdout_exists || stderr_exists || process_fds_present(pid)) {
+            return Err(LogsManagerError::LogUnavailable(pid));
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+
+    Ok((stdout_path, stderr_path))
+}
+
 /// Creates the log directory if it doesn't exist.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
     let service = service.to_string();
@@ -132,27 +210,24 @@ impl LogManager {
             "-"
         );
 
-        let stdout = format!("/proc/{}/fd/1", pid);
-        let stderr = format!("/proc/{}/fd/2", pid);
-
-        if !std::path::Path::new(&stdout).exists()
-            || !std::path::Path::new(&stderr).exists()
-        {
-            return Err(LogsManagerError::LogUnavailable(pid));
-        }
-
-        let stdout_path = resolve_log_path(service_name, "stdout");
-        let stderr_path = resolve_log_path(service_name, "stderr");
+        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
         let mut cmd = Command::new("tail");
-        cmd.arg("-n")
-            .arg(lines.to_string())
-            .arg("-F")
-            .arg(&stdout_path)
-            .arg(&stderr_path);
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        let mode = TailMode::current();
+        #[cfg(target_os = "linux")]
+        {
+            if !process_fds_present(pid) {
+                debug!(
+                    "Falling back to log files for '{}' because /proc/{pid} fds are unavailable",
+                    service_name
+                );
+            }
+        }
+        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path);
+        cmd.stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
 
         let status = cmd.status()?;
         if !status.success() {
@@ -170,8 +245,6 @@ impl LogManager {
         pid: u32,
         lines: usize,
     ) -> Result<(), LogsManagerError> {
-        use std::process::{Command, Stdio};
-
         println!(
             "\n+{:-^33}+\n\
      | {:^31} |\n\
@@ -181,18 +254,19 @@ impl LogManager {
             "-"
         );
 
-        let stdout_path = resolve_log_path(service_name, "stdout");
-        let stderr_path = resolve_log_path(service_name, "stderr");
+        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
         let mut cmd = Command::new("tail");
-        cmd.arg("-n")
-            .arg(lines.to_string())
-            .arg("-F")
-            .arg(&stdout_path)
-            .arg(&stderr_path);
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        TailMode::current().configure_command(
+            &mut cmd,
+            lines,
+            &stdout_path,
+            &stderr_path,
+        );
+        cmd.stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
 
         let status = cmd.status()?;
         if !status.success() {
