@@ -54,7 +54,8 @@ impl StatusManager {
     fn process_state(pid: u32) -> ProcessState {
         #[cfg(target_os = "linux")]
         {
-            if !Path::new(&format!("/proc/{pid}")).exists() {
+            let proc_path = format!("/proc/{pid}");
+            if !Path::new(&proc_path).exists() {
                 return ProcessState::Missing;
             }
 

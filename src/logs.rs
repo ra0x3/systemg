@@ -308,13 +308,11 @@ mod tests {
     use super::*;
     use std::fs::{self, File};
     use std::path::Path;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir_in;
 
     #[test]
     fn resolve_log_path_matches_hyphenated_files() {
-        static HOME_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = HOME_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = crate::test_utils::env_lock();
 
         let base = std::env::current_dir()
             .expect("current_dir")

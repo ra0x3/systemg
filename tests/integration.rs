@@ -3,7 +3,6 @@ use assert_cmd::Command;
 #[cfg(target_os = "linux")]
 use predicates::prelude::*;
 use std::env;
-use std::sync::{Mutex, OnceLock};
 use std::{
     fs,
     path::Path,
@@ -16,8 +15,6 @@ use systemg::{
 };
 use tempfile::tempdir;
 
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
 struct HomeEnvGuard {
     previous: Option<String>,
     _lock: std::sync::MutexGuard<'static, ()>,
@@ -25,10 +22,7 @@ struct HomeEnvGuard {
 
 impl HomeEnvGuard {
     fn set(home: &Path) -> Self {
-        let lock = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = systemg::test_utils::env_lock();
         let previous = env::var("HOME").ok();
         unsafe {
             env::set_var("HOME", home);

@@ -2282,13 +2282,7 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        collections::HashMap,
-        env, fs,
-        sync::{Mutex, OnceLock},
-        thread,
-        time::Duration,
-    };
+    use std::{collections::HashMap, env, fs, sync::Mutex, thread, time::Duration};
     use tempfile::tempdir_in;
 
     /// Helper to build a minimal service definition for unit tests.
@@ -2331,8 +2325,7 @@ mod tests {
 
     /// Executes a test callback with a temporary HOME directory to contain PID and log files.
     fn with_temp_home<F: FnOnce(&std::path::Path)>(test: F) {
-        static HOME_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = HOME_GUARD.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = crate::test_utils::env_lock();
 
         let base = std::env::current_dir()
             .expect("current_dir")

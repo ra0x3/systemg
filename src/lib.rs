@@ -29,3 +29,7 @@ pub mod status;
 
 /// Supervisor runtime that powers daemonised deployments.
 pub mod supervisor;
+
+/// Test utilities for synchronizing environment variable modifications.
+#[doc(hidden)]
+pub mod test_utils;
