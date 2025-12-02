@@ -9,7 +9,7 @@ use std::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::load_config,
+    config::{SkipConfig, load_config},
     cron::CronManager,
     daemon::{Daemon, ServiceReadyState},
     error::ProcessManagerError,
@@ -78,6 +78,44 @@ impl Supervisor {
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
         for (service_name, service_config) in &config.services {
             if service_config.cron.is_none() {
+                // Check skip flag before starting service
+                if let Some(skip_config) = &service_config.skip {
+                    match skip_config {
+                        SkipConfig::Flag(true) => {
+                            info!("Skipping service '{service_name}' due to skip flag");
+                            continue;
+                        }
+                        SkipConfig::Flag(false) => {
+                            debug!(
+                                "Skip flag for '{service_name}' disabled; starting service"
+                            );
+                        }
+                        SkipConfig::Command(skip_command) => {
+                            match self
+                                .daemon
+                                .evaluate_skip_condition(service_name, skip_command)
+                            {
+                                Ok(true) => {
+                                    info!(
+                                        "Skipping service '{service_name}' due to skip condition"
+                                    );
+                                    continue;
+                                }
+                                Ok(false) => {
+                                    debug!(
+                                        "Skip condition for '{service_name}' evaluated to false, starting service"
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "Failed to evaluate skip condition for '{service_name}': {err}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Only start services that are not cron jobs
                 self.daemon.start_service(service_name, service_config)?;
             }

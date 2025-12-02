@@ -590,7 +590,7 @@ impl Daemon {
     /// Returns Ok(true) if the service should be skipped (command exits with status 0),
     /// Ok(false) if the service should not be skipped (command exits with non-zero status),
     /// or Err if the command fails to execute.
-    fn evaluate_skip_condition(
+    pub fn evaluate_skip_condition(
         &self,
         service_name: &str,
         skip_command: &str,
@@ -1419,6 +1419,37 @@ impl Daemon {
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         info!("Starting service: {name}");
 
+        // Check skip flag
+        if let Some(skip_config) = &service.skip {
+            match skip_config {
+                SkipConfig::Flag(true) => {
+                    info!("Skipping service '{name}' due to skip flag");
+                    return Ok(ServiceReadyState::CompletedSuccess);
+                }
+                SkipConfig::Flag(false) => {
+                    debug!("Skip flag for '{name}' disabled; starting service");
+                }
+                SkipConfig::Command(skip_command) => {
+                    match self.evaluate_skip_condition(name, skip_command) {
+                        Ok(true) => {
+                            info!("Skipping service '{name}' due to skip condition");
+                            return Ok(ServiceReadyState::CompletedSuccess);
+                        }
+                        Ok(false) => {
+                            debug!(
+                                "Skip condition for '{name}' evaluated to false, starting service"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to evaluate skip condition for '{name}': {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let processes = Arc::clone(&self.processes);
         let command = service.command.clone();
         let env = service.env.clone();
@@ -1546,6 +1577,37 @@ impl Daemon {
         use std::thread;
 
         info!("Starting service: {name}");
+
+        // Check skip flag
+        if let Some(skip_config) = &service.skip {
+            match skip_config {
+                SkipConfig::Flag(true) => {
+                    info!("Skipping service '{name}' due to skip flag");
+                    return Ok(ServiceReadyState::CompletedSuccess);
+                }
+                SkipConfig::Flag(false) => {
+                    debug!("Skip flag for '{name}' disabled; starting service");
+                }
+                SkipConfig::Command(skip_command) => {
+                    match self.evaluate_skip_condition(name, skip_command) {
+                        Ok(true) => {
+                            info!("Skipping service '{name}' due to skip condition");
+                            return Ok(ServiceReadyState::CompletedSuccess);
+                        }
+                        Ok(false) => {
+                            debug!(
+                                "Skip condition for '{name}' evaluated to false, starting service"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to evaluate skip condition for '{name}': {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         let processes = Arc::clone(&self.processes);
         let command = service.command.clone();

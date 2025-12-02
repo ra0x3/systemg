@@ -582,3 +582,93 @@ fn status_flags_zombie_processes() {
         libc::waitpid(child_pid, &mut status, 0);
     }
 }
+
+#[test]
+fn skip_flag_controls_service_execution() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    // Test 1: skip: false - service SHOULD run and create file
+    let not_skipped_marker = dir.join("not_skipped.txt");
+    let config_path_1 = dir.join("config_not_skipped.yaml");
+    fs::write(
+        &config_path_1,
+        format!(
+            r#"version: "1"
+services:
+  writer:
+    command: "echo 'service executed' > '{}'"
+    skip: false
+"#,
+            not_skipped_marker.display()
+        ),
+    )
+    .expect("failed to write config 1");
+
+    // Simulate supervisor code path: load config and call daemon.start_service() directly
+    let config_1 =
+        load_config(Some(config_path_1.to_str().unwrap())).expect("load config 1");
+    let daemon_1 =
+        Daemon::from_config(config_1.clone(), false).expect("daemon from config 1");
+
+    // This mimics what Supervisor::run() does at src/supervisor.rs:77-83
+    for (service_name, service_config) in &config_1.services {
+        if service_config.cron.is_none() {
+            daemon_1
+                .start_service(service_name, service_config)
+                .expect("start service");
+        }
+    }
+
+    // Wait and verify file was created when skip: false
+    wait_for_file_value(&not_skipped_marker, "service executed");
+
+    daemon_1.stop_services().expect("stop services");
+
+    // Test 2: skip: true - service SHOULD NOT run and file should not exist
+    let skipped_marker = dir.join("skipped.txt");
+    let config_path_2 = dir.join("config_skipped.yaml");
+    fs::write(
+        &config_path_2,
+        format!(
+            r#"version: "1"
+services:
+  writer:
+    command: "echo 'service executed' > '{}'"
+    skip: true
+"#,
+            skipped_marker.display()
+        ),
+    )
+    .expect("failed to write config 2");
+
+    // Simulate supervisor code path: load config and call daemon.start_service() directly
+    let config_2 =
+        load_config(Some(config_path_2.to_str().unwrap())).expect("load config 2");
+    let daemon_2 =
+        Daemon::from_config(config_2.clone(), false).expect("daemon from config 2");
+
+    // This mimics what Supervisor::run() does at src/supervisor.rs:77-83
+    // This is the BUGGY code path that doesn't check skip!
+    for (service_name, service_config) in &config_2.services {
+        if service_config.cron.is_none() {
+            daemon_2
+                .start_service(service_name, service_config)
+                .expect("start service");
+        }
+    }
+
+    // Wait a bit to ensure service would have run if it was going to
+    thread::sleep(Duration::from_millis(500));
+
+    // Verify file was NOT created when skip: true
+    assert!(
+        !skipped_marker.exists(),
+        "skip: true should prevent service from executing, but marker file exists"
+    );
+
+    daemon_2.stop_services().expect("stop services");
+}
