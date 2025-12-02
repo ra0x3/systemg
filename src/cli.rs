@@ -91,6 +91,10 @@ pub enum Commands {
         /// Whether to daemonize systemg.
         #[arg(long)]
         daemonize: bool,
+
+        /// Optionally start only the named service.
+        #[arg(short, long)]
+        service: Option<String>,
     },
 
     /// Stop the currently running process manager.

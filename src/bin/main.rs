@@ -25,7 +25,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match args.command {
         Commands::Start {
-            config, daemonize, ..
+            config,
+            daemonize,
+            service,
         } => {
             if daemonize {
                 if supervisor_running() {
@@ -35,10 +37,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                 let config_path = resolve_config_path(&config)?;
                 info!("Starting systemg supervisor with config {:?}", config_path);
-                start_supervisor_daemon(config_path)?;
+                start_supervisor_daemon(config_path, service)?;
             } else {
                 register_signal_handler()?;
-                start_foreground(&config)?;
+                start_foreground(&config, service)?;
             }
         }
         Commands::Stop { service, config } => {
@@ -80,7 +82,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 send_control_command(command)?;
             } else if daemonize {
                 let config_path = resolve_config_path(&config)?;
-                start_supervisor_daemon(config_path)?;
+                start_supervisor_daemon(config_path, None)?;
             } else {
                 let daemon = build_daemon(&config)?;
                 daemon.restart_services()?;
@@ -127,17 +129,23 @@ fn init_logging(args: &Cli) {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-fn start_foreground(config_path: &str) -> Result<(), Box<dyn Error>> {
+fn start_foreground(
+    config_path: &str,
+    service: Option<String>,
+) -> Result<(), Box<dyn Error>> {
     let resolved_path = resolve_config_path(config_path)?;
-    let mut supervisor = Supervisor::new(resolved_path, false)?;
+    let mut supervisor = Supervisor::new(resolved_path, false, service)?;
     supervisor.run()?;
     Ok(())
 }
 
-fn start_supervisor_daemon(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
+fn start_supervisor_daemon(
+    config_path: PathBuf,
+    service: Option<String>,
+) -> Result<(), Box<dyn Error>> {
     daemonize_systemg()?;
 
-    let mut supervisor = Supervisor::new(config_path, false)?;
+    let mut supervisor = Supervisor::new(config_path, false, service)?;
     if let Err(err) = supervisor.run() {
         error!("Supervisor exited with error: {err}");
     }

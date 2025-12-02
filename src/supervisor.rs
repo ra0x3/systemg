@@ -35,6 +35,7 @@ pub struct Supervisor {
     daemon: Daemon,
     detach_children: bool,
     cron_manager: CronManager,
+    service_filter: Option<String>,
 }
 
 impl Supervisor {
@@ -42,6 +43,7 @@ impl Supervisor {
     pub fn new(
         config_path: PathBuf,
         detach_children: bool,
+        service_filter: Option<String>,
     ) -> Result<Self, SupervisorError> {
         let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
         let cron_manager = CronManager::new();
@@ -60,6 +62,7 @@ impl Supervisor {
             daemon,
             detach_children,
             cron_manager,
+            service_filter,
         })
     }
 
@@ -77,6 +80,13 @@ impl Supervisor {
         // Only start non-cron services
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
         for (service_name, service_config) in &config.services {
+            // Skip if service_filter is set and doesn't match
+            if let Some(ref filter) = self.service_filter
+                && service_name != filter
+            {
+                continue;
+            }
+
             if service_config.cron.is_none() {
                 // Check skip flag before starting service
                 if let Some(skip_config) = &service_config.skip {
