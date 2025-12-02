@@ -138,6 +138,10 @@ pub enum Commands {
         /// Number of lines to show (default: 50).
         #[arg(short, long, default_value = "50")]
         lines: usize,
+
+        /// Kind of logs to show: stdout, stderr, or supervisor (default: all).
+        #[arg(short = 'k', long)]
+        kind: Option<String>,
     },
 }
 
