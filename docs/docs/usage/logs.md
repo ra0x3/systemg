@@ -33,6 +33,26 @@ View a custom number of log lines:
 $ sysg logs api-service --lines 100
 ```
 
+### Filter by Log Kind
+
+View only specific types of logs using the `--kind` or `-k` flag:
+
+```sh
+# View only stdout logs
+$ sysg logs api-service --kind stdout
+
+# View only stderr logs
+$ sysg logs api-service --kind stderr
+
+# View only supervisor logs (systemg's own operational logs)
+$ sysg logs --kind supervisor
+```
+
+When no `--kind` flag is provided, all logs are displayed in the following order:
+1. Supervisor logs (if no service is specified)
+2. Service stdout logs
+3. Service stderr logs
+
 ## How It Works
 
 ### Log File Location
@@ -184,6 +204,7 @@ Arguments:
 
 Options:
   -l, --lines <LINES>      Number of lines to show (default: 50) [default: 50]
+  -k, --kind <KIND>        Kind of logs to show: stdout, stderr, or supervisor (default: all)
       --log-level <LEVEL>  Override the logging verbosity for this invocation only
   -h, --help               Print help
 ```

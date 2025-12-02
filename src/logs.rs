@@ -95,12 +95,25 @@ impl TailMode {
         lines: usize,
         stdout_path: &Path,
         stderr_path: &Path,
+        kind: Option<&str>,
     ) {
         cmd.arg("-n").arg(lines.to_string());
         if matches!(self, TailMode::Follow) {
             cmd.arg("-F");
         }
-        cmd.arg(stdout_path).arg(stderr_path);
+
+        match kind {
+            Some("stdout") => {
+                cmd.arg(stdout_path);
+            }
+            Some("stderr") => {
+                cmd.arg(stderr_path);
+            }
+            _ => {
+                // Default: show stdout first, then stderr
+                cmd.arg(stdout_path).arg(stderr_path);
+            }
+        }
     }
 }
 
@@ -189,8 +202,9 @@ impl LogManager {
         service_name: &str,
         pid: u32,
         lines: usize,
+        kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
-        self.show_logs_platform(service_name, pid, lines)
+        self.show_logs_platform(service_name, pid, lines, kind)
     }
 
     /// Platform-specific implementation for showing logs.
@@ -200,6 +214,7 @@ impl LogManager {
         service_name: &str,
         pid: u32,
         lines: usize,
+        kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
         println!(
             "\n+{:-^33}+\n\
@@ -225,7 +240,7 @@ impl LogManager {
                 );
             }
         }
-        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path);
+        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
         cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
 
@@ -244,6 +259,7 @@ impl LogManager {
         service_name: &str,
         pid: u32,
         lines: usize,
+        kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
         println!(
             "\n+{:-^33}+\n\
@@ -264,6 +280,7 @@ impl LogManager {
             lines,
             &stdout_path,
             &stderr_path,
+            kind,
         );
         cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
@@ -277,15 +294,34 @@ impl LogManager {
     }
 
     /// Streams logs for all active services in real-time.
-    pub fn show_logs(&self, lines: usize) -> Result<(), LogsManagerError> {
+    pub fn show_logs(
+        &self,
+        lines: usize,
+        kind: Option<&str>,
+    ) -> Result<(), LogsManagerError> {
         debug!("Fetching logs for all services...");
+
+        // Show supervisor logs first if no service specified and kind is not specified or is "supervisor"
+        if matches!(kind, None | Some("supervisor")) {
+            let _ = self.show_supervisor_log(lines).map_err(|err| {
+                eprintln!("Failed to show supervisor logs: {}", err);
+            });
+
+            // If kind is "supervisor", only show supervisor logs
+            if kind == Some("supervisor") {
+                return Ok(());
+            }
+        }
+
         let pid_file = self.pid_file.lock().unwrap();
         let services: Vec<String> = pid_file.services().keys().cloned().collect();
 
         debug!("Services: {services:?}");
 
         if services.is_empty() {
-            println!("No active services");
+            if kind.is_some() {
+                println!("No active services");
+            }
             return Ok(());
         }
 
@@ -294,9 +330,40 @@ impl LogManager {
                 .get(&service)
                 .ok_or(LogsManagerError::ServiceNotFound(service.clone()))?;
             debug!("Service: {service}, PID: {pid}");
-            if let Err(err) = self.show_log(&service, pid, lines) {
+            if let Err(err) = self.show_log(&service, pid, lines, kind) {
                 eprintln!("Failed to stream logs for '{}': {}", service, err);
             }
+        }
+
+        Ok(())
+    }
+
+    /// Shows the supervisor logs
+    fn show_supervisor_log(&self, lines: usize) -> Result<(), LogsManagerError> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        let supervisor_log =
+            PathBuf::from(format!("{}/.local/share/systemg/supervisor.log", home));
+
+        if !supervisor_log.exists() {
+            return Ok(()); // Silently skip if supervisor log doesn't exist yet
+        }
+
+        println!(
+            "\n+{:-^33}+\n\
+             | {:^31} |\n\
+             +{:-^33}+\n",
+            "-", "Supervisor", "-"
+        );
+
+        let mut cmd = Command::new("tail");
+        cmd.arg("-n").arg(lines.to_string());
+        cmd.arg(&supervisor_log);
+        cmd.stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(LogsManagerError::TailCommandFailed(status.code()));
         }
 
         Ok(())

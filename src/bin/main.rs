@@ -2,6 +2,7 @@ use libc::{SIGKILL, getpgrp, killpg};
 use nix::{sys::signal, unistd::Pid};
 use std::{
     error::Error,
+    fs,
     os::unix::io::IntoRawFd,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -96,27 +97,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => manager.show_statuses(),
             }
         }
-        Commands::Logs { service, lines } => {
+        Commands::Logs {
+            service,
+            lines,
+            kind,
+        } => {
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
             let manager = LogManager::new(pid.clone());
             match service {
                 Some(service) => {
                     info!("Fetching logs for service: {service}");
                     if let Some(process_pid) = pid.lock().unwrap().pid_for(&service) {
-                        manager.show_log(&service, process_pid, lines)?;
+                        manager.show_log(
+                            &service,
+                            process_pid,
+                            lines,
+                            kind.as_deref(),
+                        )?;
                     } else {
                         warn!("Service '{service}' is not currently running");
                     }
                 }
                 None => {
                     info!("Fetching logs for all services");
-                    manager.show_logs(lines)?;
+                    manager.show_logs(lines, kind.as_deref())?;
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn supervisor_log_path() -> PathBuf {
+    let home = std::env::var("HOME").expect("HOME not set");
+    PathBuf::from(format!("{}/.local/share/systemg/supervisor.log", home))
 }
 
 fn init_logging(args: &Cli) {
@@ -126,7 +141,32 @@ fn init_logging(args: &Cli) {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    // Ensure the log directory exists
+    let log_path = supervisor_log_path();
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    // Open log file in append mode
+    let file = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("Failed to open supervisor log file {:?}: {}", log_path, e);
+            // Fall back to stdout if we can't open the log file
+            let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+            return;
+        }
+    };
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(move || file.try_clone().unwrap())
+        .with_ansi(false)
+        .try_init();
 }
 
 fn start_foreground(
