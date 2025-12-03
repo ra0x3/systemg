@@ -86,6 +86,10 @@ pub enum ProcessManagerError {
     #[error("PID file error: {0}")]
     PidFileError(#[from] PidFileError),
 
+    /// Error for service state file.
+    #[error("Service state error: {0}")]
+    ServiceStateError(#[from] ServiceStateError),
+
     /// Error for logs manager.
     #[error("Service not found in PID file")]
     ErrNo(#[from] nix::errno::Errno),
@@ -119,6 +123,22 @@ pub enum PidFileError {
 
     /// Error writing to a PID file.
     #[error("Service not found in PID file")]
+    ServiceNotFound,
+}
+
+/// Error type for persistent service state file operations.
+#[derive(Debug, Error)]
+pub enum ServiceStateError {
+    /// Error reading the state file from disk.
+    #[error("Failed to read service state file: {0}")]
+    ReadError(#[from] std::io::Error),
+
+    /// Error parsing JSON contents of the state file.
+    #[error("Failed to parse service state file: {0}")]
+    ParseError(#[from] serde_json::Error),
+
+    /// Attempted to update or remove a non-existent service entry.
+    #[error("Service not found in state file")]
     ServiceNotFound,
 }
 

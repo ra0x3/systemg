@@ -1,14 +1,14 @@
 //! Status management for services in the daemon.
 use nix::unistd::{Pid, getpgid};
 use std::{
-    collections::HashMap,
+    collections::BTreeSet,
     process::Command,
     sync::{Arc, Mutex},
 };
 use sysinfo::{ProcessesToUpdate, System};
 use tracing::debug;
 
-use crate::daemon::PidFile;
+use crate::daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile};
 
 #[cfg(not(target_os = "linux"))]
 use nix::sys::signal;
@@ -37,17 +37,46 @@ enum ProcessState {
 pub struct StatusManager {
     /// The PID file containing service names and their respective PIDs.
     pid_file: Arc<Mutex<PidFile>>,
+    /// Persistent record of last-seen service states.
+    state_file: Arc<Mutex<ServiceStateFile>>,
 }
 
 impl StatusManager {
     /// Creates a new `StatusManager` instance.
-    pub fn new(pid_file: Arc<Mutex<PidFile>>) -> Self {
-        Self { pid_file }
+    pub fn new(
+        pid_file: Arc<Mutex<PidFile>>,
+        state_file: Arc<Mutex<ServiceStateFile>>,
+    ) -> Self {
+        Self {
+            pid_file,
+            state_file,
+        }
     }
 
     fn clear_service_pid(&self, service_name: &str) {
         if let Ok(mut guard) = self.pid_file.lock() {
             let _ = guard.remove(service_name);
+        }
+
+        if let Ok(mut state_guard) = self.state_file.lock() {
+            let should_update = state_guard
+                .get(service_name)
+                .map(|entry| matches!(entry.status, ServiceLifecycleStatus::Running))
+                .unwrap_or(false);
+
+            if should_update
+                && let Err(err) = state_guard.set(
+                    service_name,
+                    ServiceLifecycleStatus::ExitedWithError,
+                    None,
+                    None,
+                    None,
+                )
+            {
+                debug!(
+                    "Failed to reflect cleared PID state for '{service_name}' in state file: {err}"
+                );
+            }
         }
     }
 
@@ -205,7 +234,50 @@ impl StatusManager {
     /// Shows the status of a **single service**.
     pub fn show_status(&self, service_name: &str) {
         debug!("Checking status for service: {service_name}");
-        let pid = {
+        let state_entry = {
+            let guard = self
+                .state_file
+                .lock()
+                .expect("Failed to lock service state file");
+            guard.get(service_name).cloned()
+        };
+
+        if let Some(entry) = state_entry.clone() {
+            match entry.status {
+                ServiceLifecycleStatus::Skipped => {
+                    println!("● {} - Skipped via configuration", service_name);
+                    return;
+                }
+                ServiceLifecycleStatus::ExitedSuccessfully => {
+                    let note = entry
+                        .exit_code
+                        .map(|code| format!(" (exit code {code})"))
+                        .unwrap_or_default();
+                    println!("● {} - Exited successfully{}", service_name, note);
+                    return;
+                }
+                ServiceLifecycleStatus::ExitedWithError => {
+                    let detail = match (entry.exit_code, entry.signal) {
+                        (Some(code), _) => format!("exit code {code}"),
+                        (None, Some(sig)) => format!("signal {sig}"),
+                        _ => "unknown reason".to_string(),
+                    };
+                    println!("● {} - Exited with error ({})", service_name, detail);
+                    return;
+                }
+                ServiceLifecycleStatus::Stopped => {
+                    println!("● {} - Stopped", service_name);
+                    return;
+                }
+                ServiceLifecycleStatus::Running => {}
+            }
+        }
+
+        let pid = if let Some(entry) = state_entry.as_ref()
+            && let Some(pid) = entry.pid
+        {
+            pid
+        } else {
             let pid_file = self.pid_file.lock().expect("Failed to lock PID file");
             match pid_file.get(service_name) {
                 Some(pid) => pid,
@@ -263,21 +335,29 @@ impl StatusManager {
 
     /// Shows the status of **all services**.
     pub fn show_statuses(&self) {
-        let services: HashMap<String, u32> = self
-            .pid_file
-            .lock()
-            .expect("Failed to lock PID file")
-            .services()
-            .clone();
+        let mut services: BTreeSet<String> = BTreeSet::new();
+
+        {
+            let pid_guard = self.pid_file.lock().expect("Failed to lock PID file");
+            services.extend(pid_guard.services().keys().cloned());
+        }
+
+        {
+            let state_guard = self
+                .state_file
+                .lock()
+                .expect("Failed to lock service state file");
+            services.extend(state_guard.services().keys().cloned());
+        }
 
         if services.is_empty() {
-            println!("No active services.");
+            println!("No managed services.");
             return;
         }
 
-        println!("Active services:");
-        for (service, _) in services.iter() {
-            self.show_status(service);
+        println!("Service statuses:");
+        for service in services {
+            self.show_status(&service);
         }
     }
 

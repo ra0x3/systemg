@@ -4,6 +4,8 @@ use reqwest::blocking::Client;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_yaml;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
@@ -24,7 +26,7 @@ use crate::config::{
     Config, EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage,
     ServiceConfig, SkipConfig,
 };
-use crate::error::{PidFileError, ProcessManagerError};
+use crate::error::{PidFileError, ProcessManagerError, ServiceStateError};
 
 /// Build the environment map for a service, giving inline `env.vars` precedence over entries loaded
 /// from `env.file`.
@@ -150,6 +152,98 @@ impl PidFile {
     /// Retrieves a service PID
     pub fn get(&self, service: &str) -> Option<u32> {
         self.services.get(service).copied()
+    }
+}
+
+/// Enumerates the persisted lifecycle states for managed services.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceLifecycleStatus {
+    Running,
+    Skipped,
+    ExitedSuccessfully,
+    ExitedWithError,
+    Stopped,
+}
+
+/// Persisted service runtime metadata used to inform status reporting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceStateEntry {
+    pub status: ServiceLifecycleStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+}
+
+/// Persistent record of the last-known state for every managed service.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct ServiceStateFile {
+    services: HashMap<String, ServiceStateEntry>,
+}
+
+impl ServiceStateFile {
+    fn path() -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME not set");
+        PathBuf::from(format!("{}/.local/share/systemg/state.json", home))
+    }
+
+    pub fn load() -> Result<Self, ServiceStateError> {
+        let path = Self::path();
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+
+        let contents = fs::read_to_string(path)?;
+        let state = serde_json::from_str::<Self>(&contents)?;
+        Ok(state)
+    }
+
+    pub fn save(&self) -> Result<(), ServiceStateError> {
+        let path = Self::path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    pub fn services(&self) -> &HashMap<String, ServiceStateEntry> {
+        &self.services
+    }
+
+    pub fn get(&self, service: &str) -> Option<&ServiceStateEntry> {
+        self.services.get(service)
+    }
+
+    pub fn set(
+        &mut self,
+        service: &str,
+        status: ServiceLifecycleStatus,
+        pid: Option<u32>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<(), ServiceStateError> {
+        self.services.insert(
+            service.to_string(),
+            ServiceStateEntry {
+                status,
+                pid,
+                exit_code,
+                signal,
+            },
+        );
+        self.save()
+    }
+
+    pub fn remove(&mut self, service: &str) -> Result<(), ServiceStateError> {
+        if self.services.remove(service).is_some() {
+            self.save()
+        } else {
+            Err(ServiceStateError::ServiceNotFound)
+        }
     }
 }
 
@@ -297,6 +391,8 @@ pub struct Daemon {
     config: Arc<Config>,
     /// The PID file for tracking service PIDs.
     pid_file: Arc<Mutex<PidFile>>,
+    /// Persistent state for recording service lifecycle transitions.
+    state_file: Arc<Mutex<ServiceStateFile>>,
     /// Whether child services should be detached from systemg (legacy behavior).
     detach_children: bool,
     /// Base directory for resolving relative service commands and assets.
@@ -312,6 +408,7 @@ impl Daemon {
     pub fn new(
         config: Config,
         pid_file: Arc<Mutex<PidFile>>,
+        state_file: Arc<Mutex<ServiceStateFile>>,
         detach_children: bool,
     ) -> Self {
         debug!("Initializing daemon...");
@@ -333,6 +430,7 @@ impl Daemon {
             processes: Arc::new(Mutex::new(HashMap::new())),
             config: Arc::new(config),
             pid_file,
+            state_file,
             detach_children,
             running: Arc::new(AtomicBool::new(false)),
             monitor_handle: Arc::new(Mutex::new(None)),
@@ -346,7 +444,49 @@ impl Daemon {
         detach_children: bool,
     ) -> Result<Self, ProcessManagerError> {
         let pid_file = Arc::new(Mutex::new(PidFile::load()?));
-        Ok(Self::new(config, pid_file, detach_children))
+        let state_file = Arc::new(Mutex::new(ServiceStateFile::load()?));
+        Ok(Self::new(config, pid_file, state_file, detach_children))
+    }
+
+    /// Explicitly records a skipped service in the persistent state store, clearing any stale PID.
+    pub fn mark_service_skipped(&self, service: &str) -> Result<(), ProcessManagerError> {
+        self.mark_skipped(service)
+    }
+
+    fn update_state(
+        &self,
+        service: &str,
+        status: ServiceLifecycleStatus,
+        pid: Option<u32>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<(), ProcessManagerError> {
+        let mut state = self.state_file.lock()?;
+        state.set(service, status, pid, exit_code, signal)?;
+        Ok(())
+    }
+
+    fn mark_running(&self, service: &str, pid: u32) -> Result<(), ProcessManagerError> {
+        self.update_state(
+            service,
+            ServiceLifecycleStatus::Running,
+            Some(pid),
+            None,
+            None,
+        )
+    }
+
+    fn mark_skipped(&self, service: &str) -> Result<(), ProcessManagerError> {
+        {
+            let mut pid_guard = self.pid_file.lock()?;
+            if let Err(err) = pid_guard.remove(service)
+                && !matches!(err, PidFileError::ServiceNotFound)
+            {
+                return Err(err.into());
+            }
+        }
+
+        self.update_state(service, ServiceLifecycleStatus::Skipped, None, None, None)
     }
 
     /// Launches a service as a child process, ensuring it remains attached to `systemg`.
@@ -1424,6 +1564,7 @@ impl Daemon {
             match skip_config {
                 SkipConfig::Flag(true) => {
                     info!("Skipping service '{name}' due to skip flag");
+                    self.mark_skipped(name)?;
                     return Ok(ServiceReadyState::CompletedSuccess);
                 }
                 SkipConfig::Flag(false) => {
@@ -1433,6 +1574,7 @@ impl Daemon {
                     match self.evaluate_skip_condition(name, skip_command) {
                         Ok(true) => {
                             info!("Skipping service '{name}' due to skip condition");
+                            self.mark_skipped(name)?;
                             return Ok(ServiceReadyState::CompletedSuccess);
                         }
                         Ok(false) => {
@@ -1494,28 +1636,42 @@ impl Daemon {
 
         debug!("Service thread for '{name}' completed");
 
-        if let Err(err) = launch_result {
-            if let Some(action) = service
-                .hooks
-                .as_ref()
-                .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
-            {
-                run_hook(
-                    action,
-                    &service.env,
-                    HookStage::OnStart,
-                    HookOutcome::Error,
-                    name,
-                    &self.project_root,
-                );
+        match launch_result {
+            Ok(pid) => {
+                self.mark_running(name, pid)?;
             }
-            return Err(err);
+            Err(err) => {
+                if let Some(action) = service
+                    .hooks
+                    .as_ref()
+                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
+                {
+                    run_hook(
+                        action,
+                        &service.env,
+                        HookStage::OnStart,
+                        HookOutcome::Error,
+                        name,
+                        &self.project_root,
+                    );
+                }
+                return Err(err);
+            }
         }
 
         let readiness = self.wait_for_service_ready(name);
 
         match readiness {
             Ok(state) => {
+                if matches!(state, ServiceReadyState::CompletedSuccess) {
+                    self.update_state(
+                        name,
+                        ServiceLifecycleStatus::ExitedSuccessfully,
+                        None,
+                        Some(0),
+                        None,
+                    )?;
+                }
                 if let Some(action) = service
                     .hooks
                     .as_ref()
@@ -1583,6 +1739,7 @@ impl Daemon {
             match skip_config {
                 SkipConfig::Flag(true) => {
                     info!("Skipping service '{name}' due to skip flag");
+                    self.mark_skipped(name)?;
                     return Ok(ServiceReadyState::CompletedSuccess);
                 }
                 SkipConfig::Flag(false) => {
@@ -1592,6 +1749,7 @@ impl Daemon {
                     match self.evaluate_skip_condition(name, skip_command) {
                         Ok(true) => {
                             info!("Skipping service '{name}' due to skip condition");
+                            self.mark_skipped(name)?;
                             return Ok(ServiceReadyState::CompletedSuccess);
                         }
                         Ok(false) => {
@@ -1680,28 +1838,42 @@ impl Daemon {
                     ),
                 })?;
 
-        if let Err(err) = launch_result {
-            if let Some(action) = service
-                .hooks
-                .as_ref()
-                .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
-            {
-                run_hook(
-                    action,
-                    &service.env,
-                    HookStage::OnStart,
-                    HookOutcome::Error,
-                    name,
-                    &self.project_root,
-                );
+        match launch_result {
+            Ok(pid) => {
+                self.mark_running(name, pid)?;
             }
-            return Err(err);
+            Err(err) => {
+                if let Some(action) = service
+                    .hooks
+                    .as_ref()
+                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
+                {
+                    run_hook(
+                        action,
+                        &service.env,
+                        HookStage::OnStart,
+                        HookOutcome::Error,
+                        name,
+                        &self.project_root,
+                    );
+                }
+                return Err(err);
+            }
         }
 
         let readiness = self.wait_for_service_ready(name);
 
         match readiness {
             Ok(state) => {
+                if matches!(state, ServiceReadyState::CompletedSuccess) {
+                    self.update_state(
+                        name,
+                        ServiceLifecycleStatus::ExitedSuccessfully,
+                        None,
+                        Some(0),
+                        None,
+                    )?;
+                }
                 if let Some(action) = service
                     .hooks
                     .as_ref()
@@ -1744,6 +1916,7 @@ impl Daemon {
         service_name: &str,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
+        state_file: &Arc<Mutex<ServiceStateFile>>,
     ) -> Result<(), ProcessManagerError> {
         let active_pid = {
             let processes_guard = processes.lock()?;
@@ -1891,6 +2064,18 @@ impl Daemon {
                 }
             }
 
+            if let Ok(mut guard) = state_file.lock()
+                && let Err(err) = guard.set(
+                    service_name,
+                    ServiceLifecycleStatus::Stopped,
+                    None,
+                    None,
+                    None,
+                )
+            {
+                warn!("Failed to persist stopped state for '{service_name}': {err}");
+            }
+
             debug!("Service '{service_name}' stopped successfully.");
         } else {
             warn!("Service '{service_name}' not found in PID file.");
@@ -1910,6 +2095,7 @@ impl Daemon {
             service_name,
             &self.processes,
             &self.pid_file,
+            &self.state_file,
         );
 
         if was_running
@@ -1939,6 +2125,7 @@ impl Daemon {
         reverse_dependencies: &HashMap<String, Vec<String>>,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
+        state_file: &Arc<Mutex<ServiceStateFile>>,
     ) {
         let mut stack: Vec<String> =
             reverse_dependencies.get(root).cloned().unwrap_or_default();
@@ -1948,7 +2135,7 @@ impl Daemon {
             warn!("Stopping dependent service '{service}' because '{root}' failed.");
 
             if let Err(err) =
-                Self::stop_service_with_handles(&service, processes, pid_file)
+                Self::stop_service_with_handles(&service, processes, pid_file, state_file)
             {
                 error!(
                     "Failed to stop dependent service '{service}' after '{root}' failure: {err}"
@@ -1997,6 +2184,7 @@ impl Daemon {
             let config = Arc::clone(&self.config);
             let running = Arc::clone(&self.running);
             let pid_file = Arc::clone(&self.pid_file);
+            let state_file = Arc::clone(&self.state_file);
             let detach_children = self.detach_children;
             let project_root = self.project_root.clone();
 
@@ -2005,6 +2193,7 @@ impl Daemon {
                     processes,
                     config,
                     pid_file,
+                    state_file,
                     running,
                     detach_children,
                     project_root,
@@ -2035,6 +2224,7 @@ impl Daemon {
         processes: Arc<Mutex<HashMap<String, Child>>>,
         config: Arc<Config>,
         pid_file: Arc<Mutex<PidFile>>,
+        state_file: Arc<Mutex<ServiceStateFile>>,
         running: Arc<AtomicBool>,
         detach_children: bool,
         project_root: PathBuf,
@@ -2050,13 +2240,12 @@ impl Daemon {
                 for (name, child) in locked_processes.iter_mut() {
                     match child.try_wait() {
                         Ok(Some(status)) => {
-                            let exited_normally = status.success();
-                            if exited_normally {
+                            if status.success() {
                                 info!("Service '{name}' exited normally.");
                             } else {
                                 warn!("Service '{name}' was terminated with {status:?}.");
                             }
-                            exited_services.push((name.clone(), exited_normally));
+                            exited_services.push((name.clone(), status));
                         }
                         Ok(None) => {
                             debug!("Service '{name}' is still running.");
@@ -2070,9 +2259,15 @@ impl Daemon {
             if !exited_services.is_empty() {
                 let mut pid_file_guard = pid_file.lock().unwrap();
 
-                for (name, exited_normally) in exited_services {
+                for (name, exit_status) in exited_services {
                     let manually_stopped = pid_file_guard.get(&name).is_none();
-                    let hook_outcome = if manually_stopped || exited_normally {
+                    let exit_success = exit_status.success();
+                    let exit_code = exit_status.code();
+                    #[cfg(unix)]
+                    let signal = exit_status.signal();
+                    #[cfg(not(unix))]
+                    let signal = None;
+                    let hook_outcome = if manually_stopped || exit_success {
                         HookOutcome::Success
                     } else {
                         HookOutcome::Error
@@ -2098,16 +2293,53 @@ impl Daemon {
 
                     if manually_stopped {
                         info!("Service '{name}' was manually stopped. Skipping restart.");
-                    } else if !exited_normally {
+                        if let Ok(mut state_guard) = state_file.lock()
+                            && let Err(err) = state_guard.set(
+                                &name,
+                                ServiceLifecycleStatus::Stopped,
+                                None,
+                                None,
+                                None,
+                            )
+                        {
+                            warn!(
+                                "Failed to persist stopped state for '{name}' after manual stop: {err}"
+                            );
+                        }
+                    } else if !exit_success {
                         warn!("Service '{name}' crashed. Restarting...");
                         failed_services.push(name.clone());
                         restarted_services.push(name.clone());
+                        if let Ok(mut state_guard) = state_file.lock()
+                            && let Err(err) = state_guard.set(
+                                &name,
+                                ServiceLifecycleStatus::ExitedWithError,
+                                None,
+                                exit_code,
+                                signal,
+                            )
+                        {
+                            warn!("Failed to persist crash state for '{name}': {err}");
+                        }
                     } else {
                         debug!(
                             "Service '{name}' exited cleanly. Removing from PID file."
                         );
                         if let Err(e) = pid_file_guard.remove(&name) {
                             error!("Failed to remove '{name}' from PID file: {e}");
+                        }
+                        if let Ok(mut state_guard) = state_file.lock()
+                            && let Err(err) = state_guard.set(
+                                &name,
+                                ServiceLifecycleStatus::ExitedSuccessfully,
+                                None,
+                                exit_code.or(Some(0)),
+                                signal,
+                            )
+                        {
+                            warn!(
+                                "Failed to persist clean exit state for '{name}': {err}"
+                            );
                         }
                     }
 
@@ -2118,7 +2350,13 @@ impl Daemon {
             if !failed_services.is_empty() {
                 let reverse = config.reverse_dependencies();
                 for failed in failed_services {
-                    Self::stop_dependents(&failed, &reverse, &processes, &pid_file);
+                    Self::stop_dependents(
+                        &failed,
+                        &reverse,
+                        &processes,
+                        &pid_file,
+                        &state_file,
+                    );
                 }
             }
 
@@ -2372,6 +2610,7 @@ mod tests {
         services: HashMap<String, ServiceConfig>,
     ) -> Daemon {
         let pid_file = Arc::new(Mutex::new(PidFile::default()));
+        let state_file = Arc::new(Mutex::new(ServiceStateFile::default()));
         let config = Config {
             version: "1".into(),
             services,
@@ -2382,7 +2621,7 @@ mod tests {
         // Validate order to mirror load_config behaviour.
         config.service_start_order().unwrap();
 
-        Daemon::new(config, pid_file, false)
+        Daemon::new(config, pid_file, state_file, false)
     }
 
     /// Executes a test callback with a temporary HOME directory to contain PID and log files.

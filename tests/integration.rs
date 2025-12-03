@@ -583,6 +583,83 @@ fn status_flags_zombie_processes() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn status_reports_skipped_services() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  skipped_service:
+    command: "echo should be skipped"
+    skip: true
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config.clone(), false).expect("daemon from config");
+
+    daemon
+        .start_service(
+            "skipped_service",
+            config.services.get("skipped_service").unwrap(),
+        )
+        .expect("start skipped service");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    cmd.arg("status");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("skipped_service"))
+        .stdout(predicate::str::contains("Skipped"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_reports_successful_exit() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  oneshot:
+    command: "sh -c 'echo done'"
+    restart_policy: "never"
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config.clone(), false).expect("daemon from config");
+
+    daemon
+        .start_service("oneshot", config.services.get("oneshot").unwrap())
+        .expect("start oneshot");
+
+    wait_for_pid_removed("oneshot");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    cmd.arg("status");
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("oneshot"))
+        .stdout(predicate::str::contains("Exited successfully"));
+}
+
 #[test]
 fn skip_flag_controls_service_execution() {
     let temp = tempdir().expect("failed to create tempdir");

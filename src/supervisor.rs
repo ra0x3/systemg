@@ -93,6 +93,13 @@ impl Supervisor {
                     match skip_config {
                         SkipConfig::Flag(true) => {
                             info!("Skipping service '{service_name}' due to skip flag");
+                            if let Err(err) =
+                                self.daemon.mark_service_skipped(service_name)
+                            {
+                                warn!(
+                                    "Failed to record skipped state for '{service_name}': {err}"
+                                );
+                            }
                             continue;
                         }
                         SkipConfig::Flag(false) => {
@@ -109,6 +116,13 @@ impl Supervisor {
                                     info!(
                                         "Skipping service '{service_name}' due to skip condition"
                                     );
+                                    if let Err(err) =
+                                        self.daemon.mark_service_skipped(service_name)
+                                    {
+                                        warn!(
+                                            "Failed to record skipped state for '{service_name}': {err}"
+                                        );
+                                    }
                                     continue;
                                 }
                                 Ok(false) => {

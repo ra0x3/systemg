@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 use systemg::{
     cli::{Cli, Commands, parse_args},
     config::load_config,
-    daemon::{Daemon, PidFile},
+    daemon::{Daemon, PidFile, ServiceStateFile},
     ipc::{self, ControlCommand, ControlError, ControlResponse},
     logs::LogManager,
     status::StatusManager,
@@ -91,7 +91,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::Status { service } => {
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
-            let manager = StatusManager::new(pid);
+            let state =
+                Arc::new(Mutex::new(ServiceStateFile::load().unwrap_or_default()));
+            let manager = StatusManager::new(pid, state);
             match service {
                 Some(service) => manager.show_status(&service),
                 None => manager.show_statuses(),
