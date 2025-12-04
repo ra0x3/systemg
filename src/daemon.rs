@@ -610,6 +610,16 @@ impl Daemon {
         self.spawn_monitor_thread()
     }
 
+    /// Ensures the background monitor thread is running.
+    ///
+    /// The supervisor starts services individually in daemon mode, so it needs
+    /// a way to activate the monitor loop afterwards. This method is a thin
+    /// wrapper around the internal `spawn_monitor_thread` helper that keeps the
+    /// existing guard logic (only spawning when no active monitor exists).
+    pub fn ensure_monitoring(&self) -> Result<(), ProcessManagerError> {
+        self.spawn_monitor_thread()
+    }
+
     /// Executes the start workflow without waiting on the monitor thread.
     fn start_all_services(&self) -> Result<(), ProcessManagerError> {
         info!("Starting all services...");
@@ -2719,6 +2729,36 @@ fi
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
+
+            daemon.shutdown_monitor();
+        });
+    }
+
+    #[test]
+    fn monitor_reaps_services_that_exit_after_running_state() {
+        with_temp_home(|dir| {
+            fs::write(dir.join("slow_exit.sh"), "sleep 0.2\n").unwrap();
+
+            let mut services = HashMap::new();
+            let service = make_service("sh slow_exit.sh", &[]);
+            services.insert("slow".into(), service);
+
+            let daemon = create_daemon(dir, services);
+            let svc = daemon.config.services.get("slow").unwrap();
+
+            assert!(matches!(
+                daemon.start_service("slow", svc).unwrap(),
+                ServiceReadyState::Running
+            ));
+
+            daemon.ensure_monitoring().unwrap();
+            thread::sleep(Duration::from_millis(2500));
+
+            assert!(daemon.pid_file.lock().unwrap().get("slow").is_none());
+
+            let state_guard = daemon.state_file.lock().unwrap();
+            let entry = state_guard.services().get("slow").unwrap();
+            assert_eq!(entry.status, ServiceLifecycleStatus::ExitedSuccessfully);
 
             daemon.shutdown_monitor();
         });

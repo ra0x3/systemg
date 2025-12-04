@@ -145,6 +145,11 @@ impl Supervisor {
             }
         }
 
+        // Ensure the background monitor thread is watching any long-lived
+        // processes we just started so that exits are reaped and lifecycle
+        // state stays accurate.
+        self.daemon.ensure_monitoring()?;
+
         // Spawn cron checker thread
         let cron_manager = self.cron_manager.clone();
         let config_path = self.config_path.clone();
