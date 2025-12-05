@@ -22,6 +22,7 @@ use std::time::UNIX_EPOCH;
 use chrono::{DateTime, Utc};
 
 const GREEN_BOLD: &str = "\x1b[1;32m"; // Bright Green
+const RED_BOLD: &str = "\x1b[1;31m"; // Bright Red
 const MAGENTA_BOLD: &str = "\x1b[1;35m"; // Magenta
 const RESET: &str = "\x1b[0m"; // Reset color
 
@@ -253,7 +254,10 @@ impl StatusManager {
                         .exit_code
                         .map(|code| format!(" (exit code {code})"))
                         .unwrap_or_default();
-                    println!("● {} - Exited successfully{}", service_name, note);
+                    println!(
+                        "● {} - {}Exited successfully{}{}",
+                        service_name, GREEN_BOLD, note, RESET
+                    );
                     return;
                 }
                 ServiceLifecycleStatus::ExitedWithError => {
@@ -262,7 +266,10 @@ impl StatusManager {
                         (None, Some(sig)) => format!("signal {sig}"),
                         _ => "unknown reason".to_string(),
                     };
-                    println!("● {} - Exited with error ({})", service_name, detail);
+                    println!(
+                        "● {} - {}Exited with error ({}){}",
+                        service_name, RED_BOLD, detail, RESET
+                    );
                     return;
                 }
                 ServiceLifecycleStatus::Stopped => {
