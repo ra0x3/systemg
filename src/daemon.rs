@@ -401,6 +401,8 @@ pub struct Daemon {
     running: Arc<AtomicBool>,
     /// Handle to the background monitoring thread once spawned.
     monitor_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
+    /// Tracks the number of restart attempts for each service.
+    restart_counts: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl Daemon {
@@ -435,6 +437,7 @@ impl Daemon {
             running: Arc::new(AtomicBool::new(false)),
             monitor_handle: Arc::new(Mutex::new(None)),
             project_root,
+            restart_counts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2197,6 +2200,7 @@ impl Daemon {
             let state_file = Arc::clone(&self.state_file);
             let detach_children = self.detach_children;
             let project_root = self.project_root.clone();
+            let restart_counts = Arc::clone(&self.restart_counts);
 
             let handle = thread::spawn(move || {
                 Self::monitor_loop(
@@ -2207,6 +2211,7 @@ impl Daemon {
                     running,
                     detach_children,
                     project_root,
+                    restart_counts,
                 );
             });
 
@@ -2230,6 +2235,7 @@ impl Daemon {
     }
 
     /// Monitors all running services and restarts them if they exit unexpectedly.
+    #[allow(clippy::too_many_arguments)]
     fn monitor_loop(
         processes: Arc<Mutex<HashMap<String, Child>>>,
         config: Arc<Config>,
@@ -2238,6 +2244,7 @@ impl Daemon {
         running: Arc<AtomicBool>,
         detach_children: bool,
         project_root: PathBuf,
+        restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     ) {
         while running.load(Ordering::SeqCst) {
             let mut exited_services = Vec::new();
@@ -2383,6 +2390,7 @@ impl Daemon {
                         detach_children,
                         Arc::clone(&pid_file),
                         project_root.clone(),
+                        Arc::clone(&restart_counts),
                     );
                 }
             }
@@ -2401,11 +2409,29 @@ impl Daemon {
         detach_children: bool,
         pid_file: Arc<Mutex<PidFile>>,
         project_root: PathBuf,
+        restart_counts: Arc<Mutex<HashMap<String, u32>>>,
     ) {
         let name = name.to_string();
         let command = service.command.clone();
         let env = service.env.clone();
         let hooks = service.hooks.clone();
+        let max_restarts = service.max_restarts;
+
+        // Check restart count before attempting restart
+        {
+            let mut counts = restart_counts.lock().unwrap();
+            let count = counts.entry(name.clone()).or_insert(0);
+            *count += 1;
+
+            if let Some(max) = max_restarts
+                && *count > max
+            {
+                error!(
+                    "Service '{name}' has reached maximum restart attempts ({max}). Giving up."
+                );
+                return;
+            }
+        }
 
         let backoff = service
             .backoff
@@ -2414,6 +2440,8 @@ impl Daemon {
             .trim_end_matches('s')
             .parse::<u64>()
             .unwrap_or(5);
+
+        let restart_counts_clone = Arc::clone(&restart_counts);
 
         let _ = thread::spawn(move || {
             warn!("Restarting '{name}' after {backoff} seconds...");
@@ -2483,6 +2511,11 @@ impl Daemon {
                         &pid_file,
                     ) {
                         Ok(_) => {
+                            // Reset restart counter after successful restart
+                            if let Ok(mut counts) = restart_counts_clone.lock() {
+                                counts.insert(name.clone(), 0);
+                            }
+
                             if let Some(hooks_cfg) = hooks.as_ref()
                                 && let Some(action) =
                                     hooks_cfg.action(HookStage::OnStart, HookOutcome::Success)
@@ -2602,6 +2635,7 @@ mod tests {
             env: None,
             restart_policy: None,
             backoff: None,
+            max_restarts: None,
             depends_on: if deps.is_empty() {
                 None
             } else {

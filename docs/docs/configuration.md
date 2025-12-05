@@ -49,6 +49,9 @@ services:
     # Time to wait before attempting a restart (backoff duration) (optional)
     backoff: "5s"
 
+    # Maximum number of restart attempts before giving up (optional, default: unlimited)
+    max_restarts: 10
+
     # Lifecycle hooks (optional)
     hooks:
       # Commands to run when the service starts
@@ -194,6 +197,23 @@ services:
     restart_policy: "on-failure"
     backoff: "5s"
 ```
+
+#### `max_restarts` (optional)
+
+Maximum number of restart attempts before giving up on a failing service. When a service crashes repeatedly, this limit prevents infinite restart loops. If not specified (or set to `null`), the service will restart indefinitely according to its `restart_policy`.
+
+After reaching the maximum restart attempts, systemg will log an error and stop trying to restart the service. The restart counter is reset to zero after a service runs successfully, so services that recover normally will get fresh restart attempts if they fail again later.
+
+```yaml
+services:
+  myapp:
+    command: "./myapp"
+    restart_policy: "on-failure"
+    backoff: "5s"
+    max_restarts: 5  # Give up after 5 consecutive failed restart attempts
+```
+
+This is particularly useful for services that may fail due to external conditions (like port conflicts, missing dependencies, or configuration errors) where continuing to restart indefinitely would waste resources.
 
 #### `skip` (optional)
 

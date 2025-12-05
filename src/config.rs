@@ -46,6 +46,8 @@ pub struct ServiceConfig {
     pub restart_policy: Option<String>,
     /// Backoff time before restarting a failed service.
     pub backoff: Option<String>,
+    /// Maximum number of restart attempts before giving up (None = unlimited).
+    pub max_restarts: Option<u32>,
     /// List of services that must start before this service.
     pub depends_on: Option<Vec<String>>,
     /// Deployment strategy configuration.
@@ -498,6 +500,7 @@ services:
             env: None,
             restart_policy: None,
             backoff: None,
+            max_restarts: None,
             depends_on: depends_on
                 .map(|deps| deps.into_iter().map(String::from).collect()),
             deployment: None,
