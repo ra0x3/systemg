@@ -751,6 +751,118 @@ services:
 }
 
 #[test]
+fn cron_services_not_started_during_bulk_start() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let normal_marker = dir.join("normal.txt");
+    let cron_marker = dir.join("cron.txt");
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  normal:
+    command: "sh -c 'echo normal > \"{normal}\"; sleep 1'"
+    restart_policy: "never"
+  cron_job:
+    command: "sh -c 'echo cron > \"{cron}\"'"
+    restart_policy: "never"
+    cron:
+      expression: "*/30 * * * *"
+"#,
+            normal = normal_marker.display(),
+            cron = cron_marker.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config.clone(), false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    wait_for_file_value(&normal_marker, "normal");
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        !cron_marker.exists(),
+        "cron-managed service should not run during bulk start"
+    );
+
+    daemon.stop_services().expect("stop services");
+}
+
+#[test]
+fn manual_stop_suppresses_pending_restart() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  flaky:
+    command: "sh -c 'sleep 1; exit 1'"
+    restart_policy: "always"
+    backoff: "1s"
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config.clone(), false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    let first_pid = wait_for_pid("flaky");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut restarted_pid = first_pid;
+    while Instant::now() < deadline {
+        if let Ok(pid_file) = PidFile::load()
+            && let Some(pid) = pid_file.pid_for("flaky")
+            && pid != first_pid
+        {
+            restarted_pid = pid;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert_ne!(
+        first_pid, restarted_pid,
+        "service should have restarted automatically before manual stop"
+    );
+
+    daemon.stop_service("flaky").expect("manual stop");
+
+    thread::sleep(Duration::from_secs(3));
+
+    let pid_file = PidFile::load().expect("load pid file");
+    assert!(
+        pid_file.pid_for("flaky").is_none(),
+        "service should remain stopped after manual stop despite pending restart"
+    );
+
+    thread::sleep(Duration::from_secs(1));
+    let pid_file = PidFile::load().expect("reload pid file");
+    assert!(
+        pid_file.pid_for("flaky").is_none(),
+        "service should not restart"
+    );
+
+    daemon.shutdown_monitor();
+}
+
+#[test]
 fn supervisor_logs_operational_events() {
     use assert_cmd::Command;
 

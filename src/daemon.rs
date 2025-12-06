@@ -403,6 +403,10 @@ pub struct Daemon {
     monitor_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
     /// Tracks the number of restart attempts for each service.
     restart_counts: Arc<Mutex<HashMap<String, u32>>>,
+    /// Services that were explicitly stopped this cycle, used to treat exits as manual.
+    manual_stop_flags: Arc<Mutex<HashSet<String>>>,
+    /// Services whose automatic restarts are temporarily suppressed.
+    restart_suppressed: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Daemon {
@@ -438,6 +442,8 @@ impl Daemon {
             monitor_handle: Arc::new(Mutex::new(None)),
             project_root,
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
+            manual_stop_flags: Arc::new(Mutex::new(HashSet::new())),
+            restart_suppressed: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -637,6 +643,14 @@ impl Daemon {
                 Some(service) => service,
                 None => continue,
             };
+
+            if service.cron.is_some() {
+                info!(
+                    "Skipping cron-managed service '{service_name}' during bulk start; scheduled execution will launch it"
+                );
+                healthy_services.insert(service_name.clone());
+                continue 'service_loop;
+            }
 
             if let Some(skip_config) = &service.skip {
                 match skip_config {
@@ -903,6 +917,13 @@ impl Daemon {
                 None => continue,
             };
 
+            if service.cron.is_some() {
+                info!(
+                    "Skipping cron-managed service '{service_name}' during restart; scheduled execution will launch it"
+                );
+                continue;
+            }
+
             restarted_services.push(service_name.clone());
 
             let strategy = service
@@ -993,7 +1014,7 @@ impl Daemon {
         let start_state = match self.start_service(name, service) {
             Ok(state) => state,
             Err(err) => {
-                if let Err(stop_err) = self.stop_service(name) {
+                if let Err(stop_err) = self.stop_service_with_intent(name, false) {
                     warn!(
                         "Failed to stop new instance of '{name}' after restart error: {stop_err}"
                     );
@@ -1029,7 +1050,7 @@ impl Daemon {
             && let Err(err) = self.wait_for_health_check(name, health_check)
         {
             error!("Health check failed for '{name}' during rolling restart: {err}");
-            if let Err(stop_err) = self.stop_service(name) {
+            if let Err(stop_err) = self.stop_service_with_intent(name, false) {
                 warn!(
                     "Failed to stop new instance of '{name}' after health check failure: {stop_err}"
                 );
@@ -1051,7 +1072,7 @@ impl Daemon {
                     error!(
                         "Failed to parse grace period '{grace_period}' for '{name}': {err}"
                     );
-                    if let Err(stop_err) = self.stop_service(name) {
+                    if let Err(stop_err) = self.stop_service_with_intent(name, false) {
                         warn!(
                             "Failed to stop new instance of '{name}' after grace period parse error: {stop_err}"
                         );
@@ -1087,7 +1108,7 @@ impl Daemon {
     ) -> Result<(), ProcessManagerError> {
         info!("Performing immediate restart for service: {name}");
 
-        self.stop_service(name)?;
+        self.stop_service_with_intent(name, false)?;
         let start_state = self.start_service(name, service)?;
 
         if let ServiceReadyState::CompletedSuccess = start_state {
@@ -1571,6 +1592,11 @@ impl Daemon {
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         info!("Starting service: {name}");
+
+        {
+            let mut suppressed = self.restart_suppressed.lock()?;
+            suppressed.remove(name);
+        }
 
         // Check skip flag
         if let Some(skip_config) = &service.skip {
@@ -2101,7 +2127,21 @@ impl Daemon {
     ///
     /// If the service is running, it will be terminated and removed from the process map.
     /// This function correctly handles both Unix/macOS and Linux semantics for process groups.
-    pub fn stop_service(&self, service_name: &str) -> Result<(), ProcessManagerError> {
+    fn stop_service_with_intent(
+        &self,
+        service_name: &str,
+        suppress_auto_restart: bool,
+    ) -> Result<(), ProcessManagerError> {
+        {
+            let mut manual_guard = self.manual_stop_flags.lock()?;
+            manual_guard.insert(service_name.to_string());
+        }
+
+        if suppress_auto_restart {
+            let mut suppressed_guard = self.restart_suppressed.lock()?;
+            suppressed_guard.insert(service_name.to_string());
+        }
+
         let was_running = { self.pid_file.lock()?.get(service_name).is_some() };
 
         let result = Self::stop_service_with_handles(
@@ -2110,6 +2150,15 @@ impl Daemon {
             &self.pid_file,
             &self.state_file,
         );
+
+        if result.is_err() {
+            let mut manual_guard = self.manual_stop_flags.lock()?;
+            manual_guard.remove(service_name);
+            if suppress_auto_restart {
+                let mut suppressed_guard = self.restart_suppressed.lock()?;
+                suppressed_guard.remove(service_name);
+            }
+        }
 
         if was_running
             && result.is_ok()
@@ -2130,6 +2179,10 @@ impl Daemon {
         result
     }
 
+    pub fn stop_service(&self, service_name: &str) -> Result<(), ProcessManagerError> {
+        self.stop_service_with_intent(service_name, true)
+    }
+
     /// Recursively stops any services that depend (directly or indirectly) on the specified root
     /// service. Used when a dependency crashes so downstream workloads do not continue in a broken
     /// state.
@@ -2139,6 +2192,8 @@ impl Daemon {
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
         state_file: &Arc<Mutex<ServiceStateFile>>,
+        manual_stop_flags: &Arc<Mutex<HashSet<String>>>,
+        restart_suppressed: &Arc<Mutex<HashSet<String>>>,
     ) {
         let mut stack: Vec<String> =
             reverse_dependencies.get(root).cloned().unwrap_or_default();
@@ -2147,12 +2202,25 @@ impl Daemon {
         while let Some(service) = stack.pop() {
             warn!("Stopping dependent service '{service}' because '{root}' failed.");
 
+            if let Ok(mut guard) = manual_stop_flags.lock() {
+                guard.insert(service.clone());
+            }
+            if let Ok(mut guard) = restart_suppressed.lock() {
+                guard.insert(service.clone());
+            }
+
             if let Err(err) =
                 Self::stop_service_with_handles(&service, processes, pid_file, state_file)
             {
                 error!(
                     "Failed to stop dependent service '{service}' after '{root}' failure: {err}"
                 );
+                if let Ok(mut guard) = manual_stop_flags.lock() {
+                    guard.remove(&service);
+                }
+                if let Ok(mut guard) = restart_suppressed.lock() {
+                    guard.remove(&service);
+                }
             }
 
             if let Some(children) = reverse_dependencies.get(&service) {
@@ -2201,6 +2269,8 @@ impl Daemon {
             let detach_children = self.detach_children;
             let project_root = self.project_root.clone();
             let restart_counts = Arc::clone(&self.restart_counts);
+            let manual_stop_flags = Arc::clone(&self.manual_stop_flags);
+            let restart_suppressed = Arc::clone(&self.restart_suppressed);
 
             let handle = thread::spawn(move || {
                 Self::monitor_loop(
@@ -2212,6 +2282,8 @@ impl Daemon {
                     detach_children,
                     project_root,
                     restart_counts,
+                    manual_stop_flags,
+                    restart_suppressed,
                 );
             });
 
@@ -2245,6 +2317,8 @@ impl Daemon {
         detach_children: bool,
         project_root: PathBuf,
         restart_counts: Arc<Mutex<HashMap<String, u32>>>,
+        manual_stop_flags: Arc<Mutex<HashSet<String>>>,
+        restart_suppressed: Arc<Mutex<HashSet<String>>>,
     ) {
         while running.load(Ordering::SeqCst) {
             let mut exited_services = Vec::new();
@@ -2277,7 +2351,16 @@ impl Daemon {
                 let mut pid_file_guard = pid_file.lock().unwrap();
 
                 for (name, exit_status) in exited_services {
-                    let manually_stopped = pid_file_guard.get(&name).is_none();
+                    let manually_stopped = {
+                        let mut manual_guard = manual_stop_flags.lock().unwrap();
+                        if manual_guard.remove(&name) {
+                            true
+                        } else {
+                            pid_file_guard.get(&name).is_none()
+                        }
+                    };
+                    let restart_suppressed_for_service =
+                        restart_suppressed.lock().unwrap().contains(&name);
                     let exit_success = exit_status.success();
                     let exit_code = exit_status.code();
                     #[cfg(unix)]
@@ -2322,6 +2405,29 @@ impl Daemon {
                             warn!(
                                 "Failed to persist stopped state for '{name}' after manual stop: {err}"
                             );
+                        }
+                        if let Ok(mut counts) = restart_counts.lock() {
+                            counts.remove(&name);
+                        }
+                    } else if restart_suppressed_for_service {
+                        info!(
+                            "Automatic restart suppressed for service '{name}' after exit."
+                        );
+                        if let Ok(mut state_guard) = state_file.lock()
+                            && let Err(err) = state_guard.set(
+                                &name,
+                                ServiceLifecycleStatus::Stopped,
+                                None,
+                                exit_code,
+                                signal,
+                            )
+                        {
+                            warn!(
+                                "Failed to persist suppressed state for '{name}': {err}"
+                            );
+                        }
+                        if let Ok(mut counts) = restart_counts.lock() {
+                            counts.remove(&name);
                         }
                     } else if !exit_success {
                         warn!("Service '{name}' crashed. Restarting...");
@@ -2373,6 +2479,8 @@ impl Daemon {
                         &processes,
                         &pid_file,
                         &state_file,
+                        &manual_stop_flags,
+                        &restart_suppressed,
                     );
                 }
             }
@@ -2391,6 +2499,8 @@ impl Daemon {
                         Arc::clone(&pid_file),
                         project_root.clone(),
                         Arc::clone(&restart_counts),
+                        Arc::clone(&manual_stop_flags),
+                        Arc::clone(&restart_suppressed),
                     );
                 }
             }
@@ -2402,6 +2512,7 @@ impl Daemon {
     }
 
     /// Handles restarting a service if its restart policy allows.
+    #[allow(clippy::too_many_arguments)]
     fn handle_restart(
         name: &str,
         service: &ServiceConfig,
@@ -2410,6 +2521,8 @@ impl Daemon {
         pid_file: Arc<Mutex<PidFile>>,
         project_root: PathBuf,
         restart_counts: Arc<Mutex<HashMap<String, u32>>>,
+        manual_stop_flags: Arc<Mutex<HashSet<String>>>,
+        restart_suppressed: Arc<Mutex<HashSet<String>>>,
     ) {
         let name = name.to_string();
         let command = service.command.clone();
@@ -2442,10 +2555,39 @@ impl Daemon {
             .unwrap_or(5);
 
         let restart_counts_clone = Arc::clone(&restart_counts);
+        let restart_suppressed_clone = Arc::clone(&restart_suppressed);
 
         let _ = thread::spawn(move || {
             warn!("Restarting '{name}' after {backoff} seconds...");
             thread::sleep(Duration::from_secs(backoff));
+
+            if restart_suppressed_clone
+                .lock()
+                .map(|guard| guard.contains(&name))
+                .unwrap_or(false)
+            {
+                info!(
+                    "Skipping automatic restart of '{name}' because it is currently suppressed."
+                );
+                if let Ok(mut counts) = restart_counts.lock() {
+                    counts.remove(&name);
+                }
+                return;
+            }
+
+            if manual_stop_flags
+                .lock()
+                .map(|mut guard| guard.remove(&name))
+                .unwrap_or(false)
+            {
+                info!(
+                    "Skipping automatic restart of '{name}' due to concurrent manual stop."
+                );
+                if let Ok(mut counts) = restart_counts.lock() {
+                    counts.remove(&name);
+                }
+                return;
+            }
 
             let restart_result = Daemon::launch_attached_service(
                 &name,
