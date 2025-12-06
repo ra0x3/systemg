@@ -49,7 +49,7 @@ fi
 echo "Fetching latest version..."
 VERSION=$(
   curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest \
-    | awk -F'"' '/tag_name/ {gub(/^v/, "", $4); print $4}'
+    | awk -F'"' '/tag_name/ {gsub(/^v/, "", $4); print $4}'
 )
 
 if [ -z "$VERSION" ]; then
@@ -60,13 +60,29 @@ fi
 # -----------------------------
 # Check if already installed
 # -----------------------------
-if command -v sysg >/dev/null 2>&1; then
-  CURRENT_VERSION=$(sysg --version 2>/dev/null | awk '{print $2}' | sed 's/^v//')
+INSTALL_DIR="$HOME/.sysg/bin"
+EXISTING_BINARY=""
+
+if [ -x "$INSTALL_DIR/sysg" ]; then
+  EXISTING_BINARY="$INSTALL_DIR/sysg"
+elif command -v sysg >/dev/null 2>&1; then
+  EXISTING_BINARY=$(command -v sysg)
+fi
+
+if [ -n "$EXISTING_BINARY" ]; then
+  CURRENT_VERSION=$(
+    "$EXISTING_BINARY" --version 2>/dev/null \
+      | awk 'NR==1 {print $2; exit}' \
+      | sed 's/^v//' || true
+  )
+
   if [ "$CURRENT_VERSION" = "$VERSION" ]; then
     echo "sysg $VERSION is already installed and up to date."
     exit 0
+  elif [ -n "$CURRENT_VERSION" ]; then
+    echo "Upgrading sysg managed at $EXISTING_BINARY from $CURRENT_VERSION to $VERSION..."
   else
-    echo "Upgrading sysg from $CURRENT_VERSION to $VERSION..."
+    echo "Installing sysg $VERSION (existing version could not be determined)."
   fi
 fi
 
@@ -103,12 +119,35 @@ else
 fi
 
 # -----------------------------
-# Install
+# Verify and install
 # -----------------------------
-INSTALL_DIR="$HOME/.sysg/bin"
+chmod +x "$BINARY"
+
+RESOLVED_BINARY="$BINARY"
+case "$BINARY" in
+  /*) ;;
+  *) RESOLVED_BINARY="./$BINARY" ;;
+esac
+
+DOWNLOADED_VERSION=$(
+  "$RESOLVED_BINARY" --version 2>/dev/null \
+    | awk 'NR==1 {print $2; exit}' \
+    | sed 's/^v//' || true
+)
+
+if [ -n "$DOWNLOADED_VERSION" ] && [ "$DOWNLOADED_VERSION" != "$VERSION" ]; then
+  echo "Downloaded sysg reports version $DOWNLOADED_VERSION (expected $VERSION)." >&2
+  if [ "${SYSG_INSTALL_ALLOW_VERSION_MISMATCH:-}" = "1" ]; then
+    echo "Continuing install because SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1." >&2
+  else
+    echo "Aborting install; please verify release artifacts or rerun with SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1." >&2
+    rm -rf "sysg-$VERSION-$TARGET" "$BINARY" 2>/dev/null || true
+    exit 1
+  fi
+fi
+
 mkdir -p "$INSTALL_DIR"
 
-chmod +x "$BINARY"
 mv "$BINARY" "$INSTALL_DIR/sysg"
 
 # Clean extraction directory safely
