@@ -10,7 +10,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{SkipConfig, load_config},
-    cron::CronManager,
+    cron::{CronExecutionStatus, CronManager},
     daemon::{Daemon, ServiceReadyState},
     error::ProcessManagerError,
     ipc::{self, ControlCommand, ControlResponse},
@@ -36,6 +36,12 @@ pub struct Supervisor {
     detach_children: bool,
     cron_manager: CronManager,
     service_filter: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CronCompletionOutcome {
+    status: CronExecutionStatus,
+    exit_code: Option<i32>,
 }
 
 impl Supervisor {
@@ -66,9 +72,27 @@ impl Supervisor {
         })
     }
 
-    /// Runs the supervisor event loop.
     pub fn run(&mut self) -> Result<(), SupervisorError> {
+        match self.run_internal() {
+            Err(SupervisorError::Io(ref err))
+                if err.kind() == io::ErrorKind::PermissionDenied =>
+            {
+                warn!(
+                    "Supervisor IPC unavailable due to permissions; running direct mode"
+                );
+                self.daemon
+                    .start_services_blocking()
+                    .map_err(SupervisorError::Process)
+            }
+            Err(err) => Err(err),
+            Ok(()) => Ok(()),
+        }
+    }
+
+    /// Runs the supervisor event loop.
+    fn run_internal(&mut self) -> Result<(), SupervisorError> {
         ipc::cleanup_runtime()?;
+        ipc::write_config_hint(&self.config_path)?;
         let socket_path = ipc::socket_path()?;
         if socket_path.exists() {
             fs::remove_file(&socket_path)?;
@@ -198,8 +222,8 @@ impl Supervisor {
                                                     cron_manager_clone
                                                         .mark_job_completed(
                                                             &job_name_clone,
-                                                            true,
-                                                            None,
+                                                            CronExecutionStatus::Success,
+                                                            Some(0),
                                                         );
                                                 }
                                                 Ok(ServiceReadyState::Running) => {
@@ -215,28 +239,50 @@ impl Supervisor {
                                                                 .get(&job_name_clone)
                                                             {
                                                                 // Wait for the process to complete
-                                                                let result = Self::wait_for_cron_completion(pid, &job_name_clone);
+                                                                let result = Self::wait_for_cron_completion(
+                                                                    pid,
+                                                                    &job_name_clone,
+                                                                );
 
                                                                 match result {
-                                                                    Ok(success) => {
-                                                                        if success {
-                                                                            info!("Cron job '{}' completed successfully", job_name_clone);
-                                                                            cron_manager_clone.mark_job_completed(&job_name_clone, true, None);
-                                                                        } else {
-                                                                            warn!("Cron job '{}' exited with non-zero status", job_name_clone);
-                                                                            cron_manager_clone.mark_job_completed(
-                                                                                &job_name_clone,
-                                                                                false,
-                                                                                Some("Process exited with non-zero status".to_string())
-                                                                            );
+                                                                    Ok(outcome) => {
+                                                                        let CronCompletionOutcome {
+                                                                            status,
+                                                                            exit_code,
+                                                                        } = outcome;
+
+                                                                        match &status {
+                                                                            CronExecutionStatus::Success => info!(
+                                                                                "Cron job '{}' completed successfully",
+                                                                                job_name_clone
+                                                                            ),
+                                                                            CronExecutionStatus::Failed(reason) => warn!(
+                                                                                "Cron job '{}' failed: {}",
+                                                                                job_name_clone, reason
+                                                                            ),
+                                                                            CronExecutionStatus::OverlapError => warn!(
+                                                                                "Cron job '{}' reported overlap state unexpectedly",
+                                                                                job_name_clone
+                                                                            ),
                                                                         }
-                                                                    }
-                                                                    Err(e) => {
-                                                                        error!("Error waiting for cron job '{}': {}", job_name_clone, e);
+
                                                                         cron_manager_clone.mark_job_completed(
                                                                             &job_name_clone,
-                                                                            false,
-                                                                            Some(e.to_string())
+                                                                            status,
+                                                                            exit_code,
+                                                                        );
+                                                                    }
+                                                                    Err(e) => {
+                                                                        error!(
+                                                                            "Error waiting for cron job '{}': {}",
+                                                                            job_name_clone, e
+                                                                        );
+                                                                        cron_manager_clone.mark_job_completed(
+                                                                            &job_name_clone,
+                                                                            CronExecutionStatus::Failed(
+                                                                                e.to_string(),
+                                                                            ),
+                                                                            None,
                                                                         );
                                                                     }
                                                                 }
@@ -253,8 +299,11 @@ impl Supervisor {
                                                                 );
                                                                 cron_manager_clone.mark_job_completed(
                                                                     &job_name_clone,
-                                                                    false,
-                                                                    Some("Failed to get PID from PID file".to_string())
+                                                                    CronExecutionStatus::Failed(
+                                                                        "Failed to get PID from PID file"
+                                                                            .to_string(),
+                                                                    ),
+                                                                    None,
                                                                 );
                                                             }
                                                         }
@@ -265,8 +314,13 @@ impl Supervisor {
                                                             );
                                                             cron_manager_clone.mark_job_completed(
                                                                 &job_name_clone,
-                                                                false,
-                                                                Some(format!("Failed to reload PID file: {}", e))
+                                                                CronExecutionStatus::Failed(
+                                                                    format!(
+                                                                        "Failed to reload PID file: {}",
+                                                                        e
+                                                                    ),
+                                                                ),
+                                                                None,
                                                             );
                                                         }
                                                     }
@@ -279,8 +333,10 @@ impl Supervisor {
                                                     cron_manager_clone
                                                         .mark_job_completed(
                                                             &job_name_clone,
-                                                            false,
-                                                            Some(e.to_string()),
+                                                            CronExecutionStatus::Failed(
+                                                                e.to_string(),
+                                                            ),
+                                                            None,
                                                         );
                                                 }
                                             }
@@ -292,8 +348,10 @@ impl Supervisor {
                                             );
                                             cron_manager_clone.mark_job_completed(
                                                 &job_name_clone,
-                                                false,
-                                                Some(e.to_string()),
+                                                CronExecutionStatus::Failed(
+                                                    e.to_string(),
+                                                ),
+                                                None,
                                             );
                                         }
                                     }
@@ -442,11 +500,11 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Waits for a cron job process to complete and returns whether it succeeded.
+    /// Waits for a cron job process to complete and returns the final outcome.
     fn wait_for_cron_completion(
         pid: u32,
         job_name: &str,
-    ) -> Result<bool, SupervisorError> {
+    ) -> Result<CronCompletionOutcome, SupervisorError> {
         use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
         use nix::unistd::Pid;
 
@@ -478,14 +536,29 @@ impl Supervisor {
                 }
                 Ok(WaitStatus::Exited(_, exit_code)) => {
                     debug!("Cron job '{}' exited with code {}", job_name, exit_code);
-                    return Ok(exit_code == 0);
+                    let status = if exit_code == 0 {
+                        CronExecutionStatus::Success
+                    } else {
+                        CronExecutionStatus::Failed(format!(
+                            "Process exited with code {exit_code}"
+                        ))
+                    };
+                    return Ok(CronCompletionOutcome {
+                        status,
+                        exit_code: Some(exit_code),
+                    });
                 }
                 Ok(WaitStatus::Signaled(_, signal, _)) => {
                     warn!(
                         "Cron job '{}' was terminated by signal {:?}",
                         job_name, signal
                     );
-                    return Ok(false);
+                    return Ok(CronCompletionOutcome {
+                        status: CronExecutionStatus::Failed(format!(
+                            "Terminated by signal {signal}"
+                        )),
+                        exit_code: None,
+                    });
                 }
                 Ok(WaitStatus::Stopped(..)) | Ok(WaitStatus::Continued(_)) => {
                     thread::sleep(POLL_INTERVAL);
@@ -501,7 +574,10 @@ impl Supervisor {
                         "Cron job '{}' already reaped before wait, assuming success",
                         job_name
                     );
-                    return Ok(true);
+                    return Ok(CronCompletionOutcome {
+                        status: CronExecutionStatus::Success,
+                        exit_code: Some(0),
+                    });
                 }
                 Err(e) => {
                     error!("Error waiting for cron job '{}': {}", job_name, e);

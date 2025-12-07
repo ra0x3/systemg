@@ -8,6 +8,9 @@ use std::{
 use sysinfo::{ProcessesToUpdate, System};
 use tracing::debug;
 
+use crate::cron::{
+    CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
+};
 use crate::daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile};
 
 #[cfg(not(target_os = "linux"))]
@@ -18,12 +21,13 @@ use std::{fs, path::Path};
 #[cfg(target_os = "linux")]
 use std::time::UNIX_EPOCH;
 
-#[cfg(target_os = "linux")]
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
+use chrono_tz::Tz;
 
 const GREEN_BOLD: &str = "\x1b[1;32m"; // Bright Green
 const RED_BOLD: &str = "\x1b[1;31m"; // Bright Red
 const MAGENTA_BOLD: &str = "\x1b[1;35m"; // Magenta
+const YELLOW_BOLD: &str = "\x1b[1;33m"; // Yellow/Gold
 const RESET: &str = "\x1b[0m"; // Reset color
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -232,8 +236,24 @@ impl StatusManager {
         children
     }
 
+    /// Shows the status of a **single service** with optional cron designation.
+    fn show_status_with_cron_info(&self, service_name: &str, is_cron: bool) {
+        let display_name = if is_cron {
+            format!("{}[cron]{} {}", YELLOW_BOLD, RESET, service_name)
+        } else {
+            service_name.to_string()
+        };
+
+        self.show_status_impl(&display_name, service_name);
+    }
+
     /// Shows the status of a **single service**.
     pub fn show_status(&self, service_name: &str) {
+        self.show_status_impl(service_name, service_name);
+    }
+
+    /// Internal implementation for showing service status.
+    fn show_status_impl(&self, display_name: &str, service_name: &str) {
         debug!("Checking status for service: {service_name}");
         let state_entry = {
             let guard = self
@@ -246,7 +266,7 @@ impl StatusManager {
         if let Some(entry) = state_entry.clone() {
             match entry.status {
                 ServiceLifecycleStatus::Skipped => {
-                    println!("● {} - Skipped via configuration", service_name);
+                    println!("● {} - Skipped via configuration", display_name);
                     return;
                 }
                 ServiceLifecycleStatus::ExitedSuccessfully => {
@@ -256,7 +276,7 @@ impl StatusManager {
                         .unwrap_or_default();
                     println!(
                         "● {} - {}Exited successfully{}{}",
-                        service_name, GREEN_BOLD, note, RESET
+                        display_name, GREEN_BOLD, note, RESET
                     );
                     return;
                 }
@@ -268,12 +288,12 @@ impl StatusManager {
                     };
                     println!(
                         "● {} - {}Exited with error ({}){}",
-                        service_name, RED_BOLD, detail, RESET
+                        display_name, RED_BOLD, detail, RESET
                     );
                     return;
                 }
                 ServiceLifecycleStatus::Stopped => {
-                    println!("● {} - Stopped", service_name);
+                    println!("● {} - Stopped", display_name);
                     return;
                 }
                 ServiceLifecycleStatus::Running => {}
@@ -289,7 +309,7 @@ impl StatusManager {
             match pid_file.get(service_name) {
                 Some(pid) => pid,
                 None => {
-                    println!("● {} - Not running", service_name);
+                    println!("● {} - Not running", display_name);
                     return;
                 }
             }
@@ -302,13 +322,13 @@ impl StatusManager {
             ProcessState::Zombie => {
                 println!(
                     "● {} - Process {} is zombie (defunct); service is no longer running",
-                    service_name, pid
+                    display_name, pid
                 );
                 self.clear_service_pid(service_name);
                 return;
             }
             ProcessState::Missing => {
-                println!("● {} - Process {} not found", service_name, pid);
+                println!("● {} - Process {} not found", display_name, pid);
                 self.clear_service_pid(service_name);
                 return;
             }
@@ -323,7 +343,7 @@ impl StatusManager {
         let child_processes = Self::get_child_processes(pid, 6);
         let uptime_label = Self::format_uptime(&uptime);
 
-        println!("{}● - {} Running{}", GREEN_BOLD, service_name, RESET);
+        println!("{}● {} Running{}", GREEN_BOLD, display_name, RESET);
         println!(
             "   Active: {}active (running){} since {}; {}",
             GREEN_BOLD, RESET, uptime, uptime_label
@@ -357,6 +377,10 @@ impl StatusManager {
             services.extend(state_guard.services().keys().cloned());
         }
 
+        let cron_state =
+            CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+        services.extend(cron_state.jobs().keys().cloned());
+
         if services.is_empty() {
             println!("No managed services.");
             return;
@@ -364,8 +388,89 @@ impl StatusManager {
 
         println!("Service statuses:");
         for service in services {
-            self.show_status(&service);
+            let is_cron = cron_state.jobs().contains_key(&service);
+            self.show_status_with_cron_info(&service, is_cron);
+            if let Some(cron_job) = cron_state.jobs().get(&service) {
+                Self::print_cron_history(&service, cron_job);
+            }
         }
+    }
+
+    fn print_cron_history(service_name: &str, job_state: &PersistedCronJobState) {
+        let label = if job_state.timezone_label.trim().is_empty() {
+            "UTC".to_string()
+        } else {
+            job_state.timezone_label.trim().to_string()
+        };
+
+        println!("  Cron history ({label}) for {service_name}:");
+
+        if job_state.execution_history.is_empty() {
+            println!("    - No runs recorded yet.");
+            return;
+        }
+
+        for record in job_state.execution_history.iter().rev() {
+            let timestamp = record.completed_at.unwrap_or(record.started_at);
+            let ts =
+                Self::format_cron_timestamp(timestamp, job_state.timezone.as_deref());
+            let status_str = Self::format_cron_status(record);
+            println!("    - {ts} | {status_str}");
+        }
+
+        // Visually separate cron details from subsequent services.
+        println!();
+    }
+
+    fn format_cron_status(record: &CronExecutionRecord) -> String {
+        match record.status.as_ref() {
+            Some(CronExecutionStatus::Success) => {
+                let code = record.exit_code.unwrap_or(0);
+                format!("{GREEN_BOLD}exit {code}{RESET}")
+            }
+            Some(CronExecutionStatus::Failed(reason)) => {
+                let base = if let Some(code) = record.exit_code {
+                    format!("{RED_BOLD}exit {code}{RESET}")
+                } else {
+                    format!("{RED_BOLD}failed{RESET}")
+                };
+
+                if reason.trim().is_empty() {
+                    base
+                } else {
+                    format!("{base} - {reason}")
+                }
+            }
+            Some(CronExecutionStatus::OverlapError) => {
+                format!("{RED_BOLD}overlap detected{RESET}")
+            }
+            None => format!("{MAGENTA_BOLD}in progress{RESET}"),
+        }
+    }
+
+    fn format_cron_timestamp(
+        time: std::time::SystemTime,
+        tz_hint: Option<&str>,
+    ) -> String {
+        let datetime_utc: DateTime<Utc> = time.into();
+
+        if let Some(hint) = tz_hint {
+            if hint.eq_ignore_ascii_case("utc") {
+                return datetime_utc.format("%Y-%m-%d %H:%M:%S %Z").to_string();
+            }
+
+            if let Ok(tz) = hint.parse::<Tz>() {
+                return datetime_utc
+                    .with_timezone(&tz)
+                    .format("%Y-%m-%d %H:%M:%S %Z")
+                    .to_string();
+            }
+        } else {
+            let datetime_local: DateTime<Local> = DateTime::from(time);
+            return datetime_local.format("%Y-%m-%d %H:%M:%S %Z").to_string();
+        }
+
+        datetime_utc.format("%Y-%m-%d %H:%M:%S %Z").to_string()
     }
 
     /// Gets the **uptime** of a process.
@@ -464,5 +569,40 @@ impl StatusManager {
             .ok()
             .and_then(|out| String::from_utf8(out.stdout).ok())
             .unwrap_or_else(|| "Unknown".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    #[test]
+    fn format_cron_status_success_includes_green_exit_code() {
+        let record = CronExecutionRecord {
+            started_at: SystemTime::now(),
+            completed_at: Some(SystemTime::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+        };
+
+        let formatted = StatusManager::format_cron_status(&record);
+        assert!(formatted.contains("exit 0"));
+        assert!(formatted.contains(GREEN_BOLD));
+    }
+
+    #[test]
+    fn format_cron_status_failure_shows_reason() {
+        let record = CronExecutionRecord {
+            started_at: SystemTime::now(),
+            completed_at: Some(SystemTime::now()),
+            status: Some(CronExecutionStatus::Failed("boom".into())),
+            exit_code: Some(2),
+        };
+
+        let formatted = StatusManager::format_cron_status(&record);
+        assert!(formatted.contains("exit 2"));
+        assert!(formatted.contains("boom"));
+        assert!(formatted.contains(RED_BOLD));
     }
 }

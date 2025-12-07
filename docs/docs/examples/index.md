@@ -32,3 +32,15 @@ A realistic example of a Node.js CRUD web application with database backups and 
 - Environment variable management for sensitive configuration
 
 [View CRUD Example →](/docs/examples/crud)
+
+## Multi-Service Playground
+
+A trio of collaborating shell and Python services that demonstrates cron scheduling, file hand-offs, deliberate failure recovery, and webhook hooks — all using the scripts in `examples/multi-service`.
+
+**Features demonstrated:**
+- Restart supervision with `restart_policy` and lifecycle hooks
+- Cron-driven batch jobs feeding data to other services
+- Long-lived process restarts with HTTP notifications on failure
+- Cooperative file sharing between services with graceful shutdowns
+
+[View Multi-Service Example →](/docs/examples/multi-service)

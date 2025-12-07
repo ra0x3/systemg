@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::os::unix::ffi::OsStrExt;
 use std::{
     fs,
     io::{self, BufRead, BufReader, Write},
     os::unix::net::UnixStream,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use thiserror::Error;
 
@@ -23,6 +24,10 @@ pub fn socket_path() -> Result<PathBuf, ControlError> {
 /// Returns the path where the supervisor PID is recorded.
 pub fn supervisor_pid_path() -> Result<PathBuf, ControlError> {
     Ok(runtime_dir()?.join("sysg.pid"))
+}
+
+fn config_hint_path() -> Result<PathBuf, ControlError> {
+    Ok(runtime_dir()?.join("config_hint"))
 }
 
 /// Message sent from CLI invocations to the resident supervisor.
@@ -125,6 +130,16 @@ pub fn write_supervisor_pid(pid: libc::pid_t) -> Result<(), ControlError> {
     Ok(())
 }
 
+/// Persists the resolved config path to assist CLI fallbacks.
+pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
+    let hint_path = config_hint_path()?;
+    if let Some(parent) = hint_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(hint_path, config.as_os_str().as_bytes())?;
+    Ok(())
+}
+
 /// Reads the supervisor PID if present.
 pub fn read_supervisor_pid() -> Result<Option<libc::pid_t>, ControlError> {
     let path = supervisor_pid_path()?;
@@ -139,6 +154,22 @@ pub fn read_supervisor_pid() -> Result<Option<libc::pid_t>, ControlError> {
         .map_err(|e| ControlError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))
 }
 
+/// Reads the persisted config path hint if available.
+pub fn read_config_hint() -> Result<Option<PathBuf>, ControlError> {
+    let hint_path = config_hint_path()?;
+    if !hint_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(hint_path)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(PathBuf::from(trimmed)))
+}
+
 /// Clears the supervisor PID and removes the socket file.
 pub fn cleanup_runtime() -> Result<(), ControlError> {
     if let Ok(path) = socket_path()
@@ -151,6 +182,12 @@ pub fn cleanup_runtime() -> Result<(), ControlError> {
         && pid_path.exists()
     {
         let _ = fs::remove_file(pid_path);
+    }
+
+    if let Ok(config_path) = config_hint_path()
+        && config_path.exists()
+    {
+        let _ = fs::remove_file(config_path);
     }
 
     Ok(())

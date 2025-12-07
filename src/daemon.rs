@@ -20,7 +20,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::{
     Config, EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage,
@@ -2339,7 +2339,7 @@ impl Daemon {
                             exited_services.push((name.clone(), status));
                         }
                         Ok(None) => {
-                            debug!("Service '{name}' is still running.");
+                            trace!("Service '{name}' is still running.");
                             active_services += 1;
                         }
                         Err(e) => error!("Failed to check status of '{name}': {e}"),

@@ -1,6 +1,7 @@
 //! Module for managing and displaying logs of system services.
-use crate::{daemon::PidFile, error::LogsManagerError};
+use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError};
 use std::{
+    collections::BTreeSet,
     env,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
@@ -136,7 +137,7 @@ fn process_fds_present(pid: u32) -> bool {
 
 fn resolve_tail_targets(
     service_name: &str,
-    pid: u32,
+    pid: Option<u32>,
 ) -> Result<(PathBuf, PathBuf), LogsManagerError> {
     let stdout_path = resolve_log_path(service_name, "stdout");
     let stderr_path = resolve_log_path(service_name, "stderr");
@@ -153,8 +154,10 @@ fn resolve_tail_targets(
 
     #[cfg(target_os = "linux")]
     {
-        if !(stdout_exists || stderr_exists || process_fds_present(pid)) {
-            return Err(LogsManagerError::LogUnavailable(pid));
+        if let Some(pid_value) = pid
+            && !(stdout_exists || stderr_exists || process_fds_present(pid_value))
+        {
+            return Err(LogsManagerError::LogUnavailable(pid_value));
         }
     }
 
@@ -204,7 +207,16 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
-        self.show_logs_platform(service_name, pid, lines, kind)
+        self.show_logs_platform(service_name, Some(pid), lines, kind)
+    }
+
+    pub fn show_inactive_log(
+        &self,
+        service_name: &str,
+        lines: usize,
+        kind: Option<&str>,
+    ) -> Result<(), LogsManagerError> {
+        self.show_logs_platform(service_name, None, lines, kind)
     }
 
     /// Platform-specific implementation for showing logs.
@@ -212,7 +224,7 @@ impl LogManager {
     fn show_logs_platform(
         &self,
         service_name: &str,
-        pid: u32,
+        pid: Option<u32>,
         lines: usize,
         kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
@@ -221,7 +233,7 @@ impl LogManager {
      | {:^31} |\n\
      +{:-^33}+\n",
             "-",
-            format!("{} ({})", service_name, pid),
+            Self::format_log_title(service_name, pid),
             "-"
         );
 
@@ -233,9 +245,11 @@ impl LogManager {
         let mode = TailMode::current();
         #[cfg(target_os = "linux")]
         {
-            if !process_fds_present(pid) {
+            if let Some(pid_value) = pid
+                && !process_fds_present(pid_value)
+            {
                 debug!(
-                    "Falling back to log files for '{}' because /proc/{pid} fds are unavailable",
+                    "Falling back to log files for '{}' because /proc/{pid_value} fds are unavailable",
                     service_name
                 );
             }
@@ -257,7 +271,7 @@ impl LogManager {
     fn show_logs_platform(
         &self,
         service_name: &str,
-        pid: u32,
+        pid: Option<u32>,
         lines: usize,
         kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
@@ -266,7 +280,7 @@ impl LogManager {
      | {:^31} |\n\
      +{:-^33}+\n",
             "-",
-            format!("{} ({})", service_name, pid),
+            Self::format_log_title(service_name, pid),
             "-"
         );
 
@@ -313,8 +327,16 @@ impl LogManager {
             }
         }
 
-        let pid_file = self.pid_file.lock().unwrap();
-        let services: Vec<String> = pid_file.services().keys().cloned().collect();
+        let pid_snapshot = {
+            let guard = self.pid_file.lock().unwrap();
+            guard.services().clone()
+        };
+
+        let cron_state =
+            CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+
+        let mut services: BTreeSet<String> = pid_snapshot.keys().cloned().collect();
+        services.extend(cron_state.jobs().keys().cloned());
 
         debug!("Services: {services:?}");
 
@@ -326,16 +348,34 @@ impl LogManager {
         }
 
         for service in services {
-            let pid = pid_file
-                .get(&service)
-                .ok_or(LogsManagerError::ServiceNotFound(service.clone()))?;
-            debug!("Service: {service}, PID: {pid}");
-            if let Err(err) = self.show_log(&service, pid, lines, kind) {
-                eprintln!("Failed to stream logs for '{}': {}", service, err);
+            if let Some(pid) = pid_snapshot.get(&service) {
+                debug!("Service: {service}, PID: {pid}");
+                if let Err(err) = self.show_log(&service, *pid, lines, kind) {
+                    eprintln!("Failed to stream logs for '{}': {}", service, err);
+                }
+                continue;
+            }
+
+            if let Some(cron_job) = cron_state.jobs().get(&service) {
+                debug!(
+                    "Showing inactive logs for cron service '{}' with {} history entries",
+                    service,
+                    cron_job.execution_history.len()
+                );
+                if let Err(err) = self.show_inactive_log(&service, lines, kind) {
+                    eprintln!("Failed to stream logs for '{}': {}", service, err);
+                }
             }
         }
 
         Ok(())
+    }
+
+    fn format_log_title(service_name: &str, pid: Option<u32>) -> String {
+        match pid {
+            Some(pid) => format!("{service_name} ({pid})"),
+            None => format!("{service_name} (offline)"),
+        }
     }
 
     /// Shows the supervisor logs

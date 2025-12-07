@@ -13,9 +13,10 @@ use tracing_subscriber::EnvFilter;
 use systemg::{
     cli::{Cli, Commands, parse_args},
     config::load_config,
+    cron::CronStateFile,
     daemon::{Daemon, PidFile, ServiceStateFile},
     ipc::{self, ControlCommand, ControlError, ControlResponse},
-    logs::LogManager,
+    logs::{LogManager, resolve_log_path},
     status::StatusManager,
     supervisor::Supervisor,
 };
@@ -56,11 +57,42 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
                 send_control_command(command)?;
             } else {
-                let daemon = build_daemon(&config)?;
-                if let Some(service) = service_name {
-                    daemon.stop_service(&service)?;
-                } else {
-                    daemon.stop_services()?;
+                match build_daemon(&config) {
+                    Ok(daemon) => {
+                        if let Some(service) = service_name.as_deref() {
+                            daemon.stop_service(service)?;
+                        } else {
+                            daemon.stop_services()?;
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            "No supervisor detected and unable to load config '{}': {}",
+                            config, err
+                        );
+                        if let Ok(Some(hint)) = ipc::read_config_hint() {
+                            let hint_str = hint.to_string_lossy();
+                            match build_daemon(hint_str.as_ref()) {
+                                Ok(daemon) => {
+                                    if let Some(service) = service_name.as_deref() {
+                                        daemon.stop_service(service)?;
+                                    } else {
+                                        daemon.stop_services()?;
+                                    }
+                                    info!(
+                                        "stop fallback executed using config hint {:?}",
+                                        hint
+                                    );
+                                }
+                                Err(hint_err) => {
+                                    warn!(
+                                        "Fallback using config hint {:?} failed: {}",
+                                        hint, hint_err
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -109,7 +141,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             match service {
                 Some(service) => {
                     info!("Fetching logs for service: {service}");
-                    if let Some(process_pid) = pid.lock().unwrap().pid_for(&service) {
+                    let process_pid = pid.lock().unwrap().pid_for(&service);
+
+                    if let Some(process_pid) = process_pid {
                         manager.show_log(
                             &service,
                             process_pid,
@@ -117,7 +151,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                             kind.as_deref(),
                         )?;
                     } else {
-                        warn!("Service '{service}' is not currently running");
+                        let cron_state = CronStateFile::load().unwrap_or_default();
+                        let stdout_exists = resolve_log_path(&service, "stdout").exists();
+                        let stderr_exists = resolve_log_path(&service, "stderr").exists();
+
+                        if cron_state.jobs().contains_key(&service)
+                            || stdout_exists
+                            || stderr_exists
+                        {
+                            manager.show_inactive_log(
+                                &service,
+                                lines,
+                                kind.as_deref(),
+                            )?;
+                        } else {
+                            warn!("Service '{service}' is not currently running");
+                        }
                     }
                 }
                 None => {
@@ -212,6 +261,12 @@ fn resolve_config_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn supervisor_running() -> bool {
+    if let Ok(path) = ipc::socket_path()
+        && path.exists()
+    {
+        return true;
+    }
+
     match ipc::read_supervisor_pid() {
         Ok(Some(pid)) => {
             let target = Pid::from_raw(pid);
