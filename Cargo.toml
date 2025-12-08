@@ -24,6 +24,7 @@ clap = { version = "4.0", features = ["derive"] }
 colored = "3.0"
 cron = "0.12"
 ctrlc = "3.4"
+fs2 = "0.4"
 libc = "0.2.170"
 nix = { version = "0.29", features = ["process", "signal"] }
 regex = "1.7"

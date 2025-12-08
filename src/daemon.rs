@@ -1,5 +1,6 @@
 //! Module for managing and monitoring system services.
 use crate::logs::{resolve_log_path, spawn_log_writer};
+use fs2::FileExt;
 use reqwest::blocking::Client;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
@@ -97,13 +98,40 @@ impl PidFile {
         PathBuf::from(format!("{}/.local/share/systemg/pid.json", home))
     }
 
+    /// Returns the lock file path
+    fn lock_path() -> PathBuf {
+        let home = std::env::var("HOME").expect("HOME not set");
+        PathBuf::from(format!("{}/.local/share/systemg/pid.json.lock", home))
+    }
+
+    /// Acquires an exclusive lock on the PID file lock file.
+    /// Returns the locked file handle which will auto-release when dropped.
+    fn acquire_lock() -> Result<File, PidFileError> {
+        let lock_path = Self::lock_path();
+        fs::create_dir_all(lock_path.parent().unwrap())?;
+
+        let lock_file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        // Acquire exclusive lock (blocks until available)
+        lock_file.lock_exclusive()?;
+
+        Ok(lock_file)
+    }
+
     /// Returns the services map.
     pub fn services(&self) -> &HashMap<String, u32> {
         &self.services
     }
 
-    /// Loads the PID file from disk
+    /// Loads the PID file from disk with file locking
     pub fn load() -> Result<Self, PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
         let path = Self::path();
         if !path.exists() {
             return Ok(Self::default());
@@ -111,6 +139,7 @@ impl PidFile {
         let contents = fs::read_to_string(path)?;
         let pid_data = serde_json::from_str::<Self>(&contents)?;
         Ok(pid_data)
+        // Lock is automatically released when _lock goes out of scope
     }
 
     /// Return the PID for a specific service
@@ -118,35 +147,70 @@ impl PidFile {
         self.services.get(service).copied()
     }
 
-    /// Reloads the PID file from disk
+    /// Reloads the PID file from disk with file locking
     pub fn reload() -> Result<Self, PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
         let path = Self::path();
         let contents = fs::read_to_string(&path)?;
         let pid_data = serde_json::from_str::<Self>(&contents)?;
         Ok(pid_data)
+        // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Saves the current state to the PID file
+    /// Saves the current state to the PID file with file locking
     pub fn save(&self) -> Result<(), PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
         let path = Self::path();
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
+        // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Inserts a new service PID and saves
+    /// Inserts a new service PID and saves atomically with file locking
     pub fn insert(&mut self, service: &str, pid: u32) -> Result<(), PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
+        // Reload from disk to ensure we have the latest state
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path)?;
+            *self = serde_json::from_str::<Self>(&contents)?;
+        }
+
+        // Insert the new service
         self.services.insert(service.to_string(), pid);
-        self.save()
+
+        // Save back to disk
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+        // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Removes a service and saves
+    /// Removes a service and saves atomically with file locking
     pub fn remove(&mut self, service: &str) -> Result<(), PidFileError> {
-        if self.services.remove(service).is_some() {
-            self.save()
-        } else {
-            Err(PidFileError::ServiceNotFound)
+        let _lock = Self::acquire_lock()?;
+
+        // Reload from disk to ensure we have the latest state
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path)?;
+            *self = serde_json::from_str::<Self>(&contents)?;
         }
+
+        // Remove the service
+        if self.services.remove(service).is_none() {
+            return Err(PidFileError::ServiceNotFound);
+        }
+
+        // Save back to disk
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+        // Lock is automatically released when _lock goes out of scope
     }
 
     /// Retrieves a service PID
@@ -3040,6 +3104,109 @@ fi
             assert!(child_pid.is_none());
 
             daemon.shutdown_monitor();
+        });
+    }
+
+    #[test]
+    fn concurrent_pid_file_operations_no_lost_updates() {
+        with_temp_home(|_| {
+            // Initialize PID file with a baseline service
+            let mut initial = PidFile::default();
+            initial.insert("baseline", 1000).unwrap();
+
+            // Number of concurrent operations
+            let num_threads = 10;
+            let mut handles = vec![];
+
+            // Spawn threads that concurrently add services (simulating cron jobs starting)
+            for i in 0..num_threads {
+                let handle = thread::spawn(move || {
+                    // Small stagger to reduce file corruption but still trigger lost updates
+                    thread::sleep(Duration::from_micros(i as u64 * 100));
+
+                    // Simulate the pattern used in supervisor.rs for cron cleanup
+                    // Load -> Modify -> Save (no locking)
+                    // Retry on file corruption to focus on demonstrating lost updates
+                    for retry in 0..3 {
+                        match PidFile::load() {
+                            Ok(mut pid_file) => {
+                                let service_name = format!("cron_job_{}", i);
+                                if pid_file.insert(&service_name, 2000 + i).is_ok() {
+                                    break;
+                                }
+                            }
+                            Err(_) if retry < 2 => {
+                                thread::sleep(Duration::from_millis(1));
+                                continue;
+                            }
+                            Err(e) => {
+                                panic!("Failed to load PID file after retries: {}", e)
+                            }
+                        }
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Also spawn threads that remove services (simulating concurrent cleanup)
+            // to further stress the race condition
+            for i in 0..5 {
+                let handle = thread::spawn(move || {
+                    // Small delay to let some inserts happen first
+                    thread::sleep(Duration::from_millis(2));
+
+                    for retry in 0..3 {
+                        match PidFile::load() {
+                            Ok(mut pid_file) => {
+                                if i % 2 == 0 {
+                                    // Try to remove the baseline service
+                                    let _ = pid_file.remove("baseline");
+                                } else {
+                                    // Try to add another service
+                                    let _ = pid_file
+                                        .insert(&format!("extra_{}", i), 3000 + i);
+                                }
+                                break;
+                            }
+                            Err(_) if retry < 2 => {
+                                thread::sleep(Duration::from_millis(1));
+                                continue;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for all threads to complete
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // Verify the final state
+            let final_pid_file = PidFile::load().expect("Failed to load final PID file");
+
+            // With proper file locking, all cron_job_X services should be present
+            // Without locking, some will be lost due to concurrent overwrites
+            let mut missing = vec![];
+            for i in 0..num_threads {
+                let service_name = format!("cron_job_{}", i);
+                if final_pid_file.get(&service_name).is_none() {
+                    missing.push(service_name);
+                }
+            }
+
+            // This assertion will FAIL without proper file locking
+            // because concurrent load-modify-save operations will overwrite each other
+            assert!(
+                missing.is_empty(),
+                "Lost updates detected! Missing services: {:?}. \
+                 This indicates a race condition in PID file operations. \
+                 Total services in final file: {}",
+                missing,
+                final_pid_file.services().len()
+            );
         });
     }
 }
