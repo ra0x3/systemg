@@ -331,11 +331,12 @@ impl Supervisor {
                                                                     }
                                                                 }
 
-                                                                // Clean up the PID file entry
-                                                                let _ = daemon
-                                                                    .stop_service(
-                                                                        &job_name_clone,
-                                                                    );
+                                                                // Clean up the PID file entry without changing lifecycle status
+                                                                // (state has already been persisted above)
+                                                                if let Ok(mut pid_file) = PidFile::load()
+                                                                    && let Err(err) = pid_file.remove(&job_name_clone) {
+                                                                    debug!("Failed to remove cron job '{}' from PID file: {}", job_name_clone, err);
+                                                                }
                                                             } else {
                                                                 error!(
                                                                     "Failed to find PID for cron job '{}' in PID file",
