@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{SkipConfig, load_config},
     cron::{CronExecutionStatus, CronManager},
-    daemon::{Daemon, ServiceReadyState},
+    daemon::{Daemon, ServiceLifecycleStatus, ServiceReadyState, ServiceStateFile},
     error::ProcessManagerError,
     ipc::{self, ControlCommand, ControlResponse},
 };
@@ -225,6 +225,20 @@ impl Supervisor {
                                                             CronExecutionStatus::Success,
                                                             Some(0),
                                                         );
+
+                                                    // Persist exit state to ServiceStateFile for status display
+                                                    if let Ok(mut state_file) =
+                                                        ServiceStateFile::load()
+                                                        && let Err(err) = state_file.set(
+                                                            &job_name_clone,
+                                                            ServiceLifecycleStatus::ExitedSuccessfully,
+                                                            None,
+                                                            Some(0),
+                                                            None,
+                                                        )
+                                                    {
+                                                        warn!("Failed to persist cron job '{}' exit state: {}", job_name_clone, err);
+                                                    }
                                                 }
                                                 Ok(ServiceReadyState::Running) => {
                                                     // Give the process a moment to register in the PID file
@@ -268,9 +282,26 @@ impl Supervisor {
 
                                                                         cron_manager_clone.mark_job_completed(
                                                                             &job_name_clone,
-                                                                            status,
+                                                                            status.clone(),
                                                                             exit_code,
                                                                         );
+
+                                                                        // Persist exit state to ServiceStateFile for status display
+                                                                        if let Ok(mut state_file) = ServiceStateFile::load() {
+                                                                            let lifecycle_status = match status {
+                                                                                CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
+                                                                                CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
+                                                                            };
+                                                                            if let Err(err) = state_file.set(
+                                                                                &job_name_clone,
+                                                                                lifecycle_status,
+                                                                                None,
+                                                                                exit_code,
+                                                                                None,
+                                                                            ) {
+                                                                                warn!("Failed to persist cron job '{}' exit state: {}", job_name_clone, err);
+                                                                            }
+                                                                        }
                                                                     }
                                                                     Err(e) => {
                                                                         error!(
@@ -284,6 +315,19 @@ impl Supervisor {
                                                                             ),
                                                                             None,
                                                                         );
+
+                                                                        // Persist error state to ServiceStateFile
+                                                                        if let Ok(mut state_file) = ServiceStateFile::load()
+                                                                            && let Err(err) = state_file.set(
+                                                                                &job_name_clone,
+                                                                                ServiceLifecycleStatus::ExitedWithError,
+                                                                                None,
+                                                                                None,
+                                                                                None,
+                                                                            )
+                                                                        {
+                                                                            warn!("Failed to persist cron job '{}' error state: {}", job_name_clone, err);
+                                                                        }
                                                                     }
                                                                 }
 
@@ -305,6 +349,20 @@ impl Supervisor {
                                                                     ),
                                                                     None,
                                                                 );
+
+                                                                // Persist error state to ServiceStateFile
+                                                                if let Ok(mut state_file) =
+                                                                    ServiceStateFile::load()
+                                                                    && let Err(err) = state_file.set(
+                                                                        &job_name_clone,
+                                                                        ServiceLifecycleStatus::ExitedWithError,
+                                                                        None,
+                                                                        None,
+                                                                        None,
+                                                                    )
+                                                                {
+                                                                    warn!("Failed to persist cron job '{}' error state: {}", job_name_clone, err);
+                                                                }
                                                             }
                                                         }
                                                         Err(e) => {

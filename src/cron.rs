@@ -173,7 +173,7 @@ impl CronManager {
             persisted_state,
         );
         self.persist_job_state(&job_state);
-        jobs.push(job_state);
+        jobs.push(job_state.clone());
 
         if normalized {
             debug!(
@@ -182,10 +182,20 @@ impl CronManager {
             );
         }
 
-        debug!(
-            "Cron job '{}' scheduled with timezone {}",
-            service_name, timezone_label
-        );
+        if let Some(next_exec) = job_state.next_execution {
+            let now = SystemTime::now();
+            let next_dt: chrono::DateTime<Utc> = next_exec.into();
+            let now_dt: chrono::DateTime<Utc> = now.into();
+            debug!(
+                "Cron job '{}' scheduled with timezone {}. Next execution: {} (now: {})",
+                service_name, timezone_label, next_dt, now_dt
+            );
+        } else {
+            debug!(
+                "Cron job '{}' scheduled with timezone {} but next_execution is None",
+                service_name, timezone_label
+            );
+        }
         info!("Registered cron job for service '{}'", service_name);
         Ok(())
     }
@@ -200,6 +210,13 @@ impl CronManager {
             if let Some(next_exec) = job.next_execution
                 && now >= next_exec
             {
+                let next_dt: chrono::DateTime<Utc> = next_exec.into();
+                let now_dt: chrono::DateTime<Utc> = now.into();
+                debug!(
+                    "Cron job '{}' is due (next_exec: {}, now: {})",
+                    job.service_name, next_dt, now_dt
+                );
+
                 if job.currently_running {
                     warn!(
                         "Cron job '{}' is scheduled to run but previous execution is still running",

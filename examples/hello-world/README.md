@@ -2,6 +2,24 @@
 
 A simple systemg service that continuously prints numbered lines to demonstrate basic service management.
 
+## Configuration
+
+The `hello-world.sysg.yaml` configuration file defines the service:
+
+```yaml
+version: "1"
+services:
+  sh__hello_world:
+    command: "sh hello-world.sh"
+    env:
+      file: ".env"
+      vars:
+        FOO: "foo"
+    restart_policy: "on_failure"
+    retries: "5"
+    backoff: "5s"
+```
+
 ## Service Configuration
 
 - **Name**: sh__hello_world
