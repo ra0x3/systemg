@@ -87,7 +87,7 @@ services:
     py__deployment:
       # Deployment strategy: "rolling" or "immediate" (default: "immediate")
       strategy: "rolling"
-      # Optional build or migration step executed before the new process launches
+      # Optional build or migration step executed before the service starts (works with any strategy)
       pre_start: "python manage.py migrate"
       # Optional health probe the new instance must satisfy
       health_check:
@@ -383,14 +383,19 @@ services:
 
 #### `deployment.pre_start` (optional)
 
-Shell command executed before the new process launches. Useful for builds, migrations, or asset preparation. Non-zero exit codes abort the deployment and preserve the old instance.
+Shell command executed before the service process launches. Useful for builds, migrations, or asset preparation.
+
+**Works with any deployment strategy** (not just rolling deployments):
+- **Initial startup**: If the pre_start command fails (non-zero exit code), the service will not start
+- **Rolling restart**: If the pre_start command fails, deployment is aborted and the old instance is preserved
+- **Immediate restart**: If the pre_start command fails, the service will not start
 
 ```yaml
 services:
   api:
     command: "./target/release/api"
     deployment:
-      strategy: "rolling"
+      # pre_start works with or without specifying a strategy
       pre_start: "cargo build --release"
 ```
 

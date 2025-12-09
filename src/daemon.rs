@@ -1695,6 +1695,16 @@ impl Daemon {
             }
         }
 
+        // Run pre-start command if configured
+        if let Some(pre_start) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.pre_start.as_ref())
+        {
+            info!("Running pre-start command for '{name}': {pre_start}");
+            self.run_pre_start_command(name, pre_start)?;
+        }
+
         let processes = Arc::clone(&self.processes);
         let command = service.command.clone();
         let env = service.env.clone();
@@ -1868,6 +1878,16 @@ impl Daemon {
                     }
                 }
             }
+        }
+
+        // Run pre-start command if configured
+        if let Some(pre_start) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.pre_start.as_ref())
+        {
+            info!("Running pre-start command for '{name}': {pre_start}");
+            self.run_pre_start_command(name, pre_start)?;
         }
 
         let processes = Arc::clone(&self.processes);

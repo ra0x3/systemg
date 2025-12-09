@@ -989,3 +989,62 @@ services:
         log_contents
     );
 }
+
+#[test]
+fn pre_start_command_executes_on_service_startup() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let pre_start_marker = dir.join("pre_start_executed.txt");
+    let service_marker = dir.join("service_executed.txt");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  test_app:
+    command: "sh -c 'if [ -f \"{pre_marker}\" ]; then echo success > \"{svc_marker}\"; sleep 2; else echo pre_start_failed > \"{svc_marker}\"; sleep 2; fi'"
+    deployment:
+      strategy: "immediate"
+      pre_start: "echo pre_start_done > \"{pre_marker}\""
+"#,
+            pre_marker = pre_start_marker.display(),
+            svc_marker = service_marker.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config.clone(), false).expect("daemon from config");
+
+    daemon
+        .start_service("test_app", config.services.get("test_app").unwrap())
+        .expect("start test_app");
+
+    // Wait for service to execute and check pre_start marker
+    wait_for_path(&service_marker);
+
+    // Verify pre_start command was executed
+    assert!(
+        pre_start_marker.exists(),
+        "pre_start command should have created marker file before service started"
+    );
+
+    // Verify service saw the pre_start marker
+    let service_output = fs::read_to_string(&service_marker)
+        .expect("read service marker")
+        .trim()
+        .to_string();
+    assert_eq!(
+        service_output, "success",
+        "Service should have seen the pre_start marker file"
+    );
+
+    daemon.stop_service("test_app").expect("stop test_app");
+    daemon.shutdown_monitor();
+}
