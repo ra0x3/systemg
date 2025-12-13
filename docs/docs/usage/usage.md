@@ -103,3 +103,27 @@ View a custom number of log lines for a service:
 ```sh
 sysg logs database --lines 100
 ```
+
+## Purge
+
+Remove all systemg state and runtime files for a fresh start:
+
+```sh
+sysg purge
+```
+
+This command permanently deletes:
+- Service status history (`state.json`)
+- Cron execution history (`cron_state.json`)
+- All logs (supervisor and service logs)
+- Runtime files (PIDs, sockets, locks)
+
+**⚠️ Warning**: This action cannot be undone. Your configuration files are safe, but all historical data and logs will be deleted.
+
+Use this after ungraceful shutdowns, state corruption, or when you need a clean slate:
+
+```sh
+sysg stop
+sysg purge
+sysg start --config myapp.yaml --daemonize
+```

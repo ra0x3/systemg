@@ -143,6 +143,9 @@ pub enum Commands {
         #[arg(short = 'k', long)]
         kind: Option<String>,
     },
+
+    /// Purge all systemg state and runtime files.
+    Purge,
 }
 
 /// Parses command-line arguments and returns a `Cli` struct.

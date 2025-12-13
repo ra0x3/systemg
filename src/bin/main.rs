@@ -175,6 +175,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        Commands::Purge => {
+            purge_all_state()?;
+            println!("All systemg state has been purged");
+        }
     }
 
     Ok(())
@@ -183,6 +187,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn supervisor_log_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME not set");
     PathBuf::from(format!("{}/.local/share/systemg/supervisor.log", home))
+}
+
+fn purge_all_state() -> Result<(), Box<dyn Error>> {
+    let home = std::env::var("HOME").expect("HOME not set");
+    let runtime_dir = PathBuf::from(format!("{}/.local/share/systemg", home));
+
+    if runtime_dir.exists() {
+        info!("Removing systemg runtime directory: {:?}", runtime_dir);
+        fs::remove_dir_all(&runtime_dir)?;
+        info!("Successfully purged all systemg state");
+    } else {
+        info!("No systemg runtime directory found at {:?}", runtime_dir);
+    }
+
+    Ok(())
 }
 
 fn init_logging(args: &Cli) {
@@ -261,19 +280,18 @@ fn resolve_config_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn supervisor_running() -> bool {
-    if let Ok(path) = ipc::socket_path()
-        && path.exists()
-    {
-        return true;
-    }
-
+    // Check PID first (more reliable than socket existence)
     match ipc::read_supervisor_pid() {
         Ok(Some(pid)) => {
             let target = Pid::from_raw(pid);
             match signal::kill(target, None) {
-                Ok(_) => true,
+                Ok(_) => {
+                    // Process is alive
+                    true
+                }
                 Err(err) => {
                     if err == nix::Error::from(nix::errno::Errno::ESRCH) {
+                        // Process is dead - clean up stale artifacts
                         let _ = ipc::cleanup_runtime();
                         false
                     } else {
@@ -283,7 +301,16 @@ fn supervisor_running() -> bool {
                 }
             }
         }
-        Ok(None) | Err(_) => false,
+        Ok(None) | Err(_) => {
+            // No PID file - check if stale socket exists and clean it up
+            if let Ok(path) = ipc::socket_path()
+                && path.exists()
+            {
+                warn!("Found stale socket without PID file, cleaning up");
+                let _ = ipc::cleanup_runtime();
+            }
+            false
+        }
     }
 }
 

@@ -1123,3 +1123,143 @@ services:
     daemon.stop_service("test_app").expect("stop test_app");
     daemon.shutdown_monitor();
 }
+
+#[test]
+fn stale_socket_doesnt_block_commands() {
+    use assert_cmd::Command;
+    use std::os::unix::net::UnixListener;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    // Create a simple test config
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  test_service:
+    command: "sleep 5"
+"#,
+    )
+    .expect("failed to write config");
+
+    // Create the runtime directory structure
+    let runtime_dir = home.join(".local/share/systemg");
+    fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
+
+    // Create a stale socket file (simulating a killed supervisor)
+    let socket_path = runtime_dir.join("control.sock");
+    let _listener = UnixListener::bind(&socket_path).expect("failed to create socket");
+    drop(_listener); // Drop the listener to make the socket stale
+
+    // Also create a stale PID file pointing to a non-existent process
+    let pid_file = runtime_dir.join("sysg.pid");
+    fs::write(&pid_file, "999999").expect("failed to write stale pid");
+
+    // Try to run stop command - should NOT get "Connection refused"
+    // Instead it should detect the stale socket and clean up
+    let mut stop_cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    let output = stop_cmd
+        .arg("stop")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .output()
+        .expect("failed to execute stop");
+
+    // Should succeed or at least not error with "Connection refused"
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Connection refused"),
+        "Should not get 'Connection refused' with stale socket. stderr: {}",
+        stderr
+    );
+
+    // Verify stale artifacts were cleaned up
+    assert!(
+        !socket_path.exists() || !pid_file.exists(),
+        "Stale socket or PID file should be cleaned up"
+    );
+}
+
+#[test]
+fn purge_removes_all_state() {
+    use assert_cmd::Command;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    // Create a simple test config
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  test_service:
+    command: "sleep 2"
+"#,
+    )
+    .expect("failed to write config");
+
+    // Start supervisor and let service run and exit
+    let mut start_cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    start_cmd
+        .arg("start")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    thread::sleep(Duration::from_secs(3));
+
+    // Stop supervisor
+    let mut stop_cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    stop_cmd.arg("stop").assert().success();
+
+    thread::sleep(Duration::from_millis(500));
+
+    // Verify state files exist
+    let runtime_dir = home.join(".local/share/systemg");
+    let state_file = runtime_dir.join("state.json");
+    let pid_file = runtime_dir.join("pid.json");
+    let lock_file = runtime_dir.join("pid.json.lock");
+    let supervisor_log = runtime_dir.join("supervisor.log");
+
+    assert!(state_file.exists(), "state.json should exist before purge");
+    assert!(
+        pid_file.exists() || lock_file.exists() || supervisor_log.exists(),
+        "At least one runtime file should exist before purge"
+    );
+
+    // Run purge command
+    let mut purge_cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    purge_cmd.arg("purge").assert().success();
+
+    // Verify all state files are removed
+    assert!(
+        !state_file.exists(),
+        "state.json should be removed after purge"
+    );
+    assert!(!pid_file.exists(), "pid.json should be removed after purge");
+    assert!(
+        !lock_file.exists(),
+        "pid.json.lock should be removed after purge"
+    );
+    assert!(
+        !supervisor_log.exists(),
+        "supervisor.log should be removed after purge"
+    );
+
+    // Verify the entire runtime directory is removed
+    assert!(
+        !runtime_dir.exists(),
+        "Runtime directory should be completely removed after purge"
+    );
+}
