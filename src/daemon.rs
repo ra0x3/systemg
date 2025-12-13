@@ -562,6 +562,43 @@ impl Daemon {
         self.update_state(service, ServiceLifecycleStatus::Skipped, None, None, None)
     }
 
+    /// Records a failed start attempt in the persistent state file when no active instance exists.
+    fn record_start_failure(
+        &self,
+        service: &str,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) {
+        let has_active_pid = match self.pid_file.lock() {
+            Ok(guard) => guard.pid_for(service).is_some(),
+            Err(err) => {
+                warn!(
+                    "Failed to inspect pid file while recording start failure for '{service}': {err}"
+                );
+                false
+            }
+        };
+
+        if has_active_pid {
+            debug!(
+                "Skipping start failure state for '{service}' because an active PID is still tracked"
+            );
+            return;
+        }
+
+        if let Err(err) = self.update_state(
+            service,
+            ServiceLifecycleStatus::ExitedWithError,
+            None,
+            exit_code,
+            signal,
+        ) {
+            warn!(
+                "Failed to persist start failure state for '{service}' (exit_code={exit_code:?}): {err}"
+            );
+        }
+    }
+
     /// Launches a service as a child process, ensuring it remains attached to `systemg`.
     ///
     /// On **Linux**, child processes receive `SIGTERM` when `systemg` exits using `prctl()`.
@@ -1246,6 +1283,14 @@ impl Daemon {
         }
 
         if !status.success() {
+            let exit_code = status.code();
+            #[cfg(unix)]
+            let signal = status.signal();
+            #[cfg(not(unix))]
+            let signal: Option<i32> = None;
+
+            self.record_start_failure(service_name, exit_code, signal);
+
             let message = format!("Pre-start command exited with status {}", status);
             return Err(ProcessManagerError::ServiceStartError {
                 service: service_name.to_string(),

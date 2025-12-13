@@ -6,12 +6,13 @@ use std::env;
 use std::{
     fs,
     path::Path,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
 use systemg::{
     config::load_config,
-    daemon::{Daemon, PidFile},
+    daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
 };
 use tempfile::tempdir;
 
@@ -988,6 +989,80 @@ services:
         log_contents.len(),
         log_contents
     );
+}
+
+#[test]
+fn pre_start_failure_records_error_state() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+project_dir: "."
+services:
+  failing_pre_start:
+    command: "sh -c 'echo should_not_run'"
+    restart_policy: "always"
+    deployment:
+      pre_start: "sh -c 'exit 42'"
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let failing_config = config
+        .services
+        .get("failing_pre_start")
+        .cloned()
+        .expect("service exists");
+
+    let pid_file = Arc::new(Mutex::new(PidFile::load().expect("load pid file")));
+    let state_file = Arc::new(Mutex::new(
+        ServiceStateFile::load().expect("load service state file"),
+    ));
+
+    let daemon = Daemon::new(
+        config,
+        Arc::clone(&pid_file),
+        Arc::clone(&state_file),
+        false,
+    );
+
+    let result = daemon.start_service("failing_pre_start", &failing_config);
+    assert!(result.is_err(), "pre-start failure should surface as error");
+
+    {
+        let guard = state_file.lock().expect("lock state file");
+        let entry = guard
+            .get("failing_pre_start")
+            .expect("service entry recorded");
+        assert_eq!(
+            entry.status,
+            ServiceLifecycleStatus::ExitedWithError,
+            "failed pre-start should mark service as exited with error",
+        );
+        assert_eq!(
+            entry.exit_code,
+            Some(42),
+            "exit code from pre-start should be persisted",
+        );
+        assert!(entry.pid.is_none(), "no pid should be recorded");
+    }
+
+    {
+        let guard = pid_file.lock().expect("lock pid file");
+        assert!(
+            guard.pid_for("failing_pre_start").is_none(),
+            "pid file should not contain service entry after failed pre-start",
+        );
+    }
+
+    daemon.shutdown_monitor();
 }
 
 #[test]
