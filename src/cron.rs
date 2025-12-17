@@ -19,34 +19,50 @@ const MAX_EXECUTION_HISTORY: usize = 10;
 /// Status of a cron job execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CronExecutionStatus {
+    /// Cron job completed successfully.
     Success,
+    /// Cron job failed with an error message.
     Failed(String),
+    /// Cron job was scheduled to run but previous execution was still running.
     OverlapError,
 }
 
 /// Record of a single cron job execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronExecutionRecord {
+    /// When the cron job execution started.
     pub started_at: SystemTime,
+    /// When the cron job execution completed (None if still running).
     pub completed_at: Option<SystemTime>,
+    /// Final status of the execution (None if still running).
     pub status: Option<CronExecutionStatus>,
+    /// Exit code of the process (None if no exit code available).
     pub exit_code: Option<i32>,
 }
 
 /// Tracks execution history and state for a single cron job.
 #[derive(Debug, Clone)]
 pub struct CronJobState {
+    /// Name of the service this cron job manages.
     pub service_name: String,
+    /// Parsed cron schedule expression.
     pub schedule: Schedule,
+    /// Timestamp of the last execution start.
     pub last_execution: Option<SystemTime>,
+    /// Timestamp when the job is next scheduled to run.
     pub next_execution: Option<SystemTime>,
+    /// Whether an execution is currently in progress.
     pub currently_running: bool,
+    /// Rolling history of recent executions (limited to MAX_EXECUTION_HISTORY).
     pub execution_history: VecDeque<CronExecutionRecord>,
+    /// Timezone used for schedule calculations.
     pub timezone: EffectiveTimezone,
+    /// Human-readable timezone label for display.
     pub timezone_label: String,
 }
 
 impl CronJobState {
+    /// Creates a new cron job state, optionally restoring from persisted state.
     pub fn new(
         service_name: String,
         schedule: Schedule,
@@ -78,6 +94,7 @@ impl CronJobState {
         state
     }
 
+    /// Adds an execution record to the history, evicting the oldest if at capacity.
     pub fn add_execution_record(&mut self, record: CronExecutionRecord) {
         if self.execution_history.len() >= MAX_EXECUTION_HISTORY {
             self.execution_history.pop_front();
@@ -85,15 +102,20 @@ impl CronJobState {
         self.execution_history.push_back(record);
     }
 
+    /// Recalculates the next execution time based on the cron schedule and timezone.
     pub fn update_next_execution(&mut self) {
         self.next_execution = compute_next_execution(&self.schedule, self.timezone);
     }
 }
 
+/// Timezone used for cron schedule calculations.
 #[derive(Clone, Copy, Debug)]
 pub enum EffectiveTimezone {
+    /// Use the system's local timezone.
     Local,
+    /// Use UTC timezone.
     Utc,
+    /// Use a specific named timezone (e.g., America/New_York).
     Named(Tz),
 }
 
@@ -133,6 +155,7 @@ impl Default for CronManager {
 }
 
 impl CronManager {
+    /// Creates a new cron manager, loading any persisted state from disk.
     pub fn new() -> Self {
         Self::default()
     }
@@ -297,6 +320,12 @@ impl CronManager {
             .collect()
     }
 
+    /// Clear all registered cron jobs.
+    pub fn clear_all_jobs(&self) {
+        let mut jobs = self.jobs.lock().unwrap();
+        jobs.clear();
+    }
+
     fn persist_job_state(&self, job: &CronJobState) {
         if let Ok(mut state) = self.state_file.lock() {
             state.jobs.insert(
@@ -323,6 +352,7 @@ impl CronManager {
     }
 }
 
+/// Persistent storage for cron job state across supervisor restarts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CronStateFile {
     jobs: std::collections::BTreeMap<String, PersistedCronJobState>,
@@ -343,6 +373,7 @@ impl CronStateFile {
         fs::write(path, data)
     }
 
+    /// Loads the cron state file from disk, creating an empty one if it doesn't exist.
     pub fn load() -> Result<Self, std::io::Error> {
         let path = Self::path();
         if !path.exists() {
@@ -355,16 +386,22 @@ impl CronStateFile {
         Ok(state)
     }
 
+    /// Returns a reference to the map of persisted cron job states.
     pub fn jobs(&self) -> &std::collections::BTreeMap<String, PersistedCronJobState> {
         &self.jobs
     }
 }
 
+/// Serializable cron job state that persists across restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedCronJobState {
+    /// Timestamp of the last execution start.
     pub last_execution: Option<SystemTime>,
+    /// Rolling history of recent executions.
     pub execution_history: VecDeque<CronExecutionRecord>,
+    /// Human-readable timezone label.
     pub timezone_label: String,
+    /// Optional timezone string (e.g., "UTC", "America/New_York").
     pub timezone: Option<String>,
 }
 

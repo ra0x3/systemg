@@ -144,8 +144,11 @@ impl EnvConfig {
 #[derive(Debug, Clone, Copy, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum HookStage {
+    /// Hook triggered when service starts.
     OnStart,
+    /// Hook triggered when service stops.
     OnStop,
+    /// Hook triggered when service restarts.
     OnRestart,
 }
 
@@ -153,29 +156,38 @@ pub enum HookStage {
 #[derive(Debug, Clone, Copy, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum HookOutcome {
+    /// Hook outcome when service lifecycle event succeeds.
     Success,
+    /// Hook outcome when service lifecycle event fails.
     Error,
 }
 
 /// Command executed for a hook outcome.
 #[derive(Debug, Deserialize, Clone)]
 pub struct HookAction {
+    /// Shell command to execute for this hook.
     pub command: String,
+    /// Optional timeout for the hook command (e.g., "5s", "1m").
     pub timeout: Option<String>,
 }
 
 /// Hook commands grouped by outcome for a lifecycle stage.
 #[derive(Debug, Deserialize, Clone)]
 pub struct HookLifecycleConfig {
+    /// Hook action to execute when the lifecycle event succeeds.
     pub success: Option<HookAction>,
+    /// Hook action to execute when the lifecycle event fails.
     pub error: Option<HookAction>,
 }
 
 /// Hooks that run on specific service lifecycle events.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Hooks {
+    /// Hooks to execute when the service starts.
     pub on_start: Option<HookLifecycleConfig>,
+    /// Hooks to execute when the service stops.
     pub on_stop: Option<HookLifecycleConfig>,
+    /// Hooks to execute when the service restarts.
     #[serde(default)]
     pub on_restart: Option<HookLifecycleConfig>,
 }

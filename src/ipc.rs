@@ -33,35 +33,49 @@ fn config_hint_path() -> Result<PathBuf, ControlError> {
 /// Message sent from CLI invocations to the resident supervisor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlCommand {
+    /// Stop one or all services.
     Stop {
+        /// Optional service name to stop. If None, stops all services.
         service: Option<String>,
     },
+    /// Restart services, optionally with a new configuration.
     Restart {
+        /// Optional path to a new configuration file.
         config: Option<String>,
+        /// Optional service name to restart. If None, restarts all services.
         service: Option<String>,
     },
+    /// Shutdown the supervisor daemon.
     Shutdown,
 }
 
 /// Response sent by the supervisor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlResponse {
+    /// Command completed successfully.
     Ok,
+    /// Command completed with a status message.
     Message(String),
+    /// Command failed with an error message.
     Error(String),
 }
 
 /// Errors raised by the control channel helpers.
 #[derive(Debug, Error)]
 pub enum ControlError {
+    /// Control socket I/O error.
     #[error("control socket I/O failed: {0}")]
     Io(#[from] io::Error),
+    /// Error serializing or deserializing control messages.
     #[error("failed to serialise control message: {0}")]
     Serde(#[from] serde_json::Error),
+    /// HOME environment variable not set.
     #[error("HOME environment variable not set")]
     MissingHome,
+    /// Supervisor reported an error.
     #[error("supervisor reported error: {0}")]
     Server(String),
+    /// Control socket not available or supervisor not running.
     #[error("control socket not available")]
     NotAvailable,
 }

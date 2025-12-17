@@ -210,6 +210,7 @@ impl LogManager {
         self.show_logs_platform(service_name, Some(pid), lines, kind)
     }
 
+    /// Shows logs for a service that is not currently running.
     pub fn show_inactive_log(
         &self,
         service_name: &str,

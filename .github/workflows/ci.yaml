@@ -77,6 +77,9 @@ jobs:
       - name: Check Cargo.toml Formatting (cargo-sort)
         run: cargo sort --check --workspace
 
+      - name: Check Documentation (rustdoc)
+        run: cargo rustdoc --lib -- -D missing_docs
+
       - name: Run Clippy (Linting)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -258,6 +261,7 @@ jobs:
 
 
   upload-s3:
+    name: Upload Binaries to S3
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     needs: [ upload-release-binaries ]
     environment: ci

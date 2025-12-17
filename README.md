@@ -222,12 +222,12 @@ $ sysg start --log-level 4
 
 | Feature            | Systemg       | systemd         | Supervisor   | Docker Compose  |
 |--------------------|-----------------|-----------------|-----------------|------------------|
-| **Lightweight**    | Yes           | No (Heavy)   | No (Python)  | No (Containers) |
-| **No Dependencies**| Yes           | No (DBus, etc.) | No (Python)  | No (Docker)    |
-| **Simple Config**  | YAML          | Complex Units | INI          | YAML          |
-| **Process Monitoring** | Yes      | Yes         | Yes         | Yes          |
-| **PID 1 Required?**| No            | Yes         | No          | No           |
-| **Handles Dependencies?** | Yes  | Yes         | No          | Yes          |
+| **Lightweight**    | ✓             | ✗ (Heavy)       | ✗ (Python)   | ✗ (Containers)  |
+| **No Dependencies**| ✓             | ✗ (DBus, etc.)  | ✗ (Python)   | ✗ (Docker)      |
+| **Simple Config**  | YAML          | Complex Units   | INI          | YAML            |
+| **Process Monitoring** | ✓        | ✓               | ✓            | ✓               |
+| **PID 1 Required?**| ✗             | ✓               | ✗            | ✗               |
+| **Handles Dependencies?** | ✓    | ✓               | ✗            | ✓               |
 
 ---
 

@@ -21,10 +21,13 @@ use thiserror::Error;
 /// Errors emitted by the resident supervisor runtime.
 #[derive(Debug, Error)]
 pub enum SupervisorError {
+    /// Process management error.
     #[error(transparent)]
     Process(#[from] ProcessManagerError),
+    /// IPC control channel error.
     #[error(transparent)]
     Control(#[from] ipc::ControlError),
+    /// I/O error.
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -72,6 +75,7 @@ impl Supervisor {
         })
     }
 
+    /// Starts the supervisor event loop, managing services and responding to control commands.
     pub fn run(&mut self) -> Result<(), SupervisorError> {
         match self.run_internal() {
             Err(SupervisorError::Io(ref err))
@@ -531,8 +535,18 @@ impl Supervisor {
         let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
         self.daemon.stop_services()?;
         self.daemon.shutdown_monitor();
-        self.daemon = Daemon::from_config(config, self.detach_children)?;
+        self.daemon = Daemon::from_config(config.clone(), self.detach_children)?;
         self.config_path = resolved;
+
+        // Clear existing cron jobs and re-register from new config
+        self.cron_manager.clear_all_jobs();
+        for (service_name, service_config) in &config.services {
+            if let Some(cron_config) = &service_config.cron {
+                self.cron_manager.register_job(service_name, cron_config)?;
+                info!("Registered cron job for service '{}'", service_name);
+            }
+        }
+
         self.daemon.start_services_nonblocking()?;
         Ok(())
     }
@@ -557,6 +571,24 @@ impl Supervisor {
         ipc::cleanup_runtime()?;
         std::thread::sleep(Duration::from_millis(200));
         Ok(())
+    }
+
+    /// Get all registered cron jobs (for testing).
+    pub fn get_cron_jobs(&self) -> Vec<crate::cron::CronJobState> {
+        self.cron_manager.get_all_jobs()
+    }
+
+    /// Reload config for testing.
+    pub fn reload_config_for_test(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Result<(), SupervisorError> {
+        self.reload_config(path)
+    }
+
+    /// Shutdown for testing.
+    pub fn shutdown_for_test(&mut self) -> Result<(), SupervisorError> {
+        self.shutdown_runtime()
     }
 
     /// Waits for a cron job process to complete and returns the final outcome.

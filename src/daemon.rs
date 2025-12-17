@@ -223,21 +223,30 @@ impl PidFile {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceLifecycleStatus {
+    /// Service is currently running.
     Running,
+    /// Service was skipped due to skip configuration.
     Skipped,
+    /// Service exited successfully (exit code 0).
     ExitedSuccessfully,
+    /// Service exited with an error (non-zero exit code or signal).
     ExitedWithError,
+    /// Service was manually stopped.
     Stopped,
 }
 
 /// Persisted service runtime metadata used to inform status reporting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStateEntry {
+    /// Current lifecycle status of the service.
     pub status: ServiceLifecycleStatus,
+    /// Process ID when the service is running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Exit code when the service has exited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// Signal number if the service was terminated by a signal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
 }
@@ -254,6 +263,7 @@ impl ServiceStateFile {
         PathBuf::from(format!("{}/.local/share/systemg/state.json", home))
     }
 
+    /// Loads the service state file from disk, creating an empty one if it doesn't exist.
     pub fn load() -> Result<Self, ServiceStateError> {
         let path = Self::path();
         if !path.exists() {
@@ -265,6 +275,7 @@ impl ServiceStateFile {
         Ok(state)
     }
 
+    /// Saves the state file to disk.
     pub fn save(&self) -> Result<(), ServiceStateError> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
@@ -274,14 +285,17 @@ impl ServiceStateFile {
         Ok(())
     }
 
+    /// Returns a reference to the map of all service states.
     pub fn services(&self) -> &HashMap<String, ServiceStateEntry> {
         &self.services
     }
 
+    /// Gets the state entry for a specific service.
     pub fn get(&self, service: &str) -> Option<&ServiceStateEntry> {
         self.services.get(service)
     }
 
+    /// Sets the state for a service and persists to disk.
     pub fn set(
         &mut self,
         service: &str,
@@ -302,6 +316,7 @@ impl ServiceStateFile {
         self.save()
     }
 
+    /// Removes a service from the state file and persists to disk.
     pub fn remove(&mut self, service: &str) -> Result<(), ServiceStateError> {
         if self.services.remove(service).is_some() {
             self.save()
@@ -436,7 +451,9 @@ enum ServiceProbe {
 /// Indicates when a service is considered ready for dependents or has already completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceReadyState {
+    /// Service is running and ready for dependents.
     Running,
+    /// Service completed successfully (for oneshot/cron services).
     CompletedSuccess,
 }
 
@@ -2308,6 +2325,7 @@ impl Daemon {
         result
     }
 
+    /// Stops a specific service and suppresses automatic restarts.
     pub fn stop_service(&self, service_name: &str) -> Result<(), ProcessManagerError> {
         self.stop_service_with_intent(service_name, true)
     }

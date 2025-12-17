@@ -798,6 +798,75 @@ services:
 }
 
 #[test]
+fn restart_registers_new_cron_jobs() {
+    use systemg::supervisor::Supervisor;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    // Create initial config without cron jobs
+    let config_path_1 = dir.join("config1.yaml");
+    fs::write(
+        &config_path_1,
+        r#"version: "1"
+services:
+  normal:
+    command: "sleep 1000"
+    restart_policy: "never"
+"#,
+    )
+    .expect("failed to write initial config");
+
+    // Create supervisor with initial config
+    let mut supervisor =
+        Supervisor::new(config_path_1.clone(), false, None).expect("create supervisor");
+
+    // Verify no cron jobs are registered initially
+    let initial_jobs = supervisor.get_cron_jobs();
+    assert_eq!(initial_jobs.len(), 0, "Should start with no cron jobs");
+
+    // Create new config with a cron job
+    let config_path_2 = dir.join("config2.yaml");
+    fs::write(
+        &config_path_2,
+        r#"version: "1"
+services:
+  normal:
+    command: "sleep 1000"
+    restart_policy: "never"
+  new_cron_job:
+    command: "echo 'cron job executed'"
+    restart_policy: "never"
+    cron:
+      expression: "* * * * *"
+"#,
+    )
+    .expect("failed to write new config");
+
+    // Call reload_config (simulating 'sysg restart')
+    supervisor
+        .reload_config_for_test(config_path_2.as_path())
+        .expect("reload config should succeed");
+
+    // Verify the new cron job is registered
+    let updated_jobs = supervisor.get_cron_jobs();
+    assert_eq!(
+        updated_jobs.len(),
+        1,
+        "Should have 1 cron job after restart"
+    );
+    assert_eq!(
+        updated_jobs[0].service_name, "new_cron_job",
+        "The new cron job should be registered"
+    );
+
+    supervisor.shutdown_for_test().expect("shutdown supervisor");
+}
+
+#[test]
 fn manual_stop_suppresses_pending_restart() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
