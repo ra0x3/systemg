@@ -1,11 +1,11 @@
 //! Cron scheduling for services.
-use crate::config::CronConfig;
+use crate::config::{Config, CronConfig};
 use crate::error::ProcessManagerError;
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -160,12 +160,11 @@ impl CronManager {
         Self::default()
     }
 
-    /// Register a cron job from service configuration.
-    pub fn register_job(
+    fn build_job_state(
         &self,
         service_name: &str,
         cron_config: &CronConfig,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<(CronJobState, bool, String), ProcessManagerError> {
         let (effective_timezone, timezone_label) =
             resolve_timezone(cron_config, service_name)?;
         let (normalized_expression, normalized) =
@@ -187,7 +186,6 @@ impl CronManager {
             .ok()
             .and_then(|state| state.jobs.get(service_name).cloned());
 
-        let mut jobs = self.jobs.lock().unwrap();
         let job_state = CronJobState::new(
             service_name.to_string(),
             schedule,
@@ -195,6 +193,20 @@ impl CronManager {
             timezone_label.clone(),
             persisted_state,
         );
+
+        Ok((job_state, normalized, normalized_expression))
+    }
+
+    /// Register a cron job from service configuration.
+    pub fn register_job(
+        &self,
+        service_name: &str,
+        cron_config: &CronConfig,
+    ) -> Result<(), ProcessManagerError> {
+        let (job_state, normalized, normalized_expression) =
+            self.build_job_state(service_name, cron_config)?;
+        let timezone_label = job_state.timezone_label.clone();
+        let mut jobs = self.jobs.lock().unwrap();
         self.persist_job_state(&job_state);
         jobs.push(job_state.clone());
 
@@ -220,6 +232,56 @@ impl CronManager {
             );
         }
         info!("Registered cron job for service '{}'", service_name);
+        Ok(())
+    }
+
+    /// Replace all cron jobs using the provided configuration, pruning any that no longer exist.
+    pub fn sync_from_config(&self, config: &Config) -> Result<(), ProcessManagerError> {
+        let mut active_jobs = Vec::new();
+        let mut active_names = HashSet::new();
+
+        for (service_name, service_config) in &config.services {
+            if let Some(cron_config) = &service_config.cron {
+                let (job_state, normalized, normalized_expression) =
+                    self.build_job_state(service_name, cron_config)?;
+                let timezone_label = job_state.timezone_label.clone();
+
+                self.persist_job_state(&job_state);
+                if normalized {
+                    debug!(
+                        "Cron job '{}' expression normalized to '{}'",
+                        service_name, normalized_expression
+                    );
+                }
+
+                if let Some(next_exec) = job_state.next_execution {
+                    let now = SystemTime::now();
+                    let next_dt: chrono::DateTime<Utc> = next_exec.into();
+                    let now_dt: chrono::DateTime<Utc> = now.into();
+                    debug!(
+                        "Cron job '{}' scheduled with timezone {}. Next execution: {} (now: {})",
+                        service_name, timezone_label, next_dt, now_dt
+                    );
+                } else {
+                    debug!(
+                        "Cron job '{}' scheduled with timezone {} but next_execution is None",
+                        service_name, timezone_label
+                    );
+                }
+
+                active_names.insert(service_name.clone());
+                info!("Registered cron job for service '{}'", service_name);
+                active_jobs.push(job_state);
+            }
+        }
+
+        {
+            let mut jobs_guard = self.jobs.lock().unwrap();
+            *jobs_guard = active_jobs;
+        }
+
+        self.prune_inactive_jobs(&active_names);
+
         Ok(())
     }
 
@@ -326,6 +388,19 @@ impl CronManager {
         jobs.clear();
     }
 
+    fn prune_inactive_jobs(&self, active_names: &HashSet<String>) {
+        if let Ok(mut state) = self.state_file.lock() {
+            let original_len = state.jobs.len();
+            state.jobs.retain(|name, _| active_names.contains(name));
+
+            if state.jobs.len() != original_len
+                && let Err(err) = state.save()
+            {
+                warn!("Failed to persist pruned cron state: {}", err);
+            }
+        }
+    }
+
     fn persist_job_state(&self, job: &CronJobState) {
         if let Ok(mut state) = self.state_file.lock() {
             state.jobs.insert(
@@ -370,7 +445,15 @@ impl CronStateFile {
             fs::create_dir_all(parent)?;
         }
         let data = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        fs::write(path, data)
+
+        // Use explicit File operations with sync_all() to ensure data is flushed to disk
+        // before returning. This prevents race conditions in tests on Linux where the OS
+        // might buffer writes and the file could be read as empty before the buffer is flushed.
+        use std::io::Write;
+        let mut file = fs::File::create(&path)?;
+        file.write_all(data.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
     }
 
     /// Loads the cron state file from disk, creating an empty one if it doesn't exist.
@@ -466,6 +549,9 @@ fn resolve_timezone(
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
+    use std::{collections::HashMap, fs};
+
+    use crate::config::ServiceConfig;
 
     #[test]
     fn test_cron_manager_registration() {
@@ -560,6 +646,87 @@ mod tests {
         let record = persisted.execution_history.back().unwrap();
         assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
         assert_eq!(record.exit_code, Some(0));
+
+        if let Some(original) = original_home {
+            unsafe {
+                std::env::set_var("HOME", original);
+            }
+        }
+    }
+
+    fn service_with_cron(expr: &str) -> ServiceConfig {
+        ServiceConfig {
+            command: "/bin/true".into(),
+            env: None,
+            restart_policy: None,
+            backoff: None,
+            max_restarts: None,
+            depends_on: None,
+            deployment: None,
+            hooks: None,
+            cron: Some(CronConfig {
+                expression: expr.to_string(),
+                timezone: None,
+            }),
+            skip: None,
+        }
+    }
+
+    #[test]
+    fn sync_from_config_prunes_removed_jobs() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempfile::tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+
+        let manager = CronManager::new();
+
+        let mut services_v1 = HashMap::new();
+        services_v1.insert("job_one".to_string(), service_with_cron("* * * * * *"));
+        services_v1.insert("job_two".to_string(), service_with_cron("*/2 * * * * *"));
+        let config_v1 = Config {
+            version: "1".to_string(),
+            services: services_v1,
+            project_dir: None,
+            env: None,
+        };
+
+        manager.sync_from_config(&config_v1).unwrap();
+
+        let mut services_v2 = HashMap::new();
+        services_v2.insert("job_two".to_string(), service_with_cron("*/2 * * * * *"));
+        services_v2.insert("job_three".to_string(), service_with_cron("0 */5 * * * *"));
+        let config_v2 = Config {
+            version: "1".to_string(),
+            services: services_v2,
+            project_dir: None,
+            env: None,
+        };
+
+        manager.sync_from_config(&config_v2).unwrap();
+
+        let job_names: Vec<String> = manager
+            .get_all_jobs()
+            .into_iter()
+            .map(|job| job.service_name)
+            .collect();
+        assert_eq!(job_names.len(), 2);
+        assert!(job_names.contains(&"job_two".to_string()));
+        assert!(job_names.contains(&"job_three".to_string()));
+        assert!(!job_names.contains(&"job_one".to_string()));
+
+        let state = CronStateFile::load().expect("load cron state");
+        assert!(state.jobs().contains_key("job_two"));
+        assert!(state.jobs().contains_key("job_three"));
+        assert!(!state.jobs().contains_key("job_one"));
 
         if let Some(original) = original_home {
             unsafe {

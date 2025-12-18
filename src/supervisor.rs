@@ -56,14 +56,7 @@ impl Supervisor {
     ) -> Result<Self, SupervisorError> {
         let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
         let cron_manager = CronManager::new();
-
-        // Register cron jobs
-        for (service_name, service_config) in &config.services {
-            if let Some(cron_config) = &service_config.cron {
-                cron_manager.register_job(service_name, cron_config)?;
-                info!("Registered cron job for service '{}'", service_name);
-            }
-        }
+        cron_manager.sync_from_config(&config)?;
 
         let daemon = Daemon::from_config(config, detach_children)?;
         Ok(Self {
@@ -538,14 +531,7 @@ impl Supervisor {
         self.daemon = Daemon::from_config(config.clone(), self.detach_children)?;
         self.config_path = resolved;
 
-        // Clear existing cron jobs and re-register from new config
-        self.cron_manager.clear_all_jobs();
-        for (service_name, service_config) in &config.services {
-            if let Some(cron_config) = &service_config.cron {
-                self.cron_manager.register_job(service_name, cron_config)?;
-                info!("Registered cron job for service '{}'", service_name);
-            }
-        }
+        self.cron_manager.sync_from_config(&config)?;
 
         self.daemon.start_services_nonblocking()?;
         Ok(())
