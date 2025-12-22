@@ -311,14 +311,26 @@ impl LogManager {
     /// Streams logs for all active services in real-time.
     pub fn show_logs(
         &self,
-        lines: usize,
+        _lines: usize,
         kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
         debug!("Fetching logs for all services...");
 
+        // Display alert message for users
+        println!(
+            "\n\
+            ╭{}╮\n\
+            │ ⚠️  Showing first 20 logs per service (stdout & stderr)           │\n\
+            │                                                                   │\n\
+            │ For complete logs, run: sysg logs <service>                      │\n\
+            ╰{}╯\n",
+            "─".repeat(67),
+            "─".repeat(67)
+        );
+
         // Show supervisor logs first if no service specified and kind is not specified or is "supervisor"
         if matches!(kind, None | Some("supervisor")) {
-            let _ = self.show_supervisor_log(lines).map_err(|err| {
+            let _ = self.show_supervisor_log(20).map_err(|err| {
                 eprintln!("Failed to show supervisor logs: {}", err);
             });
 
@@ -351,7 +363,7 @@ impl LogManager {
         for service in services {
             if let Some(pid) = pid_snapshot.get(&service) {
                 debug!("Service: {service}, PID: {pid}");
-                if let Err(err) = self.show_log(&service, *pid, lines, kind) {
+                if let Err(err) = self.show_log(&service, *pid, 20, kind) {
                     eprintln!("Failed to stream logs for '{}': {}", service, err);
                 }
                 continue;
@@ -363,7 +375,7 @@ impl LogManager {
                     service,
                     cron_job.execution_history.len()
                 );
-                if let Err(err) = self.show_inactive_log(&service, lines, kind) {
+                if let Err(err) = self.show_inactive_log(&service, 20, kind) {
                     eprintln!("Failed to stream logs for '{}': {}", service, err);
                 }
             }
