@@ -286,26 +286,27 @@ impl ServiceStateFile {
     }
 
     /// Returns a reference to the map of all service states.
+    /// Keys are service configuration hashes (not service names).
     pub fn services(&self) -> &HashMap<String, ServiceStateEntry> {
         &self.services
     }
 
-    /// Gets the state entry for a specific service.
-    pub fn get(&self, service: &str) -> Option<&ServiceStateEntry> {
-        self.services.get(service)
+    /// Gets the state entry for a specific service by its configuration hash.
+    pub fn get(&self, service_hash: &str) -> Option<&ServiceStateEntry> {
+        self.services.get(service_hash)
     }
 
-    /// Sets the state for a service and persists to disk.
+    /// Sets the state for a service by its configuration hash and persists to disk.
     pub fn set(
         &mut self,
-        service: &str,
+        service_hash: &str,
         status: ServiceLifecycleStatus,
         pid: Option<u32>,
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ServiceStateError> {
         self.services.insert(
-            service.to_string(),
+            service_hash.to_string(),
             ServiceStateEntry {
                 status,
                 pid,
@@ -316,9 +317,9 @@ impl ServiceStateFile {
         self.save()
     }
 
-    /// Removes a service from the state file and persists to disk.
-    pub fn remove(&mut self, service: &str) -> Result<(), ServiceStateError> {
-        if self.services.remove(service).is_some() {
+    /// Removes a service from the state file by its configuration hash and persists to disk.
+    pub fn remove(&mut self, service_hash: &str) -> Result<(), ServiceStateError> {
+        if self.services.remove(service_hash).is_some() {
             self.save()
         } else {
             Err(ServiceStateError::ServiceNotFound)
@@ -543,6 +544,12 @@ impl Daemon {
         self.mark_skipped(service)
     }
 
+    /// Gets the configuration hash for a service by name.
+    /// Returns None if the service doesn't exist in the config.
+    pub fn get_service_hash(&self, service_name: &str) -> Option<String> {
+        self.config.get_service_hash(service_name)
+    }
+
     fn update_state(
         &self,
         service: &str,
@@ -551,8 +558,15 @@ impl Daemon {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ProcessManagerError> {
-        let mut state = self.state_file.lock()?;
-        state.set(service, status, pid, exit_code, signal)?;
+        if let Some(service_hash) = self.get_service_hash(service) {
+            let mut state = self.state_file.lock()?;
+            state.set(&service_hash, status, pid, exit_code, signal)?;
+        } else {
+            warn!(
+                "Service '{}' not found in config, skipping state update",
+                service
+            );
+        }
         Ok(())
     }
 

@@ -237,30 +237,58 @@ impl StatusManager {
     }
 
     /// Shows the status of a **single service** with optional cron designation.
-    fn show_status_with_cron_info(&self, service_name: &str, is_cron: bool) {
+    fn show_status_with_cron_info_by_hash(
+        &self,
+        service_name: &str,
+        service_hash: &str,
+        is_cron: bool,
+    ) {
         let display_name = if is_cron {
             format!("{}[cron]{} {}", YELLOW_BOLD, RESET, service_name)
         } else {
             service_name.to_string()
         };
 
-        self.show_status_impl(&display_name, service_name);
+        self.show_status_impl(&display_name, service_name, service_hash);
+    }
+
+    fn show_status_with_cron_info(
+        &self,
+        service_name: &str,
+        is_cron: bool,
+        config_path: Option<&str>,
+    ) {
+        // Try to load config to get the service hash
+        if let Ok(config) = crate::config::load_config(config_path)
+            && let Some(service_config) = config.services.get(service_name)
+        {
+            let service_hash = service_config.compute_hash();
+            self.show_status_with_cron_info_by_hash(service_name, &service_hash, is_cron);
+            return;
+        }
+        // Fallback: service not in config
+        println!("● {} - Not found in configuration", service_name);
     }
 
     /// Shows the status of a **single service**.
-    pub fn show_status(&self, service_name: &str) {
-        self.show_status_impl(service_name, service_name);
+    pub fn show_status(&self, service_name: &str, config_path: Option<&str>) {
+        self.show_status_with_cron_info(service_name, false, config_path);
     }
 
     /// Internal implementation for showing service status.
-    fn show_status_impl(&self, display_name: &str, service_name: &str) {
+    fn show_status_impl(
+        &self,
+        display_name: &str,
+        service_name: &str,
+        service_hash: &str,
+    ) {
         debug!("Checking status for service: {service_name}");
         let state_entry = {
             let guard = self
                 .state_file
                 .lock()
                 .expect("Failed to lock service state file");
-            guard.get(service_name).cloned()
+            guard.get(service_hash).cloned()
         };
 
         if let Some(entry) = state_entry.clone() {
@@ -360,40 +388,81 @@ impl StatusManager {
         }
     }
 
-    /// Shows the status of **all services**.
-    pub fn show_statuses(&self) {
-        let mut services: BTreeSet<String> = BTreeSet::new();
+    /// Shows the status of **all services** (including orphaned state).
+    pub fn show_statuses_all(&self) {
+        // Try to load config to map hashes to names
+        let config = crate::config::load_config(None).ok();
+        let hash_to_name: std::collections::HashMap<String, String> = config
+            .as_ref()
+            .map(|cfg| {
+                cfg.services
+                    .iter()
+                    .map(|(name, svc_config)| (svc_config.compute_hash(), name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        {
-            let pid_guard = self.pid_file.lock().expect("Failed to lock PID file");
-            services.extend(pid_guard.services().keys().cloned());
-        }
+        let mut service_hashes: BTreeSet<String> = BTreeSet::new();
 
         {
             let state_guard = self
                 .state_file
                 .lock()
                 .expect("Failed to lock service state file");
-            services.extend(state_guard.services().keys().cloned());
+            service_hashes.extend(state_guard.services().keys().cloned());
         }
 
         let cron_state =
             CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
-        services.extend(cron_state.jobs().keys().cloned());
+        service_hashes.extend(cron_state.jobs().keys().cloned());
 
-        if services.is_empty() {
+        if service_hashes.is_empty() {
             println!("No managed services.");
             return;
         }
 
         println!("Service statuses:");
-        for service in services {
-            let is_cron = cron_state.jobs().contains_key(&service);
-            self.show_status_with_cron_info(&service, is_cron);
-            if let Some(cron_job) = cron_state.jobs().get(&service) {
-                Self::print_cron_history(&service, cron_job);
+        for hash in service_hashes {
+            if let Some(service_name) = hash_to_name.get(&hash) {
+                let is_cron = cron_state.jobs().contains_key(&hash);
+                self.show_status_with_cron_info_by_hash(service_name, &hash, is_cron);
+                if let Some(cron_job) = cron_state.jobs().get(&hash) {
+                    Self::print_cron_history(service_name, cron_job);
+                }
+            } else {
+                println!(
+                    "● [orphaned] {} - Service not in current config",
+                    &hash[..16]
+                );
             }
         }
+    }
+
+    /// Shows the status of services **only in the current config** (filtered).
+    pub fn show_statuses_filtered(&self, config: &crate::config::Config) {
+        let cron_state =
+            CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+
+        if config.services.is_empty() {
+            println!("No managed services.");
+            return;
+        }
+
+        println!("Service statuses:");
+        for (service_name, service_config) in &config.services {
+            let service_hash = service_config.compute_hash();
+            let is_cron = cron_state.jobs().contains_key(&service_hash);
+            self.show_status_with_cron_info_by_hash(service_name, &service_hash, is_cron);
+            if let Some(cron_job) = cron_state.jobs().get(&service_hash) {
+                Self::print_cron_history(service_name, cron_job);
+            }
+        }
+    }
+
+    /// Shows the status of **all services** (legacy method, calls show_statuses_all).
+    #[deprecated(note = "Use show_statuses_filtered or show_statuses_all instead")]
+    pub fn show_statuses(&self) {
+        self.show_statuses_all()
     }
 
     fn print_cron_history(service_name: &str, job_state: &PersistedCronJobState) {

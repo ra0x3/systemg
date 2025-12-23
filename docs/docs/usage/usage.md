@@ -72,16 +72,28 @@ sysg restart --config new-config.yaml
 
 ## Status
 
-Show the status of all services:
+Show the status of all services (uses default `systemg.yaml` config):
 
 ```sh
 sysg status
+```
+
+Show the status with a specific configuration file:
+
+```sh
+sysg status --config myapp.yaml
 ```
 
 Show the status of a specific service:
 
 ```sh
 sysg status --service webserver
+```
+
+Show all services including orphaned state (services removed from config):
+
+```sh
+sysg status --all
 ```
 
 ## Logs

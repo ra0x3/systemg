@@ -45,6 +45,8 @@ pub struct CronExecutionRecord {
 pub struct CronJobState {
     /// Name of the service this cron job manages.
     pub service_name: String,
+    /// Configuration hash of the service (used for persistence across renames).
+    pub service_hash: String,
     /// Parsed cron schedule expression.
     pub schedule: Schedule,
     /// Timestamp of the last execution start.
@@ -65,6 +67,7 @@ impl CronJobState {
     /// Creates a new cron job state, optionally restoring from persisted state.
     pub fn new(
         service_name: String,
+        service_hash: String,
         schedule: Schedule,
         timezone: EffectiveTimezone,
         timezone_label: String,
@@ -74,6 +77,7 @@ impl CronJobState {
 
         let mut state = Self {
             service_name,
+            service_hash,
             schedule,
             last_execution: None,
             next_execution,
@@ -163,6 +167,7 @@ impl CronManager {
     fn build_job_state(
         &self,
         service_name: &str,
+        service_hash: &str,
         cron_config: &CronConfig,
     ) -> Result<(CronJobState, bool, String), ProcessManagerError> {
         let (effective_timezone, timezone_label) =
@@ -184,10 +189,11 @@ impl CronManager {
             .state_file
             .lock()
             .ok()
-            .and_then(|state| state.jobs.get(service_name).cloned());
+            .and_then(|state| state.jobs.get(service_hash).cloned());
 
         let job_state = CronJobState::new(
             service_name.to_string(),
+            service_hash.to_string(),
             schedule,
             effective_timezone,
             timezone_label.clone(),
@@ -201,10 +207,11 @@ impl CronManager {
     pub fn register_job(
         &self,
         service_name: &str,
+        service_hash: &str,
         cron_config: &CronConfig,
     ) -> Result<(), ProcessManagerError> {
         let (job_state, normalized, normalized_expression) =
-            self.build_job_state(service_name, cron_config)?;
+            self.build_job_state(service_name, service_hash, cron_config)?;
         let timezone_label = job_state.timezone_label.clone();
         let mut jobs = self.jobs.lock().unwrap();
         self.persist_job_state(&job_state);
@@ -238,12 +245,13 @@ impl CronManager {
     /// Replace all cron jobs using the provided configuration, pruning any that no longer exist.
     pub fn sync_from_config(&self, config: &Config) -> Result<(), ProcessManagerError> {
         let mut active_jobs = Vec::new();
-        let mut active_names = HashSet::new();
+        let mut active_hashes = HashSet::new();
 
         for (service_name, service_config) in &config.services {
             if let Some(cron_config) = &service_config.cron {
+                let service_hash = service_config.compute_hash();
                 let (job_state, normalized, normalized_expression) =
-                    self.build_job_state(service_name, cron_config)?;
+                    self.build_job_state(service_name, &service_hash, cron_config)?;
                 let timezone_label = job_state.timezone_label.clone();
 
                 self.persist_job_state(&job_state);
@@ -269,7 +277,7 @@ impl CronManager {
                     );
                 }
 
-                active_names.insert(service_name.clone());
+                active_hashes.insert(service_hash);
                 info!("Registered cron job for service '{}'", service_name);
                 active_jobs.push(job_state);
             }
@@ -280,7 +288,7 @@ impl CronManager {
             *jobs_guard = active_jobs;
         }
 
-        self.prune_inactive_jobs(&active_names);
+        self.prune_inactive_jobs(&active_hashes);
 
         Ok(())
     }
@@ -370,6 +378,7 @@ impl CronManager {
                 // Create a debug-compatible clone
                 CronJobState {
                     service_name: job.service_name.clone(),
+                    service_hash: job.service_hash.clone(),
                     schedule: Schedule::from_str(&job.schedule.to_string()).unwrap(),
                     last_execution: job.last_execution,
                     next_execution: job.next_execution,
@@ -388,10 +397,10 @@ impl CronManager {
         jobs.clear();
     }
 
-    fn prune_inactive_jobs(&self, active_names: &HashSet<String>) {
+    fn prune_inactive_jobs(&self, active_hashes: &HashSet<String>) {
         if let Ok(mut state) = self.state_file.lock() {
             let original_len = state.jobs.len();
-            state.jobs.retain(|name, _| active_names.contains(name));
+            state.jobs.retain(|hash, _| active_hashes.contains(hash));
 
             if state.jobs.len() != original_len
                 && let Err(err) = state.save()
@@ -404,7 +413,7 @@ impl CronManager {
     fn persist_job_state(&self, job: &CronJobState) {
         if let Ok(mut state) = self.state_file.lock() {
             state.jobs.insert(
-                job.service_name.clone(),
+                job.service_hash.clone(),
                 PersistedCronJobState {
                     last_execution: job.last_execution,
                     execution_history: job.execution_history.clone(),
@@ -470,6 +479,7 @@ impl CronStateFile {
     }
 
     /// Returns a reference to the map of persisted cron job states.
+    /// Keys are service configuration hashes (not service names).
     pub fn jobs(&self) -> &std::collections::BTreeMap<String, PersistedCronJobState> {
         &self.jobs
     }
@@ -553,6 +563,22 @@ mod tests {
 
     use crate::config::ServiceConfig;
 
+    fn compute_test_hash(cron_config: &CronConfig) -> String {
+        let service_config = ServiceConfig {
+            command: "test_command".to_string(),
+            env: None,
+            restart_policy: None,
+            backoff: None,
+            max_restarts: None,
+            depends_on: None,
+            deployment: None,
+            hooks: None,
+            cron: Some(cron_config.clone()),
+            skip: None,
+        };
+        service_config.compute_hash()
+    }
+
     #[test]
     fn test_cron_manager_registration() {
         let manager = CronManager::new();
@@ -560,8 +586,13 @@ mod tests {
             expression: "0 * * * * *".to_string(),
             timezone: Some("UTC".into()),
         };
+        let service_hash = compute_test_hash(&cron_config);
 
-        assert!(manager.register_job("test_service", &cron_config).is_ok());
+        assert!(
+            manager
+                .register_job("test_service", &service_hash, &cron_config)
+                .is_ok()
+        );
 
         let jobs = manager.get_all_jobs();
         assert_eq!(jobs.len(), 1);
@@ -576,8 +607,13 @@ mod tests {
             expression: "invalid cron".to_string(),
             timezone: None,
         };
+        let service_hash = compute_test_hash(&cron_config);
 
-        assert!(manager.register_job("test_service", &cron_config).is_err());
+        assert!(
+            manager
+                .register_job("test_service", &service_hash, &cron_config)
+                .is_err()
+        );
     }
 
     #[test]
@@ -587,8 +623,13 @@ mod tests {
             expression: "* * * * *".to_string(),
             timezone: None,
         };
+        let service_hash = compute_test_hash(&cron_config);
 
-        assert!(manager.register_job("test_service", &cron_config).is_ok());
+        assert!(
+            manager
+                .register_job("test_service", &service_hash, &cron_config)
+                .is_ok()
+        );
         let jobs = manager.get_all_jobs();
         assert!(jobs[0].next_execution.is_some());
     }
@@ -613,9 +654,10 @@ mod tests {
             expression: "* * * * * *".to_string(),
             timezone: Some("UTC".into()),
         };
+        let service_hash = compute_test_hash(&cron_config);
 
         manager
-            .register_job("persisted_service", &cron_config)
+            .register_job("persisted_service", &service_hash, &cron_config)
             .unwrap();
 
         {
@@ -636,11 +678,9 @@ mod tests {
             Some(0),
         );
 
+        let service_hash = compute_test_hash(&cron_config);
         let state = CronStateFile::load().expect("load cron state");
-        let persisted = state
-            .jobs()
-            .get("persisted_service")
-            .expect("persisted cron job");
+        let persisted = state.jobs().get(&service_hash).expect("persisted cron job");
 
         assert_eq!(persisted.execution_history.len(), 1);
         let record = persisted.execution_history.back().unwrap();
@@ -711,6 +751,11 @@ mod tests {
             env: None,
         };
 
+        // Compute hashes for each service
+        let job_two_hash = service_with_cron("*/2 * * * * *").compute_hash();
+        let job_three_hash = service_with_cron("0 */5 * * * *").compute_hash();
+        let job_one_hash = service_with_cron("* * * * * *").compute_hash();
+
         manager.sync_from_config(&config_v2).unwrap();
 
         let job_names: Vec<String> = manager
@@ -724,9 +769,9 @@ mod tests {
         assert!(!job_names.contains(&"job_one".to_string()));
 
         let state = CronStateFile::load().expect("load cron state");
-        assert!(state.jobs().contains_key("job_two"));
-        assert!(state.jobs().contains_key("job_three"));
-        assert!(!state.jobs().contains_key("job_one"));
+        assert!(state.jobs().contains_key(&job_two_hash));
+        assert!(state.jobs().contains_key(&job_three_hash));
+        assert!(!state.jobs().contains_key(&job_one_hash));
 
         if let Some(original) = original_home {
             unsafe {

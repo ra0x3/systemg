@@ -558,6 +558,17 @@ fn status_flags_zombie_processes() {
     fs::create_dir_all(&home).expect("failed to create home dir");
     let _home = HomeEnvGuard::set(&home);
 
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  arb_rs:
+    command: "sleep 60"
+"#,
+    )
+    .expect("failed to write config");
+
     let child_pid = unsafe { libc::fork() };
     assert!(child_pid >= 0, "fork failed");
 
@@ -571,7 +582,13 @@ fn status_flags_zombie_processes() {
         .expect("insert zombie pid");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
-    let assert = cmd.arg("status").arg("--service").arg("arb_rs").assert();
+    let assert = cmd
+        .arg("status")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--service")
+        .arg("arb_rs")
+        .assert();
 
     assert
         .success()
@@ -616,7 +633,9 @@ services:
         .expect("start skipped service");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
-    cmd.arg("status");
+    cmd.arg("status")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap());
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("skipped_service"))
@@ -654,7 +673,9 @@ services:
     wait_for_pid_removed("oneshot");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
-    cmd.arg("status");
+    cmd.arg("status")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap());
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("oneshot"))
@@ -1106,10 +1127,9 @@ services:
     assert!(result.is_err(), "pre-start failure should surface as error");
 
     {
+        let service_hash = failing_config.compute_hash();
         let guard = state_file.lock().expect("lock state file");
-        let entry = guard
-            .get("failing_pre_start")
-            .expect("service entry recorded");
+        let entry = guard.get(&service_hash).expect("service entry recorded");
         assert_eq!(
             entry.status,
             ServiceLifecycleStatus::ExitedWithError,

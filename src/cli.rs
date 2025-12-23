@@ -125,9 +125,17 @@ pub enum Commands {
 
     /// Show the status of currently running services.
     Status {
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
+        config: String,
+
         /// Optionally specify a service name to check its status.
         #[arg(short, long)]
         service: Option<String>,
+
+        /// Show all services including orphaned state (services not in current config).
+        #[arg(long)]
+        all: bool,
     },
 
     /// Show logs for a specific service.

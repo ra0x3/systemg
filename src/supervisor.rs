@@ -224,10 +224,11 @@ impl Supervisor {
                                                         );
 
                                                     // Persist exit state to ServiceStateFile for status display
-                                                    if let Ok(mut state_file) =
-                                                        ServiceStateFile::load()
+                                                    if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
+                                                        && let Ok(mut state_file) =
+                                                            ServiceStateFile::load()
                                                         && let Err(err) = state_file.set(
-                                                            &job_name_clone,
+                                                            &service_hash,
                                                             ServiceLifecycleStatus::ExitedSuccessfully,
                                                             None,
                                                             Some(0),
@@ -284,13 +285,15 @@ impl Supervisor {
                                                                         );
 
                                                                         // Persist exit state to ServiceStateFile for status display
-                                                                        if let Ok(mut state_file) = ServiceStateFile::load() {
+                                                                        if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
+                                                                            && let Ok(mut state_file) = ServiceStateFile::load()
+                                                                        {
                                                                             let lifecycle_status = match status {
                                                                                 CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
                                                                                 CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
                                                                             };
                                                                             if let Err(err) = state_file.set(
-                                                                                &job_name_clone,
+                                                                                &service_hash,
                                                                                 lifecycle_status,
                                                                                 None,
                                                                                 exit_code,
@@ -314,9 +317,10 @@ impl Supervisor {
                                                                         );
 
                                                                         // Persist error state to ServiceStateFile
-                                                                        if let Ok(mut state_file) = ServiceStateFile::load()
+                                                                        if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
+                                                                            && let Ok(mut state_file) = ServiceStateFile::load()
                                                                             && let Err(err) = state_file.set(
-                                                                                &job_name_clone,
+                                                                                &service_hash,
                                                                                 ServiceLifecycleStatus::ExitedWithError,
                                                                                 None,
                                                                                 None,
@@ -349,10 +353,11 @@ impl Supervisor {
                                                                 );
 
                                                                 // Persist error state to ServiceStateFile
-                                                                if let Ok(mut state_file) =
-                                                                    ServiceStateFile::load()
+                                                                if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
+                                                                    && let Ok(mut state_file) =
+                                                                        ServiceStateFile::load()
                                                                     && let Err(err) = state_file.set(
-                                                                        &job_name_clone,
+                                                                        &service_hash,
                                                                         ServiceLifecycleStatus::ExitedWithError,
                                                                         None,
                                                                         None,

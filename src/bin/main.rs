@@ -121,14 +121,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                 daemon.restart_services()?;
             }
         }
-        Commands::Status { service } => {
+        Commands::Status {
+            config,
+            service,
+            all,
+        } => {
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
             let state =
                 Arc::new(Mutex::new(ServiceStateFile::load().unwrap_or_default()));
             let manager = StatusManager::new(pid, state);
             match service {
-                Some(service) => manager.show_status(&service),
-                None => manager.show_statuses(),
+                Some(service) => manager.show_status(&service, Some(&config)),
+                None => {
+                    if all {
+                        manager.show_statuses_all()
+                    } else {
+                        let config_data = load_config(Some(&config))?;
+                        manager.show_statuses_filtered(&config_data)
+                    }
+                }
             }
         }
         Commands::Logs {

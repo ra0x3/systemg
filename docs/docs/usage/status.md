@@ -11,10 +11,16 @@ The `status` command displays detailed information about running services, inclu
 
 ### Show All Services
 
-Show the status of all currently running services:
+Show the status of all currently running services (uses default `systemg.yaml` config):
 
 ```sh
 $ sysg status
+```
+
+Show status with a specific configuration file:
+
+```sh
+$ sysg status --config myapp.yaml
 ```
 
 ### Show Specific Service
@@ -23,6 +29,12 @@ Show the status of a specific service:
 
 ```sh
 $ sysg status --service arb-rs
+```
+
+With a custom configuration file:
+
+```sh
+$ sysg status --config myapp.yaml --service arb-rs
 ```
 
 ## How It Works
@@ -176,9 +188,11 @@ Show the status of currently running services
 Usage: sysg status [OPTIONS]
 
 Options:
-      --log-level <LEVEL>  Override the logging verbosity for this invocation only
-  -s, --service <SERVICE>  Optionally specify a service name to check its status
-  -h, --help               Print help
+  -c, --config <CONFIG>      Path to the configuration file (defaults to `systemg.yaml`)
+      --log-level <LEVEL>    Override the logging verbosity for this invocation only
+  -s, --service <SERVICE>    Optionally specify a service name to check its status
+      --all                  Show all services including orphaned state (services not in current config)
+  -h, --help                 Print help
 ```
 
 ## Example Output

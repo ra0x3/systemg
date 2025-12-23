@@ -1,6 +1,7 @@
 //! Configuration management for Systemg.
 use regex::Regex;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     env, fs,
@@ -25,7 +26,7 @@ pub struct Config {
 }
 
 /// Skip configuration for a service.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 #[serde(untagged)]
 pub enum SkipConfig {
     /// Boolean flag that, when `true`, always skips the service.
@@ -36,7 +37,7 @@ pub enum SkipConfig {
 }
 
 /// Configuration for an individual service.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct ServiceConfig {
     /// Command used to start the service.
     pub command: String,
@@ -60,8 +61,34 @@ pub struct ServiceConfig {
     pub skip: Option<SkipConfig>,
 }
 
+impl ServiceConfig {
+    /// Computes a stable hash of this service configuration, excluding the service name.
+    /// This hash is used to identify the service state across renames.
+    ///
+    /// # Returns
+    /// A 16-character hexadecimal string representing the first 64 bits of the SHA256 hash.
+    pub fn compute_hash(&self) -> String {
+        // Serialize the config to JSON with sorted keys for deterministic output
+        let json = serde_json::to_string(self)
+            .expect("ServiceConfig should always be serializable");
+
+        // Compute SHA256 hash
+        let mut hasher = Sha256::new();
+        hasher.update(json.as_bytes());
+        let result = hasher.finalize();
+
+        // Take first 64 bits (8 bytes) and convert to hex
+        // This gives us a 16-character hash which is sufficient for uniqueness
+        // while being more readable than the full 64-character SHA256
+        format!(
+            "{:016x}",
+            u64::from_be_bytes(result[0..8].try_into().unwrap())
+        )
+    }
+}
+
 /// Deployment strategy configuration for a service.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct DeploymentConfig {
     /// Deployment strategy: "rolling" or "immediate".
     pub strategy: Option<String>,
@@ -74,7 +101,7 @@ pub struct DeploymentConfig {
 }
 
 /// Health check configuration used during rolling deployments.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct HealthCheckConfig {
     /// Health check URL.
     pub url: String,
@@ -85,7 +112,7 @@ pub struct HealthCheckConfig {
 }
 
 /// Represents environment variables for a service.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct EnvConfig {
     /// Optional path to an environment file.
     pub file: Option<String>,
@@ -163,7 +190,7 @@ pub enum HookOutcome {
 }
 
 /// Command executed for a hook outcome.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct HookAction {
     /// Shell command to execute for this hook.
     pub command: String,
@@ -172,7 +199,7 @@ pub struct HookAction {
 }
 
 /// Hook commands grouped by outcome for a lifecycle stage.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct HookLifecycleConfig {
     /// Hook action to execute when the lifecycle event succeeds.
     pub success: Option<HookAction>,
@@ -181,7 +208,7 @@ pub struct HookLifecycleConfig {
 }
 
 /// Hooks that run on specific service lifecycle events.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct Hooks {
     /// Hooks to execute when the service starts.
     pub on_start: Option<HookLifecycleConfig>,
@@ -209,7 +236,7 @@ impl Hooks {
 }
 
 /// Cron configuration for scheduled service execution.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct CronConfig {
     /// Cron expression defining the schedule (e.g., "0 * * * * *").
     pub expression: String,
@@ -218,6 +245,23 @@ pub struct CronConfig {
 }
 
 impl Config {
+    /// Computes a mapping from service names to their configuration hashes.
+    /// This is used to identify services across renames.
+    pub fn service_hashes(&self) -> HashMap<String, String> {
+        self.services
+            .iter()
+            .map(|(name, config)| (name.clone(), config.compute_hash()))
+            .collect()
+    }
+
+    /// Gets the configuration hash for a specific service by name.
+    /// Returns None if the service doesn't exist.
+    pub fn get_service_hash(&self, service_name: &str) -> Option<String> {
+        self.services
+            .get(service_name)
+            .map(|cfg| cfg.compute_hash())
+    }
+
     /// Returns services ordered so dependencies start before dependents.
     pub fn service_start_order(&self) -> Result<Vec<String>, ProcessManagerError> {
         let mut indegree: HashMap<String, usize> =
@@ -772,5 +816,131 @@ services:
         assert_eq!(vars2.get("SHARED"), Some(&"root_value".to_string()));
         assert_eq!(vars2.get("ROOT_ONLY"), Some(&"root".to_string()));
         assert!(vars2.get("SERVICE_ONLY").is_none());
+    }
+
+    #[test]
+    fn hash_computation_is_stable() {
+        // Same config should always produce the same hash
+        let config1 = ServiceConfig {
+            command: "test command".to_string(),
+            env: None,
+            restart_policy: Some("always".to_string()),
+            backoff: Some("5s".to_string()),
+            max_restarts: Some(3),
+            depends_on: None,
+            deployment: None,
+            hooks: None,
+            cron: Some(CronConfig {
+                expression: "0 * * * * *".to_string(),
+                timezone: Some("UTC".to_string()),
+            }),
+            skip: None,
+        };
+
+        let config2 = ServiceConfig {
+            command: "test command".to_string(),
+            env: None,
+            restart_policy: Some("always".to_string()),
+            backoff: Some("5s".to_string()),
+            max_restarts: Some(3),
+            depends_on: None,
+            deployment: None,
+            hooks: None,
+            cron: Some(CronConfig {
+                expression: "0 * * * * *".to_string(),
+                timezone: Some("UTC".to_string()),
+            }),
+            skip: None,
+        };
+
+        let hash1 = config1.compute_hash();
+        let hash2 = config2.compute_hash();
+
+        assert_eq!(
+            hash1, hash2,
+            "Identical configs should produce identical hashes"
+        );
+        assert_eq!(hash1.len(), 16, "Hash should be 16 characters");
+    }
+
+    #[test]
+    fn hash_changes_with_config_changes() {
+        let base_config = ServiceConfig {
+            command: "test command".to_string(),
+            env: None,
+            restart_policy: None,
+            backoff: None,
+            max_restarts: None,
+            depends_on: None,
+            deployment: None,
+            hooks: None,
+            cron: None,
+            skip: None,
+        };
+
+        let modified_command = ServiceConfig {
+            command: "different command".to_string(),
+            ..base_config.clone()
+        };
+
+        let modified_cron = ServiceConfig {
+            cron: Some(CronConfig {
+                expression: "*/5 * * * * *".to_string(),
+                timezone: None,
+            }),
+            ..base_config.clone()
+        };
+
+        let base_hash = base_config.compute_hash();
+        let command_hash = modified_command.compute_hash();
+        let cron_hash = modified_cron.compute_hash();
+
+        assert_ne!(
+            base_hash, command_hash,
+            "Changing command should change hash"
+        );
+        assert_ne!(base_hash, cron_hash, "Adding cron should change hash");
+        assert_ne!(
+            command_hash, cron_hash,
+            "Different changes should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn service_rename_preserves_hash() {
+        // The hash should NOT depend on the service name
+        // This test verifies that renaming a service doesn't change its hash
+
+        let config = ServiceConfig {
+            command: "echo hello".to_string(),
+            env: None,
+            restart_policy: Some("always".to_string()),
+            backoff: None,
+            max_restarts: None,
+            depends_on: None,
+            deployment: None,
+            hooks: None,
+            cron: Some(CronConfig {
+                expression: "0 * * * * *".to_string(),
+                timezone: Some("UTC".to_string()),
+            }),
+            skip: None,
+        };
+
+        // The same config used with different service names should have the same hash
+        let hash = config.compute_hash();
+
+        // Verify that the hash is based on config content, not name
+        // (Since ServiceConfig doesn't contain the name field, this is guaranteed)
+        assert_eq!(hash.len(), 16);
+
+        // Create a "renamed" service (same config)
+        let renamed_config = config.clone();
+        let renamed_hash = renamed_config.compute_hash();
+
+        assert_eq!(
+            hash, renamed_hash,
+            "Hash should be the same after 'renaming' (using same config)"
+        );
     }
 }

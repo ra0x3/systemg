@@ -190,11 +190,17 @@ $ sysg restart --config new-config.yaml
 **Status** - Check the status of running services:
 
 ```sh
-# Show status of all services
+# Show status of all services (uses default systemg.yaml)
 $ sysg status
+
+# Show status with a specific configuration file
+$ sysg status --config myapp.yaml
 
 # Show status of a specific service
 $ sysg status --service webserver
+
+# Show all services including orphaned state
+$ sysg status --all
 ```
 
 **Logs** - View logs for a specific service:
