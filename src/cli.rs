@@ -140,6 +140,10 @@ pub enum Commands {
 
     /// Show logs for a specific service.
     Logs {
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
+        config: String,
+
         /// The name of the service whose logs should be displayed (optional).
         service: Option<String>,
 

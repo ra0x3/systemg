@@ -313,6 +313,7 @@ impl LogManager {
         &self,
         _lines: usize,
         kind: Option<&str>,
+        config_path: Option<&str>,
     ) -> Result<(), LogsManagerError> {
         debug!("Fetching logs for all services...");
 
@@ -350,7 +351,7 @@ impl LogManager {
 
         // Build hash-to-name mapping from config
         let hash_to_name: std::collections::HashMap<String, String> =
-            crate::config::load_config(None)
+            crate::config::load_config(config_path)
                 .ok()
                 .map(|config| {
                     config
@@ -395,7 +396,7 @@ impl LogManager {
             }
 
             // Check if this is a cron service by looking up its hash
-            if let Ok(config) = crate::config::load_config(None)
+            if let Ok(config) = crate::config::load_config(config_path)
                 && let Some(service_config) = config.services.get(&service_name)
             {
                 let service_hash = service_config.compute_hash();

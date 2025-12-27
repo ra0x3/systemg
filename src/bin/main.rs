@@ -126,27 +126,52 @@ fn main() -> Result<(), Box<dyn Error>> {
             service,
             all,
         } => {
+            // Try to determine the actual config path, falling back to hint if needed
+            let effective_config = match load_config(Some(&config)) {
+                Ok(_) => config.clone(),
+                Err(_) => {
+                    if let Ok(Some(hint)) = ipc::read_config_hint() {
+                        hint.to_string_lossy().to_string()
+                    } else {
+                        config.clone()
+                    }
+                }
+            };
+
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
             let state =
                 Arc::new(Mutex::new(ServiceStateFile::load().unwrap_or_default()));
             let manager = StatusManager::new(pid, state);
             match service {
-                Some(service) => manager.show_status(&service, Some(&config)),
+                Some(service) => manager.show_status(&service, Some(&effective_config)),
                 None => {
                     if all {
                         manager.show_statuses_all()
                     } else {
-                        let config_data = load_config(Some(&config))?;
+                        let config_data = load_config(Some(&effective_config))?;
                         manager.show_statuses_filtered(&config_data)
                     }
                 }
             }
         }
         Commands::Logs {
+            config,
             service,
             lines,
             kind,
         } => {
+            // Try to determine the actual config path, falling back to hint if needed
+            let effective_config = match load_config(Some(&config)) {
+                Ok(_) => config.clone(),
+                Err(_) => {
+                    if let Ok(Some(hint)) = ipc::read_config_hint() {
+                        hint.to_string_lossy().to_string()
+                    } else {
+                        config.clone()
+                    }
+                }
+            };
+
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
             let manager = LogManager::new(pid.clone());
             match service {
@@ -182,7 +207,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 None => {
                     info!("Fetching logs for all services");
-                    manager.show_logs(lines, kind.as_deref())?;
+                    manager.show_logs(lines, kind.as_deref(), Some(&effective_config))?;
                 }
             }
         }
