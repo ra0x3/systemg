@@ -348,35 +348,65 @@ impl LogManager {
         let cron_state =
             CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
 
-        let mut services: BTreeSet<String> = pid_snapshot.keys().cloned().collect();
-        services.extend(cron_state.jobs().keys().cloned());
+        // Build hash-to-name mapping from config
+        let hash_to_name: std::collections::HashMap<String, String> =
+            crate::config::load_config(None)
+                .ok()
+                .map(|config| {
+                    config
+                        .services
+                        .iter()
+                        .map(|(name, svc_config)| {
+                            (svc_config.compute_hash(), name.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
-        debug!("Services: {services:?}");
+        // Collect service names (from PID file) and hashes (from cron state)
+        let mut service_names: BTreeSet<String> = pid_snapshot.keys().cloned().collect();
 
-        if services.is_empty() {
+        // Map cron job hashes to service names
+        for hash in cron_state.jobs().keys() {
+            if let Some(name) = hash_to_name.get(hash) {
+                service_names.insert(name.clone());
+            } else {
+                // Fallback: use hash if name not found (orphaned service)
+                service_names.insert(hash.clone());
+            }
+        }
+
+        debug!("Services: {service_names:?}");
+
+        if service_names.is_empty() {
             if kind.is_some() {
                 println!("No active services");
             }
             return Ok(());
         }
 
-        for service in services {
-            if let Some(pid) = pid_snapshot.get(&service) {
-                debug!("Service: {service}, PID: {pid}");
-                if let Err(err) = self.show_log(&service, *pid, 20, kind) {
-                    eprintln!("Failed to stream logs for '{}': {}", service, err);
+        for service_name in service_names {
+            if let Some(pid) = pid_snapshot.get(&service_name) {
+                debug!("Service: {service_name}, PID: {pid}");
+                if let Err(err) = self.show_log(&service_name, *pid, 20, kind) {
+                    eprintln!("Failed to stream logs for '{}': {}", service_name, err);
                 }
                 continue;
             }
 
-            if let Some(cron_job) = cron_state.jobs().get(&service) {
-                debug!(
-                    "Showing inactive logs for cron service '{}' with {} history entries",
-                    service,
-                    cron_job.execution_history.len()
-                );
-                if let Err(err) = self.show_inactive_log(&service, 20, kind) {
-                    eprintln!("Failed to stream logs for '{}': {}", service, err);
+            // Check if this is a cron service by looking up its hash
+            if let Ok(config) = crate::config::load_config(None)
+                && let Some(service_config) = config.services.get(&service_name)
+            {
+                let service_hash = service_config.compute_hash();
+                if let Some(_cron_job) = cron_state.jobs().get(&service_hash) {
+                    debug!("Showing inactive logs for cron service '{}'", service_name);
+                    if let Err(err) = self.show_inactive_log(&service_name, 20, kind) {
+                        eprintln!(
+                            "Failed to stream logs for '{}': {}",
+                            service_name, err
+                        );
+                    }
                 }
             }
         }
