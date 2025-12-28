@@ -1,12 +1,17 @@
-use libc::{SIGKILL, getpgrp, killpg};
+use libc::{SIGKILL, SIGTERM, getpgrp, killpg};
 use nix::{sys::signal, unistd::Pid};
 use std::{
+    collections::HashSet,
     error::Error,
     fs,
     os::unix::io::IntoRawFd,
     path::PathBuf,
+    process,
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
+use sysinfo::{ProcessesToUpdate, System};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -226,6 +231,8 @@ fn supervisor_log_path() -> PathBuf {
 }
 
 fn purge_all_state() -> Result<(), Box<dyn Error>> {
+    stop_resident_supervisors();
+
     let home = std::env::var("HOME").expect("HOME not set");
     let runtime_dir = PathBuf::from(format!("{}/.local/share/systemg", home));
 
@@ -238,6 +245,162 @@ fn purge_all_state() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn stop_resident_supervisors() {
+    let candidates = gather_supervisor_pids();
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let mut survivors = HashSet::new();
+
+    if supervisor_running() {
+        match send_control_command(ControlCommand::Shutdown) {
+            Ok(_) => {
+                for pid in &candidates {
+                    if !wait_for_supervisor_exit(*pid, Duration::from_secs(3)) {
+                        survivors.insert(*pid);
+                    }
+                }
+            }
+            Err(err) => {
+                if let Some(control_err) = err.downcast_ref::<ControlError>() {
+                    match control_err {
+                        ControlError::NotAvailable => warn!(
+                            "Supervisor IPC unavailable during purge; falling back to signal-based shutdown"
+                        ),
+                        other => warn!("Failed to request supervisor shutdown: {other}"),
+                    }
+                } else {
+                    warn!("Failed to request supervisor shutdown: {err}");
+                }
+                survivors = candidates.clone();
+            }
+        }
+    } else {
+        survivors = candidates.clone();
+    }
+
+    if survivors.is_empty() {
+        return;
+    }
+
+    for pid in gather_supervisor_pids() {
+        survivors.insert(pid);
+    }
+
+    for pid in survivors {
+        forcefully_terminate_supervisor(pid);
+    }
+}
+
+fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+
+    let mut set = HashSet::new();
+
+    if let Ok(Some(pid)) = ipc::read_supervisor_pid() {
+        set.insert(pid);
+    }
+
+    let current_pid = process::id();
+
+    for (pid, process) in system.processes() {
+        if pid.as_u32() == current_pid {
+            continue;
+        }
+
+        if is_daemonized_supervisor_process(process) {
+            set.insert(pid.as_u32() as libc::pid_t);
+        }
+    }
+
+    set
+}
+
+fn is_daemonized_supervisor_process(process: &sysinfo::Process) -> bool {
+    let cmd = process.cmd();
+    if cmd.is_empty() {
+        return false;
+    }
+
+    let binary = cmd
+        .get(0)
+        .map(|arg| arg.to_string_lossy())
+        .unwrap_or_default();
+
+    if !(binary.ends_with("sysg") || binary.contains("/sysg")) {
+        return false;
+    }
+
+    let mut has_start = false;
+    let mut has_daemonize = false;
+
+    for arg in cmd {
+        let value = arg.to_string_lossy();
+        if value == "start" {
+            has_start = true;
+        } else if value == "--daemonize" {
+            has_daemonize = true;
+        }
+    }
+
+    has_start && has_daemonize
+}
+
+fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+
+    while Instant::now() < deadline {
+        match signal::kill(Pid::from_raw(pid), None) {
+            Ok(_) => thread::sleep(Duration::from_millis(100)),
+            Err(err) => {
+                if err == nix::Error::from(nix::errno::Errno::ESRCH) {
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    false
+}
+
+fn forcefully_terminate_supervisor(pid: libc::pid_t) {
+    if wait_for_supervisor_exit(pid, Duration::from_millis(100)) {
+        return;
+    }
+
+    let pgid = unsafe { libc::getpgid(pid) };
+
+    if pgid >= 0 && pgid == pid {
+        unsafe {
+            libc::killpg(pgid, SIGTERM);
+        }
+    } else {
+        unsafe {
+            libc::kill(pid, SIGTERM);
+        }
+    }
+
+    if wait_for_supervisor_exit(pid, Duration::from_secs(2)) {
+        return;
+    }
+
+    if pgid >= 0 && pgid == pid {
+        unsafe {
+            libc::killpg(pgid, SIGKILL);
+        }
+    } else {
+        unsafe {
+            libc::kill(pid, SIGKILL);
+        }
+    }
+
+    let _ = wait_for_supervisor_exit(pid, Duration::from_secs(2));
 }
 
 fn init_logging(args: &Cli) {

@@ -10,6 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
@@ -128,21 +129,45 @@ fn wait_for_pid_removed(service: &str) {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn wait_for_process_exit(pid: u32) {
-    use std::path::PathBuf;
+    #[cfg(target_os = "linux")]
+    {
+        use std::path::PathBuf;
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let proc_path = PathBuf::from(format!("/proc/{}", pid));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let proc_path = PathBuf::from(format!("/proc/{}", pid));
 
-    while Instant::now() < deadline {
-        if !proc_path.exists() {
-            return;
+        while Instant::now() < deadline {
+            if !proc_path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
         }
-        thread::sleep(Duration::from_millis(100));
+
+        panic!("Timed out waiting for PID {} to exit", pid);
     }
 
-    panic!("Timed out waiting for PID {} to exit", pid);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut system = System::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        while Instant::now() < deadline {
+            system.refresh_processes(ProcessesToUpdate::All, true);
+            if system.process(Pid::from_u32(pid)).is_none() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        panic!("Timed out waiting for PID {} to exit", pid);
+    }
+}
+
+fn is_process_alive(pid: u32) -> bool {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.process(Pid::from_u32(pid)).is_some()
 }
 
 fn wait_for_latest_pid(pid_dir: &Path, min_runs: usize) -> u32 {
@@ -1350,5 +1375,49 @@ services:
     assert!(
         !runtime_dir.exists(),
         "Runtime directory should be completely removed after purge"
+    );
+}
+
+#[test]
+fn purge_stops_running_supervisor() {
+    use assert_cmd::Command;
+    use std::process::Command as StdCommand;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let mut sleeper = StdCommand::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("failed to spawn sleeper");
+    let pid = sleeper.id();
+
+    assert!(is_process_alive(pid), "sleeper should be running");
+
+    let runtime_dir = home.join(".local/share/systemg");
+    fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
+    let pid_path = runtime_dir.join("sysg.pid");
+    fs::write(&pid_path, pid.to_string()).expect("failed to write pid file");
+
+    wait_for_path(&pid_path);
+
+    let mut purge_cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    purge_cmd.arg("purge").assert().success();
+
+    wait_for_process_exit(pid);
+    assert!(
+        !is_process_alive(pid),
+        "sleeper should be terminated by purge"
+    );
+
+    // Reap the child process to avoid zombies when running locally.
+    let _ = sleeper.wait();
+
+    assert!(
+        !runtime_dir.exists(),
+        "runtime directory should be removed after purge"
     );
 }
