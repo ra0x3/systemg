@@ -58,28 +58,34 @@ impl StatusManager {
         }
     }
 
-    fn clear_service_pid(&self, service_name: &str) {
+    fn clear_service_pid(&self, service_name: &str, service_hash: &str) {
         if let Ok(mut guard) = self.pid_file.lock() {
             let _ = guard.remove(service_name);
         }
 
         if let Ok(mut state_guard) = self.state_file.lock() {
             let should_update = state_guard
-                .get(service_name)
+                .get(service_hash)
                 .map(|entry| matches!(entry.status, ServiceLifecycleStatus::Running))
                 .unwrap_or(false);
 
-            if should_update
-                && let Err(err) = state_guard.set(
-                    service_name,
+            if should_update {
+                if let Err(err) = state_guard.set(
+                    service_hash,
                     ServiceLifecycleStatus::ExitedWithError,
                     None,
                     None,
                     None,
-                )
+                ) {
+                    debug!(
+                        "Failed to reflect cleared PID state for '{service_name}' in state file: {err}"
+                    );
+                }
+            } else if state_guard.services().contains_key(service_name)
+                && let Err(err) = state_guard.remove(service_name)
             {
                 debug!(
-                    "Failed to reflect cleared PID state for '{service_name}' in state file: {err}"
+                    "Failed to remove legacy state entry for '{service_name}' in state file: {err}"
                 );
             }
         }
@@ -352,12 +358,12 @@ impl StatusManager {
                     "● {} - Process {} is zombie (defunct); service is no longer running",
                     display_name, pid
                 );
-                self.clear_service_pid(service_name);
+                self.clear_service_pid(service_name, service_hash);
                 return;
             }
             ProcessState::Missing => {
                 println!("● {} - Process {} not found", display_name, pid);
-                self.clear_service_pid(service_name);
+                self.clear_service_pid(service_name, service_hash);
                 return;
             }
         }
@@ -646,6 +652,12 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
+    use std::{
+        env, fs,
+        sync::{Arc, Mutex},
+    };
+    use tempfile::tempdir_in;
+
     #[test]
     fn format_cron_status_success_includes_green_exit_code() {
         let record = CronExecutionRecord {
@@ -673,5 +685,64 @@ mod tests {
         assert!(formatted.contains("exit 2"));
         assert!(formatted.contains("boom"));
         assert!(formatted.contains(RED_BOLD));
+    }
+
+    #[test]
+    fn clear_service_pid_marks_hash_entry_as_exited() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base directory");
+        let temp = tempdir_in(&base).expect("create temp home");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home directory");
+
+        let original_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+
+        let pid_file = Arc::new(Mutex::new(PidFile::load().expect("load pid file")));
+        {
+            let mut guard = pid_file.lock().expect("lock pid file");
+            guard.insert("demo_service", 42).expect("insert pid entry");
+        }
+
+        let service_hash = "deadbeefdeadbeef";
+        let state_file = Arc::new(Mutex::new(
+            ServiceStateFile::load().expect("load state file"),
+        ));
+        {
+            let mut guard = state_file.lock().expect("lock state file");
+            guard
+                .set(
+                    service_hash,
+                    ServiceLifecycleStatus::Running,
+                    Some(42),
+                    None,
+                    None,
+                )
+                .expect("record running state");
+        }
+
+        let manager = StatusManager::new(Arc::clone(&pid_file), Arc::clone(&state_file));
+        manager.clear_service_pid("demo_service", service_hash);
+
+        {
+            let guard = state_file.lock().expect("lock state file");
+            let entry = guard.get(service_hash).expect("state entry present");
+            assert_eq!(entry.status, ServiceLifecycleStatus::ExitedWithError);
+            assert!(entry.pid.is_none());
+        }
+
+        unsafe {
+            if let Some(home) = original_home {
+                env::set_var("HOME", home);
+            } else {
+                env::remove_var("HOME");
+            }
+        }
     }
 }
