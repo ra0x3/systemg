@@ -21,6 +21,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use sysinfo::{ProcessesToUpdate, System};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::config::{
@@ -492,6 +493,221 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Recursively collects all descendant process IDs for the given root PID using the system
+    /// process tree. Returns a set containing the root PID and all child processes.
+    fn collect_descendants(root_pid: u32) -> HashSet<u32> {
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::All, true);
+
+        let mut descendants = HashSet::new();
+        let mut stack = vec![root_pid];
+
+        while let Some(current) = stack.pop() {
+            for (proc_pid, process) in system.processes() {
+                if let Some(parent) = process.parent()
+                    && parent.as_u32() == current
+                {
+                    let child_pid = proc_pid.as_u32();
+                    if descendants.insert(child_pid) {
+                        stack.push(child_pid);
+                    }
+                }
+            }
+        }
+
+        descendants
+    }
+
+    /// Sends a signal to a process and checks if it's still running. When signal is None, performs
+    /// a liveness check (signal 0). Returns true if the process is alive, false if it doesn't exist.
+    /// On Linux, also checks /proc/{pid}/stat to detect zombie processes.
+    fn signal_pid(
+        service_name: &str,
+        pid: u32,
+        signal: Option<nix::sys::signal::Signal>,
+    ) -> Result<bool, ProcessManagerError> {
+        let target = nix::unistd::Pid::from_raw(pid as i32);
+        match nix::sys::signal::kill(target, signal) {
+            Ok(_) => {
+                if signal.is_none() {
+                    #[cfg(target_os = "linux")]
+                    {
+                        if matches!(Self::read_proc_state(pid), Some('Z') | Some('X')) {
+                            return Ok(false);
+                        }
+                    }
+                }
+                Ok(true)
+            }
+            Err(nix::errno::Errno::ESRCH) => Ok(false),
+            Err(err) => Err(ProcessManagerError::ServiceStopError {
+                service: service_name.to_string(),
+                source: std::io::Error::from_raw_os_error(err as i32),
+            }),
+        }
+    }
+
+    /// Reads the process state character from /proc/{pid}/stat on Linux. Returns the state
+    /// character (R=running, S=sleeping, Z=zombie, X=dead, etc.) or None if the process doesn't exist.
+    #[cfg(target_os = "linux")]
+    fn read_proc_state(pid: u32) -> Option<char> {
+        let stat_path_str = format!("/proc/{pid}/stat");
+        let stat_path = Path::new(&stat_path_str);
+        let contents = fs::read_to_string(stat_path).ok()?;
+        let mut parts = contents.split_whitespace();
+        parts.next()?; // pid
+        let mut name_part = parts.next()?; // (comm)
+        if !name_part.ends_with(')') {
+            for part in parts.by_ref() {
+                name_part = part;
+                if name_part.ends_with(')') {
+                    break;
+                }
+            }
+        }
+
+        parts.next()?.chars().next()
+    }
+
+    /// Waits for processes to exit by polling their liveness. Checks each PID in the pending set
+    /// up to `checks` times with `interval` delay between checks. Returns the set of PIDs that
+    /// are still alive after all checks.
+    fn wait_for_exit(
+        service_name: &str,
+        mut pending: HashSet<u32>,
+        checks: usize,
+        interval: Duration,
+    ) -> Result<HashSet<u32>, ProcessManagerError> {
+        for _ in 0..checks {
+            if pending.is_empty() {
+                break;
+            }
+
+            thread::sleep(interval);
+
+            let mut survivors = HashSet::new();
+            for pid in pending.iter().copied() {
+                if Self::signal_pid(service_name, pid, None)? {
+                    survivors.insert(pid);
+                }
+            }
+            pending = survivors;
+        }
+
+        Ok(pending)
+    }
+
+    /// Sends a signal to multiple PIDs and returns the set of PIDs that survived (are still alive
+    /// after the signal). Used for graceful shutdown attempts before escalating to SIGKILL.
+    fn send_signal_to_pids(
+        service_name: &str,
+        pids: HashSet<u32>,
+        signal: nix::sys::signal::Signal,
+    ) -> Result<HashSet<u32>, ProcessManagerError> {
+        let mut survivors = HashSet::new();
+        for pid in pids {
+            if Self::signal_pid(service_name, pid, Some(signal))? {
+                survivors.insert(pid);
+            }
+        }
+        Ok(survivors)
+    }
+
+    /// Terminates a process and all its descendants using escalating signals. First sends SIGTERM
+    /// to the entire process tree and waits for graceful shutdown. If processes don't exit within
+    /// the timeout, escalates to SIGKILL. Returns an error if any processes survive after SIGKILL.
+    fn terminate_process_tree(
+        service_name: &str,
+        root_pid: u32,
+    ) -> Result<(), ProcessManagerError> {
+        use nix::sys::signal::Signal::{SIGKILL, SIGTERM};
+
+        let mut pending = Self::collect_descendants(root_pid);
+        pending.insert(root_pid);
+
+        const CHECKS: usize = 10;
+        const INTERVAL: Duration = Duration::from_millis(100);
+
+        let supervisor_pgid = unsafe { libc::getpgid(0) };
+        let child_pgid = unsafe { libc::getpgid(root_pid as libc::pid_t) };
+
+        let signal_group = |signal: libc::c_int| {
+            if child_pgid >= 0 && child_pgid != supervisor_pgid {
+                let result = unsafe { libc::killpg(child_pgid, signal) };
+                if result < 0 {
+                    let err = std::io::Error::last_os_error();
+                    match err.raw_os_error() {
+                        Some(code) if code == libc::ESRCH => {}
+                        Some(code) if code == libc::EPERM => {
+                            warn!(
+                                "Insufficient permissions to signal process group {child_pgid} for '{service_name}'"
+                            );
+                        }
+                        _ => {
+                            warn!(
+                                "Failed to signal process group {child_pgid} for '{service_name}': {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        };
+
+        signal_group(SIGTERM as libc::c_int);
+        pending = Self::send_signal_to_pids(service_name, pending, SIGTERM)?;
+        pending = Self::wait_for_exit(service_name, pending, CHECKS, INTERVAL)?;
+
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        signal_group(SIGKILL as libc::c_int);
+        pending = Self::send_signal_to_pids(service_name, pending, SIGKILL)?;
+        pending = Self::wait_for_exit(service_name, pending, CHECKS, INTERVAL)?;
+
+        if pending.is_empty() {
+            Ok(())
+        } else {
+            Err(ProcessManagerError::ServiceStopError {
+                service: service_name.to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "Failed to terminate process tree rooted at PID {root_pid} for '{service_name}'"
+                    ),
+                ),
+            })
+        }
+    }
+
+    /// Persists service state to the state file using the service's configuration hash as the key.
+    /// Logs a warning if the service is not found in the config. This is the low-level function
+    /// that writes state directly to disk.
+    fn persist_service_state(
+        config: &Arc<Config>,
+        state_file: &Arc<Mutex<ServiceStateFile>>,
+        service_name: &str,
+        status: ServiceLifecycleStatus,
+        pid: Option<u32>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<(), ProcessManagerError> {
+        if let Some(service_hash) = config.get_service_hash(service_name) {
+            let mut state_guard = state_file.lock()?;
+            state_guard.set(&service_hash, status, pid, exit_code, signal)?;
+            if service_hash != service_name
+                && let Err(err) = state_guard.remove(service_name)
+                && !matches!(err, ServiceStateError::ServiceNotFound)
+            {
+                warn!(
+                    "Failed to remove legacy state entry for '{service_name}' in state file: {err}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Initializes a new `Daemon` with an empty process map and a shared config reference.
     pub fn new(
         config: Config,
@@ -550,6 +766,8 @@ impl Daemon {
         self.config.get_service_hash(service_name)
     }
 
+    /// Updates the service state in the persistent state file. This is a convenience wrapper
+    /// around persist_service_state that uses the daemon's config and state_file references.
     fn update_state(
         &self,
         service: &str,
@@ -561,6 +779,14 @@ impl Daemon {
         if let Some(service_hash) = self.get_service_hash(service) {
             let mut state = self.state_file.lock()?;
             state.set(&service_hash, status, pid, exit_code, signal)?;
+            if service_hash != service
+                && let Err(err) = state.remove(service)
+                && !matches!(err, ServiceStateError::ServiceNotFound)
+            {
+                warn!(
+                    "Failed to remove legacy state entry for '{service}' in state file: {err}"
+                );
+            }
         } else {
             warn!(
                 "Service '{}' not found in config, skipping state update",
@@ -570,6 +796,8 @@ impl Daemon {
         Ok(())
     }
 
+    /// Marks a service as running in the state file and PID file. This is called when a service
+    /// process is successfully spawned and verified to be alive.
     fn mark_running(&self, service: &str, pid: u32) -> Result<(), ProcessManagerError> {
         self.update_state(
             service,
@@ -580,6 +808,8 @@ impl Daemon {
         )
     }
 
+    /// Marks a service as skipped in the state file. This is called when the skip flag evaluates
+    /// to true and the service is not started. Also removes any stale PID file entry.
     fn mark_skipped(&self, service: &str) -> Result<(), ProcessManagerError> {
         {
             let mut pid_guard = self.pid_file.lock()?;
@@ -937,6 +1167,8 @@ impl Daemon {
         )
     }
 
+    /// Internal implementation of wait_for_service_ready that accepts explicit handles for processes
+    /// and PID file. This allows the function to be called from both instance methods and static contexts.
     fn wait_for_service_ready_with_handles(
         service_name: &str,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
@@ -1433,6 +1665,8 @@ impl Daemon {
         Ok(Duration::from_secs(amount.saturating_mul(multiplier)))
     }
 
+    /// Scans the last 50 lines of a service's stderr log for port conflict indicators. Returns
+    /// true if common port conflict messages are detected (e.g., "address already in use", EADDRINUSE).
     fn logs_indicate_port_conflict(service_name: &str) -> bool {
         const MAX_LINES: usize = 50;
 
@@ -1471,6 +1705,8 @@ impl Daemon {
         }
     }
 
+    /// Determines if a service should be verified as running after a restart. Returns false for
+    /// one-shot services (restart_policy=never) and cron jobs, true for long-running services.
     fn should_verify_service(service: &ServiceConfig) -> bool {
         if matches!(service.restart_policy.as_deref(), Some("never")) {
             return false;
@@ -1483,6 +1719,9 @@ impl Daemon {
         true
     }
 
+    /// Verifies that the specified services are running after a restart operation. Polls each
+    /// service multiple times to ensure it stays alive. Returns an error if any service fails
+    /// to start or exits immediately.
     fn verify_services_running(
         &self,
         services: &[String],
@@ -1595,10 +1834,7 @@ impl Daemon {
         mut detached: DetachedService,
     ) -> Result<(), ProcessManagerError> {
         let pid = detached.pid;
-        if let Err(err) = Self::terminate_pid(pid, service_name) {
-            error!("Failed to terminate previous instance of '{service_name}': {err}");
-            return Err(err);
-        }
+        Self::terminate_process_tree(service_name, pid)?;
 
         // Best-effort wait to reap the child and avoid zombies.
         if let Err(err) = detached.child.wait() {
@@ -1610,106 +1846,6 @@ impl Daemon {
         info!(
             "Old instance of '{service_name}' terminated successfully during rolling restart."
         );
-
-        Ok(())
-    }
-
-    /// Sends termination signals mirroring the standard stop workflow for a specific PID.
-    fn terminate_pid(pid: u32, service_name: &str) -> Result<(), ProcessManagerError> {
-        fn nix_error_to_io(err: nix::errno::Errno) -> std::io::Error {
-            std::io::Error::from_raw_os_error(err as i32)
-        }
-
-        let pid = nix::unistd::Pid::from_raw(pid as i32);
-        let mut process_running = true;
-
-        match nix::sys::signal::kill(pid, None) {
-            Ok(_) => {
-                debug!("Stopping previous instance of '{service_name}' (PID {pid})");
-            }
-            Err(err) => {
-                if err == nix::errno::Errno::ESRCH {
-                    process_running = false;
-                } else {
-                    let source = nix_error_to_io(err);
-                    return Err(ProcessManagerError::ServiceStopError {
-                        service: service_name.to_string(),
-                        source,
-                    });
-                }
-            }
-        }
-
-        if process_running {
-            let supervisor_pgid = unsafe { libc::getpgid(0) };
-            let child_pgid = unsafe { libc::getpgid(pid.as_raw()) };
-
-            if child_pgid >= 0 && child_pgid != supervisor_pgid {
-                let kill_result = unsafe { libc::killpg(child_pgid, libc::SIGTERM) };
-                if kill_result < 0 {
-                    let err = std::io::Error::last_os_error();
-                    match err.raw_os_error() {
-                        Some(code) if code == libc::ESRCH => {}
-                        Some(code) if code == libc::EPERM => {
-                            warn!(
-                                "Insufficient permissions to signal process group {child_pgid} for '{service_name}'. Falling back to direct signal"
-                            );
-                        }
-                        _ => {
-                            return Err(ProcessManagerError::ServiceStopError {
-                                service: service_name.to_string(),
-                                source: err,
-                            });
-                        }
-                    }
-                }
-            }
-
-            if let Err(err) = nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGTERM))
-            {
-                if err == nix::errno::Errno::ESRCH {
-                    process_running = false;
-                } else {
-                    let source = nix_error_to_io(err);
-                    return Err(ProcessManagerError::ServiceStopError {
-                        service: service_name.to_string(),
-                        source,
-                    });
-                }
-            }
-        }
-
-        if process_running {
-            const CHECKS: usize = 10;
-            const INTERVAL: Duration = Duration::from_millis(100);
-
-            for _ in 0..CHECKS {
-                thread::sleep(INTERVAL);
-                if matches!(
-                    nix::sys::signal::kill(pid, None),
-                    Err(nix::errno::Errno::ESRCH)
-                ) {
-                    process_running = false;
-                    break;
-                }
-            }
-
-            if process_running {
-                warn!(
-                    "Previous instance of '{service_name}' did not exit after SIGTERM; sending SIGKILL"
-                );
-                if let Err(err) =
-                    nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGKILL))
-                    && err != nix::errno::Errno::ESRCH
-                {
-                    let source = nix_error_to_io(err);
-                    return Err(ProcessManagerError::ServiceStopError {
-                        service: service_name.to_string(),
-                        source,
-                    });
-                }
-            }
-        }
 
         Ok(())
     }
@@ -2116,169 +2252,65 @@ impl Daemon {
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
         state_file: &Arc<Mutex<ServiceStateFile>>,
+        config: &Arc<Config>,
     ) -> Result<(), ProcessManagerError> {
-        let active_pid = {
-            let processes_guard = processes.lock()?;
-            processes_guard.get(service_name).map(|child| child.id())
+        let child_handle = {
+            let mut processes_guard = processes.lock()?;
+            processes_guard.remove(service_name)
         };
 
-        let pid = if let Some(pid) = active_pid {
+        let pid = if let Some(pid) = child_handle.as_ref().map(|child| child.id()) {
             Some(pid)
         } else {
-            pid_file.lock()?.get(service_name)
+            let guard = pid_file.lock()?;
+            guard.get(service_name)
         };
 
-        if let Some(process_id) = pid {
-            let pid = nix::unistd::Pid::from_raw(process_id as i32);
-
-            fn nix_error_to_io(err: nix::errno::Errno) -> std::io::Error {
-                std::io::Error::from_raw_os_error(err as i32)
-            }
-
-            let mut process_running = true;
-
-            match nix::sys::signal::kill(pid, None) {
-                Ok(_) => {
-                    debug!("Stopping service '{service_name}' (PID {pid})");
-                }
-                Err(err) => {
-                    if err == nix::errno::Errno::ESRCH {
-                        debug!("Service '{service_name}' no longer has a live process");
-                        process_running = false;
-                    } else {
-                        let source = nix_error_to_io(err);
-                        error!(
-                            "Failed to probe service '{service_name}' before stopping: {source}"
-                        );
-                        return Err(ProcessManagerError::ServiceStopError {
-                            service: service_name.to_string(),
-                            source,
-                        });
-                    }
-                }
-            }
-
-            if process_running {
-                let supervisor_pgid = unsafe { libc::getpgid(0) };
-                let child_pgid = unsafe { libc::getpgid(pid.as_raw()) };
-
-                if child_pgid >= 0 && child_pgid != supervisor_pgid {
-                    let kill_result = unsafe { libc::killpg(child_pgid, libc::SIGTERM) };
-                    if kill_result < 0 {
-                        let err = std::io::Error::last_os_error();
-                        match err.raw_os_error() {
-                            Some(code) if code == libc::ESRCH => {
-                                debug!(
-                                    "Process group for service '{service_name}' missing; falling back to direct signal"
-                                );
-                            }
-                            Some(code) if code == libc::EPERM => {
-                                warn!(
-                                    "Insufficient permissions to signal process group {child_pgid} for '{service_name}'. Falling back to direct signal"
-                                );
-                            }
-                            _ => {
-                                error!(
-                                    "Failed to kill process group {child_pgid} of service '{service_name}': {err}"
-                                );
-                                return Err(ProcessManagerError::ServiceStopError {
-                                    service: service_name.to_string(),
-                                    source: err,
-                                });
-                            }
-                        }
-                    } else {
-                        debug!(
-                            "Sent SIGTERM to process group {child_pgid} for service '{service_name}'"
-                        );
-                    }
-                }
-
-                if let Err(kill_err) =
-                    nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGTERM))
+        if let Some(process_id) = pid
+            && let Err(err) = Self::terminate_process_tree(service_name, process_id)
+        {
+            match &err {
+                ProcessManagerError::ServiceStopError { source, .. }
+                    if source.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    if kill_err == nix::errno::Errno::ESRCH {
-                        process_running = false;
-                        debug!(
-                            "Service '{service_name}' exited before SIGTERM could be delivered"
-                        );
-                    } else {
-                        let source = nix_error_to_io(kill_err);
-                        error!(
-                            "Failed to signal service '{service_name}' directly: {source}"
-                        );
-                        return Err(ProcessManagerError::ServiceStopError {
-                            service: service_name.to_string(),
-                            source,
-                        });
-                    }
-                }
-            }
-
-            if process_running {
-                const CHECKS: usize = 10;
-                const INTERVAL: Duration = Duration::from_millis(100);
-
-                for _ in 0..CHECKS {
-                    std::thread::sleep(INTERVAL);
-                    if matches!(
-                        nix::sys::signal::kill(pid, None),
-                        Err(nix::errno::Errno::ESRCH)
-                    ) {
-                        process_running = false;
-                        break;
-                    }
-                }
-
-                if process_running {
                     warn!(
-                        "Service '{service_name}' did not exit after SIGTERM; sending SIGKILL"
+                        "Timed out terminating process tree for '{service_name}' (pid {process_id}); continuing cleanup"
                     );
-                    if let Err(kill_err) =
-                        nix::sys::signal::kill(pid, Some(nix::sys::signal::SIGKILL))
-                    {
-                        if kill_err != nix::errno::Errno::ESRCH {
-                            let source = nix_error_to_io(kill_err);
-                            error!(
-                                "Failed to forcefully terminate service '{service_name}': {source}"
-                            );
-                            return Err(ProcessManagerError::ServiceStopError {
-                                service: service_name.to_string(),
-                                source,
-                            });
-                        }
-                    } else {
-                        let _ = nix::sys::signal::kill(pid, None);
-                    }
                 }
+                _ => return Err(err),
             }
-
-            processes.lock()?.remove(service_name);
-            if let Err(err) = pid_file.lock()?.remove(service_name) {
-                match err {
-                    PidFileError::ServiceNotFound => {
-                        debug!("Service '{service_name}' already cleared from PID file");
-                    }
-                    _ => return Err(err.into()),
-                }
-            }
-
-            if let Ok(mut guard) = state_file.lock()
-                && let Err(err) = guard.set(
-                    service_name,
-                    ServiceLifecycleStatus::Stopped,
-                    None,
-                    None,
-                    None,
-                )
-            {
-                warn!("Failed to persist stopped state for '{service_name}': {err}");
-            }
-
-            debug!("Service '{service_name}' stopped successfully.");
-        } else {
-            warn!("Service '{service_name}' not found in PID file.");
         }
+
+        if let Some(mut child) = child_handle
+            && let Err(err) = child.wait()
+        {
+            warn!("Failed to wait on '{service_name}' after termination: {err}");
+        }
+
+        match pid_file.lock()?.remove(service_name) {
+            Ok(_) | Err(PidFileError::ServiceNotFound) => {}
+            Err(err) => return Err(err.into()),
+        }
+
+        if let Some(service_hash) = config.get_service_hash(service_name) {
+            let mut state_guard = state_file.lock()?;
+            state_guard.set(
+                &service_hash,
+                ServiceLifecycleStatus::Stopped,
+                None,
+                None,
+                None,
+            )?;
+
+            if service_hash != service_name
+                && let Err(err) = state_guard.remove(service_name)
+                && !matches!(err, ServiceStateError::ServiceNotFound)
+            {
+                warn!("Failed to remove legacy state entry for '{service_name}': {err}");
+            }
+        }
+
+        debug!("Service '{service_name}' stopped successfully.");
 
         Ok(())
     }
@@ -2309,6 +2341,7 @@ impl Daemon {
             &self.processes,
             &self.pid_file,
             &self.state_file,
+            &self.config,
         );
 
         if result.is_err() {
@@ -2347,12 +2380,14 @@ impl Daemon {
     /// Recursively stops any services that depend (directly or indirectly) on the specified root
     /// service. Used when a dependency crashes so downstream workloads do not continue in a broken
     /// state.
+    #[allow(clippy::too_many_arguments)]
     fn stop_dependents(
         root: &str,
         reverse_dependencies: &HashMap<String, Vec<String>>,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
         state_file: &Arc<Mutex<ServiceStateFile>>,
+        config: &Arc<Config>,
         manual_stop_flags: &Arc<Mutex<HashSet<String>>>,
         restart_suppressed: &Arc<Mutex<HashSet<String>>>,
     ) {
@@ -2370,9 +2405,9 @@ impl Daemon {
                 guard.insert(service.clone());
             }
 
-            if let Err(err) =
-                Self::stop_service_with_handles(&service, processes, pid_file, state_file)
-            {
+            if let Err(err) = Self::stop_service_with_handles(
+                &service, processes, pid_file, state_file, config,
+            ) {
                 error!(
                     "Failed to stop dependent service '{service}' after '{root}' failure: {err}"
                 );
@@ -2382,6 +2417,15 @@ impl Daemon {
                 if let Ok(mut guard) = restart_suppressed.lock() {
                     guard.remove(&service);
                 }
+            }
+
+            if let Ok(mut guard) = pid_file.lock()
+                && let Err(err) = guard.remove(&service)
+                && !matches!(err, PidFileError::ServiceNotFound)
+            {
+                warn!(
+                    "Failed to clear PID entry for dependent '{service}' after '{root}' failure: {err}"
+                );
             }
 
             if let Some(children) = reverse_dependencies.get(&service) {
@@ -2554,15 +2598,22 @@ impl Daemon {
 
                     if manually_stopped {
                         info!("Service '{name}' was manually stopped. Skipping restart.");
-                        if let Ok(mut state_guard) = state_file.lock()
-                            && let Err(err) = state_guard.set(
-                                &name,
-                                ServiceLifecycleStatus::Stopped,
-                                None,
-                                None,
-                                None,
-                            )
+                        if let Err(err) = pid_file_guard.remove(&name)
+                            && !matches!(err, PidFileError::ServiceNotFound)
                         {
+                            warn!(
+                                "Failed to clear PID entry for '{name}' after manual stop: {err}"
+                            );
+                        }
+                        if let Err(err) = Self::persist_service_state(
+                            &config,
+                            &state_file,
+                            &name,
+                            ServiceLifecycleStatus::Stopped,
+                            None,
+                            None,
+                            None,
+                        ) {
                             warn!(
                                 "Failed to persist stopped state for '{name}' after manual stop: {err}"
                             );
@@ -2574,15 +2625,15 @@ impl Daemon {
                         info!(
                             "Automatic restart suppressed for service '{name}' after exit."
                         );
-                        if let Ok(mut state_guard) = state_file.lock()
-                            && let Err(err) = state_guard.set(
-                                &name,
-                                ServiceLifecycleStatus::Stopped,
-                                None,
-                                exit_code,
-                                signal,
-                            )
-                        {
+                        if let Err(err) = Self::persist_service_state(
+                            &config,
+                            &state_file,
+                            &name,
+                            ServiceLifecycleStatus::Stopped,
+                            None,
+                            exit_code,
+                            signal,
+                        ) {
                             warn!(
                                 "Failed to persist suppressed state for '{name}': {err}"
                             );
@@ -2594,15 +2645,15 @@ impl Daemon {
                         warn!("Service '{name}' crashed. Restarting...");
                         failed_services.push(name.clone());
                         restarted_services.push(name.clone());
-                        if let Ok(mut state_guard) = state_file.lock()
-                            && let Err(err) = state_guard.set(
-                                &name,
-                                ServiceLifecycleStatus::ExitedWithError,
-                                None,
-                                exit_code,
-                                signal,
-                            )
-                        {
+                        if let Err(err) = Self::persist_service_state(
+                            &config,
+                            &state_file,
+                            &name,
+                            ServiceLifecycleStatus::ExitedWithError,
+                            None,
+                            exit_code,
+                            signal,
+                        ) {
                             warn!("Failed to persist crash state for '{name}': {err}");
                         }
                     } else {
@@ -2612,15 +2663,15 @@ impl Daemon {
                         if let Err(e) = pid_file_guard.remove(&name) {
                             error!("Failed to remove '{name}' from PID file: {e}");
                         }
-                        if let Ok(mut state_guard) = state_file.lock()
-                            && let Err(err) = state_guard.set(
-                                &name,
-                                ServiceLifecycleStatus::ExitedSuccessfully,
-                                None,
-                                exit_code.or(Some(0)),
-                                signal,
-                            )
-                        {
+                        if let Err(err) = Self::persist_service_state(
+                            &config,
+                            &state_file,
+                            &name,
+                            ServiceLifecycleStatus::ExitedSuccessfully,
+                            None,
+                            exit_code.or(Some(0)),
+                            signal,
+                        ) {
                             warn!(
                                 "Failed to persist clean exit state for '{name}': {err}"
                             );
@@ -2640,6 +2691,7 @@ impl Daemon {
                         &processes,
                         &pid_file,
                         &state_file,
+                        &config,
                         &manual_stop_flags,
                         &restart_suppressed,
                     );
@@ -2771,7 +2823,9 @@ impl Daemon {
                             "Failed to record PID {pid} for restarted service '{name}': {err}"
                         );
 
-                        if let Err(stop_err) = Self::terminate_pid(pid, &name) {
+                        if let Err(stop_err) =
+                            Self::terminate_process_tree(&name, pid)
+                        {
                             warn!(
                                 "Also failed to terminate untracked restart of '{name}': {stop_err}"
                             );
@@ -2928,7 +2982,13 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, env, fs, sync::Mutex, thread, time::Duration};
+    use std::{
+        collections::HashMap,
+        env, fs,
+        sync::Mutex,
+        thread,
+        time::{Duration, Instant},
+    };
     use tempfile::tempdir_in;
 
     /// Helper to build a minimal service definition for unit tests.
@@ -3094,7 +3154,16 @@ fi
             assert!(daemon.pid_file.lock().unwrap().get("slow").is_none());
 
             let state_guard = daemon.state_file.lock().unwrap();
-            let entry = state_guard.services().get("slow").unwrap();
+            let service_hash = daemon
+                .config
+                .services
+                .get("slow")
+                .expect("service present")
+                .compute_hash();
+            let entry = state_guard
+                .services()
+                .get(&service_hash)
+                .expect("state entry present");
             assert_eq!(entry.status, ServiceLifecycleStatus::ExitedSuccessfully);
 
             daemon.shutdown_monitor();
@@ -3195,10 +3264,18 @@ fi
             let daemon = create_daemon(dir, services);
             daemon.start_services_nonblocking().unwrap();
 
-            thread::sleep(Duration::from_secs(4));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if daemon.pid_file.lock().unwrap().get("child").is_none() {
+                    break;
+                }
 
-            let child_pid = daemon.pid_file.lock().unwrap().get("child");
-            assert!(child_pid.is_none());
+                if Instant::now() >= deadline {
+                    panic!("dependent service still recorded in pid file");
+                }
+
+                thread::sleep(Duration::from_millis(100));
+            }
 
             daemon.shutdown_monitor();
         });

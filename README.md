@@ -11,6 +11,8 @@
     <img src="https://img.shields.io/badge/ChatGPT-74aa9c?style=for-the-badge&logo=openai&logoColor=white" />
 </div>
 
+[//]: # (<img height="500px" src="https://i.imgur.com/MHXfe9T.png" />)
+
 ## Table of Contents
 
 1. [Getting Started](#getting-started)

@@ -255,13 +255,14 @@ fn stop_resident_supervisors() {
     }
 
     let mut survivors = HashSet::new();
+    let mut fallback_targets = HashSet::new();
 
     if supervisor_running() {
         match send_control_command(ControlCommand::Shutdown) {
             Ok(_) => {
                 for pid in &candidates {
                     if !wait_for_supervisor_exit(*pid, Duration::from_secs(3)) {
-                        survivors.insert(*pid);
+                        fallback_targets.insert(*pid);
                     }
                 }
             }
@@ -276,12 +277,14 @@ fn stop_resident_supervisors() {
                 } else {
                     warn!("Failed to request supervisor shutdown: {err}");
                 }
-                survivors = candidates.clone();
+                fallback_targets.extend(&candidates);
             }
         }
     } else {
-        survivors = candidates.clone();
+        fallback_targets.extend(&candidates);
     }
+
+    survivors.extend(fallback_targets);
 
     if survivors.is_empty() {
         return;
@@ -328,7 +331,7 @@ fn is_daemonized_supervisor_process(process: &sysinfo::Process) -> bool {
     }
 
     let binary = cmd
-        .get(0)
+        .first()
         .map(|arg| arg.to_string_lossy())
         .unwrap_or_default();
 
@@ -353,12 +356,21 @@ fn is_daemonized_supervisor_process(process: &sysinfo::Process) -> bool {
 
 fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
+    let target = Pid::from_raw(pid);
 
     while Instant::now() < deadline {
-        match signal::kill(Pid::from_raw(pid), None) {
-            Ok(_) => thread::sleep(Duration::from_millis(100)),
+        match signal::kill(target, None) {
+            Ok(_) => {
+                if supervisor_process_exited(pid) {
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
             Err(err) => {
                 if err == nix::Error::from(nix::errno::Errno::ESRCH) {
+                    return true;
+                }
+                if supervisor_process_exited(pid) {
                     return true;
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -377,13 +389,9 @@ fn forcefully_terminate_supervisor(pid: libc::pid_t) {
     let pgid = unsafe { libc::getpgid(pid) };
 
     if pgid >= 0 && pgid == pid {
-        unsafe {
-            libc::killpg(pgid, SIGTERM);
-        }
+        unsafe { libc::killpg(pgid, SIGTERM) };
     } else {
-        unsafe {
-            libc::kill(pid, SIGTERM);
-        }
+        unsafe { libc::kill(pid, SIGTERM) };
     }
 
     if wait_for_supervisor_exit(pid, Duration::from_secs(2)) {
@@ -391,16 +399,43 @@ fn forcefully_terminate_supervisor(pid: libc::pid_t) {
     }
 
     if pgid >= 0 && pgid == pid {
-        unsafe {
-            libc::killpg(pgid, SIGKILL);
-        }
+        unsafe { libc::killpg(pgid, SIGKILL) };
     } else {
-        unsafe {
-            libc::kill(pid, SIGKILL);
-        }
+        unsafe { libc::kill(pid, SIGKILL) };
     }
 
     let _ = wait_for_supervisor_exit(pid, Duration::from_secs(2));
+}
+
+fn supervisor_process_exited(pid: libc::pid_t) -> bool {
+    let proc_root = PathBuf::from(format!("/proc/{pid}"));
+    if !proc_root.exists() {
+        return true;
+    }
+
+    match read_proc_state(pid) {
+        Some('Z') | Some('X') => true,
+        Some(_) => false,
+        None => false,
+    }
+}
+
+fn read_proc_state(pid: libc::pid_t) -> Option<char> {
+    let stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
+    let contents = fs::read_to_string(stat_path).ok()?;
+    let mut parts = contents.split_whitespace();
+    parts.next()?;
+    let mut name_part = parts.next()?;
+    if !name_part.ends_with(')') {
+        for part in parts.by_ref() {
+            name_part = part;
+            if name_part.ends_with(')') {
+                break;
+            }
+        }
+    }
+
+    parts.next()?.chars().next()
 }
 
 fn init_logging(args: &Cli) {

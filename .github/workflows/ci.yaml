@@ -22,7 +22,7 @@ env:
 
 jobs:
   docs:
-    name: Build & Test Docusaurus Docs
+    name: Docusaurus
     runs-on: ubuntu-latest
 
     steps:
@@ -52,10 +52,9 @@ jobs:
         working-directory: docs
         run: npm test
 
-  cargo:
-    name: SystemG CI
+  rustdoc:
+    name: Rust Doc
     runs-on: ubuntu-latest
-    needs: [docs]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -66,25 +65,99 @@ jobs:
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Cargo Tools
-        run: |
-          cargo install cargo-sort
-          rustup component add rustfmt clippy
+      - name: Check Documentation
+        run: cargo rustdoc --lib -- -D missing_docs
+
+  cargo-sort:
+    name: Cargo Sort
+    runs-on: ubuntu-latest
+    needs: [docs, rustdoc]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-sort
+        run: cargo install cargo-sort
+
+      - name: Check Cargo.toml Formatting
+        run: cargo sort --check --workspace
+
+  rustfmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    needs: [docs, rustdoc]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+
+      - name: Run Rustfmt
+        run: cargo fmt -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    needs: [cargo-sort, rustfmt]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install clippy
+        run: rustup component add clippy
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  cargo-build:
+    name: Cargo Build
+    runs-on: ubuntu-latest
+    needs: [clippy]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Cargo build
         run: cargo build --locked
 
-      - name: Check Cargo.toml Formatting (cargo-sort)
-        run: cargo sort --check --workspace
+  cargo-test:
+    name: Cargo Test
+    runs-on: ubuntu-latest
+    needs: [clippy]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Check Documentation (rustdoc)
-        run: cargo rustdoc --lib -- -D missing_docs
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Clippy (Linting)
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Run Rustfmt (Code Formatting)
-        run: cargo fmt -- --check
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Run Tests
         run: cargo test --verbose
@@ -94,7 +167,7 @@ jobs:
     runs-on: ${{ matrix.job.os }}
     permissions:
       contents: write
-    needs: [cargo]
+    needs: [cargo-test]
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
