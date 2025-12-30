@@ -70,5 +70,9 @@ name = "service_control_regression"
 path = "tests/integration/service_control_regression.rs"
 
 [[test]]
+name = "pid_tracking"
+path = "tests/integration/pid_tracking.rs"
+
+[[test]]
 name = "integration"
 path = "tests/integration.rs"

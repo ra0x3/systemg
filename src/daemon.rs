@@ -2758,7 +2758,9 @@ impl Daemon {
                         Arc::clone(&processes),
                         detach_children,
                         Arc::clone(&pid_file),
+                        Arc::clone(&state_file),
                         project_root.clone(),
+                        Arc::clone(&config),
                         Arc::clone(&restart_counts),
                         Arc::clone(&manual_stop_flags),
                         Arc::clone(&restart_suppressed),
@@ -2780,7 +2782,9 @@ impl Daemon {
         processes: Arc<Mutex<HashMap<String, Child>>>,
         detach_children: bool,
         pid_file: Arc<Mutex<PidFile>>,
+        state_file: Arc<Mutex<ServiceStateFile>>,
         project_root: PathBuf,
+        config: Arc<Config>,
         restart_counts: Arc<Mutex<HashMap<String, u32>>>,
         manual_stop_flags: Arc<Mutex<HashSet<String>>>,
         restart_suppressed: Arc<Mutex<HashSet<String>>>,
@@ -2918,10 +2922,24 @@ impl Daemon {
                         &processes,
                         &pid_file,
                     ) {
-                        Ok(_) => {
+                        Ok(ServiceReadyState::Running) => {
                             // Reset restart counter after successful restart
                             if let Ok(mut counts) = restart_counts_clone.lock() {
                                 counts.insert(name.clone(), 0);
+                            }
+
+                            if let Err(err) = Self::persist_service_state(
+                                &config,
+                                &state_file,
+                                &name,
+                                ServiceLifecycleStatus::Running,
+                                Some(pid),
+                                None,
+                                None,
+                            ) {
+                                warn!(
+                                    "Failed to persist running state for restarted '{name}': {err}"
+                                );
                             }
 
                             if let Some(hooks_cfg) = hooks.as_ref()
@@ -2956,6 +2974,53 @@ impl Daemon {
                                 && let Ok(latest) = PidFile::reload()
                             {
                                 *pid_file_guard = latest;
+                            }
+                        }
+                        Ok(ServiceReadyState::CompletedSuccess) => {
+                            if let Ok(mut counts) = restart_counts_clone.lock() {
+                                counts.insert(name.clone(), 0);
+                            }
+
+                            if let Err(err) = Self::persist_service_state(
+                                &config,
+                                &state_file,
+                                &name,
+                                ServiceLifecycleStatus::ExitedSuccessfully,
+                                None,
+                                Some(0),
+                                None,
+                            ) {
+                                warn!(
+                                    "Failed to persist completion state for restarted '{name}': {err}"
+                                );
+                            }
+
+                            if let Some(hooks_cfg) = hooks.as_ref()
+                                && let Some(action) =
+                                    hooks_cfg.action(HookStage::OnStart, HookOutcome::Success)
+                            {
+                                run_hook(
+                                    action,
+                                    &env,
+                                    HookStage::OnStart,
+                                    HookOutcome::Success,
+                                    &name,
+                                    &project_root,
+                                );
+                            }
+
+                            if let Some(hooks_cfg) = hooks.as_ref()
+                                && let Some(action) =
+                                    hooks_cfg.action(HookStage::OnRestart, HookOutcome::Success)
+                            {
+                                run_hook(
+                                    action,
+                                    &env,
+                                    HookStage::OnRestart,
+                                    HookOutcome::Success,
+                                    &name,
+                                    &project_root,
+                                );
                             }
                         }
                         Err(err) => {

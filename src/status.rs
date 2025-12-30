@@ -12,6 +12,7 @@ use crate::cron::{
     CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
 };
 use crate::daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile};
+use crate::error::ServiceStateError;
 
 #[cfg(not(target_os = "linux"))]
 use nix::sys::signal;
@@ -83,6 +84,29 @@ impl StatusManager {
                 }
             } else if state_guard.services().contains_key(service_name)
                 && let Err(err) = state_guard.remove(service_name)
+            {
+                debug!(
+                    "Failed to remove legacy state entry for '{service_name}' in state file: {err}"
+                );
+            }
+        }
+    }
+
+    fn mark_service_running(&self, service_name: &str, service_hash: &str, pid: u32) {
+        if let Ok(mut state_guard) = self.state_file.lock() {
+            if let Err(err) = state_guard.set(
+                service_hash,
+                ServiceLifecycleStatus::Running,
+                Some(pid),
+                None,
+                None,
+            ) {
+                debug!(
+                    "Failed to record running state for '{service_name}' in state file: {err}"
+                );
+            } else if service_hash != service_name
+                && let Err(err) = state_guard.remove(service_name)
+                && !matches!(err, ServiceStateError::ServiceNotFound)
             {
                 debug!(
                     "Failed to remove legacy state entry for '{service_name}' in state file: {err}"
@@ -356,7 +380,69 @@ impl StatusManager {
             guard.get(service_hash).cloned()
         };
 
-        if let Some(entry) = state_entry.clone() {
+        let mut pid = state_entry.as_ref().and_then(|entry| entry.pid);
+        if pid.is_none()
+            && let Ok(pid_guard) = self.pid_file.lock()
+        {
+            pid = pid_guard.get(service_name);
+        }
+
+        if let Some(pid) = pid {
+            debug!("Checking status for PID: {pid}");
+            match Self::process_state(pid) {
+                ProcessState::Running => {
+                    if state_entry.as_ref().map(|entry| (entry.status, entry.pid))
+                        != Some((ServiceLifecycleStatus::Running, Some(pid)))
+                    {
+                        self.mark_service_running(service_name, service_hash, pid);
+                    }
+
+                    let uptime = Self::get_process_uptime(pid);
+                    let tasks = Self::get_task_count(pid);
+                    let memory = Self::get_memory_usage(pid);
+                    let cpu_time = Self::get_cpu_time(pid);
+                    let process_group = Self::get_process_group(pid);
+                    let command = Self::get_process_cmdline(pid);
+                    let child_processes = Self::get_child_processes(pid, 6);
+                    let uptime_label = Self::format_uptime(&uptime);
+
+                    println!("{}● {} Running{}", GREEN_BOLD, display_name, RESET);
+                    println!(
+                        "   Active: {}active (running){} since {}; {}",
+                        GREEN_BOLD, RESET, uptime, uptime_label
+                    );
+                    println!(" Main PID: {}", pid);
+                    println!(
+                        "    {}Tasks: {} (limit: N/A){}",
+                        MAGENTA_BOLD, tasks, RESET
+                    );
+                    println!("   {}Memory: {:.1}M{}", MAGENTA_BOLD, memory, RESET);
+                    println!("      {}CPU: {:.3}s{}", MAGENTA_BOLD, cpu_time, RESET);
+                    println!(" Process Group: {}", process_group);
+
+                    println!("     |-{} {}", pid, command.trim());
+                    for child in child_processes {
+                        println!("{}", child);
+                    }
+                    return;
+                }
+                ProcessState::Zombie => {
+                    println!(
+                        "● {} - Process {} is zombie (defunct); service is no longer running",
+                        display_name, pid
+                    );
+                    self.clear_service_pid(service_name, service_hash);
+                    return;
+                }
+                ProcessState::Missing => {
+                    println!("● {} - Process {} not found", display_name, pid);
+                    self.clear_service_pid(service_name, service_hash);
+                    return;
+                }
+            }
+        }
+
+        if let Some(entry) = state_entry {
             match entry.status {
                 ServiceLifecycleStatus::Skipped => {
                     println!("● {} - Skipped via configuration", display_name);
@@ -393,64 +479,7 @@ impl StatusManager {
             }
         }
 
-        let pid = if let Some(entry) = state_entry.as_ref()
-            && let Some(pid) = entry.pid
-        {
-            pid
-        } else {
-            let pid_file = self.pid_file.lock().expect("Failed to lock PID file");
-            match pid_file.get(service_name) {
-                Some(pid) => pid,
-                None => {
-                    println!("● {} - Not running", display_name);
-                    return;
-                }
-            }
-        };
-
-        debug!("Checking status for PID: {pid}");
-
-        match Self::process_state(pid) {
-            ProcessState::Running => {}
-            ProcessState::Zombie => {
-                println!(
-                    "● {} - Process {} is zombie (defunct); service is no longer running",
-                    display_name, pid
-                );
-                self.clear_service_pid(service_name, service_hash);
-                return;
-            }
-            ProcessState::Missing => {
-                println!("● {} - Process {} not found", display_name, pid);
-                self.clear_service_pid(service_name, service_hash);
-                return;
-            }
-        }
-
-        let uptime = Self::get_process_uptime(pid);
-        let tasks = Self::get_task_count(pid);
-        let memory = Self::get_memory_usage(pid);
-        let cpu_time = Self::get_cpu_time(pid);
-        let process_group = Self::get_process_group(pid);
-        let command = Self::get_process_cmdline(pid);
-        let child_processes = Self::get_child_processes(pid, 6);
-        let uptime_label = Self::format_uptime(&uptime);
-
-        println!("{}● {} Running{}", GREEN_BOLD, display_name, RESET);
-        println!(
-            "   Active: {}active (running){} since {}; {}",
-            GREEN_BOLD, RESET, uptime, uptime_label
-        );
-        println!(" Main PID: {}", pid);
-        println!("    {}Tasks: {} (limit: N/A){}", MAGENTA_BOLD, tasks, RESET);
-        println!("   {}Memory: {:.1}M{}", MAGENTA_BOLD, memory, RESET);
-        println!("      {}CPU: {:.3}s{}", MAGENTA_BOLD, cpu_time, RESET);
-        println!(" Process Group: {}", process_group);
-
-        println!("     |-{} {}", pid, command.trim());
-        for child in child_processes {
-            println!("{}", child);
-        }
+        println!("● {} - Not running", display_name);
     }
 
     /// Shows the status of **all services** (including orphaned state).

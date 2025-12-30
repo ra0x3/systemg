@@ -1,12 +1,12 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use assert_cmd::Command;
+use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use common::{HomeEnvGuard, is_process_alive, wait_for_pid, wait_for_pid_removed};
 use std::{fs, thread, time::Duration};
 use systemg::{
     config::load_config,
-    daemon::{Daemon, PidFile},
+    daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
 };
 use tempfile::tempdir;
 
@@ -283,4 +283,86 @@ services:
     // This test verifies the main process is properly killed
 
     daemon.shutdown_monitor();
+}
+
+#[test]
+fn purge_retains_configured_services_in_status() {
+    let temp = tempdir().unwrap();
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("sysg.yaml");
+    let config_yaml = r#"
+version: "1"
+services:
+  sample:
+    command: "sleep 30"
+    restart_policy: never
+"#;
+    fs::write(&config_path, config_yaml).unwrap();
+
+    let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
+    let service_hash = config
+        .services
+        .get("sample")
+        .expect("service exists")
+        .compute_hash();
+
+    // Seed some runtime state so status shows the service prior to purge.
+    let mut state_file = ServiceStateFile::load().unwrap_or_default();
+    state_file
+        .set(
+            &service_hash,
+            ServiceLifecycleStatus::Running,
+            Some(4242),
+            None,
+            None,
+        )
+        .unwrap();
+    drop(state_file);
+
+    let mut pid_file = PidFile::load().unwrap_or_default();
+    pid_file.insert("sample", 4242).unwrap();
+    drop(pid_file);
+
+    let status_before = cargo_bin_cmd!("sysg")
+        .env("HOME", &home)
+        .arg("status")
+        .arg("-c")
+        .arg(config_path.to_str().unwrap())
+        .output()
+        .expect("status before purge to execute");
+    assert!(status_before.status.success());
+    let stdout_before = String::from_utf8_lossy(&status_before.stdout);
+    assert!(
+        stdout_before.contains("sample"),
+        "Expected seeded service to appear before purge"
+    );
+
+    let purge_output = cargo_bin_cmd!("sysg")
+        .env("HOME", &home)
+        .arg("purge")
+        .output()
+        .expect("purge command to execute");
+    assert!(purge_output.status.success());
+
+    let status_after = cargo_bin_cmd!("sysg")
+        .env("HOME", &home)
+        .arg("status")
+        .arg("-c")
+        .arg(config_path.to_str().unwrap())
+        .output()
+        .expect("status after purge to execute");
+    assert!(status_after.status.success());
+    let stdout_after = String::from_utf8_lossy(&status_after.stdout);
+    assert!(
+        stdout_after.contains("sample"),
+        "Expected configured service to remain visible after purge"
+    );
+    assert!(
+        stdout_after.contains("Not running"),
+        "Service should show as Not running after purge"
+    );
 }

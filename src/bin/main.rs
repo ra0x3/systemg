@@ -238,6 +238,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn runtime_state_dir() -> PathBuf {
+    let home = std::env::var("HOME").expect("HOME not set");
+    PathBuf::from(format!("{home}/.local/share/systemg"))
+}
+
 fn supervisor_log_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME not set");
     PathBuf::from(format!("{}/.local/share/systemg/supervisor.log", home))
@@ -246,8 +251,7 @@ fn supervisor_log_path() -> PathBuf {
 fn purge_all_state() -> Result<(), Box<dyn Error>> {
     stop_resident_supervisors();
 
-    let home = std::env::var("HOME").expect("HOME not set");
-    let runtime_dir = PathBuf::from(format!("{}/.local/share/systemg", home));
+    let runtime_dir = runtime_state_dir();
 
     if runtime_dir.exists() {
         info!("Removing systemg runtime directory: {:?}", runtime_dir);
