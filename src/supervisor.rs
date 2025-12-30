@@ -483,6 +483,26 @@ impl Supervisor {
         command: ControlCommand,
     ) -> Result<ControlResponse, SupervisorError> {
         match command {
+            ControlCommand::Start { service } => {
+                if let Some(service_name) = service {
+                    // Start a single service
+                    let config = self.daemon.config();
+                    if let Some(service_config) = config.services.get(&service_name) {
+                        self.daemon.start_service(&service_name, service_config)?;
+                        Ok(ControlResponse::Message(format!(
+                            "Service '{service_name}' started"
+                        )))
+                    } else {
+                        Ok(ControlResponse::Error(format!(
+                            "Service '{service_name}' not found in configuration"
+                        )))
+                    }
+                } else {
+                    // Start all services
+                    self.daemon.start_services_blocking()?;
+                    Ok(ControlResponse::Message("All services started".into()))
+                }
+            }
             ControlCommand::Stop { service } => {
                 if let Some(service) = service {
                     self.daemon.stop_service(&service)?;

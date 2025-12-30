@@ -38,7 +38,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             if daemonize {
                 if supervisor_running() {
-                    warn!("systemg supervisor already running; aborting duplicate start");
+                    // If supervisor is running and we have a specific service, send Start command
+                    if let Some(service_name) = service {
+                        let command = ControlCommand::Start {
+                            service: Some(service_name.clone()),
+                        };
+                        send_control_command(command)?;
+                        info!(
+                            "Service '{service_name}' start command sent to supervisor"
+                        );
+                    } else {
+                        warn!(
+                            "systemg supervisor already running; aborting duplicate start"
+                        );
+                    }
                     return Ok(());
                 }
 

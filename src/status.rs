@@ -249,13 +249,72 @@ impl StatusManager {
         service_hash: &str,
         is_cron: bool,
     ) {
+        // Determine the health color based on service state
+        let health_color = self.get_service_health_color(service_hash, is_cron);
+
         let display_name = if is_cron {
-            format!("{}[cron]{} {}", YELLOW_BOLD, RESET, service_name)
+            format!(
+                "{}[cron]{} {}{}{}",
+                YELLOW_BOLD, RESET, health_color, service_name, RESET
+            )
         } else {
-            service_name.to_string()
+            format!("{}{}{}", health_color, service_name, RESET)
         };
 
         self.show_status_impl(&display_name, service_name, service_hash);
+    }
+
+    /// Determines the health color for a service name based on its current state.
+    fn get_service_health_color(
+        &self,
+        service_hash: &str,
+        is_cron: bool,
+    ) -> &'static str {
+        // Check the service state
+        let state_entry = {
+            let guard = self
+                .state_file
+                .lock()
+                .expect("Failed to lock service state file");
+            guard.get(service_hash).cloned()
+        };
+
+        if let Some(entry) = state_entry {
+            match entry.status {
+                ServiceLifecycleStatus::Running
+                | ServiceLifecycleStatus::ExitedSuccessfully => {
+                    return GREEN_BOLD;
+                }
+                ServiceLifecycleStatus::ExitedWithError => {
+                    return RED_BOLD;
+                }
+                ServiceLifecycleStatus::Stopped | ServiceLifecycleStatus::Skipped => {
+                    // No color for stopped/skipped services
+                    return "";
+                }
+            }
+        }
+
+        // For cron jobs, also check the last execution status
+        if is_cron {
+            let cron_state =
+                CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+            if let Some(job_state) = cron_state.jobs().get(service_hash)
+                && let Some(last_execution) = job_state.execution_history.back()
+            {
+                match last_execution.status.as_ref() {
+                    Some(CronExecutionStatus::Success) => return GREEN_BOLD,
+                    Some(CronExecutionStatus::Failed(_))
+                    | Some(CronExecutionStatus::OverlapError) => {
+                        return RED_BOLD;
+                    }
+                    None => {} // Still running, no color
+                }
+            }
+        }
+
+        // Default: no color if we can't determine the state
+        ""
     }
 
     fn show_status_with_cron_info(

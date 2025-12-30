@@ -173,12 +173,17 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
     let kind = kind.to_string();
     thread::spawn(move || {
         let path = get_log_path(&service, &kind);
-        fs::create_dir_all(path.parent().unwrap()).ok();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .expect("Unable to open log file");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        let file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => f,
+            Err(err) => {
+                eprintln!("Warning: Unable to open log file at {:?}: {}", path, err);
+                return;
+            }
+        };
+        let mut file = file;
 
         let reader = BufReader::new(reader);
         for line in reader.lines().map_while(Result::ok) {

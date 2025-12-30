@@ -52,3 +52,23 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 assert_cmd = { version = "2.0" }
 predicates = { version = "2.1" }
 tempfile = { version = "3.14.0" }
+
+[[test]]
+name = "hooks"
+path = "tests/integration/hooks.rs"
+
+[[test]]
+name = "service_control"
+path = "tests/integration/service_control.rs"
+
+[[test]]
+name = "process"
+path = "tests/integration/process.rs"
+
+[[test]]
+name = "service_control_regression"
+path = "tests/integration/service_control_regression.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

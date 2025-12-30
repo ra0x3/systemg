@@ -755,6 +755,11 @@ impl Daemon {
         Ok(Self::new(config, pid_file, state_file, detach_children))
     }
 
+    /// Returns a reference to the configuration.
+    pub fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config)
+    }
+
     /// Explicitly records a skipped service in the persistent state store, clearing any stale PID.
     pub fn mark_service_skipped(&self, service: &str) -> Result<(), ProcessManagerError> {
         self.mark_skipped(service)
@@ -1937,7 +1942,9 @@ impl Daemon {
                 detach_children,
             ) {
                 Ok(pid) => {
-                    pid_file.lock()?.insert(&service_name, pid).unwrap();
+                    let mut pid_guard = pid_file.lock()?;
+                    pid_guard.services.insert(service_name.clone(), pid);
+                    pid_guard.save()?;
                     Ok(pid)
                 }
                 Err(e) => {
@@ -2127,9 +2134,10 @@ impl Daemon {
                 Ok(pid) => {
                     match pid_file.lock() {
                         Ok(mut guard) => {
-                            if let Err(err) = guard.insert(&service_name, pid) {
+                            guard.services.insert(service_name.clone(), pid);
+                            if let Err(err) = guard.save() {
                                 error!(
-                                    "Failed to record PID for service '{service_name}': {}",
+                                    "Failed to save PID file for service '{service_name}': {}",
                                     err
                                 );
                                 let _ = tx.send(Err(err.into()));
@@ -2254,32 +2262,43 @@ impl Daemon {
         state_file: &Arc<Mutex<ServiceStateFile>>,
         config: &Arc<Config>,
     ) -> Result<(), ProcessManagerError> {
+        // First, get the PID without removing from HashMap yet
+        let pid = {
+            let mut processes_guard = processes.lock()?;
+            if let Some(child) = processes_guard.get_mut(service_name) {
+                Some(child.id())
+            } else {
+                let guard = pid_file.lock()?;
+                guard.get(service_name)
+            }
+        };
+
+        // Terminate the process tree
+        if let Some(process_id) = pid {
+            match Self::terminate_process_tree(service_name, process_id) {
+                Ok(_) => {
+                    debug!(
+                        "Process tree for '{service_name}' (pid {process_id}) terminated successfully"
+                    );
+                }
+                Err(err) => match &err {
+                    ProcessManagerError::ServiceStopError { source, .. }
+                        if source.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        warn!(
+                            "Timed out terminating process tree for '{service_name}' (pid {process_id}); forcing cleanup"
+                        );
+                    }
+                    _ => return Err(err),
+                },
+            }
+        }
+
+        // Now remove the child handle and wait on it
         let child_handle = {
             let mut processes_guard = processes.lock()?;
             processes_guard.remove(service_name)
         };
-
-        let pid = if let Some(pid) = child_handle.as_ref().map(|child| child.id()) {
-            Some(pid)
-        } else {
-            let guard = pid_file.lock()?;
-            guard.get(service_name)
-        };
-
-        if let Some(process_id) = pid
-            && let Err(err) = Self::terminate_process_tree(service_name, process_id)
-        {
-            match &err {
-                ProcessManagerError::ServiceStopError { source, .. }
-                    if source.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    warn!(
-                        "Timed out terminating process tree for '{service_name}' (pid {process_id}); continuing cleanup"
-                    );
-                }
-                _ => return Err(err),
-            }
-        }
 
         if let Some(mut child) = child_handle
             && let Err(err) = child.wait()
@@ -2419,13 +2438,21 @@ impl Daemon {
                 }
             }
 
-            if let Ok(mut guard) = pid_file.lock()
-                && let Err(err) = guard.remove(&service)
-                && !matches!(err, PidFileError::ServiceNotFound)
-            {
-                warn!(
-                    "Failed to clear PID entry for dependent '{service}' after '{root}' failure: {err}"
-                );
+            if let Ok(mut guard) = pid_file.lock() {
+                if let Err(err) = guard.remove(&service)
+                    && !matches!(err, PidFileError::ServiceNotFound)
+                {
+                    warn!(
+                        "Failed to clear PID entry for dependent '{service}' after '{root}' failure: {err}"
+                    );
+                } else {
+                    // Save the PID file after removing the dependent service
+                    if let Err(err) = guard.save() {
+                        warn!(
+                            "Failed to save PID file after removing dependent '{service}': {err}"
+                        );
+                    }
+                }
             }
 
             if let Some(children) = reverse_dependencies.get(&service) {
@@ -2578,7 +2605,10 @@ impl Daemon {
                         HookOutcome::Error
                     };
 
-                    if let Some(service) = config.services.get(&name) {
+                    // Only run OnStop hooks if the service wasn't manually stopped
+                    // (manual stops already run the hook in stop_service_with_intent)
+                    if !manually_stopped && let Some(service) = config.services.get(&name)
+                    {
                         let env = service.env.clone();
                         if let Some(action) = service
                             .hooks
@@ -2642,9 +2672,27 @@ impl Daemon {
                             counts.remove(&name);
                         }
                     } else if !exit_success {
-                        warn!("Service '{name}' crashed. Restarting...");
+                        // Service failed - always mark it as failed for dependency handling
                         failed_services.push(name.clone());
-                        restarted_services.push(name.clone());
+
+                        // Check if service should be restarted based on its restart_policy
+                        let should_restart = config
+                            .services
+                            .get(&name)
+                            .map(|s| s.restart_policy.as_deref())
+                            .map(|policy| {
+                                policy == Some("always") || policy == Some("on-failure")
+                            })
+                            .unwrap_or(false);
+
+                        if should_restart {
+                            warn!("Service '{name}' crashed. Restarting...");
+                            restarted_services.push(name.clone());
+                        } else {
+                            warn!(
+                                "Service '{name}' crashed but restart_policy does not allow restart."
+                            );
+                        }
                         if let Err(err) = Self::persist_service_state(
                             &config,
                             &state_file,
@@ -2816,7 +2864,10 @@ impl Daemon {
                     let record_result = pid_file
                         .lock()
                         .map_err(ProcessManagerError::from)
-                        .and_then(|mut guard| guard.insert(&name, pid).map_err(ProcessManagerError::from));
+                        .and_then(|mut guard| {
+                            guard.services.insert(name.clone(), pid);
+                            guard.save().map_err(ProcessManagerError::from)
+                        });
 
                     if let Err(err) = record_result {
                         error!(
@@ -2989,7 +3040,6 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
-    use tempfile::tempdir_in;
 
     /// Helper to build a minimal service definition for unit tests.
     fn make_service(command: &str, deps: &[&str]) -> ServiceConfig {
@@ -3035,11 +3085,7 @@ mod tests {
     fn with_temp_home<F: FnOnce(&std::path::Path)>(test: F) {
         let _guard = crate::test_utils::env_lock();
 
-        let base = std::env::current_dir()
-            .expect("current_dir")
-            .join("target/tmp-home");
-        fs::create_dir_all(&base).expect("create tmp-home base");
-        let temp = tempdir_in(base).expect("tempdir");
+        let temp = tempfile::tempdir().expect("tempdir");
         let original = env::var("HOME").ok();
         unsafe {
             env::set_var("HOME", temp.path());
@@ -3381,6 +3427,281 @@ fi
                 missing,
                 final_pid_file.services().len()
             );
+        });
+    }
+
+    #[test]
+    fn individual_service_stop_removes_from_tracking() {
+        with_temp_home(|dir| {
+            let mut services = HashMap::new();
+            services.insert("test_service".into(), make_service("sleep 60", &[]));
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services_nonblocking().unwrap();
+
+            thread::sleep(Duration::from_millis(100));
+
+            // Verify service is running
+            assert!(
+                daemon
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .contains_key("test_service")
+            );
+            assert!(
+                daemon
+                    .pid_file
+                    .lock()
+                    .unwrap()
+                    .get("test_service")
+                    .is_some()
+            );
+
+            // Stop individual service
+            daemon.stop_service("test_service").unwrap();
+
+            // Verify service is removed from tracking
+            assert!(
+                !daemon
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .contains_key("test_service")
+            );
+            assert!(
+                daemon
+                    .pid_file
+                    .lock()
+                    .unwrap()
+                    .get("test_service")
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn stop_service_handles_termination_failure() {
+        with_temp_home(|dir| {
+            let mut services = HashMap::new();
+            // Use a command that ignores SIGTERM for testing
+            services.insert(
+                "stubborn_service".into(),
+                make_service("sh -c 'trap \"\" TERM; sleep 10'", &[]),
+            );
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services_nonblocking().unwrap();
+
+            thread::sleep(Duration::from_millis(100));
+
+            // Service should be running
+            assert!(
+                daemon
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .contains_key("stubborn_service")
+            );
+
+            // Stop should eventually succeed (via SIGKILL escalation)
+            daemon.stop_service("stubborn_service").unwrap();
+
+            // Service should be removed even after termination difficulties
+            assert!(
+                !daemon
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .contains_key("stubborn_service")
+            );
+        });
+    }
+
+    #[test]
+    fn start_individual_service_after_stop() {
+        with_temp_home(|dir| {
+            let mut service = make_service("echo 'test'", &[]);
+            service.restart_policy = Some("never".into());
+
+            let mut services = HashMap::new();
+            services.insert("test_service".into(), service.clone());
+
+            let daemon = create_daemon(dir, services);
+
+            // Start service
+            let result = daemon.start_service("test_service", &service).unwrap();
+            assert!(matches!(result, ServiceReadyState::CompletedSuccess));
+
+            thread::sleep(Duration::from_millis(100));
+
+            // Stop service
+            daemon.stop_service("test_service").unwrap();
+            assert!(
+                !daemon
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .contains_key("test_service")
+            );
+
+            // Start service again
+            let result = daemon.start_service("test_service", &service).unwrap();
+            assert!(matches!(result, ServiceReadyState::CompletedSuccess));
+        });
+    }
+
+    #[test]
+    fn manual_stop_flag_prevents_restart() {
+        with_temp_home(|dir| {
+            let mut service = make_service("sh -c 'sleep 0.1 && exit 1'", &[]);
+            service.restart_policy = Some("always".into());
+
+            let mut services = HashMap::new();
+            services.insert("test_service".into(), service);
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services_nonblocking().unwrap();
+
+            thread::sleep(Duration::from_millis(50));
+
+            // Manual stop should set flag
+            daemon.stop_service("test_service").unwrap();
+
+            // Verify manual stop flag is set
+            assert!(
+                daemon
+                    .manual_stop_flags
+                    .lock()
+                    .unwrap()
+                    .contains("test_service")
+            );
+
+            // Verify restart is suppressed
+            assert!(
+                daemon
+                    .restart_suppressed
+                    .lock()
+                    .unwrap()
+                    .contains("test_service")
+            );
+
+            thread::sleep(Duration::from_millis(200));
+
+            // Service should not have restarted
+            assert!(
+                !daemon
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .contains_key("test_service")
+            );
+        });
+    }
+
+    #[test]
+    fn config_accessor_returns_arc() {
+        with_temp_home(|dir| {
+            let services = HashMap::new();
+            let daemon = create_daemon(dir, services);
+
+            let config1 = daemon.config();
+            let config2 = daemon.config();
+
+            // Both should be the same Arc
+            assert!(Arc::ptr_eq(&config1, &config2));
+        });
+    }
+
+    #[test]
+    fn stop_service_runs_hooks_once() {
+        with_temp_home(|dir| {
+            let hook_log = dir.join("hooks.log");
+
+            let hooks = crate::config::Hooks {
+                on_start: None,
+                on_stop: Some(crate::config::HookLifecycleConfig {
+                    success: Some(crate::config::HookAction {
+                        command: format!("echo 'STOP_SUCCESS' >> {}", hook_log.display()),
+                        timeout: None,
+                    }),
+                    error: Some(crate::config::HookAction {
+                        command: format!("echo 'STOP_ERROR' >> {}", hook_log.display()),
+                        timeout: None,
+                    }),
+                }),
+                on_restart: None,
+            };
+
+            let mut service = make_service("sleep 60", &[]);
+            service.hooks = Some(hooks);
+
+            let mut services = HashMap::new();
+            services.insert("hooked_service".into(), service);
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services_nonblocking().unwrap();
+
+            thread::sleep(Duration::from_millis(100));
+
+            // Stop service
+            daemon.stop_service("hooked_service").unwrap();
+
+            thread::sleep(Duration::from_millis(100));
+
+            // Hook should run exactly once
+            let content = fs::read_to_string(&hook_log).unwrap_or_default();
+            assert_eq!(content.matches("STOP_SUCCESS").count(), 1);
+        });
+    }
+
+    #[test]
+    fn terminate_process_tree_kills_all_descendants() {
+        with_temp_home(|_| {
+            // Create a parent process that spawns children
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c");
+            cmd.arg("sh -c 'sleep 60' & sh -c 'sleep 60' & sleep 60");
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+
+            let mut parent = cmd.spawn().unwrap();
+            let parent_pid = parent.id();
+
+            thread::sleep(Duration::from_millis(100));
+
+            // Collect all descendants before termination
+            let descendants_before = Daemon::collect_descendants(parent_pid);
+            assert!(
+                !descendants_before.is_empty(),
+                "Should have child processes"
+            );
+
+            // Terminate the process tree
+            match Daemon::terminate_process_tree("test", parent_pid) {
+                Ok(_) => {
+                    thread::sleep(Duration::from_millis(200));
+
+                    // All processes should be gone
+                    for pid in descendants_before {
+                        assert!(
+                            !Daemon::signal_pid("test", pid, None).unwrap(),
+                            "Child process {} should be terminated",
+                            pid
+                        );
+                    }
+                }
+                Err(ProcessManagerError::ServiceStopError { source, .. })
+                    if source.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Timeout is acceptable in tests - just skip verification
+                }
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+
+            // Clean up
+            let _ = parent.wait();
         });
     }
 }

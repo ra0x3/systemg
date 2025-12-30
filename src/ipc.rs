@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::os::unix::ffi::OsStrExt;
 use std::{
     fs,
     io::{self, BufRead, BufReader, Write},
@@ -33,6 +32,11 @@ fn config_hint_path() -> Result<PathBuf, ControlError> {
 /// Message sent from CLI invocations to the resident supervisor.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlCommand {
+    /// Start one or all services.
+    Start {
+        /// Optional service name to start. If None, starts all services.
+        service: Option<String>,
+    },
     /// Stop one or all services.
     Stop {
         /// Optional service name to stop. If None, stops all services.
@@ -140,6 +144,9 @@ pub fn write_response(
 /// Persists the supervisor PID for later CLI detection.
 pub fn write_supervisor_pid(pid: libc::pid_t) -> Result<(), ControlError> {
     let path = supervisor_pid_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     fs::write(path, pid.to_string())?;
     Ok(())
 }
@@ -150,7 +157,8 @@ pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
     if let Some(parent) = hint_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(hint_path, config.as_os_str().as_bytes())?;
+    let config_str = config.to_string_lossy();
+    fs::write(hint_path, config_str.as_bytes())?;
     Ok(())
 }
 
@@ -205,4 +213,254 @@ pub fn cleanup_runtime() -> Result<(), ControlError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use tempfile::tempdir;
+
+    #[test]
+    fn control_command_serialization() {
+        // Test Start command
+        let start = ControlCommand::Start {
+            service: Some("test_service".to_string()),
+        };
+        let json = serde_json::to_string(&start).unwrap();
+        assert!(json.contains("Start"));
+        assert!(json.contains("test_service"));
+
+        // Test Stop command
+        let stop = ControlCommand::Stop { service: None };
+        let json = serde_json::to_string(&stop).unwrap();
+        assert!(json.contains("Stop"));
+
+        // Test Restart command
+        let restart = ControlCommand::Restart {
+            config: Some("config.yaml".to_string()),
+            service: Some("service".to_string()),
+        };
+        let json = serde_json::to_string(&restart).unwrap();
+        assert!(json.contains("Restart"));
+        assert!(json.contains("config.yaml"));
+
+        // Test Shutdown command
+        let shutdown = ControlCommand::Shutdown;
+        let json = serde_json::to_string(&shutdown).unwrap();
+        assert!(json.contains("Shutdown"));
+    }
+
+    #[test]
+    fn control_response_serialization() {
+        let ok = ControlResponse::Ok;
+        let json = serde_json::to_string(&ok).unwrap();
+        assert!(json.contains("Ok"));
+
+        let message = ControlResponse::Message("Service started".to_string());
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("Message"));
+        assert!(json.contains("Service started"));
+
+        let error = ControlResponse::Error("Failed to stop".to_string());
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("Error"));
+        assert!(json.contains("Failed to stop"));
+    }
+
+    #[test]
+    fn write_and_read_supervisor_pid() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+
+        let pid = 12345;
+        write_supervisor_pid(pid).unwrap();
+
+        let read_pid = read_supervisor_pid().unwrap();
+        assert_eq!(read_pid, Some(pid));
+
+        // Cleanup
+        cleanup_runtime().unwrap();
+        let read_pid = read_supervisor_pid().unwrap();
+        assert_eq!(read_pid, None);
+
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn write_and_read_config_hint() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+
+        let config = PathBuf::from("/path/to/config.yaml");
+        write_config_hint(&config).unwrap();
+
+        let hint = read_config_hint().unwrap();
+        assert_eq!(hint, Some(config));
+
+        // Cleanup
+        cleanup_runtime().unwrap();
+        let hint = read_config_hint().unwrap();
+        assert_eq!(hint, None);
+
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn send_command_no_socket() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+
+        let command = ControlCommand::Shutdown;
+        let result = send_command(&command);
+
+        assert!(matches!(result, Err(ControlError::NotAvailable)));
+
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn write_and_read_command_response() {
+        let temp = tempdir().unwrap();
+        let socket_path = temp.path().join("test.sock");
+
+        // Create a Unix socket pair for testing
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+
+            // Read command
+            let cmd = read_command(&mut stream).unwrap();
+            assert!(matches!(cmd, ControlCommand::Start { .. }));
+
+            // Write response
+            let response = ControlResponse::Message("Started".to_string());
+            write_response(&mut stream, &response).unwrap();
+        });
+
+        // Give the thread time to start
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Connect and send command
+        let mut stream = UnixStream::connect(&socket_path).unwrap();
+        let command = ControlCommand::Start {
+            service: Some("test".to_string()),
+        };
+        let payload = serde_json::to_vec(&command).unwrap();
+        stream.write_all(&payload).unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+
+        // Read response
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let response: ControlResponse = serde_json::from_str(line.trim()).unwrap();
+
+        assert!(matches!(response, ControlResponse::Message(msg) if msg == "Started"));
+    }
+
+    #[test]
+    fn control_error_from_io_error() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
+        let ctrl_err: ControlError = io_err.into();
+
+        match ctrl_err {
+            ControlError::Io(_) => {}
+            _ => panic!("Expected Io error variant"),
+        }
+    }
+
+    #[test]
+    fn control_error_from_serde_error() {
+        let json = "{invalid json}";
+        let serde_err = serde_json::from_str::<ControlCommand>(json).unwrap_err();
+        let ctrl_err: ControlError = serde_err.into();
+
+        match ctrl_err {
+            ControlError::Serde(_) => {}
+            _ => panic!("Expected Serde error variant"),
+        }
+    }
+
+    #[test]
+    fn runtime_dir_creation() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+
+        let dir = runtime_dir().unwrap();
+        assert!(dir.ends_with(".local/share/systemg"));
+        assert!(dir.exists());
+
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn socket_path_generation() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+
+        let path = socket_path().unwrap();
+        assert!(path.ends_with("control.sock"));
+
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn empty_config_hint_handled() {
+        let temp = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+
+        // Write empty string
+        let hint_path = config_hint_path().unwrap();
+        fs::create_dir_all(hint_path.parent().unwrap()).unwrap();
+        fs::write(&hint_path, "").unwrap();
+
+        // Should return None for empty content
+        let hint = read_config_hint().unwrap();
+        assert_eq!(hint, None);
+    }
 }
