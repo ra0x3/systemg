@@ -11,11 +11,13 @@ The `status` command displays detailed information about running services, inclu
 
 ### Show All Services
 
-Show the status of all currently running services (uses default `systemg.yaml` config):
+Show the status of all currently running services:
 
 ```sh
 $ sysg status
 ```
+
+> **Note**: When no `--config` is specified, systemg automatically uses the configuration path from the [`config_hint`](../state.md#config_hint) file, which was saved when the supervisor started. This eliminates the need to specify `--config` for most commands.
 
 Show status with a specific configuration file:
 

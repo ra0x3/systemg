@@ -17,6 +17,8 @@ View the last 50 lines of logs for all services:
 $ sysg logs
 ```
 
+> **Note**: The `logs` command doesn't require a `--config` flag when a supervisor is running, thanks to the [`config_hint`](../state.md#config_hint) file that stores the last used configuration path. This makes it easy to quickly check logs without remembering configuration paths.
+
 ### View Specific Service Logs
 
 View logs for a specific service:

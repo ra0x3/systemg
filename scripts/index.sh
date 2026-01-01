@@ -1,8 +1,62 @@
 #!/bin/sh
 set -e
 
+# -----------------------------
+# Parse command line arguments
+# -----------------------------
+REQUESTED_VERSION=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --version|-v)
+      shift
+      if [ -z "$1" ]; then
+        echo "Error: --version requires a version number"
+        echo "Usage: curl ... | sh -s -- --version VERSION"
+        echo "       curl ... | sh -s -- -v VERSION"
+        exit 1
+      fi
+      REQUESTED_VERSION="$1"
+      shift
+      ;;
+    --help|-h)
+      echo "systemg installer"
+      echo ""
+      echo "Usage:"
+      echo "  Install latest:     curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh"
+      echo "  Install specific:   curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version VERSION"
+      echo "  Install specific:   curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v VERSION"
+      echo ""
+      echo "Options:"
+      echo "  --version, -v VERSION    Install or activate a specific version"
+      echo "  --help, -h               Show this help message"
+      echo ""
+      echo "Examples:"
+      echo "  curl ... | sh                        # Install latest version"
+      echo "  curl ... | sh -s -- --version 0.15.6 # Install version 0.15.6"
+      echo "  curl ... | sh -s -- -v 0.15.6        # Install version 0.15.6 (short form)"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Use --help for usage information"
+      exit 1
+      ;;
+  esac
+done
+
 ARCH=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+# -----------------------------
+# Setup directory structure
+# -----------------------------
+SYSG_ROOT="$HOME/.sysg"
+SYSG_BIN_DIR="$SYSG_ROOT/bin"
+SYSG_VERSIONS_DIR="$SYSG_ROOT/versions"
+SYSG_ACTIVE_VERSION_FILE="$SYSG_ROOT/active-version"
+
+mkdir -p "$SYSG_BIN_DIR"
+mkdir -p "$SYSG_VERSIONS_DIR"
 
 # -----------------------------
 # Detect platform + target triple
@@ -44,47 +98,69 @@ else
 fi
 
 # -----------------------------
-# Fetch version
+# Determine version to install
 # -----------------------------
-echo "Fetching latest version..."
-VERSION=$(
-  curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest \
-    | awk -F'"' '/tag_name/ {gsub(/^v/, "", $4); print $4}'
-)
+if [ -n "$REQUESTED_VERSION" ]; then
+  # User specified a version
+  VERSION="$REQUESTED_VERSION"
+  # Remove 'v' prefix if present
+  VERSION="${VERSION#v}"
+  echo "Installing specified version: $VERSION"
+else
+  # Fetch latest version
+  echo "Fetching latest version..."
+  VERSION=$(
+    curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest \
+      | awk -F'"' '/tag_name/ {gsub(/^v/, "", $4); print $4}'
+  )
 
-if [ -z "$VERSION" ]; then
-  echo "Failed to determine latest version from GitHub."
-  exit 1
+  if [ -z "$VERSION" ]; then
+    echo "Failed to determine latest version from GitHub."
+    exit 1
+  fi
+  echo "Latest version: $VERSION"
 fi
 
 # -----------------------------
-# Check if already installed
+# Check if version is already installed
 # -----------------------------
-INSTALL_DIR="$HOME/.sysg/bin"
-EXISTING_BINARY=""
+VERSION_DIR="$SYSG_VERSIONS_DIR/$VERSION"
+VERSION_BINARY="$VERSION_DIR/sysg"
 
-if [ -x "$INSTALL_DIR/sysg" ]; then
-  EXISTING_BINARY="$INSTALL_DIR/sysg"
-elif command -v sysg >/dev/null 2>&1; then
-  EXISTING_BINARY=$(command -v sysg)
+# Check current active version
+CURRENT_ACTIVE_VERSION=""
+if [ -f "$SYSG_ACTIVE_VERSION_FILE" ]; then
+  CURRENT_ACTIVE_VERSION=$(cat "$SYSG_ACTIVE_VERSION_FILE" 2>/dev/null || echo "")
 fi
 
-if [ -n "$EXISTING_BINARY" ]; then
-  CURRENT_VERSION=$(
-    "$EXISTING_BINARY" --version 2>/dev/null \
+# If this version is already installed
+if [ -x "$VERSION_BINARY" ]; then
+  # Verify the installed binary actually reports the correct version
+  INSTALLED_VERSION=$(
+    "$VERSION_BINARY" --version 2>/dev/null \
       | awk 'NR==1 {print $2; exit}' \
       | sed 's/^v//' || true
   )
 
-  if [ "$CURRENT_VERSION" = "$VERSION" ]; then
-    echo "sysg $VERSION is already installed and up to date."
-    exit 0
-  elif [ -n "$CURRENT_VERSION" ]; then
-    echo "Upgrading sysg managed at $EXISTING_BINARY from $CURRENT_VERSION to $VERSION..."
+  if [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+    if [ "$CURRENT_ACTIVE_VERSION" = "$VERSION" ]; then
+      echo "sysg $VERSION is already installed and active."
+      exit 0
+    else
+      echo "sysg $VERSION is already installed. Switching to it..."
+      echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
+      ln -sf "$VERSION_BINARY" "$SYSG_BIN_DIR/sysg"
+      echo "Switched to sysg $VERSION"
+      exit 0
+    fi
   else
-    echo "Installing sysg $VERSION (existing version could not be determined)."
+    echo "Warning: Installed binary reports version $INSTALLED_VERSION (expected $VERSION)."
+    echo "Re-downloading..."
+    rm -rf "$VERSION_DIR"
   fi
 fi
+
+echo "Installing sysg $VERSION..."
 
 FILE="sysg-$VERSION-$TARGET.tar.gz"
 URL="https://sh.sysg.dev/$FILE"
@@ -99,8 +175,12 @@ fi
 # -----------------------------
 # Extract
 # -----------------------------
-tar -xzf "$FILE"
-rm "$FILE"
+# Create a temporary directory for extraction
+TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'sysg-install')
+cd "$TEMP_DIR"
+
+tar -xzf "$OLDPWD/$FILE"
+rm "$OLDPWD/$FILE"
 
 # Find the sysg binary after extraction
 if [ -f "sysg" ]; then
@@ -114,6 +194,8 @@ else
     BINARY="$FOUND"
   else
     echo "Error: sysg binary not found after extraction."
+    cd "$OLDPWD"
+    rm -rf "$TEMP_DIR"
     exit 1
   fi
 fi
@@ -141,17 +223,25 @@ if [ -n "$DOWNLOADED_VERSION" ] && [ "$DOWNLOADED_VERSION" != "$VERSION" ]; then
     echo "Continuing install because SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1." >&2
   else
     echo "Aborting install; please verify release artifacts or rerun with SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1." >&2
-    rm -rf "sysg-$VERSION-$TARGET" "$BINARY" 2>/dev/null || true
+    cd "$OLDPWD"
+    rm -rf "$TEMP_DIR"
     exit 1
   fi
 fi
 
-mkdir -p "$INSTALL_DIR"
+# Create version-specific directory and install
+mkdir -p "$VERSION_DIR"
+mv "$BINARY" "$VERSION_BINARY"
 
-mv "$BINARY" "$INSTALL_DIR/sysg"
+# Create/update symlink to active version
+ln -sf "$VERSION_BINARY" "$SYSG_BIN_DIR/sysg"
 
-# Clean extraction directory safely
-rm -rf "sysg-$VERSION-$TARGET" 2>/dev/null || true
+# Mark this version as active
+echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
+
+# Clean up
+cd "$OLDPWD"
+rm -rf "$TEMP_DIR"
 
 # -----------------------------
 # Shell PATH update
@@ -186,10 +276,33 @@ fi
 export PATH="$HOME/.sysg/bin:$PATH"
 
 echo ""
-echo "sysg $VERSION installed successfully to $INSTALL_DIR"
+echo "sysg $VERSION installed successfully!"
 echo ""
+echo "Installation details:"
+echo "  Active version: $VERSION"
+echo "  Binary location: $VERSION_BINARY"
+echo "  Symlink: $SYSG_BIN_DIR/sysg -> $VERSION_BINARY"
+echo ""
+
+# Show list of installed versions
+echo "Installed versions:"
+for version_path in "$SYSG_VERSIONS_DIR"/*; do
+  if [ -d "$version_path" ] && [ -x "$version_path/sysg" ]; then
+    version_name=$(basename "$version_path")
+    if [ "$version_name" = "$VERSION" ]; then
+      echo "  * $version_name (active)"
+    else
+      echo "    $version_name"
+    fi
+  fi
+done
+echo ""
+
 echo "To start using sysg:"
 echo "  - Restart your terminal, OR"
 echo "  - Run: export PATH=\"\$HOME/.sysg/bin:\$PATH\""
+echo ""
+echo "To switch versions later:"
+echo "  curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version VERSION"
 echo ""
 echo "Run 'sysg --help' to get started."

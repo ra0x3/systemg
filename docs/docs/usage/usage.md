@@ -1,15 +1,32 @@
 ---
 sidebar_position: 3
-title: Usage
+title: Commands
 ---
 
-# Usage
+# Commands
 
 Systemg uses a simple YAML-based configuration and supports the following commands.
 Beyond lifecycle management, you can attach [webhooks](../webhooks.md) to service
 events or run [cron-scheduled](../cron.md) jobs alongside long-lived processes.
 
 Every command accepts `--log-level <LEVEL>` (string names like `info`/`debug` or numbers 0-5) if you want to change tracing output for a single invocation. For example, `sysg status --log-level debug`.
+
+## Configuration Auto-Discovery
+
+One of systemg's ergonomic features is the [`config_hint`](../state.md#config_hint) file. When you start the supervisor with a specific configuration file, systemg remembers this path. This means subsequent commands (`stop`, `restart`, `status`, `logs`) can be run without specifying `--config`:
+
+```sh
+# Start with a specific config
+$ sysg start --config /path/to/my-app.yaml --daemonize
+
+# These commands now work without --config
+$ sysg status
+$ sysg logs web-server
+$ sysg restart
+$ sysg stop
+```
+
+This greatly improves the command-line experience, especially when working with configuration files outside the current directory.
 
 ## Start
 

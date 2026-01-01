@@ -224,6 +224,91 @@ All scripts assume a POSIX shell and rely only on tools that ship with macOS/Lin
 
 Because the cron job writes `lines.txt`, the echo worker always has something to replay, and `py_size` demonstrates how a supervised process can fail, fire hooks, restart, and still terminate cleanly.
 
+## Example Output
+
+Here's what you'll see when running these services:
+
+### Starting the services
+
+```bash
+$ sysg start --config systemg.yaml
+Supervisor started
+```
+
+### Checking service status
+
+```bash
+$ sysg status
+Service statuses:
+● echo_lines Running
+   Active: active (running) since 00:16; 16 secs ago
+ Main PID: 67705
+    Tasks: 0 (limit: N/A)
+   Memory: 2.0M
+      CPU: 0.010s
+ Process Group: 67705
+     |-67705 sh echo_lines.sh
+       ├─67943 sleep 5
+
+● [cron] count_number - Exited successfully (exit code 0)
+  Cron history (local (-08:00-08:00)) for count_number:
+    - 2025-12-31 15:47:10 -08:00 | exit 0
+    - 2025-12-31 15:47:00 -08:00 | exit 0
+    - 2025-12-31 15:41:10 -08:00 | exit 0
+    - 2025-12-31 15:41:00 -08:00 | exit 0
+    - 2025-12-31 15:40:50 -08:00 | exit 0
+
+● py_size Running
+   Active: active (running) since 00:17; 17 secs ago
+ Main PID: 67704
+    Tasks: 0 (limit: N/A)
+   Memory: 8.2M
+      CPU: 0.030s
+ Process Group: 67704
+     |-67704 python3 py_size.py
+```
+
+### Viewing logs
+
+```bash
+$ sysg logs py_size
++---------------------------------+
+|         py_size (running)       |
++---------------------------------+
+
+==> /Users/rashad/.local/share/systemg/logs/py_size_stdout.log <==
+py_size: echo.txt -> 595 bytes
+py_size: lines.txt -> 195 bytes
+py_size: echo.txt -> 665 bytes
+py_size: lines.txt -> 212 bytes
+py_size: echo.txt -> 735 bytes
+py_size: lines.txt -> 229 bytes
+...
+```
+
+```bash
+$ sysg logs echo_lines
++---------------------------------+
+|      echo_lines (running)       |
++---------------------------------+
+
+==> /Users/rashad/.local/share/systemg/logs/echo_lines_stdout.log <==
+The last line is: (no lines yet)
+The last line is: The number is 1
+The last line is: The number is 2
+The last line is: The number is 2
+The last line is: The number is 3
+The last line is: The number is 3
+...
+```
+
+### Stopping the services
+
+```bash
+$ sysg stop
+Supervisor shutting down
+```
+
 ## Cleanup
 
 The scripts tidy up their temporary markers automatically, but you can delete the generated `.count_state`, `.py_size_*`, `lines.txt`, and `echo.txt` files if you want a fresh run.

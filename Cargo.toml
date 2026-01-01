@@ -21,7 +21,6 @@ macos = []
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 clap = { version = "4.0", features = ["derive"] }
-colored = "3.0"
 cron = "0.12"
 ctrlc = "3.4"
 fs2 = "0.4"
@@ -36,10 +35,8 @@ sha2 = "0.10"
 strum = { version = "0.27", features = ["derive"] }
 strum_macros = "0.27"
 sysinfo = { version = "0.33" }
-tempfile = "3.14.0"
 thiserror = "1.0"
 tracing = "0.1"
-tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]

@@ -41,7 +41,7 @@ The purge command removes the entire `~/.local/share/systemg` directory, which c
    - `pid.json.lock` - Lock file for PID file operations
    - `control.sock` - Unix socket for IPC (when supervisor is running)
    - `sysg.pid` - Supervisor process PID (when supervisor is running)
-   - `config_hint` - Last used config path
+   - [`config_hint`](../state.md#config_hint) - Last used config path (enables config-free commands)
 
 3. **Logs**:
    - `supervisor.log` - Supervisor operational logs

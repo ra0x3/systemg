@@ -23,6 +23,8 @@ Start the process manager with a specific configuration file:
 $ sysg start --config systemg.yaml
 ```
 
+> **Note**: The configuration path is saved in the [`config_hint`](../state.md#config_hint) file when the supervisor starts. This allows subsequent commands to work without specifying `--config`, greatly improving ergonomics.
+
 ### Daemon Mode
 
 Start the long-lived supervisor that persists after you log out:

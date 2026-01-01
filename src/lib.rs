@@ -3,6 +3,24 @@
 //! CLI interface to start, stop, and check the status of services, along with logging
 //! capabilities and lifecycle hooks for service management.
 
+#![warn(unused_crate_dependencies)]
+// These dependencies are only used in the binary (src/bin/main.rs)
+use ctrlc as _;
+use strum as _;
+use tracing_subscriber as _;
+
+// OpenSSL is only needed for static linking on Linux
+#[cfg(target_os = "linux")]
+use openssl_sys as _;
+
+// Test dependencies are only used in test code
+#[cfg(test)]
+use assert_cmd as _;
+#[cfg(test)]
+use predicates as _;
+#[cfg(test)]
+use tempfile as _;
+
 /// CLI interface.
 pub mod cli;
 

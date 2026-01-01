@@ -164,4 +164,4 @@ Options:
   -h, --help               Print help
 ```
 
-**Note**: The `--config` option is used when no supervisor is running to load the configuration and locate services. When a supervisor is running, the supervisor's configuration is used.
+> **Note**: The `--config` option is used when no supervisor is running to load the configuration and locate services. When a supervisor is running, the supervisor's configuration is used. Thanks to the [`config_hint`](../state.md#config_hint) file, you often don't need to specify `--config` at all - systemg remembers the last configuration path used.

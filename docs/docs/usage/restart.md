@@ -17,6 +17,8 @@ Restart all services using the current configuration:
 $ sysg restart
 ```
 
+> **Note**: When no `--config` is specified, systemg uses the configuration path stored in the [`config_hint`](../state.md#config_hint) file from the last supervisor start. This provides excellent ergonomics as you don't need to remember or type the config path.
+
 ### Restart with New Configuration
 
 Restart all services using a different configuration file:
