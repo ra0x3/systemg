@@ -37,12 +37,25 @@ pub enum SkipConfig {
 }
 
 /// Configuration for an individual service.
-#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[derive(Debug, Default, Deserialize, Clone, serde::Serialize)]
 pub struct ServiceConfig {
     /// Command used to start the service.
     pub command: String,
     /// Optional environment variables for the service.
     pub env: Option<EnvConfig>,
+    /// User that should own the running process.
+    pub user: Option<String>,
+    /// Primary group for the running process.
+    pub group: Option<String>,
+    /// Supplementary groups to apply after switching users.
+    #[serde(default, rename = "supplementary_groups")]
+    pub supplementary_groups: Option<Vec<String>>,
+    /// Resource limit configuration applied prior to exec.
+    pub limits: Option<LimitsConfig>,
+    /// Linux capabilities retained for the service when started as root.
+    pub capabilities: Option<Vec<String>>,
+    /// Namespace and confinement settings for sandboxed execution.
+    pub isolation: Option<IsolationConfig>,
     /// Restart policy (e.g., "always", "on-failure", "never").
     pub restart_policy: Option<String>,
     /// Backoff time before restarting a failed service.
@@ -59,6 +72,180 @@ pub struct ServiceConfig {
     pub cron: Option<CronConfig>,
     /// Optional skip configuration that determines if the service should be skipped.
     pub skip: Option<SkipConfig>,
+}
+
+/// Resource limit overrides configured per service.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct LimitsConfig {
+    /// Maximum number of open file descriptors (`RLIMIT_NOFILE`).
+    pub nofile: Option<LimitValue>,
+    /// Maximum number of processes (`RLIMIT_NPROC`).
+    pub nproc: Option<LimitValue>,
+    /// Maximum locked memory in bytes (`RLIMIT_MEMLOCK`).
+    pub memlock: Option<LimitValue>,
+    /// CPU scheduling priority (`nice` value, -20..19).
+    pub nice: Option<i32>,
+    /// CPU affinity mask specified as CPU indices.
+    pub cpu_affinity: Option<Vec<u16>>,
+    /// Optional cgroup v2 parameters applied after spawn.
+    pub cgroup: Option<CgroupConfig>,
+}
+
+/// Configuration options for cgroup v2 controllers.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct CgroupConfig {
+    /// Absolute path for the cgroup base; defaults to `/sys/fs/cgroup/systemg` when omitted.
+    pub root: Option<String>,
+    /// Memory limit written to `memory.max` (e.g., `512M`, `max`).
+    pub memory_max: Option<String>,
+    /// CPU quota written to `cpu.max` (e.g., `max` or `200000 100000`).
+    pub cpu_max: Option<String>,
+    /// CPU weight written to `cpu.weight` (between 1 and 10000).
+    pub cpu_weight: Option<u64>,
+}
+
+/// Value accepted for `setrlimit`-backed configuration entries.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum LimitValue {
+    /// A fixed numeric soft+hard limit.
+    Fixed(u64),
+    /// Unlimited (maps to `RLIM_INFINITY`).
+    Unlimited,
+}
+
+impl<'de> Deserialize<'de> for LimitValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LimitVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LimitVisitor {
+            type Value = LimitValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a non-negative integer, an optional size suffix (e.g. 512M), or 'unlimited'",
+                )
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(LimitValue::Fixed(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match parse_limit(value) {
+                    Ok(bytes) => Ok(LimitValue::Fixed(bytes)),
+                    Err(LimitParseError::Unlimited) => Ok(LimitValue::Unlimited),
+                    Err(LimitParseError::Invalid(_)) => {
+                        Err(E::invalid_value(serde::de::Unexpected::Str(value), &self))
+                    }
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 0 {
+                    return Err(E::invalid_value(
+                        serde::de::Unexpected::Signed(value),
+                        &"non-negative integer",
+                    ));
+                }
+                Ok(LimitValue::Fixed(value as u64))
+            }
+        }
+
+        deserializer.deserialize_any(LimitVisitor)
+    }
+}
+
+#[derive(Debug)]
+enum LimitParseError {
+    Unlimited,
+    Invalid(String),
+}
+
+fn parse_limit(input: &str) -> Result<u64, LimitParseError> {
+    let trimmed = input.trim();
+    if trimmed.eq_ignore_ascii_case("unlimited") {
+        return Err(LimitParseError::Unlimited);
+    }
+
+    let normalized = trimmed.replace('_', "");
+    let without_bytes = normalized.trim_end_matches(&['B', 'b'][..]);
+
+    let (number_part, factor) = match without_bytes.chars().last() {
+        Some(suffix) if suffix.is_ascii_alphabetic() => {
+            let len = without_bytes.len() - suffix.len_utf8();
+            let number_part = &without_bytes[..len];
+            let multiplier = match suffix.to_ascii_uppercase() {
+                'K' => 1u128 << 10,
+                'M' => 1u128 << 20,
+                'G' => 1u128 << 30,
+                'T' => 1u128 << 40,
+                _ => return Err(LimitParseError::Invalid(trimmed.to_string())),
+            };
+            (number_part.trim(), multiplier)
+        }
+        _ => (without_bytes.trim(), 1u128),
+    };
+
+    if number_part.is_empty() {
+        return Err(LimitParseError::Invalid(trimmed.to_string()));
+    }
+
+    let value = number_part
+        .parse::<u128>()
+        .map_err(|_| LimitParseError::Invalid(trimmed.to_string()))?;
+
+    let bytes = value
+        .checked_mul(factor)
+        .ok_or_else(|| LimitParseError::Invalid(trimmed.to_string()))?;
+
+    u64::try_from(bytes).map_err(|_| LimitParseError::Invalid(trimmed.to_string()))
+}
+
+impl std::fmt::Display for LimitParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LimitParseError::Unlimited => write!(f, "value represents unlimited"),
+            LimitParseError::Invalid(value) => write!(f, "invalid limit value '{value}'"),
+        }
+    }
+}
+
+impl std::error::Error for LimitParseError {}
+
+/// Linux namespace and confinement options.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct IsolationConfig {
+    /// Enable network namespace isolation.
+    pub network: Option<bool>,
+    /// Enable mount namespace isolation.
+    pub mount: Option<bool>,
+    /// Enable PID namespace isolation.
+    pub pid: Option<bool>,
+    /// Enable user namespace isolation.
+    pub user: Option<bool>,
+    /// Apply seccomp filtering profile.
+    pub seccomp: Option<String>,
+    /// AppArmor profile to enforce.
+    pub apparmor_profile: Option<String>,
+    /// SELinux context to apply.
+    pub selinux_context: Option<String>,
+    /// Restrict device access similar to `PrivateDevices`.
+    pub private_devices: Option<bool>,
+    /// Restrict temporary directories similar to `PrivateTmp`.
+    pub private_tmp: Option<bool>,
 }
 
 impl ServiceConfig {
@@ -554,6 +741,12 @@ services:
         ServiceConfig {
             command: "echo ok".into(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -824,6 +1017,12 @@ services:
         let config1 = ServiceConfig {
             command: "test command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: Some("always".to_string()),
             backoff: Some("5s".to_string()),
             max_restarts: Some(3),
@@ -840,6 +1039,12 @@ services:
         let config2 = ServiceConfig {
             command: "test command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: Some("always".to_string()),
             backoff: Some("5s".to_string()),
             max_restarts: Some(3),
@@ -868,6 +1073,12 @@ services:
         let base_config = ServiceConfig {
             command: "test command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -914,6 +1125,12 @@ services:
         let config = ServiceConfig {
             command: "echo hello".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: Some("always".to_string()),
             backoff: None,
             max_restarts: None,
@@ -942,5 +1159,28 @@ services:
             hash, renamed_hash,
             "Hash should be the same after 'renaming' (using same config)"
         );
+    }
+
+    #[test]
+    fn parse_limit_accepts_suffixes() {
+        let kib = parse_limit("4K").expect("parse 4K");
+        assert_eq!(kib, 4 * 1024);
+
+        let mib = parse_limit("512M").expect("parse 512M");
+        assert_eq!(mib, 512 * 1024 * 1024);
+
+        let gib = parse_limit("1G").expect("parse 1G");
+        assert_eq!(gib, 1024 * 1024 * 1024);
+
+        let plain = parse_limit("1_000").expect("parse underscores");
+        assert_eq!(plain, 1_000);
+    }
+
+    #[test]
+    fn parse_limit_rejects_invalid_strings() {
+        match parse_limit("ten") {
+            Err(LimitParseError::Invalid(msg)) => assert_eq!(msg, "ten"),
+            other => panic!("expected invalid error, got {other:?}"),
+        }
     }
 }

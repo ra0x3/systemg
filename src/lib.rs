@@ -51,3 +51,9 @@ pub mod supervisor;
 /// Test utilities for synchronizing environment variable modifications.
 #[doc(hidden)]
 pub mod test_utils;
+
+/// Runtime context helpers for managing directories and privilege mode.
+pub mod runtime;
+
+/// Privilege management and resource handling utilities.
+pub mod privilege;

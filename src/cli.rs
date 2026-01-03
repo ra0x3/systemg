@@ -74,6 +74,14 @@ pub struct Cli {
     #[arg(long, value_name = "LEVEL", global = true)]
     pub log_level: Option<LogLevelArg>,
 
+    /// Opt into privileged system mode. Requires running as root.
+    #[arg(long = "sys", global = true)]
+    pub sys: bool,
+
+    /// Drop privileges after performing privileged setup.
+    #[arg(long = "drop-privileges", global = true)]
+    pub drop_privileges: bool,
+
     /// The command to execute.
     #[command(subcommand)]
     pub command: Commands,

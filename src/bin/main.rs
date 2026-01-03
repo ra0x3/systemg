@@ -1,9 +1,12 @@
 use libc::{SIGKILL, SIGTERM, getpgrp, killpg};
-use nix::{sys::signal, unistd::Pid};
+use nix::{
+    sys::signal,
+    unistd::{Pid, Uid},
+};
 use std::{
     collections::HashSet,
     error::Error,
-    fs,
+    fs, io,
     os::unix::io::IntoRawFd,
     path::PathBuf,
     process,
@@ -22,13 +25,39 @@ use systemg::{
     daemon::{Daemon, PidFile, ServiceStateFile},
     ipc::{self, ControlCommand, ControlError, ControlResponse},
     logs::{LogManager, resolve_log_path},
+    runtime::{self, RuntimeMode},
     status::StatusManager,
     supervisor::Supervisor,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
+    let euid = Uid::effective();
+
+    let runtime_mode = if args.sys {
+        if !euid.is_root() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "--sys requires root privileges",
+            )
+            .into());
+        }
+        RuntimeMode::System
+    } else {
+        RuntimeMode::User
+    };
+
+    runtime::init(runtime_mode);
+    runtime::set_drop_privileges(args.drop_privileges);
+    if args.drop_privileges && !euid.is_root() {
+        warn!("--drop-privileges has no effect when not running as root");
+    }
+    runtime::capture_socket_activation();
     init_logging(&args);
+
+    if euid.is_root() && runtime_mode == RuntimeMode::User {
+        warn!("Running as root without --sys; state will be stored in userspace paths");
+    }
 
     match args.command {
         Commands::Start {
@@ -238,20 +267,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn runtime_state_dir() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME not set");
-    PathBuf::from(format!("{home}/.local/share/systemg"))
-}
-
-fn supervisor_log_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME not set");
-    PathBuf::from(format!("{}/.local/share/systemg/supervisor.log", home))
-}
-
 fn purge_all_state() -> Result<(), Box<dyn Error>> {
     stop_resident_supervisors();
 
-    let runtime_dir = runtime_state_dir();
+    let runtime_dir = runtime::state_dir();
 
     if runtime_dir.exists() {
         info!("Removing systemg runtime directory: {:?}", runtime_dir);
@@ -463,10 +482,11 @@ fn init_logging(args: &Cli) {
     };
 
     // Ensure the log directory exists
-    let log_path = supervisor_log_path();
-    if let Some(parent) = log_path.parent() {
-        let _ = fs::create_dir_all(parent);
+    let log_dir = runtime::log_dir();
+    if let Err(err) = fs::create_dir_all(&log_dir) {
+        eprintln!("Failed to create log directory {:?}: {}", log_dir, err);
     }
+    let log_path = log_dir.join("supervisor.log");
 
     // Open log file in append mode
     let file = match fs::OpenOptions::new()
@@ -526,8 +546,19 @@ fn resolve_config_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
         return Ok(candidate);
     }
 
-    let resolved = std::env::current_dir()?.join(&candidate);
-    Ok(resolved.canonicalize().unwrap_or(resolved))
+    let cwd_candidate = std::env::current_dir()?.join(&candidate);
+    if cwd_candidate.exists() {
+        return Ok(cwd_candidate.canonicalize().unwrap_or(cwd_candidate));
+    }
+
+    for dir in runtime::config_dirs() {
+        let candidate_path = dir.join(&candidate);
+        if candidate_path.exists() {
+            return Ok(candidate_path);
+        }
+    }
+
+    Ok(cwd_candidate)
 }
 
 fn supervisor_running() -> bool {

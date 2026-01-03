@@ -44,7 +44,7 @@ The purge command removes the entire `~/.local/share/systemg` directory, which c
    - [`config_hint`](../state.md#config_hint) - Last used config path (enables config-free commands)
 
 3. **Logs**:
-   - `supervisor.log` - Supervisor operational logs
+   - `logs/supervisor.log` - Supervisor operational logs
    - `logs/` - Directory containing all service stdout/stderr logs
 
 ## When to Use Purge

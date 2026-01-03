@@ -80,7 +80,6 @@ fn restart_updates_state_with_new_pid() {
         "flaky".to_string(),
         ServiceConfig {
             command,
-            env: None,
             restart_policy: Some("always".to_string()),
             backoff: Some("1s".to_string()),
             max_restarts: Some(3),
@@ -89,6 +88,7 @@ fn restart_updates_state_with_new_pid() {
             hooks: None,
             cron: None,
             skip: None,
+            ..ServiceConfig::default()
         },
     );
 

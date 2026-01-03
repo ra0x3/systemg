@@ -1,5 +1,5 @@
 //! Module for managing and displaying logs of system services.
-use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError};
+use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError, runtime};
 use std::{
     collections::BTreeSet,
     env,
@@ -21,9 +21,7 @@ pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
 
 /// Returns the canonical path for a service log without performing any existence checks.
 fn canonical_log_path(service: &str, kind: &str) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    let mut path = PathBuf::from(home);
-    path.push(".local/share/systemg/logs");
+    let mut path = runtime::log_dir();
     path.push(format!("{service}_{kind}.log"));
     path
 }
@@ -429,9 +427,7 @@ impl LogManager {
 
     /// Shows the supervisor logs
     fn show_supervisor_log(&self, lines: usize) -> Result<(), LogsManagerError> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        let supervisor_log =
-            PathBuf::from(format!("{}/.local/share/systemg/supervisor.log", home));
+        let supervisor_log = runtime::log_dir().join("supervisor.log");
 
         if !supervisor_log.exists() {
             return Ok(()); // Silently skip if supervisor log doesn't exist yet
@@ -480,6 +476,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", home);
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let log_dir = canonical_log_path("dummy", "stdout")
             .parent()
@@ -500,5 +498,7 @@ mod tests {
                 std::env::remove_var("HOME");
             }
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }
