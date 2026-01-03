@@ -167,10 +167,10 @@ fn resolve_tail_targets(
 
 /// Creates the log directory if it doesn't exist.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
-    let service = service.to_string();
-    let kind = kind.to_string();
+    // Capture log path now, before spawning thread, to avoid race conditions
+    // with runtime context changes during test cleanup
+    let path = get_log_path(service, kind);
     thread::spawn(move || {
-        let path = get_log_path(&service, &kind);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).ok();
         }

@@ -6,6 +6,9 @@ use std::{
     sync::{OnceLock, RwLock},
 };
 
+#[cfg(test)]
+use std::path::Path;
+
 #[cfg(unix)]
 use libc;
 
@@ -46,6 +49,10 @@ impl RuntimeContext {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/"));
+        Self::from_user_home(home)
+    }
+
+    fn from_user_home(home: PathBuf) -> Self {
         let state_dir = home.join(".local/share/systemg");
         let log_dir = state_dir.join("logs");
         let config_dir = home.join(".config/systemg");
@@ -84,6 +91,17 @@ pub fn init(mode: RuntimeMode) {
     let drop_privileges = guard.drop_privileges;
     let activation_fds = guard.activation_fds.clone();
     let mut context = RuntimeContext::from_mode(mode);
+    context.drop_privileges = drop_privileges;
+    context.activation_fds = activation_fds;
+    *guard = context;
+}
+
+#[cfg(test)]
+pub fn init_with_test_home(home: &Path) {
+    let mut guard = context_lock().write().expect("runtime context poisoned");
+    let drop_privileges = guard.drop_privileges;
+    let activation_fds = guard.activation_fds.clone();
+    let mut context = RuntimeContext::from_user_home(home.to_path_buf());
     context.drop_privileges = drop_privileges;
     context.activation_fds = activation_fds;
     *guard = context;

@@ -3175,11 +3175,15 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let original = env::var("HOME").ok();
+        let temp_home = temp.path().to_path_buf();
         unsafe {
-            env::set_var("HOME", temp.path());
+            env::set_var("HOME", &temp_home);
         }
-        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::init_with_test_home(&temp_home);
         crate::runtime::set_drop_privileges(false);
+
+        fs::create_dir_all(crate::runtime::state_dir()).unwrap();
+        fs::create_dir_all(crate::runtime::log_dir()).unwrap();
         test(temp.path());
         match original {
             Some(val) => unsafe {

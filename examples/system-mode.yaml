@@ -1,40 +1,110 @@
+# Example configuration for running systemg in system/privileged mode (--sys flag).
+# This demonstrates all privileged service options available when running as root.
+
+# Configuration file version (required)
 version: "1"
+
 services:
   web:
+    # The command to start the service (required)
     command: "/usr/local/bin/web"
+
+    # Switch the service to run as this user after privileged setup (optional)
+    # Requires systemg to be running as root
     user: "www-data"
+
+    # Switch the service to run as this group after privileged setup (optional)
+    # If not specified, uses the primary group of the target user
     group: "www-data"
+
+    # Additional groups to add to the process (optional)
+    # Useful for granting access to specific resources (e.g., log directories)
     supplementary_groups: ["www-logs"]
+
+    # Policy for restarting the service: "always", "on-failure", or "never" (optional)
     restart_policy: "always"
+
+    # Resource limits applied via setrlimit and other kernel interfaces (optional)
     limits:
+      # Maximum number of open file descriptors (RLIMIT_NOFILE)
       nofile: 65536
+
+      # Maximum number of processes/threads (RLIMIT_NPROC, Unix only)
       nproc: 4096
+
+      # Maximum locked memory in bytes (RLIMIT_MEMLOCK)
+      # Supports "unlimited" or values with K/M/G/T suffixes
       memlock: "unlimited"
+
+      # Scheduler priority (-20 = highest priority, 19 = lowest priority)
+      # Negative values require root privileges
       nice: -5
-      cpu_affinity: [0,1]
+
+      # CPU cores to pin the process to (Linux only)
+      # Restricts the process to run only on specified CPU cores
+      cpu_affinity: [0, 1]
+
+      # cgroup v2 resource controls (Linux only, requires cgroup v2 filesystem)
       cgroup:
+        # Maximum memory limit for the service
+        # Supports values like "512M", "1G", etc.
         memory_max: "512M"
+
+        # CPU bandwidth limit in format "quota period" (microseconds)
+        # "200000 100000" means 200ms quota per 100ms period (2 CPUs worth)
         cpu_max: "200000 100000"
+
+    # Linux capabilities to retain after privilege drop (optional)
+    # All other capabilities are cleared for security
+    # See capabilities(7) for the full list
     capabilities:
+      # Allow binding to privileged ports (< 1024) without full root
       - CAP_NET_BIND_SERVICE
+      # Allow setting nice values and scheduling policies
       - CAP_SYS_NICE
+
+    # Kernel namespace isolation options (optional)
+    # Unsupported options log warnings instead of failing
     isolation:
+      # Isolate network namespace (service gets its own network stack)
       network: true
+
+      # Isolate PID namespace (service sees only its own processes)
       pid: true
+
+      # Isolate mount namespace (service gets private mount table)
       mount: true
+
+      # Use a private /tmp directory for the service
       private_tmp: true
 
   worker:
+    # The command to start the service (required)
     command: "/usr/local/bin/worker"
+
+    # Run as unprivileged user for security
     user: "app"
     group: "app"
+
+    # Only restart if the service exits with a non-zero status code
     restart_policy: "on-failure"
+
+    # Resource limits for the worker process
     limits:
+      # Limit open file descriptors
       nofile: 32768
+
+      # Run at lower priority (positive values = lower priority)
       nice: 5
 
+# Cron jobs section for scheduled tasks
 cron:
   nightly_backup:
+    # The command to execute on schedule (required)
     command: "/usr/local/bin/backup"
+
+    # Cron scheduling configuration
     cron:
+      # Cron expression: "second minute hour day month weekday"
+      # This runs at midnight (00:00:00) every day
       expression: "0 0 * * * *"

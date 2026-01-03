@@ -468,11 +468,14 @@ mod tests {
 
     #[test]
     fn empty_config_hint_handled() {
+        let _guard = crate::test_utils::env_lock();
         let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         // Write empty string
         let hint_path = config_hint_path().unwrap();
@@ -483,9 +486,12 @@ mod tests {
         let hint = read_config_hint().unwrap();
         assert_eq!(hint, None);
 
-        unsafe {
-            std::env::remove_var("HOME");
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }

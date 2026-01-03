@@ -695,10 +695,10 @@ mod tests {
         assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
         assert_eq!(record.exit_code, Some(0));
 
-        if let Some(original) = original_home {
-            unsafe {
-                std::env::set_var("HOME", original);
-            }
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
@@ -789,10 +789,12 @@ mod tests {
         assert!(state.jobs().contains_key(&job_three_hash));
         assert!(!state.jobs().contains_key(&job_one_hash));
 
-        if let Some(original) = original_home {
-            unsafe {
-                std::env::set_var("HOME", original);
-            }
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }
