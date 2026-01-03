@@ -57,8 +57,8 @@ Privileged mode (`sudo sysg --sys`) relocates state to system directories and en
 For each service, `PrivilegeContext` aggregates:
 
 - Target user/group/supplementary groups (resolved via `nix::unistd::{User, Group}`)
-- Resource limits (`setrlimit`, `setpriority`, `sched_setaffinity`); strings like `512M` map to bytes
-- Linux capabilities (implemented with the `caps` crate)
+- Resource limits (`setrlimit`, `setpriority`, `sched_setaffinity`)
+- Linux capabilities (implemented with the [`caps-rs`](https://github.com/lucab/caps-rs))
 - Optional cgroup v2 settings and namespace toggles (`network`, `pid`, `mount`, `user`)
 
 ### Spawn Sequence
@@ -72,7 +72,6 @@ For each service, `PrivilegeContext` aggregates:
 - Namespaces (network, PID, mount, user) are best-effort: unsupported kernels emit warnings.
 - `limits.cgroup.*` writes to cgroup v2 controllers before the process joins the new group; the optional `root` field lets you test against a temporary mount.
 - When running under systemd socket activation, systemg records inherited file descriptors via `LISTEN_FDS/FDNAMES` and exposes them through the runtime so services can bind without reopening sockets.
-- The repository provides `scripts/install-systemg.sh` and `examples/system-mode.yaml` as starting points for packaging, logrotate, and systemd integration.
 
 ### Drop Privileges Flow
 

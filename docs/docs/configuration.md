@@ -440,7 +440,7 @@ Deployment strategy configuration for managing service restarts and updates.
 
 Deployment strategy for the service. Valid values:
 
-- `"immediate"` *(default)* – stop the running instance and start a fresh copy right away. This matches the behaviour in earlier releases and requires no additional configuration.
+- `"immediate"` *(default)* – stop the running instance and start a fresh copy right away. This matches the behavior in earlier releases and requires no additional configuration.
 - `"rolling"` – launch a replacement alongside the existing instance, verify it is healthy, optionally wait for a grace period, and only then terminate the previous process. This keeps services available throughout a restart.
 
 ```yaml

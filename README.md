@@ -16,8 +16,9 @@
 ## Table of Contents
 
 1. [Getting Started](#getting-started)
-   - 1.1 [Installation](#installation)
-   - 1.2 [Running a Basic Start Command](#running-a-basic-start-command)
+   - 1.1 [How It Works](#how-it-works)
+   - 1.2 [Installation](#installation)
+   - 1.3 [Running a Basic Start Command](#running-a-basic-start-command)
    - 1.3 [How It Works (docs)](docs/docs/how-it-works.md)
 2. [Why systemg](#why-systemg)
    - 2.1 [Features](#features)
@@ -37,6 +38,10 @@ It aims to provide **a minimal alternative to systemd** and other heavyweight se
 ---
 
 ## Getting Started
+
+### How It Works
+
+Curious about the architecture? Read [How Systemg Works](docs/docs/how-it-works.md) for a deep dive into userspace vs. kernel-space behavior, socket activation, and runtime helpers.
 
 ### Installation
 
@@ -162,7 +167,7 @@ If `database` fails to come up, `web` will remain stopped and log the dependency
 
 #### Rolling Deployments
 
-Services can opt into rolling restarts so existing instances keep serving traffic until replacements are healthy. Add a `deployment` block to configure the behaviour:
+Services can opt into rolling restarts so existing instances keep serving traffic until replacements are healthy. Add a `deployment` block to configure the behavior:
 
 ```yaml
 version: "1"

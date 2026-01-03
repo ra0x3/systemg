@@ -3163,7 +3163,7 @@ mod tests {
             env: None,
         };
 
-        // Validate order to mirror load_config behaviour.
+        // Validate order to mirror load_config behavior.
         config.service_start_order().unwrap();
 
         Daemon::new(config, pid_file, state_file, false)

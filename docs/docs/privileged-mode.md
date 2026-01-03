@@ -99,7 +99,7 @@ Namespace and sandbox toggles (Linux only): `network`, `mount`, `pid`, `user`, `
 - Namespaces leverage `unshare` before `exec`; combine them with capability configuration when a feature (e.g. `CLONE_NEWNET`) requires specific privileges.
 - `private_devices` and `private_tmp` are advisory toggles today and emit warnings until full device/tmpfs remounting is implemented.
 
-## Behaviour Without Root
+## Behavior Without Root
 
 - `sysg --sys` returns a permission error unless run as root.
 - Services that request user/group switching return `PermissionDenied` when the supervisor lacks privileges.
