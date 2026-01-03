@@ -759,6 +759,9 @@ services:
 #[cfg(target_os = "linux")]
 #[test]
 fn logs_streams_when_pid_has_no_fds() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -786,8 +789,8 @@ fn logs_streams_when_pid_has_no_fds() {
 
     assert
         .success()
-        .stdout(predicate::str::contains("arb_rs"))
-        .stdout(predicate::str::contains("streamed stdout line"));
+        .stdout(predicates::str::contains("arb_rs"))
+        .stdout(predicates::str::contains("streamed stdout line"));
 
     unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
 }
@@ -795,6 +798,9 @@ fn logs_streams_when_pid_has_no_fds() {
 #[cfg(target_os = "linux")]
 #[test]
 fn status_flags_zombie_processes() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -835,8 +841,8 @@ services:
 
     assert
         .success()
-        .stdout(predicate::str::contains("Process"))
-        .stdout(predicate::str::contains("zombie"));
+        .stdout(predicates::str::contains("Process"))
+        .stdout(predicates::str::contains("zombie"));
 
     unsafe {
         let mut status: libc::c_int = 0;
@@ -847,6 +853,9 @@ services:
 #[cfg(target_os = "linux")]
 #[test]
 fn status_reports_skipped_services() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -881,13 +890,16 @@ services:
         .arg(config_path.to_str().unwrap());
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("skipped_service"))
-        .stdout(predicate::str::contains("Skipped"));
+        .stdout(predicates::str::contains("skipped_service"))
+        .stdout(predicates::str::contains("Skipped"));
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn status_reports_successful_exit() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -921,8 +933,8 @@ services:
         .arg(config_path.to_str().unwrap());
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("oneshot"))
-        .stdout(predicate::str::contains("Exited successfully"));
+        .stdout(predicates::str::contains("oneshot"))
+        .stdout(predicates::str::contains("Exited successfully"));
 }
 
 // #[test]

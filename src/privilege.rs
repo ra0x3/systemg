@@ -4,8 +4,13 @@ use crate::config::CgroupConfig;
 use crate::config::{IsolationConfig, LimitValue, LimitsConfig, ServiceConfig};
 use crate::runtime;
 use libc::{RLIM_INFINITY, RLIMIT_MEMLOCK, c_int, id_t, rlimit};
+#[cfg(target_os = "linux")]
+use libc::{c_uint, size_t};
 use nix::unistd::{Group, Uid, User, getgid, getuid};
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
+#[cfg(not(target_os = "linux"))]
 use std::convert::TryInto;
 use std::io;
 use std::path::PathBuf;
@@ -72,11 +77,17 @@ impl UserContext {
 /// Normalised privilege plan derived from a `ServiceConfig` prior to spawn.
 #[derive(Debug, Clone, Default)]
 pub struct PrivilegeContext {
+    /// Name of the service this context applies to
     pub service_name: String,
+    /// Unique hash identifying the service configuration
     pub service_hash: String,
+    /// User context for privilege dropping operations
     pub user: UserContext,
+    /// Resource limits to apply to the process
     pub limits: Option<LimitsConfig>,
+    /// Linux capabilities to retain after privilege drop
     pub capabilities: Vec<String>,
+    /// Namespace isolation configuration for the process
     pub isolation: Option<IsolationConfig>,
 }
 
@@ -206,17 +217,17 @@ impl PrivilegeContext {
         };
 
         if let Some(value) = &limits.nofile {
-            set_rlimit(libc::RLIMIT_NOFILE, value)?;
+            set_rlimit(libc::RLIMIT_NOFILE as c_int, value)?;
         }
         if let Some(value) = &limits.nproc {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
-            set_rlimit(libc::RLIMIT_NPROC, value)?;
+            set_rlimit(libc::RLIMIT_NPROC as c_int, value)?;
 
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             warn!("nproc limit requested but unsupported on this platform");
         }
         if let Some(value) = &limits.memlock {
-            set_rlimit(RLIMIT_MEMLOCK, value)?;
+            set_rlimit(RLIMIT_MEMLOCK as c_int, value)?;
         }
         Ok(())
     }
@@ -246,11 +257,9 @@ impl PrivilegeContext {
         {
             let mut set = CpuSet::new();
             for cpu in cpus {
-                set.set(*cpu as usize)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                set.set(*cpu as usize).map_err(io::Error::other)?;
             }
-            sched::sched_setaffinity(Pid::from_raw(0), &set)
-                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            sched::sched_setaffinity(Pid::from_raw(0), &set).map_err(io::Error::other)?;
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -274,6 +283,9 @@ impl PrivilegeContext {
         if !self.user.supplementary.is_empty() {
             let mut buf = self.user.supplementary.clone();
             buf.insert(0, self.user.gid.unwrap_or_else(|| getgid().as_raw()));
+            #[cfg(target_os = "linux")]
+            let group_len: size_t = buf.len();
+            #[cfg(not(target_os = "linux"))]
             let group_len: c_int = buf.len().try_into().map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, "too many groups")
             })?;
@@ -299,6 +311,11 @@ impl PrivilegeContext {
 
     #[cfg(target_os = "linux")]
     fn apply_capabilities_pre_user(&self) -> io::Result<()> {
+        // Capability management requires root privileges. Skip if not running as root.
+        if !getuid().is_root() {
+            return Ok(());
+        }
+
         if self.capabilities.is_empty() {
             for set in [
                 CapSet::Effective,
@@ -339,6 +356,14 @@ impl PrivilegeContext {
 
     #[cfg(target_os = "linux")]
     fn apply_capabilities_post_user(&self) -> io::Result<()> {
+        // Capability management requires root privileges. Skip if not running as root.
+        // Note: After a user switch, getuid() reflects the new non-root user, but if we
+        // started as root we would have already handled capabilities in apply_capabilities_pre_user.
+        // This function is a no-op for non-root processes.
+        if self.user.uid.is_none() && !getuid().is_root() {
+            return Ok(());
+        }
+
         if self.capabilities.is_empty() {
             caps::clear(None, CapSet::Ambient).map_err(caps_err)?;
             return Ok(());
@@ -382,14 +407,14 @@ impl PrivilegeContext {
                 match sched::unshare(flags) {
                     Ok(()) => {}
                     Err(err) => {
-                        let io_err = io::Error::new(io::ErrorKind::Other, err);
-                        match err.as_errno() {
-                            Some(Errno::EPERM) => {
+                        let io_err = io::Error::other(err);
+                        match err {
+                            Errno::EPERM => {
                                 warn!(
                                     "Failed to unshare namespaces ({flags:?}) due to EPERM; continuing without isolation"
                                 );
                             }
-                            Some(Errno::EINVAL) => {
+                            Errno::EINVAL => {
                                 warn!(
                                     "Kernel does not support requested namespaces ({flags:?}); continuing without isolation"
                                 );
@@ -449,33 +474,33 @@ impl PrivilegeContext {
     /// Performs post-spawn privilege work (e.g. cgroup attachments) that must
     /// run after the child PID is known.
     pub fn apply_post_spawn(&self, pid: libc::pid_t) -> io::Result<()> {
-        if let Some(limits) = &self.limits {
-            if let Some(cgroup_cfg) = &limits.cgroup {
-                if getuid().is_root() {
-                    if let Err(err) =
-                        apply_cgroup_settings(&self.service_hash, cgroup_cfg, pid)
-                    {
-                        warn!(
-                            "Failed to configure cgroup for '{}': {}",
-                            self.service_name, err
-                        );
-                    }
-                } else {
+        if let Some(limits) = &self.limits
+            && let Some(cgroup_cfg) = &limits.cgroup
+        {
+            if getuid().is_root() {
+                if let Err(err) =
+                    apply_cgroup_settings(&self.service_hash, cgroup_cfg, pid)
+                {
                     warn!(
-                        "Cgroup configuration requested for '{}' but systemg is not running as root",
-                        self.service_name
+                        "Failed to configure cgroup for '{}': {}",
+                        self.service_name, err
                     );
                 }
+            } else {
+                warn!(
+                    "Cgroup configuration requested for '{}' but systemg is not running as root",
+                    self.service_name
+                );
             }
         }
 
-        if let Some(isolation) = &self.isolation {
-            if isolation.pid.unwrap_or(false) {
-                info!(
-                    "Service spawned inside PID namespace; child PID {} is isolated",
-                    pid
-                );
-            }
+        if let Some(isolation) = &self.isolation
+            && isolation.pid.unwrap_or(false)
+        {
+            info!(
+                "Service spawned inside PID namespace; child PID {} is isolated",
+                pid
+            );
         }
         Ok(())
     }
@@ -508,6 +533,9 @@ fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
         },
     };
 
+    #[cfg(target_os = "linux")]
+    let res = unsafe { libc::setrlimit(which as c_uint, &rlim as *const rlimit) };
+    #[cfg(not(target_os = "linux"))]
     let res = unsafe { libc::setrlimit(which, &rlim as *const rlimit) };
     if res != 0 {
         return Err(io::Error::last_os_error());
@@ -516,8 +544,8 @@ fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn parse_caps(names: &[String]) -> io::Result<Vec<Capability>> {
-    let mut caps_set = Vec::with_capacity(names.len());
+fn parse_caps(names: &[String]) -> io::Result<HashSet<Capability>> {
+    let mut caps_set = HashSet::with_capacity(names.len());
     for name in names {
         let cap = Capability::from_str(name.trim()).map_err(|_| {
             io::Error::new(
@@ -525,14 +553,14 @@ fn parse_caps(names: &[String]) -> io::Result<Vec<Capability>> {
                 format!("invalid capability '{name}'"),
             )
         })?;
-        caps_set.push(cap);
+        caps_set.insert(cap);
     }
     Ok(caps_set)
 }
 
 #[cfg(target_os = "linux")]
 fn caps_err(err: CapsError) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err.to_string())
+    io::Error::other(err.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -680,6 +708,3 @@ mod linux_tests {
         assert!(ctx.apply_isolation().is_ok());
     }
 }
-
-#[cfg(target_os = "linux")]
-use nix::unistd::Pid;
