@@ -6,10 +6,12 @@ use std::{
     collections::{BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use strum_macros::AsRefStr;
 
 use crate::error::ProcessManagerError;
+use crate::metrics::{MetricsSettings, SpilloverSettings};
 
 /// Represents the structure of the configuration file.
 #[derive(Debug, Deserialize, Clone)]
@@ -23,6 +25,75 @@ pub struct Config {
     /// Optional environment variables that apply to all services by default.
     /// Service-level env configurations override these root-level settings.
     pub env: Option<EnvConfig>,
+    /// Metrics collection configuration.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+}
+const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 60;
+const METRICS_DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
+const METRICS_DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
+const METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES: u64 = 256 * 1024;
+
+/// Top-level metrics configuration block.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct MetricsConfig {
+    pub retention_minutes: u64,
+    pub sample_interval_secs: u64,
+    pub max_memory_bytes: usize,
+    pub spillover_path: Option<String>,
+    pub spillover_max_bytes: Option<u64>,
+    pub spillover_segment_bytes: Option<u64>,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            retention_minutes: METRICS_DEFAULT_RETENTION_MINUTES,
+            sample_interval_secs: METRICS_DEFAULT_SAMPLE_INTERVAL_SECS,
+            max_memory_bytes: METRICS_DEFAULT_MAX_MEMORY_BYTES,
+            spillover_path: None,
+            spillover_max_bytes: None,
+            spillover_segment_bytes: None,
+        }
+    }
+}
+
+impl MetricsConfig {
+    pub fn to_settings(&self, project_dir: Option<&Path>) -> MetricsSettings {
+        let retention_minutes = self.retention_minutes.max(1);
+        let sample_interval_secs = self.sample_interval_secs.clamp(1, 60);
+        let max_memory_bytes = self.max_memory_bytes.max(128 * 1024);
+
+        let spillover = self.spillover_path.as_ref().and_then(|raw| {
+            let mut path = PathBuf::from(raw);
+            if path.is_relative()
+                && let Some(base) = project_dir
+            {
+                path = base.join(path);
+            }
+
+            let max_bytes = self.spillover_max_bytes.unwrap_or(6 * 1024 * 1024);
+            if max_bytes == 0 {
+                return None;
+            }
+
+            Some(SpilloverSettings {
+                directory: path,
+                max_bytes,
+                segment_bytes: self
+                    .spillover_segment_bytes
+                    .unwrap_or(METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES),
+            })
+        });
+
+        MetricsSettings {
+            retention: Duration::from_secs(retention_minutes * 60),
+            sample_interval: Duration::from_secs(sample_interval_secs),
+            max_memory_bytes,
+            spillover,
+        }
+    }
 }
 
 /// Skip configuration for a service.
@@ -771,6 +842,7 @@ services:
             services,
             project_dir: None,
             env: None,
+            metrics: MetricsConfig::default(),
         };
 
         let order = config.service_start_order().unwrap();
@@ -787,6 +859,7 @@ services:
             services,
             project_dir: None,
             env: None,
+            metrics: MetricsConfig::default(),
         };
 
         match config.service_start_order() {
@@ -812,6 +885,7 @@ services:
             services,
             project_dir: None,
             env: None,
+            metrics: MetricsConfig::default(),
         };
 
         match config.service_start_order() {

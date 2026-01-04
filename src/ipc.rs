@@ -1,4 +1,8 @@
-use crate::runtime;
+use crate::{
+    metrics::MetricSample,
+    runtime,
+    status::{StatusSnapshot, UnitStatus},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -51,6 +55,15 @@ pub enum ControlCommand {
     },
     /// Shutdown the supervisor daemon.
     Shutdown,
+    /// Fetch the cached status snapshot from the supervisor.
+    Status,
+    /// Inspect an individual unit with metrics.
+    Inspect {
+        /// Name or hash of the unit to inspect.
+        unit: String,
+        /// Maximum number of samples to return.
+        samples: u32,
+    },
 }
 
 /// Response sent by the supervisor.
@@ -62,6 +75,18 @@ pub enum ControlResponse {
     Message(String),
     /// Command failed with an error message.
     Error(String),
+    /// Current status snapshot payload.
+    Status(StatusSnapshot),
+    /// Inspect payload including recent samples.
+    Inspect(Box<InspectPayload>),
+}
+
+/// Inspect response payload.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InspectPayload {
+    pub unit: Option<UnitStatus>,
+    #[serde(default)]
+    pub samples: Vec<MetricSample>,
 }
 
 /// Errors raised by the control channel helpers.
@@ -249,6 +274,14 @@ mod tests {
         let shutdown = ControlCommand::Shutdown;
         let json = serde_json::to_string(&shutdown).unwrap();
         assert!(json.contains("Shutdown"));
+
+        let inspect = ControlCommand::Inspect {
+            unit: "svc".to_string(),
+            samples: 10,
+        };
+        let json = serde_json::to_string(&inspect).unwrap();
+        assert!(json.contains("Inspect"));
+        assert!(json.contains("\"samples\":10"));
     }
 
     #[test]
@@ -266,6 +299,15 @@ mod tests {
         let json = serde_json::to_string(&error).unwrap();
         assert!(json.contains("Error"));
         assert!(json.contains("Failed to stop"));
+
+        let inspect_payload = InspectPayload {
+            unit: None,
+            samples: Vec::new(),
+        };
+        let json =
+            serde_json::to_string(&ControlResponse::Inspect(Box::new(inspect_payload)))
+                .unwrap();
+        assert!(json.contains("Inspect"));
     }
 
     #[test]
@@ -361,7 +403,13 @@ mod tests {
         let socket_path = temp.path().join("test.sock");
 
         // Create a Unix socket pair for testing
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                return;
+            }
+            Err(err) => panic!("failed to bind test socket: {err}"),
+        };
 
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();

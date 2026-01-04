@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
-use systemg::config::{Config, ServiceConfig};
+use systemg::config::{Config, MetricsConfig, ServiceConfig};
 use systemg::daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile};
 use tempfile::tempdir;
 
@@ -97,6 +97,7 @@ fn restart_updates_state_with_new_pid() {
         services,
         project_dir: Some(temp.path().to_string_lossy().to_string()),
         env: None,
+        metrics: MetricsConfig::default(),
     };
 
     let daemon = build_daemon(config);

@@ -758,6 +758,16 @@ impl Daemon {
         Arc::clone(&self.config)
     }
 
+    /// Returns a handle to the shared PID file so callers can inspect process IDs.
+    pub fn pid_file_handle(&self) -> Arc<Mutex<PidFile>> {
+        Arc::clone(&self.pid_file)
+    }
+
+    /// Returns a handle to the persisted service state store.
+    pub fn service_state_handle(&self) -> Arc<Mutex<ServiceStateFile>> {
+        Arc::clone(&self.state_file)
+    }
+
     /// Explicitly records a skipped service in the persistent state store, clearing any stale PID.
     pub fn mark_service_skipped(&self, service: &str) -> Result<(), ProcessManagerError> {
         self.mark_skipped(service)
@@ -3161,6 +3171,7 @@ mod tests {
             services,
             project_dir: Some(dir.to_string_lossy().to_string()),
             env: None,
+            metrics: crate::config::MetricsConfig::default(),
         };
 
         // Validate order to mirror load_config behavior.

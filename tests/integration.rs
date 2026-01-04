@@ -131,6 +131,116 @@ fn wait_for_pid_removed(service: &str) {
     }
 }
 
+#[test]
+fn status_json_falls_back_to_snapshot_without_supervisor() {
+    use assert_cmd::Command;
+    use serde_json::Value;
+
+    let temp = tempdir().expect("create tempdir");
+    let home_guard = HomeEnvGuard::set(temp.path());
+
+    let config_path = temp.path().join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/true"
+"#,
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))
+        .expect("load config for hash");
+    let service = config.services.get("demo").expect("demo service");
+    let hash = service.compute_hash();
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::ExitedSuccessfully,
+            None,
+            Some(0),
+            None,
+        )
+        .expect("persist state");
+
+    let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
+    let output = Command::new(sysg_bin)
+        .arg("status")
+        .arg("--config")
+        .arg(config_path.as_os_str())
+        .arg("--json")
+        .output()
+        .expect("run sysg status");
+
+    let code = output.status.code().unwrap_or_default();
+    assert!(
+        code == 0 || code == 1,
+        "inspect command should exit healthy or degraded before supervisor is running, got {code}"
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
+    assert_eq!(payload["overall_health"], "healthy");
+
+    drop(home_guard);
+}
+
+#[test]
+fn inspect_json_falls_back_without_supervisor() {
+    use assert_cmd::Command;
+    use serde_json::Value;
+
+    let temp = tempdir().expect("create tempdir");
+    let home_guard = HomeEnvGuard::set(temp.path());
+
+    let config_path = temp.path().join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/true"
+"#,
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))
+        .expect("load config for hash");
+    let service = config.services.get("demo").expect("demo service");
+    let hash = service.compute_hash();
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::Running,
+            Some(4242),
+            None,
+            None,
+        )
+        .expect("persist state");
+
+    let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
+    let output = Command::new(sysg_bin)
+        .arg("inspect")
+        .arg(&hash)
+        .arg("--config")
+        .arg(config_path.as_os_str())
+        .arg("--json")
+        .output()
+        .expect("run sysg inspect");
+
+    assert!(output.status.success());
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
+    assert_eq!(payload["unit"]["hash"], hash);
+    assert!(payload["samples"].as_array().unwrap().is_empty());
+
+    drop(home_guard);
+}
+
 #[cfg(target_os = "linux")]
 fn wait_for_process_exit(pid: u32) {
     use std::path::PathBuf;

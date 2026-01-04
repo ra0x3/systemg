@@ -1,18 +1,27 @@
 //! Status management for services in the daemon.
 use nix::unistd::{Pid, getpgid};
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
 };
 use sysinfo::{ProcessesToUpdate, System};
-use tracing::debug;
+use thiserror::Error;
+use tracing::{debug, error};
 
+use crate::config::Config;
 use crate::cron::{
     CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
 };
 use crate::daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile};
-use crate::error::ServiceStateError;
+use crate::error::{PidFileError, ProcessManagerError, ServiceStateError};
+use crate::metrics::{MetricsHandle, MetricsStore, MetricsSummary};
 
 #[cfg(not(target_os = "linux"))]
 use nix::sys::signal;
@@ -31,9 +40,673 @@ const MAGENTA_BOLD: &str = "\x1b[1;35m"; // Magenta
 const YELLOW_BOLD: &str = "\x1b[1;33m"; // Yellow/Gold
 const RESET: &str = "\x1b[0m"; // Reset color
 
+/// Version identifier for the machine-readable status snapshot payload.
+pub const STATUS_SCHEMA_VERSION: &str = "status.v1";
+
+/// Errors emitted when building or refreshing status snapshots.
+#[derive(Debug, Error)]
+pub enum StatusError {
+    /// Failed to acquire the PID file information from disk.
+    #[error("failed to load pid file: {0}")]
+    PidFile(#[from] PidFileError),
+    /// Failed to read the persisted service state file from disk.
+    #[error("failed to load service state file: {0}")]
+    ServiceState(#[from] ServiceStateError),
+    /// Failed to refresh cron state information.
+    #[error("failed to load cron state file: {0}")]
+    CronState(#[from] std::io::Error),
+    /// Mutex guarding the PID file was poisoned.
+    #[error("pid file mutex poisoned")]
+    PidFilePoisoned,
+    /// Mutex guarding the service state file was poisoned.
+    #[error("service state mutex poisoned")]
+    ServiceStatePoisoned,
+    /// Metrics store mutex was poisoned.
+    #[error("metrics store mutex poisoned")]
+    MetricsPoisoned,
+    /// Failed to load configuration metadata required for display purposes.
+    #[error("failed to load configuration: {0}")]
+    Config(#[from] ProcessManagerError),
+}
+
+/// Represents the overall health of the supervisor runtime.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverallHealth {
+    Healthy,
+    Degraded,
+    Failing,
+}
+
+/// Describes what type of unit is represented by a status entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitKind {
+    Service,
+    Cron,
+    Orphaned,
+}
+
+/// Health classification for a specific unit.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitHealth {
+    Healthy,
+    Degraded,
+    Failing,
+}
+
+/// Machine-readable snapshot of supervisor state, cached by the resident daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusSnapshot {
+    pub schema_version: String,
+    pub captured_at: DateTime<Utc>,
+    pub overall_health: OverallHealth,
+    pub units: Vec<UnitStatus>,
+}
+
+impl StatusSnapshot {
+    fn new(units: Vec<UnitStatus>) -> Self {
+        let overall_health = compute_overall_health(&units);
+        Self {
+            schema_version: STATUS_SCHEMA_VERSION.to_string(),
+            captured_at: Utc::now(),
+            overall_health,
+            units,
+        }
+    }
+
+    /// Returns an empty snapshot used during bootstrap before any data is available.
+    pub fn empty() -> Self {
+        Self {
+            schema_version: STATUS_SCHEMA_VERSION.to_string(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: Vec::new(),
+        }
+    }
+}
+
+/// Status entry for a managed service or cron unit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitStatus {
+    pub name: String,
+    pub hash: String,
+    pub kind: UnitKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<ServiceLifecycleStatus>,
+    pub health: UnitHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessRuntime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime: Option<UptimeInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_exit: Option<ExitMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cron: Option<CronUnitStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<UnitMetricsSummary>,
+}
+
+/// Summarized metrics attached to a unit entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnitMetricsSummary {
+    pub latest_cpu_percent: f32,
+    pub average_cpu_percent: f32,
+    pub max_cpu_percent: f32,
+    pub latest_rss_bytes: u64,
+    pub samples: usize,
+}
+
+impl From<MetricsSummary> for UnitMetricsSummary {
+    fn from(summary: MetricsSummary) -> Self {
+        Self {
+            latest_cpu_percent: summary.latest_cpu_percent,
+            average_cpu_percent: summary.average_cpu_percent,
+            max_cpu_percent: summary.max_cpu_percent,
+            latest_rss_bytes: summary.latest_rss_bytes,
+            samples: summary.samples,
+        }
+    }
+}
+
+/// Runtime process metadata for a unit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessRuntime {
+    pub pid: u32,
+    pub state: ProcessState,
+}
+
+/// Captures how long a process has been active.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UptimeInfo {
+    pub seconds: u64,
+    pub human: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+/// Exit metadata tracked for the last lifecycle transition of a unit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExitMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+}
+
+/// Cron-specific status attributes that augment a unit entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronUnitStatus {
+    pub timezone_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<CronExecutionSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_runs: Vec<CronExecutionSummary>,
+}
+
+/// Shallow projection of cron execution history used for reporting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronExecutionSummary {
+    pub started_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<CronExecutionStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+/// Thread-safe cache of the most recent status snapshot.
+#[derive(Clone)]
+pub struct StatusCache {
+    inner: Arc<RwLock<StatusSnapshot>>,
+}
+
+impl StatusCache {
+    pub fn new(initial: StatusSnapshot) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(initial)),
+        }
+    }
+
+    /// Returns a cloned copy of the cached snapshot for read-only consumers.
+    pub fn snapshot(&self) -> StatusSnapshot {
+        self.inner
+            .read()
+            .expect("status snapshot lock poisoned")
+            .clone()
+    }
+
+    /// Replaces the cached snapshot. Intended to be called by the refresher thread.
+    pub fn replace(&self, snapshot: StatusSnapshot) {
+        if let Ok(mut guard) = self.inner.write() {
+            *guard = snapshot;
+        }
+    }
+}
+
+/// Background worker that periodically refreshes the cached status snapshot.
+pub struct StatusRefresher {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl StatusRefresher {
+    pub fn spawn<F>(cache: StatusCache, interval: Duration, mut builder: F) -> Self
+    where
+        F: FnMut() -> Result<StatusSnapshot, StatusError> + Send + 'static,
+    {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let handle = thread::spawn(move || {
+            while !stop_clone.load(Ordering::SeqCst) {
+                match builder() {
+                    Ok(snapshot) => cache.replace(snapshot),
+                    Err(err) => error!("failed to refresh status snapshot: {err}"),
+                }
+
+                let mut slept = Duration::ZERO;
+                while slept < interval {
+                    if stop_clone.load(Ordering::SeqCst) {
+                        return;
+                    }
+
+                    let remaining = interval.saturating_sub(slept);
+                    let step = if remaining > Duration::from_millis(100) {
+                        Duration::from_millis(100)
+                    } else {
+                        remaining
+                    };
+                    thread::sleep(step);
+                    slept += step;
+                }
+            }
+        });
+
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn stop(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for StatusRefresher {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Builds a fresh snapshot from the supervisor runtime, locking shared state while collecting.
+pub fn collect_snapshot_from_runtime(
+    config: Arc<Config>,
+    pid_file: &Arc<Mutex<PidFile>>,
+    service_state: &Arc<Mutex<ServiceStateFile>>,
+    metrics: Option<&MetricsHandle>,
+) -> Result<StatusSnapshot, StatusError> {
+    let pid_guard = pid_file.lock().map_err(|_| StatusError::PidFilePoisoned)?;
+    let mut state_guard = service_state
+        .lock()
+        .map_err(|_| StatusError::ServiceStatePoisoned)?;
+    let cron_state = CronStateFile::load()?;
+    let metrics_guard = match metrics {
+        Some(handle) => Some(handle.read().map_err(|_| StatusError::MetricsPoisoned)?),
+        None => None,
+    };
+
+    Ok(build_snapshot(
+        Some(config.as_ref()),
+        &pid_guard,
+        &mut state_guard,
+        &cron_state,
+        metrics_guard.as_deref(),
+    ))
+}
+
+/// Builds a snapshot purely from persisted state on disk.
+pub fn collect_snapshot_from_disk(
+    config: Option<Config>,
+) -> Result<StatusSnapshot, StatusError> {
+    let pid_file = PidFile::load()?;
+    let mut service_state = ServiceStateFile::load()?;
+    let cron_state = CronStateFile::load()?;
+    let config_ref = config.as_ref();
+
+    Ok(build_snapshot(
+        config_ref,
+        &pid_file,
+        &mut service_state,
+        &cron_state,
+        None,
+    ))
+}
+
+fn build_snapshot(
+    config: Option<&Config>,
+    pid_file: &PidFile,
+    service_state: &mut ServiceStateFile,
+    cron_state: &CronStateFile,
+    metrics_store: Option<&MetricsStore>,
+) -> StatusSnapshot {
+    let mut hash_to_name: HashMap<String, String> = HashMap::new();
+    let mut hash_kind: HashMap<String, UnitKind> = HashMap::new();
+    let mut unit_hashes: BTreeSet<String> = BTreeSet::new();
+
+    if let Some(cfg) = config {
+        for (service_name, service_config) in &cfg.services {
+            let hash = service_config.compute_hash();
+            hash_to_name.insert(hash.clone(), service_name.clone());
+            if service_config.cron.is_some() {
+                hash_kind.insert(hash.clone(), UnitKind::Cron);
+            } else {
+                hash_kind.insert(hash.clone(), UnitKind::Service);
+            }
+            unit_hashes.insert(hash);
+        }
+    }
+
+    unit_hashes.extend(service_state.services().keys().cloned());
+    unit_hashes.extend(cron_state.jobs().keys().cloned());
+
+    let mut units = Vec::new();
+
+    for hash in unit_hashes {
+        let actual_name = hash_to_name.get(&hash).cloned();
+        let display_name = actual_name
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("[orphaned] {}", truncate_hash(&hash)));
+
+        let kind = hash_kind.get(&hash).copied().unwrap_or_else(|| {
+            if cron_state.jobs().contains_key(&hash) {
+                UnitKind::Cron
+            } else if actual_name.is_some() {
+                UnitKind::Service
+            } else {
+                UnitKind::Orphaned
+            }
+        });
+
+        let mut state_entry = service_state.get(&hash).cloned();
+        let mut lifecycle = state_entry.as_ref().map(|entry| entry.status);
+        let mut pid = state_entry.as_ref().and_then(|entry| entry.pid);
+
+        if pid.is_none()
+            && let Some(name) = actual_name.as_deref()
+        {
+            pid = pid_file.pid_for(name);
+        }
+
+        let process_runtime = pid.map(|pid| ProcessRuntime {
+            pid,
+            state: StatusManager::process_state(pid),
+        });
+
+        if let Some(runtime) = process_runtime.as_ref()
+            && matches!(runtime.state, ProcessState::Running)
+            && !matches!(lifecycle, Some(ServiceLifecycleStatus::Running))
+        {
+            if let Err(err) = service_state.set(
+                &hash,
+                ServiceLifecycleStatus::Running,
+                Some(runtime.pid),
+                None,
+                None,
+            ) {
+                error!("Failed to refresh running state for '{display_name}': {err}");
+            } else {
+                state_entry = service_state.get(&hash).cloned();
+                lifecycle = state_entry.as_ref().map(|entry| entry.status);
+            }
+        }
+
+        let uptime = match process_runtime.as_ref() {
+            Some(runtime) if matches!(runtime.state, ProcessState::Running) => {
+                compute_uptime(runtime.pid)
+            }
+            _ => None,
+        };
+
+        let last_exit = state_entry.as_ref().and_then(|entry| {
+            if entry.exit_code.is_some() || entry.signal.is_some() {
+                Some(ExitMetadata {
+                    exit_code: entry.exit_code,
+                    signal: entry.signal,
+                })
+            } else {
+                None
+            }
+        });
+
+        let cron = cron_state.jobs().get(&hash).map(|job| {
+            let recent_runs: Vec<CronExecutionSummary> = job
+                .execution_history
+                .iter()
+                .rev()
+                .map(cron_record_to_summary)
+                .collect();
+
+            let last_run = recent_runs.first().cloned();
+
+            CronUnitStatus {
+                timezone_label: job.timezone_label.clone(),
+                timezone: job.timezone.clone(),
+                last_run,
+                recent_runs,
+            }
+        });
+
+        let health =
+            derive_unit_health(kind, lifecycle, process_runtime.as_ref(), cron.as_ref());
+        let metrics_summary = metrics_store
+            .and_then(|store| store.summarize_unit(&hash))
+            .map(UnitMetricsSummary::from);
+
+        units.push(UnitStatus {
+            name: display_name,
+            hash,
+            kind,
+            lifecycle,
+            health,
+            process: process_runtime,
+            uptime,
+            last_exit,
+            cron,
+            metrics: metrics_summary,
+        });
+    }
+
+    // Include any PID entries that have no associated hash/config data.
+    for (service_name, &pid_value) in pid_file.services() {
+        if hash_to_name.values().any(|name| name == service_name) {
+            continue;
+        }
+
+        let runtime = ProcessRuntime {
+            pid: pid_value,
+            state: StatusManager::process_state(pid_value),
+        };
+        let uptime = if matches!(runtime.state, ProcessState::Running) {
+            compute_uptime(runtime.pid)
+        } else {
+            None
+        };
+
+        let health = match runtime.state {
+            ProcessState::Running => UnitHealth::Healthy,
+            ProcessState::Zombie | ProcessState::Missing => UnitHealth::Failing,
+        };
+
+        let metrics_summary = metrics_store
+            .and_then(|store| store.summarize_unit(service_name))
+            .map(UnitMetricsSummary::from);
+
+        units.push(UnitStatus {
+            name: service_name.clone(),
+            hash: service_name.clone(),
+            kind: UnitKind::Orphaned,
+            lifecycle: None,
+            health,
+            process: Some(runtime),
+            uptime,
+            last_exit: None,
+            cron: None,
+            metrics: metrics_summary,
+        });
+    }
+
+    StatusSnapshot::new(units)
+}
+
+fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary {
+    CronExecutionSummary {
+        started_at: DateTime::<Utc>::from(record.started_at),
+        completed_at: record.completed_at.map(DateTime::<Utc>::from),
+        status: record.status.clone(),
+        exit_code: record.exit_code,
+    }
+}
+
+fn derive_unit_health(
+    kind: UnitKind,
+    lifecycle: Option<ServiceLifecycleStatus>,
+    runtime: Option<&ProcessRuntime>,
+    cron: Option<&CronUnitStatus>,
+) -> UnitHealth {
+    if let Some(runtime) = runtime {
+        match runtime.state {
+            ProcessState::Running => return UnitHealth::Healthy,
+            ProcessState::Zombie => {
+                return UnitHealth::Failing;
+            }
+            ProcessState::Missing => {
+                return UnitHealth::Degraded;
+            }
+        }
+    }
+
+    match lifecycle {
+        Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
+        Some(ServiceLifecycleStatus::Running) => return UnitHealth::Failing,
+        Some(ServiceLifecycleStatus::Skipped) | Some(ServiceLifecycleStatus::Stopped) => {
+            return UnitHealth::Degraded;
+        }
+        Some(ServiceLifecycleStatus::ExitedSuccessfully) => return UnitHealth::Healthy,
+        None => {}
+    }
+
+    if let Some(cron_status) = cron {
+        if let Some(last_run) = cron_status.last_run.as_ref() {
+            if let Some(status) = &last_run.status {
+                return match status {
+                    CronExecutionStatus::Success => UnitHealth::Healthy,
+                    CronExecutionStatus::OverlapError
+                    | CronExecutionStatus::Failed(_) => UnitHealth::Failing,
+                };
+            }
+
+            return UnitHealth::Healthy;
+        }
+
+        return UnitHealth::Degraded;
+    }
+
+    match kind {
+        UnitKind::Cron => UnitHealth::Degraded,
+        UnitKind::Service | UnitKind::Orphaned => UnitHealth::Degraded,
+    }
+}
+
+pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
+    if units
+        .iter()
+        .any(|unit| matches!(unit.health, UnitHealth::Failing))
+    {
+        return OverallHealth::Failing;
+    }
+
+    if units
+        .iter()
+        .any(|unit| matches!(unit.health, UnitHealth::Degraded))
+    {
+        return OverallHealth::Degraded;
+    }
+
+    OverallHealth::Healthy
+}
+
+fn truncate_hash(hash: &str) -> String {
+    let prefix_length = hash.len().min(12);
+    hash[..prefix_length].to_string()
+}
+
+fn compute_uptime(pid: u32) -> Option<UptimeInfo> {
+    #[cfg(target_os = "linux")]
+    {
+        let metadata = fs::metadata(format!("/proc/{pid}")).ok()?;
+        let started_at = metadata.modified().ok()?;
+        let started_at_utc: DateTime<Utc> = started_at.into();
+        let seconds = Utc::now()
+            .signed_duration_since(started_at_utc)
+            .to_std()
+            .ok()?
+            .as_secs();
+        return Some(UptimeInfo {
+            seconds,
+            human: format_elapsed(seconds),
+            started_at: Some(started_at_utc),
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("etime=")
+            .output()
+            .ok()?;
+        let raw = String::from_utf8(output.stdout).ok()?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let seconds = parse_elapsed_seconds(trimmed)?;
+        Some(UptimeInfo {
+            seconds,
+            human: format_elapsed(seconds),
+            started_at: None,
+        })
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn parse_elapsed_seconds(uptime_str: &str) -> Option<u64> {
+    let trimmed = uptime_str.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (day_component, time_part) = match trimmed.split_once('-') {
+        Some((days, rest)) => (days.trim().parse::<u64>().ok()?, rest),
+        None => (0, trimmed),
+    };
+
+    let segments: Vec<&str> = time_part.split(':').collect();
+    if segments.is_empty() || segments.len() > 3 {
+        return None;
+    }
+
+    let mut values = [0u64; 3];
+    for (idx, segment) in segments.iter().rev().enumerate() {
+        values[2 - idx] = segment.trim().parse::<u64>().ok()?;
+    }
+
+    let hours = values[0];
+    let minutes = values[1];
+    let seconds = values[2];
+
+    let total_seconds = seconds
+        + minutes.saturating_mul(60)
+        + hours.saturating_mul(3_600)
+        + day_component.saturating_mul(86_400);
+
+    Some(total_seconds)
+}
+
+fn format_elapsed(total_seconds: u64) -> String {
+    match total_seconds {
+        0..=59 => format!("{} secs ago", total_seconds),
+        60..=3_599 => format!("{} mins ago", total_seconds / 60),
+        3_600..=86_399 => format!("{} hours ago", total_seconds / 3_600),
+        86_400..=604_799 => format!("{} days ago", total_seconds / 86_400),
+        _ => format!("{} weeks ago", total_seconds / 604_800),
+    }
+}
+
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProcessState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
     Running,
     Zombie,
     Missing,
@@ -172,8 +845,8 @@ impl StatusManager {
 
     /// Parses an uptime string in "HH:MM" format and returns a human-readable string.
     pub fn format_uptime(uptime_str: &str) -> String {
-        if let Some(total_seconds) = Self::parse_elapsed_seconds(uptime_str) {
-            return Self::format_elapsed(total_seconds);
+        if let Some(total_seconds) = parse_elapsed_seconds(uptime_str) {
+            return format_elapsed(total_seconds);
         }
 
         #[cfg(target_os = "linux")]
@@ -184,56 +857,11 @@ impl StatusManager {
                     .signed_duration_since(parsed.with_timezone(&chrono::Utc))
                     .to_std()
             {
-                return Self::format_elapsed(duration.as_secs());
+                return format_elapsed(duration.as_secs());
             }
         }
 
         "Unknown".to_string()
-    }
-
-    fn parse_elapsed_seconds(uptime_str: &str) -> Option<u64> {
-        let trimmed = uptime_str.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        // Handle optional day component in formats like "2-03:04:05" emitted by `ps -o etime`
-        let (day_component, time_part) = match trimmed.split_once('-') {
-            Some((days, rest)) => (days.trim().parse::<u64>().ok()?, rest),
-            None => (0, trimmed),
-        };
-
-        let segments: Vec<&str> = time_part.split(':').collect();
-        if segments.is_empty() || segments.len() > 3 {
-            return None;
-        }
-
-        let mut values = [0u64; 3];
-        // Right-align parsed values into [hours, minutes, seconds]
-        for (idx, segment) in segments.iter().rev().enumerate() {
-            values[2 - idx] = segment.trim().parse::<u64>().ok()?;
-        }
-
-        let hours = values[0];
-        let minutes = values[1];
-        let seconds = values[2];
-
-        let total_seconds = seconds
-            + minutes.saturating_mul(60)
-            + hours.saturating_mul(3600)
-            + day_component.saturating_mul(86_400);
-
-        Some(total_seconds)
-    }
-
-    fn format_elapsed(total_seconds: u64) -> String {
-        match total_seconds {
-            0..=59 => format!("{} secs ago", total_seconds),
-            60..=3_599 => format!("{} mins ago", total_seconds / 60),
-            3_600..=86_399 => format!("{} hours ago", total_seconds / 3_600),
-            86_400..=604_799 => format!("{} days ago", total_seconds / 86_400),
-            _ => format!("{} weeks ago", total_seconds / 604_800),
-        }
     }
 
     /// Retrieves all child processes of a given PID and nests them properly.
@@ -836,5 +1464,68 @@ mod tests {
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn compute_overall_health_reflects_worst_unit() {
+        let units = vec![
+            UnitStatus {
+                name: "svc-a".into(),
+                hash: "hash-a".into(),
+                kind: UnitKind::Service,
+                lifecycle: None,
+                health: UnitHealth::Healthy,
+                process: None,
+                uptime: None,
+                last_exit: None,
+                cron: None,
+                metrics: None,
+            },
+            UnitStatus {
+                name: "svc-b".into(),
+                hash: "hash-b".into(),
+                kind: UnitKind::Service,
+                lifecycle: None,
+                health: UnitHealth::Failing,
+                process: None,
+                uptime: None,
+                last_exit: None,
+                cron: None,
+                metrics: None,
+            },
+        ];
+
+        assert_eq!(compute_overall_health(&units), OverallHealth::Failing);
+    }
+
+    #[test]
+    fn derive_unit_health_for_successful_cron_is_healthy() {
+        let summary = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+        };
+
+        let cron_status = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(summary),
+            recent_runs: Vec::new(),
+        };
+
+        let health = derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status));
+        assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn derive_unit_health_for_failed_service_is_failing() {
+        let health = derive_unit_health(
+            UnitKind::Service,
+            Some(ServiceLifecycleStatus::ExitedWithError),
+            None,
+            None,
+        );
+        assert_eq!(health, UnitHealth::Failing);
     }
 }

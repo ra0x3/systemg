@@ -27,6 +27,9 @@ pub mod cli;
 /// Configuration management.
 pub mod config;
 
+/// Runtime metrics collection and storage.
+pub mod metrics;
+
 /// Cron scheduling for services.
 pub mod cron;
 
