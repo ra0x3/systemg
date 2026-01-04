@@ -20,8 +20,8 @@ Supervisor logs contain:
 
 The supervisor log file is stored at:
 
-- **macOS**: `~/.local/share/systemg/supervisor.log`
-- **Linux**: `~/.local/share/systemg/supervisor.log`
+- **Userspace mode**: `~/.local/share/systemg/logs/supervisor.log`
+- **System mode (`sysg --sys`)**: `/var/log/systemg/supervisor.log`
 
 The log file is created automatically when systemg starts and is appended to for all subsequent operations.
 
@@ -48,16 +48,16 @@ You can also view supervisor logs directly:
 
 ```sh
 # View the entire log file
-$ cat ~/.local/share/systemg/supervisor.log
+$ cat ~/.local/share/systemg/logs/supervisor.log
 
 # Follow logs in real-time
-$ tail -f ~/.local/share/systemg/supervisor.log
+$ tail -f ~/.local/share/systemg/logs/supervisor.log
 
 # View last 100 lines
-$ tail -n 100 ~/.local/share/systemg/supervisor.log
+$ tail -n 100 ~/.local/share/systemg/logs/supervisor.log
 
 # Search for specific events
-$ grep "Starting service" ~/.local/share/systemg/supervisor.log
+$ grep "Starting service" ~/.local/share/systemg/logs/supervisor.log
 ```
 
 ## Log Levels
@@ -185,7 +185,7 @@ Systemg doesn't automatically rotate supervisor logs. For production use, consid
 Create `/etc/logrotate.d/systemg`:
 
 ```
-/home/*/.local/share/systemg/supervisor.log {
+~/.local/share/systemg/logs/supervisor.log {
     daily
     rotate 7
     compress
@@ -199,7 +199,7 @@ Create `/etc/logrotate.d/systemg`:
 
 ```sh
 # Archive current log
-$ mv ~/.local/share/systemg/supervisor.log ~/.local/share/systemg/supervisor.log.old
+$ mv ~/.local/share/systemg/logs/supervisor.log ~/.local/share/systemg/logs/supervisor.log.old
 
 # Systemg will create a new log file on next write
 # No need to restart systemg
@@ -211,10 +211,10 @@ To clear supervisor logs:
 
 ```sh
 # Truncate the log file
-$ truncate -s 0 ~/.local/share/systemg/supervisor.log
+$ truncate -s 0 ~/.local/share/systemg/logs/supervisor.log
 
 # Or delete it entirely
-$ rm ~/.local/share/systemg/supervisor.log
+$ rm ~/.local/share/systemg/logs/supervisor.log
 ```
 
 The log file will be recreated automatically when systemg next starts or writes a log entry.

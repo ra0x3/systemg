@@ -81,7 +81,7 @@ launching the main process:
 3. The supervisor’s own process environment provides final fallbacks.
 
 This order means inline overrides in `env.vars` win over values defined in the
-`.env` file, matching the behaviour of the services themselves. Values are also
+`.env` file, matching the behavior of the services themselves. Values are also
 available for `${VAR}` expansions during configuration parsing, so hooks can
 safely reference the same secrets and settings as the main service command.
 
@@ -96,7 +96,7 @@ safely reference the same secrets and settings as the main service command.
 - **Isolation**: Hooks are fire-and-forget; they do not retry automatically and
   their exit status does not affect service state apart from logging.
 
-## Behaviour Matrix
+## Behavior Matrix
 
 | Scenario | Hooks Fired (in order) |
 |----------|-----------------------|

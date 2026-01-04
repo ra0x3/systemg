@@ -16,8 +16,10 @@
 ## Table of Contents
 
 1. [Getting Started](#getting-started)
-   - 1.1 [Installation](#installation)
-   - 1.2 [Running a Basic Start Command](#running-a-basic-start-command)
+   - 1.1 [How It Works](#how-it-works)
+   - 1.2 [Installation](#installation)
+   - 1.3 [Running a Basic Start Command](#running-a-basic-start-command)
+   - 1.3 [How It Works (docs)](docs/docs/how-it-works.md)
 2. [Why systemg](#why-systemg)
    - 2.1 [Features](#features)
    - 2.2 [Comparison](#comparison)
@@ -37,6 +39,10 @@ It aims to provide **a minimal alternative to systemd** and other heavyweight se
 
 ## Getting Started
 
+### How It Works
+
+Curious about the architecture? Read [How Systemg Works](docs/docs/how-it-works.md) for a deep dive into userspace vs. kernel-space behavior, socket activation, and runtime helpers.
+
 ### Installation
 
 Install the system binary:
@@ -52,6 +58,8 @@ $ cargo install sysg
 ```
 
 Or download the pre-built binary from the releases page.
+
+For system deployments, `scripts/install-systemg.sh` installs `/usr/bin/sysg`, provisions `/etc/systemg`, `/var/lib/systemg`, `/var/log/systemg`, and drops sample logrotate + systemd assets for socket activation. Review and adapt it to match your distribution policies before running. Pair it with `examples/system-mode.yaml` and check the new `docs/docs/security.md` guide for hardening best practices.
 
 ### Running a Basic Start Command
 
@@ -89,6 +97,50 @@ Systemg offers a **lightweight**, **configuration-driven** solution that's **eas
 - **Minimal & Fast** - Built with Rust, designed for performance and low resource usage.
 - **No Root Required** - Unlike systemd, it doesn't take over PID 1.
 
+### Privileged Mode (Optional)
+
+Need to manage system daemons, bind privileged ports, or attach cgroup limits? Run the supervisor in privileged mode:
+
+```sh
+# Start with elevated privileges and system-wide state directories
+$ sudo sysg --sys start --config /etc/systemg/nginx.yaml --daemonize
+
+# Bind as root, then immediately drop to the configured service user
+$ sudo sysg --sys --drop-privileges start --service web
+
+# Check status without elevated privileges (falls back to userspace mode)
+$ sysg status --service web
+```
+
+In privileged mode systemg relocates state to `/var/lib/systemg`, writes supervisor logs to `/var/log/systemg/supervisor.log`, and respects the new service-level fields:
+
+```yaml
+services:
+  web:
+    command: "./server"
+    user: "www-data"
+    group: "www-data"
+    supplementary_groups: ["www-logs"]
+    limits:
+      nofile: 65536
+      nproc: 4096
+      memlock: "unlimited"      # supports K/M/G/T suffixes
+      nice: -5
+      cpu_affinity: [0, 1]
+      cgroup:
+        memory_max: "512M"
+        cpu_max: "200000 100000"
+    capabilities:
+      - CAP_NET_BIND_SERVICE
+      - CAP_SYS_NICE
+    isolation:
+      network: true
+      pid: true
+      mount: true
+```
+
+All privileged operations are opt-in: services that omit these fields continue to run unprivileged, and unit tests skip elevated scenarios automatically when not running as root.
+
 #### Dependency Handling
 
 Declare service relationships with the `depends_on` field to coordinate startup order and health checks. Systemg will:
@@ -115,7 +167,7 @@ If `database` fails to come up, `web` will remain stopped and log the dependency
 
 #### Rolling Deployments
 
-Services can opt into rolling restarts so existing instances keep serving traffic until replacements are healthy. Add a `deployment` block to configure the behaviour:
+Services can opt into rolling restarts so existing instances keep serving traffic until replacements are healthy. Add a `deployment` block to configure the behavior:
 
 ```yaml
 version: "1"

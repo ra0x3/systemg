@@ -791,6 +791,8 @@ mod tests {
         unsafe {
             env::set_var("HOME", &home);
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let pid_file = Arc::new(Mutex::new(PidFile::load().expect("load pid file")));
         {
@@ -832,5 +834,7 @@ mod tests {
                 env::remove_var("HOME");
             }
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }

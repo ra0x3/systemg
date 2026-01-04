@@ -1,7 +1,3 @@
-#[cfg(target_os = "linux")]
-use assert_cmd::Command;
-#[cfg(target_os = "linux")]
-use predicates::prelude::*;
 use std::env;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -31,6 +27,8 @@ impl HomeEnvGuard {
         unsafe {
             env::set_var("HOME", home);
         }
+        systemg::runtime::init(systemg::runtime::RuntimeMode::User);
+        systemg::runtime::set_drop_privileges(false);
         Self {
             previous,
             _lock: lock,
@@ -48,6 +46,8 @@ impl Drop for HomeEnvGuard {
                 env::remove_var("HOME");
             },
         }
+        systemg::runtime::init(systemg::runtime::RuntimeMode::User);
+        systemg::runtime::set_drop_privileges(false);
     }
 }
 
@@ -759,6 +759,9 @@ services:
 #[cfg(target_os = "linux")]
 #[test]
 fn logs_streams_when_pid_has_no_fds() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -786,8 +789,8 @@ fn logs_streams_when_pid_has_no_fds() {
 
     assert
         .success()
-        .stdout(predicate::str::contains("arb_rs"))
-        .stdout(predicate::str::contains("streamed stdout line"));
+        .stdout(predicates::str::contains("arb_rs"))
+        .stdout(predicates::str::contains("streamed stdout line"));
 
     unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
 }
@@ -795,6 +798,9 @@ fn logs_streams_when_pid_has_no_fds() {
 #[cfg(target_os = "linux")]
 #[test]
 fn status_flags_zombie_processes() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -835,8 +841,8 @@ services:
 
     assert
         .success()
-        .stdout(predicate::str::contains("Process"))
-        .stdout(predicate::str::contains("zombie"));
+        .stdout(predicates::str::contains("Process"))
+        .stdout(predicates::str::contains("zombie"));
 
     unsafe {
         let mut status: libc::c_int = 0;
@@ -847,6 +853,9 @@ services:
 #[cfg(target_os = "linux")]
 #[test]
 fn status_reports_skipped_services() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -881,13 +890,16 @@ services:
         .arg(config_path.to_str().unwrap());
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("skipped_service"))
-        .stdout(predicate::str::contains("Skipped"));
+        .stdout(predicates::str::contains("skipped_service"))
+        .stdout(predicates::str::contains("Skipped"));
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn status_reports_successful_exit() {
+    use assert_cmd::Command;
+    use predicates;
+
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -921,8 +933,8 @@ services:
         .arg(config_path.to_str().unwrap());
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("oneshot"))
-        .stdout(predicate::str::contains("Exited successfully"));
+        .stdout(predicates::str::contains("oneshot"))
+        .stdout(predicates::str::contains("Exited successfully"));
 }
 
 // #[test]
@@ -1220,7 +1232,7 @@ services:
     )
     .expect("failed to write config");
 
-    let supervisor_log = home.join(".local/share/systemg/supervisor.log");
+    let supervisor_log = home.join(".local/share/systemg/logs/supervisor.log");
 
     // Start sysg with debug logging and daemonize
     let mut start_cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
@@ -1574,7 +1586,7 @@ services:
     let state_file = runtime_dir.join("state.json");
     let pid_file = runtime_dir.join("pid.json");
     let lock_file = runtime_dir.join("pid.json.lock");
-    let supervisor_log = runtime_dir.join("supervisor.log");
+    let supervisor_log = runtime_dir.join("logs/supervisor.log");
 
     assert!(state_file.exists(), "state.json should exist before purge");
     assert!(
@@ -1652,5 +1664,29 @@ fn purge_stops_running_supervisor() {
     assert!(
         !runtime_dir.exists(),
         "runtime directory should be removed after purge"
+    );
+}
+
+#[test]
+fn sys_flag_requires_root_privileges() {
+    use std::process::Command;
+    if nix::unistd::Uid::effective().is_root() {
+        return;
+    }
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("--sys")
+        .arg("status")
+        .output()
+        .expect("failed to invoke sysg");
+
+    assert!(
+        !output.status.success(),
+        "--sys should fail when invoked without root"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--sys requires root"),
+        "stderr should mention missing root privileges: {stderr}"
     );
 }

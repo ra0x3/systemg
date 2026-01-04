@@ -94,6 +94,16 @@ pub enum ProcessManagerError {
     #[error("Service not found in PID file")]
     ErrNo(#[from] nix::errno::Errno),
 
+    /// Error when privilege setup fails before spawning a service.
+    #[error("Failed to configure privileges for service '{service}': {source}")]
+    PrivilegeSetupFailed {
+        /// Service requesting privilege changes.
+        service: String,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// Error when services fail to remain running after a restart completes.
     #[error("Service(s) failed to remain running after restart: {services:?}")]
     ServicesNotRunning {

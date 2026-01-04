@@ -1,5 +1,5 @@
 ---
-sidebar_position: 11
+sidebar_position: 99
 title: Philosophy
 ---
 
@@ -12,6 +12,8 @@ Systemg occupies the sweet spot between heavyweight system managers and simplist
 ## Technical Architecture
 
 Where `systemd` manages the entire system boot and `supervisor` manages legacy daemon processes, systemg focuses exclusively on **application service orchestration** with zero assumptions about your environment. It's built in Rust as a single static binary with no runtime dependencies, contrasting sharply with `PM2`'s Node.js requirement or `supervisor`'s Python dependency—you get predictable memory usage, instant startup, and deployment simplicity. The persistent state design (`~/.local/share/systemg/`) means your services survive supervisor restarts, unlike `foreman`/`overmind` which lose all state on exit, while the [`config_hint`](./state.md#config_hint) mechanism eliminates the need to specify configuration paths repeatedly (a common frustration with `supervisor`'s `supervisorctl -c`).
+
+When you graduate from userspace requirements into system-level responsibilities, systemg keeps the same philosophy: **privileged mode is opt-in and least-privilege by default**. You can start the supervisor with `--sys` to relocate state into `/var/lib/systemg`, bind privileged ports, or attach cgroups/namespaces, yet services only retain the Linux capabilities you explicitly list. If you omit them, systemg clears every capability set before dropping root so the process stays as unprivileged as possible. This lets teams adopt kernel-space integrations incrementally without giving up the simplicity that makes userspace deployments predictable.
 
 ## Service Model Philosophy
 

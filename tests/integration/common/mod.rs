@@ -22,6 +22,8 @@ impl HomeEnvGuard {
         unsafe {
             env::set_var("HOME", home);
         }
+        systemg::runtime::init(systemg::runtime::RuntimeMode::User);
+        systemg::runtime::set_drop_privileges(false);
         Self {
             previous,
             _lock: lock,
@@ -39,6 +41,8 @@ impl Drop for HomeEnvGuard {
                 env::remove_var("HOME");
             },
         }
+        systemg::runtime::init(systemg::runtime::RuntimeMode::User);
+        systemg::runtime::set_drop_privileges(false);
     }
 }
 

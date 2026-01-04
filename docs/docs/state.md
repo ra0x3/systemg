@@ -17,13 +17,15 @@ Systemg maintains its operational state in the `~/.local/share/systemg/` directo
 ├── pid.json              # Service PID registry
 ├── pid.json.lock         # Lock file for PID registry updates
 ├── state.json            # Service state tracking
-├── supervisor.log        # Supervisor operational logs
-└── logs/                 # Service output logs
+└── logs/
+    ├── supervisor.log     # Supervisor operational logs
     ├── service1_stdout.log
     ├── service1_stderr.log
     ├── service2_stdout.log
     └── service2_stderr.log
 ```
+
+When systemg runs with elevated privileges (`sysg --sys`), the entire tree is relocated under `/var/lib/systemg`, and supervisor logs are written to `/var/log/systemg` instead of the per-user directory.
 
 ## State Files
 
@@ -139,7 +141,7 @@ Systemg maintains its operational state in the `~/.local/share/systemg/` directo
 - Records exit codes for debugging
 - Persists across supervisor restarts
 
-### `supervisor.log`
+### `logs/supervisor.log`
 
 **Purpose**: Contains operational logs from the supervisor itself.
 
@@ -154,12 +156,15 @@ Systemg maintains its operational state in the `~/.local/share/systemg/` directo
 2025-12-31T15:30:00.567Z INFO  systemg supervisor listening on control.sock
 ```
 
+**Location**:
+- Userspace mode: `~/.local/share/systemg/logs/supervisor.log`
+- System mode (`sysg --sys`): `/var/log/systemg/supervisor.log`
+
 **Usage**:
 - Records supervisor lifecycle events
 - Logs service start/stop operations
 - Captures errors and warnings
 - Useful for debugging supervisor issues
-- Rotated automatically when it grows too large
 
 ### `logs/` Directory
 
@@ -188,7 +193,7 @@ The following state persists when the supervisor is restarted:
 - Service PID registry (`pid.json`)
 - Service state information (`state.json`)
 - Service logs (`logs/` directory)
-- Supervisor logs (`supervisor.log`)
+- Supervisor logs (`logs/supervisor.log`)
 
 This persistence ensures that:
 - Running services continue without interruption
