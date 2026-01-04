@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Status management for services in the daemon.
 use nix::unistd::{Pid, getpgid};
 use serde::{Deserialize, Serialize};
@@ -34,11 +35,11 @@ use std::time::UNIX_EPOCH;
 use chrono::{DateTime, Local, Utc};
 use chrono_tz::Tz;
 
-const GREEN_BOLD: &str = "\x1b[1;32m"; // Bright Green
-const RED_BOLD: &str = "\x1b[1;31m"; // Bright Red
-const MAGENTA_BOLD: &str = "\x1b[1;35m"; // Magenta
-const YELLOW_BOLD: &str = "\x1b[1;33m"; // Yellow/Gold
-const RESET: &str = "\x1b[0m"; // Reset color
+const GREEN_BOLD: &str = "\x1b[1;32m";
+const RED_BOLD: &str = "\x1b[1;31m";
+const MAGENTA_BOLD: &str = "\x1b[1;35m";
+const YELLOW_BOLD: &str = "\x1b[1;33m";
+const RESET: &str = "\x1b[0m";
 
 /// Version identifier for the machine-readable status snapshot payload.
 pub const STATUS_SCHEMA_VERSION: &str = "status.v1";
@@ -623,11 +624,11 @@ fn compute_uptime(pid: u32) -> Option<UptimeInfo> {
             .to_std()
             .ok()?
             .as_secs();
-        return Some(UptimeInfo {
+        Some(UptimeInfo {
             seconds,
             human: format_elapsed(seconds),
             started_at: Some(started_at_utc),
-        });
+        })
     }
 
     #[cfg(target_os = "macos")]

@@ -336,6 +336,68 @@ const YELLOW_BOLD: &str = "\x1b[1;33m";
 const RED_BOLD: &str = "\x1b[1;31m";
 const RESET: &str = "\x1b[0m";
 
+#[derive(Clone, Copy)]
+enum Alignment {
+    Left,
+    Right,
+    Center,
+}
+
+#[derive(Clone, Copy)]
+struct Column {
+    title: &'static str,
+    width: usize,
+    align: Alignment,
+}
+
+const TABLE_COLUMNS: [Column; 9] = [
+    Column {
+        title: "UNIT",
+        width: 24,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "KIND",
+        width: 6,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "STATE",
+        width: 12,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "PID",
+        width: 8,
+        align: Alignment::Right,
+    },
+    Column {
+        title: "CPU",
+        width: 10,
+        align: Alignment::Right,
+    },
+    Column {
+        title: "RSS",
+        width: 10,
+        align: Alignment::Right,
+    },
+    Column {
+        title: "UPTIME",
+        width: 20,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "LAST EXIT",
+        width: 18,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "HEALTH",
+        width: 8,
+        align: Alignment::Center,
+    },
+];
+
 fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Error>> {
     match ipc::send_command(&ControlCommand::Status) {
         Ok(ControlResponse::Status(snapshot)) => Ok(snapshot),
@@ -396,65 +458,43 @@ fn render_status(
         .with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S %Z");
 
+    let columns = &TABLE_COLUMNS;
+    let full_header_border = make_full_border(columns, '=');
+    println!("{}", full_header_border);
     println!(
-        "Status captured at {} (schema {})",
-        timestamp, snapshot.schema_version
-    );
-    println!(
-        "Overall health: {}",
-        colorize(
-            overall_health_label(health),
-            overall_health_color(health),
-            opts.no_color
+        "{}",
+        format_banner(
+            &format!(
+                "Status captured at {} (schema {})",
+                timestamp, snapshot.schema_version
+            ),
+            columns,
         )
     );
-    println!();
-
     println!(
-        "{:<24} {:<6} {:<12} {:<8} {:<10} {:<10} {:<20} {:<18} {:<8}",
-        "UNIT", "KIND", "STATE", "PID", "CPU", "RSS", "UPTIME", "LAST EXIT", "HEALTH"
+        "{}",
+        format_banner(
+            &format!(
+                "Overall health {}",
+                colorize(
+                    overall_health_label(health),
+                    overall_health_color(health),
+                    opts.no_color
+                )
+            ),
+            columns,
+        )
     );
-    println!(
-        "{:-<24} {:-<6} {:-<12} {:-<8} {:-<10} {:-<10} {:-<20} {:-<18} {:-<8}",
-        "", "", "", "", "", "", "", "", ""
-    );
+    println!("{}", make_border(columns, '='));
+    println!("{}", format_header_row(columns));
+    println!("{}", make_border(columns, '-'));
 
     for unit in &units {
-        let kind_label = match unit.kind {
-            UnitKind::Service => "svc",
-            UnitKind::Cron => "cron",
-            UnitKind::Orphaned => "orph",
-        };
-
-        let state = unit_state_label(unit);
-        let pid = unit
-            .process
-            .as_ref()
-            .map(|runtime| runtime.pid.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        let uptime = format_uptime_column(unit.uptime.as_ref());
-        let cpu_col = format_cpu_column(unit.metrics.as_ref());
-        let rss_col = format_rss_column(unit.metrics.as_ref());
-        let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
-        let health_label = colorize(
-            unit_health_label(unit.health),
-            unit_health_color(unit.health),
-            opts.no_color,
-        );
-
-        println!(
-            "{:<24} {:<6} {:<12} {:<8} {:<10} {:<10} {:<20} {:<18} {:<8}",
-            unit.name,
-            kind_label,
-            state,
-            pid,
-            cpu_col,
-            rss_col,
-            uptime,
-            last_exit,
-            health_label
-        );
+        println!("{}", format_unit_row(unit, columns, opts.no_color));
     }
+
+    println!("{}", make_border(columns, '='));
+    println!("{}", full_header_border);
 
     io::stdout().flush()?;
     Ok(health)
@@ -575,6 +615,154 @@ fn format_last_exit(
         },
         None => "-".to_string(),
     }
+}
+
+fn total_inner_width(columns: &[Column]) -> usize {
+    let base: usize = columns.iter().map(|c| c.width + 2).sum();
+    base + columns.len().saturating_sub(1)
+}
+
+fn make_full_border(columns: &[Column], fill_char: char) -> String {
+    let inner_width = total_inner_width(columns);
+    format!("+{}+", fill_char.to_string().repeat(inner_width))
+}
+
+fn make_border(columns: &[Column], fill_char: char) -> String {
+    let mut line = String::from("+");
+    for column in columns {
+        line.push_str(&fill_char.to_string().repeat(column.width + 2));
+        line.push('+');
+    }
+    line
+}
+
+fn format_banner(text: &str, columns: &[Column]) -> String {
+    let inner_width = total_inner_width(columns);
+    let content = ansi_pad(text, inner_width, Alignment::Center);
+    format!("|{}|", content)
+}
+
+fn format_header_row(columns: &[Column]) -> String {
+    let mut row = String::from("|");
+    for column in columns {
+        row.push(' ');
+        row.push_str(&ansi_pad(column.title, column.width, Alignment::Center));
+        row.push(' ');
+        row.push('|');
+    }
+    row
+}
+
+fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> String {
+    let kind_label = match unit.kind {
+        UnitKind::Service => "svc",
+        UnitKind::Cron => "cron",
+        UnitKind::Orphaned => "orph",
+    };
+
+    let state = unit_state_label(unit);
+    let pid = unit
+        .process
+        .as_ref()
+        .map(|runtime| runtime.pid.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let cpu_col = format_cpu_column(unit.metrics.as_ref());
+    let rss_col = format_rss_column(unit.metrics.as_ref());
+    let uptime = format_uptime_column(unit.uptime.as_ref());
+    let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+    let health_label = colorize(
+        unit_health_label(unit.health),
+        unit_health_color(unit.health),
+        no_color,
+    );
+
+    let name_width = columns
+        .first()
+        .map(|col| col.width)
+        .unwrap_or_else(|| unit.name.len());
+    let display_name = if visible_length(&unit.name) > name_width {
+        ellipsize(&unit.name, name_width)
+    } else {
+        unit.name.clone()
+    };
+
+    let values = [
+        display_name,
+        kind_label.to_string(),
+        state,
+        pid,
+        cpu_col,
+        rss_col,
+        uptime,
+        last_exit,
+        health_label,
+    ];
+
+    format_row(&values, columns)
+}
+
+fn format_row(values: &[String; 9], columns: &[Column]) -> String {
+    let mut row = String::from("|");
+    for (value, column) in values.iter().zip(columns.iter()) {
+        row.push(' ');
+        row.push_str(&ansi_pad(value, column.width, column.align));
+        row.push(' ');
+        row.push('|');
+    }
+    row
+}
+
+fn ansi_pad(value: &str, width: usize, align: Alignment) -> String {
+    let len = visible_length(value);
+    if len >= width {
+        return value.to_string();
+    }
+
+    let pad = width - len;
+    match align {
+        Alignment::Left => format!("{}{}", value, " ".repeat(pad)),
+        Alignment::Right => format!("{}{}", " ".repeat(pad), value),
+        Alignment::Center => {
+            let left = pad / 2;
+            let right = pad - left;
+            format!("{}{}{}", " ".repeat(left), value, " ".repeat(right))
+        }
+    }
+}
+
+fn visible_length(text: &str) -> usize {
+    let mut len = 0;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for next in &mut chars {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+fn ellipsize(value: &str, width: usize) -> String {
+    if width <= 3 {
+        return "...".chars().take(width).collect();
+    }
+
+    let mut result = String::new();
+    let mut iter = value.chars();
+    for _ in 0..(width - 3) {
+        if let Some(ch) = iter.next() {
+            result.push(ch);
+        } else {
+            return value.to_string();
+        }
+    }
+    result.push_str("...");
+    result
 }
 
 fn format_cpu_column(metrics: Option<&UnitMetricsSummary>) -> String {

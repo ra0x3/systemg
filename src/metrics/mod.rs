@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};

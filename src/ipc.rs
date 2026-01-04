@@ -84,7 +84,9 @@ pub enum ControlResponse {
 /// Inspect response payload.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InspectPayload {
+    /// Optional status details for the requested unit.
     pub unit: Option<UnitStatus>,
+    /// Recent metric samples associated with the unit.
     #[serde(default)]
     pub samples: Vec<MetricSample>,
 }

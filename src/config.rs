@@ -38,11 +38,17 @@ const METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES: u64 = 256 * 1024;
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct MetricsConfig {
+    /// Number of minutes to retain in-memory samples (minimum: 1).
     pub retention_minutes: u64,
+    /// Sampling interval in seconds (clamped between 1 and 60).
     pub sample_interval_secs: u64,
+    /// Maximum memory used across all ring buffers (bytes).
     pub max_memory_bytes: usize,
+    /// Optional directory path for spillover segments.
     pub spillover_path: Option<String>,
+    /// Maximum bytes to persist on disk for spillover segments.
     pub spillover_max_bytes: Option<u64>,
+    /// Preferred segment size when rotating spillover files.
     pub spillover_segment_bytes: Option<u64>,
 }
 
@@ -60,6 +66,7 @@ impl Default for MetricsConfig {
 }
 
 impl MetricsConfig {
+    /// Converts the configuration into runtime settings.
     pub fn to_settings(&self, project_dir: Option<&Path>) -> MetricsSettings {
         let retention_minutes = self.retention_minutes.max(1);
         let sample_interval_secs = self.sample_interval_secs.clamp(1, 60);

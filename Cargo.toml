@@ -72,5 +72,25 @@ name = "pid_tracking"
 path = "tests/integration/pid_tracking.rs"
 
 [[test]]
-name = "integration"
-path = "tests/integration.rs"
+name = "status"
+path = "tests/integration/status.rs"
+
+[[test]]
+name = "logs"
+path = "tests/integration/logs.rs"
+
+[[test]]
+name = "cron"
+path = "tests/integration/cron.rs"
+
+[[test]]
+name = "supervisor"
+path = "tests/integration/supervisor.rs"
+
+[[test]]
+name = "deployment"
+path = "tests/integration/deployment.rs"
+
+[[test]]
+name = "cli"
+path = "tests/integration/cli.rs"
