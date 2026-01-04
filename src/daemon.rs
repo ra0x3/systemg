@@ -1,5 +1,6 @@
 //! Module for managing and monitoring system services.
 use crate::logs::{resolve_log_path, spawn_log_writer};
+use crate::runtime;
 use fs2::FileExt;
 use reqwest::blocking::Client;
 use serde::de::Error as _;
@@ -95,14 +96,12 @@ pub struct PidFile {
 impl PidFile {
     /// Returns the PID file path
     fn path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/pid.json", home))
+        runtime::state_dir().join("pid.json")
     }
 
     /// Returns the lock file path
     fn lock_path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/pid.json.lock", home))
+        runtime::state_dir().join("pid.json.lock")
     }
 
     /// Acquires an exclusive lock on the PID file lock file.
@@ -260,8 +259,7 @@ pub struct ServiceStateFile {
 
 impl ServiceStateFile {
     fn path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/state.json", home))
+        runtime::state_dir().join("state.json")
     }
 
     /// Loads the service state file from disk, creating an empty one if it doesn't exist.
@@ -873,20 +871,19 @@ impl Daemon {
     ///
     /// # Arguments
     /// * `service_name` - The name of the service.
-    /// * `command` - The command string to execute.
-    /// * `env` - Optional environment variables.
+    /// * `service_config` - The service configuration for command/env/runtime settings.
     /// * `processes` - Shared process tracking map.
     ///
     /// # Returns
     /// A [`Child`] process handle if successful.
     fn launch_attached_service(
         service_name: &str,
-        command: &str,
-        env: Option<EnvConfig>,
+        service_config: &ServiceConfig,
         working_dir: PathBuf,
         processes: Arc<Mutex<HashMap<String, Child>>>,
         detach_children: bool,
     ) -> Result<u32, ProcessManagerError> {
+        let command = &service_config.command;
         debug!("Launching service: '{service_name}' with command: `{command}`");
 
         let mut cmd = Command::new("sh");
@@ -897,7 +894,22 @@ impl Daemon {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let merged_env = collect_service_env(&env, &working_dir, service_name);
+        let mut merged_env =
+            collect_service_env(&service_config.env, &working_dir, service_name);
+
+        let privilege = crate::privilege::PrivilegeContext::from_service(
+            service_name,
+            service_config,
+        )
+        .map_err(|source| ProcessManagerError::PrivilegeSetupFailed {
+            service: service_name.to_string(),
+            source,
+        })?;
+
+        for (key, value) in privilege.user.env_overrides() {
+            merged_env.insert(key, value);
+        }
+
         if !merged_env.is_empty() {
             let keys: Vec<_> = merged_env.keys().cloned().collect();
             debug!("Setting environment variables: {:?}", keys);
@@ -905,6 +917,8 @@ impl Daemon {
                 cmd.env(key, value);
             }
         }
+
+        let privilege_clone = privilege.clone();
 
         unsafe {
             cmd.pre_exec(move || {
@@ -939,7 +953,10 @@ impl Daemon {
                     }
                 }
 
-                Ok(())
+                privilege_clone.apply_pre_exec().map_err(|err| {
+                    eprintln!("systemg pre_exec: privilege setup failed: {}", err);
+                    err
+                })
             });
         }
 
@@ -959,6 +976,12 @@ impl Daemon {
                 }
 
                 processes.lock()?.insert(service_name.to_string(), child);
+
+                if let Err(err) = privilege.apply_post_spawn(pid as libc::pid_t) {
+                    warn!(
+                        "Failed to apply post-spawn privilege adjustments for '{service_name}': {err}"
+                    );
+                }
                 Ok(pid)
             }
             Err(e) => {
@@ -1923,8 +1946,7 @@ impl Daemon {
         }
 
         let processes = Arc::clone(&self.processes);
-        let command = service.command.clone();
-        let env = service.env.clone();
+        let service_config = service.clone();
         let service_name = name.to_string();
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
@@ -1935,8 +1957,7 @@ impl Daemon {
 
             match Daemon::launch_attached_service(
                 &service_name,
-                &command,
-                env,
+                &service_config,
                 working_dir.clone(),
                 processes.clone(),
                 detach_children,
@@ -2110,8 +2131,7 @@ impl Daemon {
         }
 
         let processes = Arc::clone(&self.processes);
-        let command = service.command.clone();
-        let env = service.env.clone();
+        let service_config = service.clone();
         let service_name = name.to_string();
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
@@ -2123,8 +2143,7 @@ impl Daemon {
 
             let launch_result = Daemon::launch_attached_service(
                 &service_name,
-                &command,
-                env,
+                &service_config,
                 working_dir.clone(),
                 processes.clone(),
                 detach_children,
@@ -2790,8 +2809,7 @@ impl Daemon {
         restart_suppressed: Arc<Mutex<HashSet<String>>>,
     ) {
         let name = name.to_string();
-        let command = service.command.clone();
-        let env = service.env.clone();
+        let service_clone = service.clone();
         let hooks = service.hooks.clone();
         let max_restarts = service.max_restarts;
 
@@ -2856,8 +2874,7 @@ impl Daemon {
 
             let restart_result = Daemon::launch_attached_service(
                 &name,
-                &command,
-                env.clone(),
+                &service_clone,
                 project_root.clone(),
                 Arc::clone(&processes),
                 detach_children,
@@ -2892,7 +2909,7 @@ impl Daemon {
                         {
                             run_hook(
                                 action,
-                                &env,
+                                &service_clone.env,
                                 HookStage::OnStart,
                                 HookOutcome::Error,
                                 &name,
@@ -2906,7 +2923,7 @@ impl Daemon {
                         {
                             run_hook(
                                 action,
-                                &env,
+                                &service_clone.env,
                                 HookStage::OnRestart,
                                 HookOutcome::Error,
                                 &name,
@@ -2948,7 +2965,7 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnStart,
                                     HookOutcome::Success,
                                     &name,
@@ -2962,7 +2979,7 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnRestart,
                                     HookOutcome::Success,
                                     &name,
@@ -3001,7 +3018,7 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnStart,
                                     HookOutcome::Success,
                                     &name,
@@ -3015,7 +3032,7 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnRestart,
                                     HookOutcome::Success,
                                     &name,
@@ -3034,7 +3051,7 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnStart,
                                     HookOutcome::Error,
                                     &name,
@@ -3048,7 +3065,7 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnRestart,
                                     HookOutcome::Error,
                                     &name,
@@ -3067,7 +3084,7 @@ impl Daemon {
                     {
                         run_hook(
                             action,
-                            &env,
+                            &service_clone.env,
                             HookStage::OnStart,
                             HookOutcome::Error,
                             &name,
@@ -3081,7 +3098,7 @@ impl Daemon {
                     {
                         run_hook(
                             action,
-                            &env,
+                            &service_clone.env,
                             HookStage::OnRestart,
                             HookOutcome::Error,
                             &name,
@@ -3111,6 +3128,12 @@ mod tests {
         ServiceConfig {
             command: command.to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -3140,7 +3163,7 @@ mod tests {
             env: None,
         };
 
-        // Validate order to mirror load_config behaviour.
+        // Validate order to mirror load_config behavior.
         config.service_start_order().unwrap();
 
         Daemon::new(config, pid_file, state_file, false)
@@ -3152,9 +3175,15 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let original = env::var("HOME").ok();
+        let temp_home = temp.path().to_path_buf();
         unsafe {
-            env::set_var("HOME", temp.path());
+            env::set_var("HOME", &temp_home);
         }
+        crate::runtime::init_with_test_home(&temp_home);
+        crate::runtime::set_drop_privileges(false);
+
+        fs::create_dir_all(crate::runtime::state_dir()).unwrap();
+        fs::create_dir_all(crate::runtime::log_dir()).unwrap();
         test(temp.path());
         match original {
             Some(val) => unsafe {
@@ -3164,6 +3193,8 @@ mod tests {
                 env::remove_var("HOME");
             },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]

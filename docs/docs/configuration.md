@@ -336,6 +336,77 @@ services:
         DATABASE_URL: "postgres://localhost/mydb"
 ```
 
+### Privileged Service Options
+
+The following fields are most useful when the supervisor runs with `--sys`:
+
+#### `user`, `group`, `supplementary_groups`
+
+Switch the service to a target account after privileged setup.
+
+```yaml
+services:
+  api:
+    command: "/usr/local/bin/api"
+    user: "www-data"
+    group: "www-data"
+    supplementary_groups: ["www-logs"]
+```
+
+#### `limits`
+
+Controls resource limits (`setrlimit`), scheduler priority, CPU affinity, and optional cgroup v2 settings.
+
+| Field            | Description                                       |
+| ---------------- | ------------------------------------------------- |
+| `nofile`         | Max open file descriptors (`RLIMIT_NOFILE`)       |
+| `nproc`          | Max processes (`RLIMIT_NPROC`, Unix only)         |
+| `memlock`        | Locked memory (`RLIMIT_MEMLOCK`), supports `K/M/G/T` suffixes |
+| `nice`           | Scheduler priority (-20..19)                      |
+| `cpu_affinity`   | CPU cores to pin the process to (Linux)           |
+| `cgroup`         | cgroup v2 controllers (memory/cpu)                |
+
+```yaml
+services:
+  worker:
+    command: "./worker"
+    limits:
+      nofile: 32768
+      memlock: "256M"
+      nice: 5
+      cgroup:
+        memory_max: "1G"
+        cpu_max: "200000 100000"
+```
+
+#### `capabilities`
+
+Linux capabilities to retain after the privilege drop. All other capability sets are cleared.
+
+```yaml
+services:
+  proxy:
+    command: "./proxy"
+    capabilities:
+      - CAP_NET_BIND_SERVICE
+      - CAP_SYS_NICE
+```
+
+#### `isolation`
+
+Request kernel namespaces or sandbox hints. Unsupported toggles log warnings instead of crashing.
+
+```yaml
+services:
+  sandboxed:
+    command: "./app"
+    isolation:
+      network: true
+      pid: true
+      mount: true
+      private_tmp: true
+```
+
 ### Service Dependencies
 
 #### `depends_on` (optional)
@@ -369,7 +440,7 @@ Deployment strategy configuration for managing service restarts and updates.
 
 Deployment strategy for the service. Valid values:
 
-- `"immediate"` *(default)* – stop the running instance and start a fresh copy right away. This matches the behaviour in earlier releases and requires no additional configuration.
+- `"immediate"` *(default)* – stop the running instance and start a fresh copy right away. This matches the behavior in earlier releases and requires no additional configuration.
 - `"rolling"` – launch a replacement alongside the existing instance, verify it is healthy, optionally wait for a grace period, and only then terminate the previous process. This keeps services available throughout a restart.
 
 ```yaml

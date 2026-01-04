@@ -1,3 +1,4 @@
+use crate::runtime;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -9,8 +10,7 @@ use thiserror::Error;
 
 /// Directory under `$HOME` where runtime artifacts (PID/socket files) are stored.
 fn runtime_dir() -> Result<PathBuf, ControlError> {
-    let home = std::env::var("HOME").map_err(|_| ControlError::MissingHome)?;
-    let path = PathBuf::from(home).join(".local/share/systemg");
+    let path = runtime::state_dir();
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -276,6 +276,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let pid = 12345;
         write_supervisor_pid(pid).unwrap();
@@ -293,6 +295,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -303,6 +307,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let config = PathBuf::from("/path/to/config.yaml");
         write_config_hint(&config).unwrap();
@@ -320,6 +326,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -330,6 +338,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let command = ControlCommand::Shutdown;
         let result = send_command(&command);
@@ -341,6 +351,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -416,6 +428,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let dir = runtime_dir().unwrap();
         assert!(dir.ends_with(".local/share/systemg"));
@@ -426,6 +440,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -436,6 +452,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let path = socket_path().unwrap();
         assert!(path.ends_with("control.sock"));
@@ -445,14 +463,19 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
     }
 
     #[test]
     fn empty_config_hint_handled() {
+        let _guard = crate::test_utils::env_lock();
         let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         // Write empty string
         let hint_path = config_hint_path().unwrap();
@@ -462,5 +485,13 @@ mod tests {
         // Should return None for empty content
         let hint = read_config_hint().unwrap();
         assert_eq!(hint, None);
+
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }

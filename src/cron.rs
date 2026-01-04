@@ -1,6 +1,7 @@
 //! Cron scheduling for services.
 use crate::config::{Config, CronConfig};
 use crate::error::ProcessManagerError;
+use crate::runtime;
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
@@ -444,8 +445,7 @@ pub struct CronStateFile {
 
 impl CronStateFile {
     fn path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/cron_state.json", home))
+        runtime::state_dir().join("cron_state.json")
     }
 
     fn save(&self) -> Result<(), std::io::Error> {
@@ -567,6 +567,12 @@ mod tests {
         let service_config = ServiceConfig {
             command: "test_command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -648,6 +654,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", home);
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let manager = CronManager::new();
         let cron_config = CronConfig {
@@ -687,17 +695,25 @@ mod tests {
         assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
         assert_eq!(record.exit_code, Some(0));
 
-        if let Some(original) = original_home {
-            unsafe {
-                std::env::set_var("HOME", original);
-            }
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     fn service_with_cron(expr: &str) -> ServiceConfig {
         ServiceConfig {
             command: "/bin/true".into(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -773,10 +789,12 @@ mod tests {
         assert!(state.jobs().contains_key(&job_three_hash));
         assert!(!state.jobs().contains_key(&job_one_hash));
 
-        if let Some(original) = original_home {
-            unsafe {
-                std::env::set_var("HOME", original);
-            }
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }
