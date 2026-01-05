@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
 use libc::{SIGKILL, SIGTERM, getpgrp, killpg};
 use nix::{
     sys::signal,
@@ -7,6 +8,7 @@ use std::{
     collections::HashSet,
     error::Error,
     fs, io,
+    io::Write,
     os::unix::io::IntoRawFd,
     path::PathBuf,
     process,
@@ -21,12 +23,17 @@ use tracing_subscriber::EnvFilter;
 use systemg::{
     cli::{Cli, Commands, parse_args},
     config::load_config,
-    cron::CronStateFile,
-    daemon::{Daemon, PidFile, ServiceStateFile},
-    ipc::{self, ControlCommand, ControlError, ControlResponse},
+    cron::{CronExecutionStatus, CronStateFile},
+    daemon::{Daemon, PidFile, ServiceLifecycleStatus},
+    ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
     logs::{LogManager, resolve_log_path},
+    metrics::MetricSample,
     runtime::{self, RuntimeMode},
-    status::StatusManager,
+    status::{
+        CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, StatusSnapshot,
+        UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
+        collect_snapshot_from_disk, compute_overall_health,
+    },
     supervisor::Supervisor,
 };
 
@@ -172,34 +179,77 @@ fn main() -> Result<(), Box<dyn Error>> {
             config,
             service,
             all,
+            json,
+            no_color,
+            watch,
         } => {
-            // Try to determine the actual config path, falling back to hint if needed
-            let effective_config = match load_config(Some(&config)) {
-                Ok(_) => config.clone(),
-                Err(_) => {
-                    if let Ok(Some(hint)) = ipc::read_config_hint() {
-                        hint.to_string_lossy().to_string()
-                    } else {
-                        config.clone()
-                    }
-                }
+            let mut effective_config = config.clone();
+            if load_config(Some(&config)).is_err()
+                && let Ok(Some(hint)) = ipc::read_config_hint()
+            {
+                effective_config = hint.to_string_lossy().to_string();
+            }
+
+            let render_opts = StatusRenderOptions {
+                json,
+                no_color,
+                include_orphans: all,
+                service_filter: service.as_deref(),
             };
 
-            let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
-            let state =
-                Arc::new(Mutex::new(ServiceStateFile::load().unwrap_or_default()));
-            let manager = StatusManager::new(pid, state);
-            match service {
-                Some(service) => manager.show_status(&service, Some(&effective_config)),
-                None => {
-                    if all {
-                        manager.show_statuses_all()
-                    } else {
-                        let config_data = load_config(Some(&effective_config))?;
-                        manager.show_statuses_filtered(&config_data)
-                    }
+            if let Some(interval) = watch {
+                let sleep_interval = Duration::from_secs(interval.max(1));
+                loop {
+                    let snapshot = fetch_status_snapshot(&effective_config)?;
+                    render_status(&snapshot, &render_opts, true)?;
+                    thread::sleep(sleep_interval);
                 }
+            } else {
+                let snapshot = fetch_status_snapshot(&effective_config)?;
+                let health = render_status(&snapshot, &render_opts, false)?;
+                let exit_code = match health {
+                    OverallHealth::Healthy => 0,
+                    OverallHealth::Degraded => 1,
+                    OverallHealth::Failing => 2,
+                };
+                process::exit(exit_code);
             }
+        }
+        Commands::Inspect {
+            config,
+            unit,
+            json,
+            no_color,
+            since,
+            samples,
+        } => {
+            let mut effective_config = config.clone();
+            if load_config(Some(&config)).is_err()
+                && let Ok(Some(hint)) = ipc::read_config_hint()
+            {
+                effective_config = hint.to_string_lossy().to_string();
+            }
+
+            let payload = fetch_inspect(&effective_config, &unit, samples)?;
+            if payload.unit.is_none() {
+                eprintln!("Unit '{unit}' not found.");
+                process::exit(2);
+            }
+
+            let render_opts = InspectRenderOptions {
+                json,
+                no_color,
+                since,
+                samples_limit: samples,
+            };
+
+            let health = render_inspect(&payload, &render_opts)?;
+            let exit_code = match health {
+                OverallHealth::Healthy => 0,
+                OverallHealth::Degraded => 1,
+                OverallHealth::Failing => 2,
+            };
+            process::exit(exit_code);
         }
         Commands::Logs {
             config,
@@ -265,6 +315,651 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+struct StatusRenderOptions<'a> {
+    json: bool,
+    no_color: bool,
+    include_orphans: bool,
+    service_filter: Option<&'a str>,
+}
+
+struct InspectRenderOptions {
+    json: bool,
+    no_color: bool,
+    since: Option<u64>,
+    samples_limit: usize,
+}
+
+const GREEN_BOLD: &str = "\x1b[1;32m";
+const YELLOW_BOLD: &str = "\x1b[1;33m";
+const RED_BOLD: &str = "\x1b[1;31m";
+const RESET: &str = "\x1b[0m";
+
+#[derive(Clone, Copy)]
+enum Alignment {
+    Left,
+    Right,
+    Center,
+}
+
+#[derive(Clone, Copy)]
+struct Column {
+    title: &'static str,
+    width: usize,
+    align: Alignment,
+}
+
+const TABLE_COLUMNS: [Column; 9] = [
+    Column {
+        title: "UNIT",
+        width: 24,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "KIND",
+        width: 6,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "STATE",
+        width: 12,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "PID",
+        width: 8,
+        align: Alignment::Right,
+    },
+    Column {
+        title: "CPU",
+        width: 10,
+        align: Alignment::Right,
+    },
+    Column {
+        title: "RSS",
+        width: 10,
+        align: Alignment::Right,
+    },
+    Column {
+        title: "UPTIME",
+        width: 20,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "LAST EXIT",
+        width: 18,
+        align: Alignment::Left,
+    },
+    Column {
+        title: "HEALTH",
+        width: 8,
+        align: Alignment::Center,
+    },
+];
+
+fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Error>> {
+    match ipc::send_command(&ControlCommand::Status) {
+        Ok(ControlResponse::Status(snapshot)) => Ok(snapshot),
+        Ok(other) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {:?}",
+            other
+        ))
+        .into()),
+        Err(ControlError::NotAvailable) => {
+            let config = load_config(Some(config_path)).ok();
+            collect_snapshot_from_disk(config)
+                .map_err(|err| Box::new(err) as Box<dyn Error>)
+        }
+        Err(err) => Err(Box::new(err)),
+    }
+}
+
+fn render_status(
+    snapshot: &StatusSnapshot,
+    opts: &StatusRenderOptions,
+    watch_mode: bool,
+) -> Result<OverallHealth, Box<dyn Error>> {
+    let mut units: Vec<UnitStatus> = snapshot
+        .units
+        .iter()
+        .filter(|unit| opts.include_orphans || unit.kind != UnitKind::Orphaned)
+        .cloned()
+        .collect();
+
+    if let Some(filter) = opts.service_filter {
+        units.retain(|unit| unit.name == filter || unit.hash == filter);
+    }
+
+    if units.is_empty() {
+        println!("No matching units found.");
+        return Ok(OverallHealth::Degraded);
+    }
+
+    let health = compute_overall_health(&units);
+
+    if opts.json {
+        let filtered_snapshot = StatusSnapshot {
+            schema_version: snapshot.schema_version.clone(),
+            captured_at: snapshot.captured_at,
+            overall_health: health,
+            units,
+        };
+        println!("{}", serde_json::to_string_pretty(&filtered_snapshot)?);
+        return Ok(health);
+    }
+
+    if watch_mode {
+        print!("\x1B[2J\x1B[H");
+    }
+
+    let timestamp = snapshot
+        .captured_at
+        .with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S %Z");
+
+    let columns = &TABLE_COLUMNS;
+    let full_header_border = make_full_border(columns, '=');
+    println!("{}", full_header_border);
+    println!(
+        "{}",
+        format_banner(
+            &format!(
+                "Status captured at {} (schema {})",
+                timestamp, snapshot.schema_version
+            ),
+            columns,
+        )
+    );
+    println!(
+        "{}",
+        format_banner(
+            &format!(
+                "Overall health {}",
+                colorize(
+                    overall_health_label(health),
+                    overall_health_color(health),
+                    opts.no_color
+                )
+            ),
+            columns,
+        )
+    );
+    println!("{}", make_border(columns, '='));
+    println!("{}", format_header_row(columns));
+    println!("{}", make_border(columns, '-'));
+
+    for unit in &units {
+        println!("{}", format_unit_row(unit, columns, opts.no_color));
+    }
+
+    println!("{}", make_border(columns, '='));
+    println!("{}", full_header_border);
+
+    io::stdout().flush()?;
+    Ok(health)
+}
+
+fn colorize(text: &str, color: &str, no_color: bool) -> String {
+    if no_color {
+        text.to_string()
+    } else {
+        format!("{}{}{}", color, text, RESET)
+    }
+}
+
+fn overall_health_label(health: OverallHealth) -> &'static str {
+    match health {
+        OverallHealth::Healthy => "healthy",
+        OverallHealth::Degraded => "degraded",
+        OverallHealth::Failing => "failing",
+    }
+}
+
+fn overall_health_color(health: OverallHealth) -> &'static str {
+    match health {
+        OverallHealth::Healthy => GREEN_BOLD,
+        OverallHealth::Degraded => YELLOW_BOLD,
+        OverallHealth::Failing => RED_BOLD,
+    }
+}
+
+fn unit_health_label(health: UnitHealth) -> &'static str {
+    match health {
+        UnitHealth::Healthy => "healthy",
+        UnitHealth::Degraded => "degraded",
+        UnitHealth::Failing => "failing",
+    }
+}
+
+fn unit_health_color(health: UnitHealth) -> &'static str {
+    match health {
+        UnitHealth::Healthy => GREEN_BOLD,
+        UnitHealth::Degraded => YELLOW_BOLD,
+        UnitHealth::Failing => RED_BOLD,
+    }
+}
+
+fn unit_state_label(unit: &UnitStatus) -> String {
+    if let Some(process) = &unit.process {
+        return match process.state {
+            ProcessState::Running => "Running".to_string(),
+            ProcessState::Zombie => "Zombie".to_string(),
+            ProcessState::Missing => "Missing".to_string(),
+        };
+    }
+
+    if let Some(lifecycle) = unit.lifecycle {
+        return match lifecycle {
+            ServiceLifecycleStatus::Running => "Running".to_string(),
+            ServiceLifecycleStatus::ExitedSuccessfully => "Succeeded".to_string(),
+            ServiceLifecycleStatus::ExitedWithError => "Failed".to_string(),
+            ServiceLifecycleStatus::Stopped => "Stopped".to_string(),
+            ServiceLifecycleStatus::Skipped => "Skipped".to_string(),
+        };
+    }
+
+    if let Some(cron) = &unit.cron {
+        if let Some(last) = cron.last_run.as_ref() {
+            if let Some(status) = &last.status {
+                return match status {
+                    CronExecutionStatus::Success => "Idle".to_string(),
+                    CronExecutionStatus::Failed(_) => "Failed".to_string(),
+                    CronExecutionStatus::OverlapError => "Overlap".to_string(),
+                };
+            }
+
+            return "Running".to_string();
+        }
+
+        return "Scheduled".to_string();
+    }
+
+    "Not running".to_string()
+}
+
+fn format_uptime_column(uptime: Option<&UptimeInfo>) -> String {
+    if let Some(info) = uptime {
+        format!("{} ({}s)", info.human, info.seconds)
+    } else {
+        "-".to_string()
+    }
+}
+
+fn format_last_exit(
+    exit: Option<&ExitMetadata>,
+    cron: Option<&CronUnitStatus>,
+) -> String {
+    if let Some(cron) = cron
+        && let Some(last) = &cron.last_run
+    {
+        return match &last.status {
+            Some(CronExecutionStatus::Success) => "cron ok".to_string(),
+            Some(CronExecutionStatus::Failed(reason)) => {
+                if reason.is_empty() {
+                    "cron failed".to_string()
+                } else {
+                    format!("cron failed: {}", reason)
+                }
+            }
+            Some(CronExecutionStatus::OverlapError) => "cron overlap".to_string(),
+            None => "cron running".to_string(),
+        };
+    }
+
+    match exit {
+        Some(metadata) => match (metadata.exit_code, metadata.signal) {
+            (Some(code), _) => format!("exit {code}"),
+            (None, Some(signal)) => format!("signal {signal}"),
+            _ => "unknown".to_string(),
+        },
+        None => "-".to_string(),
+    }
+}
+
+fn total_inner_width(columns: &[Column]) -> usize {
+    let base: usize = columns.iter().map(|c| c.width + 2).sum();
+    base + columns.len().saturating_sub(1)
+}
+
+fn make_full_border(columns: &[Column], fill_char: char) -> String {
+    let inner_width = total_inner_width(columns);
+    format!("+{}+", fill_char.to_string().repeat(inner_width))
+}
+
+fn make_border(columns: &[Column], fill_char: char) -> String {
+    let mut line = String::from("+");
+    for column in columns {
+        line.push_str(&fill_char.to_string().repeat(column.width + 2));
+        line.push('+');
+    }
+    line
+}
+
+fn format_banner(text: &str, columns: &[Column]) -> String {
+    let inner_width = total_inner_width(columns);
+    let content = ansi_pad(text, inner_width, Alignment::Center);
+    format!("|{}|", content)
+}
+
+fn format_header_row(columns: &[Column]) -> String {
+    let mut row = String::from("|");
+    for column in columns {
+        row.push(' ');
+        row.push_str(&ansi_pad(column.title, column.width, Alignment::Center));
+        row.push(' ');
+        row.push('|');
+    }
+    row
+}
+
+fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> String {
+    let kind_label = match unit.kind {
+        UnitKind::Service => "svc",
+        UnitKind::Cron => "cron",
+        UnitKind::Orphaned => "orph",
+    };
+
+    let state = unit_state_label(unit);
+    let pid = unit
+        .process
+        .as_ref()
+        .map(|runtime| runtime.pid.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let cpu_col = format_cpu_column(unit.metrics.as_ref());
+    let rss_col = format_rss_column(unit.metrics.as_ref());
+    let uptime = format_uptime_column(unit.uptime.as_ref());
+    let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+    let health_label = colorize(
+        unit_health_label(unit.health),
+        unit_health_color(unit.health),
+        no_color,
+    );
+
+    let name_width = columns
+        .first()
+        .map(|col| col.width)
+        .unwrap_or_else(|| unit.name.len());
+    let display_name = if visible_length(&unit.name) > name_width {
+        ellipsize(&unit.name, name_width)
+    } else {
+        unit.name.clone()
+    };
+
+    let values = [
+        display_name,
+        kind_label.to_string(),
+        state,
+        pid,
+        cpu_col,
+        rss_col,
+        uptime,
+        last_exit,
+        health_label,
+    ];
+
+    format_row(&values, columns)
+}
+
+fn format_row(values: &[String; 9], columns: &[Column]) -> String {
+    let mut row = String::from("|");
+    for (value, column) in values.iter().zip(columns.iter()) {
+        row.push(' ');
+        row.push_str(&ansi_pad(value, column.width, column.align));
+        row.push(' ');
+        row.push('|');
+    }
+    row
+}
+
+fn ansi_pad(value: &str, width: usize, align: Alignment) -> String {
+    let len = visible_length(value);
+    if len >= width {
+        return value.to_string();
+    }
+
+    let pad = width - len;
+    match align {
+        Alignment::Left => format!("{}{}", value, " ".repeat(pad)),
+        Alignment::Right => format!("{}{}", " ".repeat(pad), value),
+        Alignment::Center => {
+            let left = pad / 2;
+            let right = pad - left;
+            format!("{}{}{}", " ".repeat(left), value, " ".repeat(right))
+        }
+    }
+}
+
+fn visible_length(text: &str) -> usize {
+    let mut len = 0;
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for next in &mut chars {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+fn ellipsize(value: &str, width: usize) -> String {
+    if width <= 3 {
+        return "...".chars().take(width).collect();
+    }
+
+    let mut result = String::new();
+    let mut iter = value.chars();
+    for _ in 0..(width - 3) {
+        if let Some(ch) = iter.next() {
+            result.push(ch);
+        } else {
+            return value.to_string();
+        }
+    }
+    result.push_str("...");
+    result
+}
+
+fn format_cpu_column(metrics: Option<&UnitMetricsSummary>) -> String {
+    metrics
+        .map(|summary| format!("{:.1}%", summary.latest_cpu_percent))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_rss_column(metrics: Option<&UnitMetricsSummary>) -> String {
+    metrics
+        .map(|summary| format_bytes(summary.latest_rss_bytes))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    if bytes < 1024 {
+        return format!("{}B", bytes);
+    }
+
+    let mut value = bytes as f64;
+    let mut idx = 0;
+    while value >= 1024.0 && idx < UNITS.len() - 1 {
+        value /= 1024.0;
+        idx += 1;
+    }
+
+    format!("{:.1}{}B", value, UNITS[idx])
+}
+
+fn fetch_inspect(
+    config_path: &str,
+    unit: &str,
+    samples: usize,
+) -> Result<InspectPayload, Box<dyn Error>> {
+    let limit = samples.min(u32::MAX as usize) as u32;
+    match ipc::send_command(&ControlCommand::Inspect {
+        unit: unit.to_string(),
+        samples: limit,
+    }) {
+        Ok(ControlResponse::Inspect(payload)) => Ok(*payload),
+        Ok(other) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {:?}",
+            other
+        ))
+        .into()),
+        Err(ControlError::NotAvailable) => {
+            let config = load_config(Some(config_path))?;
+            let snapshot = collect_snapshot_from_disk(Some(config))?;
+            let unit_status = snapshot
+                .units
+                .into_iter()
+                .find(|status| status.name == unit || status.hash == unit);
+            Ok(InspectPayload {
+                unit: unit_status,
+                samples: Vec::new(),
+            })
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn render_inspect(
+    payload: &InspectPayload,
+    opts: &InspectRenderOptions,
+) -> Result<OverallHealth, Box<dyn Error>> {
+    if payload.unit.is_none() {
+        println!("No unit matching the requested identifier.");
+        return Ok(OverallHealth::Failing);
+    }
+
+    let unit = payload.unit.as_ref().unwrap();
+    let health = overall_health_from_unit(unit);
+
+    let filtered_samples =
+        filter_samples(&payload.samples, opts.since, opts.samples_limit);
+
+    if opts.json {
+        let json_payload = InspectPayload {
+            unit: Some(unit.clone()),
+            samples: filtered_samples,
+        };
+        println!("{}", serde_json::to_string_pretty(&json_payload)?);
+        return Ok(health);
+    }
+
+    println!("Inspecting unit: {}", unit.name);
+    println!(
+        "Kind: {}",
+        match unit.kind {
+            UnitKind::Service => "service",
+            UnitKind::Cron => "cron",
+            UnitKind::Orphaned => "orphaned",
+        }
+    );
+    println!(
+        "Health: {}",
+        colorize(
+            overall_health_label(health),
+            overall_health_color(health),
+            opts.no_color
+        )
+    );
+
+    if let Some(process) = &unit.process {
+        println!("PID: {}", process.pid);
+    }
+
+    if let Some(uptime) = unit.uptime.as_ref() {
+        println!("Uptime: {} ({}s)", uptime.human, uptime.seconds);
+    }
+
+    println!(
+        "Last exit: {}",
+        format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref())
+    );
+
+    if let Some(metrics) = unit.metrics.as_ref() {
+        println!(
+            "Metrics: latest {:.1}% CPU, avg {:.1}% CPU, max {:.1}% CPU, RSS {} across {} samples",
+            metrics.latest_cpu_percent,
+            metrics.average_cpu_percent,
+            metrics.max_cpu_percent,
+            format_bytes(metrics.latest_rss_bytes),
+            metrics.samples,
+        );
+    } else {
+        println!("Metrics: not available (collector has not observed samples yet)");
+    }
+
+    if filtered_samples.is_empty() {
+        println!("No metric samples to display.");
+        return Ok(health);
+    }
+
+    println!();
+    println!("{:<24} {:>8} {:>10}", "TIMESTAMP", "CPU", "RSS");
+    println!("{:-<24} {:-<8} {:-<10}", "", "", "");
+    for sample in filtered_samples {
+        println!(
+            "{:<24} {:>7.1}% {:>10}",
+            format_timestamp(sample.timestamp),
+            sample.cpu_percent,
+            format_bytes(sample.rss_bytes),
+        );
+    }
+
+    Ok(health)
+}
+
+fn filter_samples(
+    samples: &[MetricSample],
+    since: Option<u64>,
+    limit: usize,
+) -> Vec<MetricSample> {
+    let mut filtered: Vec<MetricSample> = if let Some(seconds) = since {
+        let cutoff = Utc::now()
+            .checked_sub_signed(ChronoDuration::seconds(
+                seconds.min(i64::MAX as u64) as i64
+            ))
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        samples
+            .iter()
+            .filter(|sample| sample.timestamp >= cutoff)
+            .cloned()
+            .collect()
+    } else {
+        samples.to_vec()
+    };
+
+    if filtered.len() > limit {
+        filtered = filtered
+            .into_iter()
+            .rev()
+            .take(limit)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+    }
+
+    filtered
+}
+
+fn format_timestamp(timestamp: DateTime<Utc>) -> String {
+    timestamp
+        .with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string()
+}
+
+fn overall_health_from_unit(unit: &UnitStatus) -> OverallHealth {
+    match unit.health {
+        UnitHealth::Healthy => OverallHealth::Healthy,
+        UnitHealth::Degraded => OverallHealth::Degraded,
+        UnitHealth::Failing => OverallHealth::Failing,
+    }
 }
 
 fn purge_all_state() -> Result<(), Box<dyn Error>> {
@@ -603,6 +1298,8 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         Ok(ControlResponse::Ok) => Ok(()),
+        Ok(ControlResponse::Status(_)) => Ok(()),
+        Ok(ControlResponse::Inspect(_)) => Ok(()),
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Err(ControlError::NotAvailable) => {
             warn!("No running systemg supervisor found; skipping command");

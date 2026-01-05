@@ -334,7 +334,11 @@ services:
         .arg(config_path.to_str().unwrap())
         .output()
         .expect("status before purge to execute");
-    assert!(status_before.status.success());
+    let before_code = status_before.status.code().unwrap_or_default();
+    assert!(
+        before_code == 0 || before_code == 1,
+        "status command should exit healthy or degraded before purge, got {before_code}"
+    );
     let stdout_before = String::from_utf8_lossy(&status_before.stdout);
     assert!(
         stdout_before.contains("sample"),
@@ -355,7 +359,11 @@ services:
         .arg(config_path.to_str().unwrap())
         .output()
         .expect("status after purge to execute");
-    assert!(status_after.status.success());
+    let after_code = status_after.status.code().unwrap_or_default();
+    assert!(
+        after_code == 0 || after_code == 1,
+        "status command should exit healthy or degraded after purge, got {after_code}"
+    );
     let stdout_after = String::from_utf8_lossy(&status_after.stdout);
     assert!(
         stdout_after.contains("sample"),

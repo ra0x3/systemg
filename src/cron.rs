@@ -753,6 +753,7 @@ mod tests {
             services: services_v1,
             project_dir: None,
             env: None,
+            metrics: crate::config::MetricsConfig::default(),
         };
 
         manager.sync_from_config(&config_v1).unwrap();
@@ -765,6 +766,7 @@ mod tests {
             services: services_v2,
             project_dir: None,
             env: None,
+            metrics: crate::config::MetricsConfig::default(),
         };
 
         // Compute hashes for each service

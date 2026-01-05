@@ -4,12 +4,12 @@
 mod common;
 
 use assert_cmd::cargo::cargo_bin_cmd;
-use common::{HomeEnvGuard, is_process_alive, wait_for_pid};
+use common::{HomeEnvGuard, is_process_alive, wait_for_pid, wait_for_pid_removed};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
-use systemg::config::{Config, ServiceConfig};
+use systemg::config::{Config, MetricsConfig, ServiceConfig, load_config};
 use systemg::daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile};
 use tempfile::tempdir;
 
@@ -97,6 +97,7 @@ fn restart_updates_state_with_new_pid() {
         services,
         project_dir: Some(temp.path().to_string_lossy().to_string()),
         env: None,
+        metrics: MetricsConfig::default(),
     };
 
     let daemon = build_daemon(config);
@@ -136,6 +137,80 @@ fn restart_updates_state_with_new_pid() {
     );
 
     daemon.stop_services().ok();
+    daemon.shutdown_monitor();
+}
+
+#[test]
+fn stop_updates_state_for_service_hash() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let script = dir.join("loop.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\ntrap '' TERM\nwhile true; do\n  sleep 1\ndone\n",
+    )
+    .expect("failed to write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut perms = fs::metadata(&script).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script, perms).expect("chmod script");
+    }
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  resilient:
+    command: "{}"
+"#,
+            script.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let service_hash = config
+        .services
+        .get("resilient")
+        .expect("service present")
+        .compute_hash();
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    let pid = wait_for_pid("resilient");
+    assert!(is_process_alive(pid), "service should be running");
+
+    daemon.stop_service("resilient").expect("stop resilient");
+    wait_for_pid_removed("resilient");
+
+    let state = ServiceStateFile::load().expect("load state");
+    let entry = state.get(&service_hash).expect("state entry for hash");
+    assert_eq!(
+        entry.status,
+        ServiceLifecycleStatus::Stopped,
+        "hash entry should reflect stopped state"
+    );
+    assert!(entry.pid.is_none(), "stopped service should not retain pid");
+    assert!(
+        !state.services().contains_key("resilient"),
+        "legacy name-based key should be pruned"
+    );
+    assert_eq!(
+        state.services().len(),
+        1,
+        "state file should contain only the hashed entry"
+    );
+
     daemon.shutdown_monitor();
 }
 

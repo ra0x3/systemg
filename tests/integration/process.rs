@@ -2,6 +2,10 @@
 mod common;
 
 use common::HomeEnvGuard;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::time::Duration;
 use std::{fs, thread};
 use systemg::{config::load_config, daemon::Daemon};
@@ -124,6 +128,200 @@ services:
     // PID should be cleaned up
     let pid_file = systemg::daemon::PidFile::load().unwrap();
     assert!(pid_file.pid_for("ghost_service").is_none());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restart_kills_detached_descendants_via_detacher() {
+    use std::time::Instant;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let child_pid_path = dir.join("child.pid");
+    let script = dir.join("detacher.py");
+    fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import os
+import signal
+import time
+
+child_path = os.environ["CHILD_PID_PATH"]
+
+
+def spawn():
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        signal.signal(signal.SIGTERM, lambda *_: None)
+        signal.signal(signal.SIGINT, lambda *_: None)
+        with open(child_path, "w") as fh:
+            fh.write(str(os.getpid()))
+            fh.flush()
+        while True:
+            time.sleep(1)
+    else:
+        signal.signal(signal.SIGTERM, lambda *_: time.sleep(0.5))
+        with open(child_path + ".parent", "w") as fh:
+            fh.write(str(os.getpid()))
+            fh.flush()
+        while True:
+            time.sleep(1)
+
+
+spawn()
+"#,
+    )
+    .expect("failed to write detacher script");
+    let mut perms = fs::metadata(&script).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  detacher:
+    command: "{}"
+    env:
+      vars:
+        CHILD_PID_PATH: "{}"
+"#,
+            script.display(),
+            child_pid_path.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let service_cfg = config
+        .services
+        .get("detacher")
+        .expect("service present")
+        .clone();
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    let first_parent_pid = common::wait_for_pid("detacher");
+    common::wait_for_path(&child_pid_path);
+    let read_child_pid = |path: &Path| -> u32 {
+        fs::read_to_string(path)
+            .expect("read child pid")
+            .trim()
+            .parse()
+            .expect("parse child pid")
+    };
+    let first_child_pid = read_child_pid(&child_pid_path);
+    assert!(
+        common::is_process_alive(first_child_pid),
+        "detached child should be running"
+    );
+
+    daemon
+        .restart_service("detacher", &service_cfg)
+        .expect("restart detacher");
+
+    let new_parent_pid = common::wait_for_pid("detacher");
+    assert_ne!(
+        first_parent_pid, new_parent_pid,
+        "restart should record a new parent pid"
+    );
+
+    let mut new_child_pid = 0u32;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(contents) = fs::read_to_string(&child_pid_path)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && pid != first_child_pid
+        {
+            new_child_pid = pid;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(new_child_pid != 0, "child pid should update after restart");
+
+    let mut attempts = 0;
+    while attempts < 50 && common::is_process_alive(first_child_pid) {
+        thread::sleep(Duration::from_millis(100));
+        attempts += 1;
+    }
+    assert!(
+        !common::is_process_alive(first_child_pid),
+        "detached child should be terminated after restart"
+    );
+    assert!(
+        common::is_process_alive(new_child_pid),
+        "replacement detached child should be running"
+    );
+
+    daemon.stop_service("detacher").expect("stop detacher");
+    common::wait_for_pid_removed("detacher");
+    daemon.shutdown_monitor();
+}
+
+#[test]
+fn stop_succeeds_with_stale_pidfile_entry_with_corrupted_pid() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let script = dir.join("stale.sh");
+    let done_marker = dir.join("stale.done");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nfinish() {{ touch \"{}\"; }}\ntrap finish EXIT TERM INT\nwhile true; do sleep 1; done\n",
+            done_marker.display()
+        ),
+    )
+    .expect("failed to write stale script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  stale:
+    command: "sh ./stale.sh"
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services_nonblocking().expect("start services");
+
+    let real_pid = common::wait_for_pid("stale");
+
+    let bogus_pid = real_pid.saturating_add(10_000);
+    let pid_file_path = home.join(".local/share/systemg/pid.json");
+    fs::create_dir_all(pid_file_path.parent().unwrap())
+        .expect("failed to create pid directory");
+    let fake_contents = format!(
+        "{{\n  \"services\": {{\n    \"stale\": {}\n  }}\n}}\n",
+        bogus_pid
+    );
+    fs::write(&pid_file_path, fake_contents).expect("failed to corrupt pid file");
+
+    daemon.stop_service("stale").expect("stop stale");
+
+    common::wait_for_pid_removed("stale");
+
+    common::wait_for_path(&done_marker);
+
+    daemon.shutdown_monitor();
 }
 
 #[cfg(target_os = "linux")]

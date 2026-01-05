@@ -144,6 +144,44 @@ pub enum Commands {
         /// Show all services including orphaned state (services not in current config).
         #[arg(long)]
         all: bool,
+
+        /// Emit machine-readable JSON output instead of a table.
+        #[arg(long)]
+        json: bool,
+
+        /// Disable ANSI colors in output.
+        #[arg(long = "no-color")]
+        no_color: bool,
+
+        /// Continuously refresh status at the provided interval in seconds.
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+    },
+
+    /// Inspect a single service or cron unit in detail.
+    Inspect {
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
+        config: String,
+
+        /// Name or hash of the unit to inspect.
+        unit: String,
+
+        /// Emit machine-readable JSON output instead of a report.
+        #[arg(long)]
+        json: bool,
+
+        /// Disable ANSI colors in output.
+        #[arg(long = "no-color")]
+        no_color: bool,
+
+        /// Only include samples captured in the last N seconds.
+        #[arg(long, value_name = "SECONDS")]
+        since: Option<u64>,
+
+        /// Maximum number of metric samples to display (default: 60).
+        #[arg(long, value_name = "COUNT", default_value = "60")]
+        samples: usize,
     },
 
     /// Show logs for a specific service.
