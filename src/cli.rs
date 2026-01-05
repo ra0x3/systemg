@@ -182,6 +182,10 @@ pub enum Commands {
         /// Maximum number of metric samples to display (default: 60).
         #[arg(long, value_name = "COUNT", default_value = "60")]
         samples: usize,
+
+        /// Display metrics in table format instead of chart visualization.
+        #[arg(long)]
+        table: bool,
     },
 
     /// Show logs for a specific service.

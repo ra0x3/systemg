@@ -222,6 +222,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             no_color,
             since,
             samples,
+            table,
         } => {
             let mut effective_config = config.clone();
             if load_config(Some(&config)).is_err()
@@ -241,6 +242,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 no_color,
                 since,
                 samples_limit: samples,
+                table,
             };
 
             let health = render_inspect(&payload, &render_opts)?;
@@ -329,11 +331,18 @@ struct InspectRenderOptions {
     no_color: bool,
     since: Option<u64>,
     samples_limit: usize,
+    table: bool,
 }
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
+const GREEN: &str = "\x1b[32m";
+const BRIGHT_GREEN: &str = "\x1b[92m";
 const YELLOW_BOLD: &str = "\x1b[1;33m";
 const RED_BOLD: &str = "\x1b[1;31m";
+const RED: &str = "\x1b[31m";
+const CYAN: &str = "\x1b[36m";
+const YELLOW: &str = "\x1b[33m";
+const GRAY: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
 
 #[derive(Clone, Copy)]
@@ -540,22 +549,26 @@ fn unit_health_color(health: UnitHealth) -> &'static str {
     }
 }
 
-fn unit_state_label(unit: &UnitStatus) -> String {
+fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
     if let Some(process) = &unit.process {
         return match process.state {
-            ProcessState::Running => "Running".to_string(),
-            ProcessState::Zombie => "Zombie".to_string(),
-            ProcessState::Missing => "Missing".to_string(),
+            ProcessState::Running => colorize("Running", BRIGHT_GREEN, no_color),
+            ProcessState::Zombie => colorize("Zombie", RED, no_color),
+            ProcessState::Missing => colorize("Missing", RED_BOLD, no_color),
         };
     }
 
     if let Some(lifecycle) = unit.lifecycle {
         return match lifecycle {
-            ServiceLifecycleStatus::Running => "Running".to_string(),
-            ServiceLifecycleStatus::ExitedSuccessfully => "Succeeded".to_string(),
-            ServiceLifecycleStatus::ExitedWithError => "Failed".to_string(),
-            ServiceLifecycleStatus::Stopped => "Stopped".to_string(),
-            ServiceLifecycleStatus::Skipped => "Skipped".to_string(),
+            ServiceLifecycleStatus::Running => {
+                colorize("Running", BRIGHT_GREEN, no_color)
+            }
+            ServiceLifecycleStatus::ExitedSuccessfully => {
+                colorize("Succeeded", GREEN, no_color)
+            }
+            ServiceLifecycleStatus::ExitedWithError => colorize("Failed", RED, no_color),
+            ServiceLifecycleStatus::Stopped => colorize("Stopped", GRAY, no_color),
+            ServiceLifecycleStatus::Skipped => colorize("Skipped", GRAY, no_color),
         };
     }
 
@@ -563,19 +576,21 @@ fn unit_state_label(unit: &UnitStatus) -> String {
         if let Some(last) = cron.last_run.as_ref() {
             if let Some(status) = &last.status {
                 return match status {
-                    CronExecutionStatus::Success => "Idle".to_string(),
-                    CronExecutionStatus::Failed(_) => "Failed".to_string(),
-                    CronExecutionStatus::OverlapError => "Overlap".to_string(),
+                    CronExecutionStatus::Success => colorize("Idle", GREEN, no_color),
+                    CronExecutionStatus::Failed(_) => colorize("Failed", RED, no_color),
+                    CronExecutionStatus::OverlapError => {
+                        colorize("Overlap", YELLOW_BOLD, no_color)
+                    }
                 };
             }
 
-            return "Running".to_string();
+            return colorize("Running", BRIGHT_GREEN, no_color);
         }
 
-        return "Scheduled".to_string();
+        return colorize("Scheduled", YELLOW, no_color);
     }
 
-    "Not running".to_string()
+    colorize("Not running", GRAY, no_color)
 }
 
 fn format_uptime_column(uptime: Option<&UptimeInfo>) -> String {
@@ -586,6 +601,23 @@ fn format_uptime_column(uptime: Option<&UptimeInfo>) -> String {
     }
 }
 
+fn format_relative_time(from: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(from);
+
+    if duration.num_seconds() < 60 {
+        "< 1m ago".to_string()
+    } else if duration.num_minutes() < 60 {
+        format!("{}m ago", duration.num_minutes())
+    } else if duration.num_hours() < 24 {
+        format!("{}h ago", duration.num_hours())
+    } else if duration.num_days() < 7 {
+        format!("{}d ago", duration.num_days())
+    } else {
+        format!("{}w ago", duration.num_weeks())
+    }
+}
+
 fn format_last_exit(
     exit: Option<&ExitMetadata>,
     cron: Option<&CronUnitStatus>,
@@ -593,24 +625,48 @@ fn format_last_exit(
     if let Some(cron) = cron
         && let Some(last) = &cron.last_run
     {
+        let time_str = if let Some(completed_at) = last.completed_at {
+            format!(" {}", format_relative_time(completed_at))
+        } else if last.status.is_none() {
+            // Still running, no completion time
+            "".to_string()
+        } else {
+            // Has status but no completion time, use start time
+            format!(" {}", format_relative_time(last.started_at))
+        };
+
         return match &last.status {
-            Some(CronExecutionStatus::Success) => "cron ok".to_string(),
-            Some(CronExecutionStatus::Failed(reason)) => {
-                if reason.is_empty() {
-                    "cron failed".to_string()
+            Some(CronExecutionStatus::Success) => {
+                if let Some(code) = last.exit_code {
+                    format!("exit {}{}", code, time_str)
                 } else {
-                    format!("cron failed: {}", reason)
+                    format!("cron ok{}", time_str)
                 }
             }
-            Some(CronExecutionStatus::OverlapError) => "cron overlap".to_string(),
-            None => "cron running".to_string(),
+            Some(CronExecutionStatus::Failed(reason)) => {
+                if let Some(code) = last.exit_code {
+                    format!("exit {}{}", code, time_str)
+                } else if reason.is_empty() {
+                    format!("cron failed{}", time_str)
+                } else {
+                    // Truncate reason if it's too long
+                    let truncated_reason = if reason.len() > 20 {
+                        format!("{}...", &reason[..17])
+                    } else {
+                        reason.clone()
+                    };
+                    format!("failed: {}{}", truncated_reason, time_str)
+                }
+            }
+            Some(CronExecutionStatus::OverlapError) => format!("overlap{}", time_str),
+            None => "running".to_string(),
         };
     }
 
     match exit {
         Some(metadata) => match (metadata.exit_code, metadata.signal) {
-            (Some(code), _) => format!("exit {code}"),
-            (None, Some(signal)) => format!("signal {signal}"),
+            (Some(code), _) => format!("exit {}", code),
+            (None, Some(signal)) => format!("signal {}", signal),
             _ => "unknown".to_string(),
         },
         None => "-".to_string(),
@@ -660,7 +716,13 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         UnitKind::Orphaned => "orph",
     };
 
-    let state = unit_state_label(unit);
+    let colored_kind_label = match unit.kind {
+        UnitKind::Service => colorize(kind_label, CYAN, no_color),
+        UnitKind::Cron => colorize(kind_label, YELLOW, no_color),
+        UnitKind::Orphaned => kind_label.to_string(),
+    };
+
+    let state = unit_state_label(unit, no_color);
     let pid = unit
         .process
         .as_ref()
@@ -688,7 +750,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
 
     let values = [
         display_name,
-        kind_label.to_string(),
+        colored_kind_label,
         state,
         pid,
         cpu_col,
@@ -898,16 +960,24 @@ fn render_inspect(
         return Ok(health);
     }
 
-    println!();
-    println!("{:<24} {:>8} {:>10}", "TIMESTAMP", "CPU", "RSS");
-    println!("{:-<24} {:-<8} {:-<10}", "", "", "");
-    for sample in filtered_samples {
-        println!(
-            "{:<24} {:>7.1}% {:>10}",
-            format_timestamp(sample.timestamp),
-            sample.cpu_percent,
-            format_bytes(sample.rss_bytes),
-        );
+    // Use chart visualization by default, table if requested
+    if opts.table {
+        // Legacy table view
+        println!();
+        println!("{:<24} {:>8} {:>10}", "TIMESTAMP", "CPU", "RSS");
+        println!("{:-<24} {:-<8} {:-<10}", "", "", "");
+        for sample in filtered_samples {
+            println!(
+                "{:<24} {:>7.1}% {:>10}",
+                format_timestamp(sample.timestamp),
+                sample.cpu_percent,
+                format_bytes(sample.rss_bytes),
+            );
+        }
+    } else {
+        // Default chart visualization
+        let terminal_width = 100; // Default terminal width, could be made dynamic
+        render_metrics_chart(&filtered_samples, terminal_width, opts.no_color);
     }
 
     Ok(health)
@@ -952,6 +1022,183 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
         .with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string()
+}
+
+struct ChartParams<'a> {
+    samples: &'a [MetricSample],
+    chart_width: usize,
+    chart_height: usize,
+    max_value: f64,
+    unit_suffix: &'a str,
+    color: &'a str,
+    no_color: bool,
+}
+
+/// Renders an ASCII chart for CPU and RSS metrics over time
+fn render_metrics_chart(samples: &[MetricSample], terminal_width: usize, no_color: bool) {
+    if samples.is_empty() {
+        return;
+    }
+
+    // Chart dimensions
+    let chart_height = 20;
+    let chart_width = terminal_width.min(120).saturating_sub(15); // Leave room for labels
+
+    // Find max values for scaling
+    let max_cpu = samples
+        .iter()
+        .map(|s| s.cpu_percent as f64)
+        .fold(0.0, f64::max)
+        .max(10.0); // Minimum 10% scale for visibility
+
+    let max_rss = samples
+        .iter()
+        .map(|s| s.rss_bytes as f64)
+        .fold(0.0, f64::max);
+
+    // CPU Chart
+    println!();
+    println!(
+        "{}CPU Usage (%){}",
+        if no_color { "" } else { CYAN },
+        if no_color { "" } else { RESET }
+    );
+    println!();
+
+    let cpu_params = ChartParams {
+        samples,
+        chart_width,
+        chart_height,
+        max_value: max_cpu,
+        unit_suffix: "%",
+        color: CYAN,
+        no_color,
+    };
+    render_single_chart(cpu_params, |s| s.cpu_percent as f64);
+
+    // RSS Chart
+    println!();
+    println!(
+        "{}Memory Usage (RSS){}",
+        if no_color { "" } else { YELLOW },
+        if no_color { "" } else { RESET }
+    );
+    println!();
+
+    // Convert to GB for better readability
+    let max_rss_gb = max_rss / (1024.0 * 1024.0 * 1024.0);
+    let rss_params = ChartParams {
+        samples,
+        chart_width,
+        chart_height,
+        max_value: max_rss_gb,
+        unit_suffix: "GB",
+        color: YELLOW,
+        no_color,
+    };
+    render_single_chart(rss_params, |s| {
+        s.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    });
+}
+
+fn render_single_chart<F>(params: ChartParams, value_fn: F)
+where
+    F: Fn(&MetricSample) -> f64,
+{
+    let ChartParams {
+        samples,
+        chart_width,
+        chart_height,
+        max_value,
+        unit_suffix,
+        color,
+        no_color,
+    } = params;
+    // Downsample if we have more samples than width
+    let step = samples.len().saturating_sub(1).max(1) as f64
+        / (chart_width as f64 - 1.0).max(1.0);
+
+    // Draw Y-axis and chart
+    for row in 0..chart_height {
+        // Y-axis label
+        if row == 0 {
+            if unit_suffix == "GB" {
+                print!("{:>8.2}{} ┤", max_value, unit_suffix);
+            } else {
+                print!("{:>8.1}{} ┤", max_value, unit_suffix);
+            }
+        } else if row == chart_height - 1 {
+            if unit_suffix == "GB" {
+                print!("{:>8.2}{} ┤", 0.0, unit_suffix);
+            } else {
+                print!("{:>8.1}{} ┤", 0.0, unit_suffix);
+            }
+        } else if row == chart_height / 2 {
+            if unit_suffix == "GB" {
+                print!("{:>8.2}{} ┤", max_value / 2.0, unit_suffix);
+            } else {
+                print!("{:>8.1}{} ┤", max_value / 2.0, unit_suffix);
+            }
+        } else {
+            print!("{:>10}┤", "");
+        }
+
+        // Draw chart bars
+        for col in 0..chart_width {
+            let sample_idx = (col as f64 * step) as usize;
+            if sample_idx >= samples.len() {
+                print!(" ");
+                continue;
+            }
+
+            let value = value_fn(&samples[sample_idx]);
+            let bar_height = (value / max_value * chart_height as f64) as usize;
+
+            if chart_height - row - 1 < bar_height {
+                print!(
+                    "{}█{}",
+                    if no_color { "" } else { color },
+                    if no_color { "" } else { RESET }
+                );
+            } else {
+                print!(" ");
+            }
+        }
+        println!();
+    }
+
+    // X-axis
+    print!("{:>10}└", "");
+    for _ in 0..chart_width {
+        print!("─");
+    }
+    println!();
+
+    // Time labels
+    if !samples.is_empty() {
+        let start_time = samples.first().unwrap().timestamp;
+        let end_time = samples.last().unwrap().timestamp;
+
+        let start_label = start_time
+            .with_timezone(&Local)
+            .format("%H:%M:%S")
+            .to_string();
+        let end_label = end_time
+            .with_timezone(&Local)
+            .format("%H:%M:%S")
+            .to_string();
+
+        let padding = chart_width.saturating_sub(start_label.len() + end_label.len());
+        print!(
+            "{:>10} {}{:padding$}{}",
+            "",
+            start_label,
+            "",
+            end_label,
+            padding = padding
+        );
+        println!();
+    }
 }
 
 fn overall_health_from_unit(unit: &UnitStatus) -> OverallHealth {
