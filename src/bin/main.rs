@@ -693,10 +693,8 @@ fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
             ServiceLifecycleStatus::Running => {
                 colorize("Running", BRIGHT_GREEN, no_color)
             }
-            ServiceLifecycleStatus::ExitedSuccessfully => {
-                colorize("Succeeded", GREEN, no_color)
-            }
-            ServiceLifecycleStatus::ExitedWithError => colorize("Failed", RED, no_color),
+            ServiceLifecycleStatus::ExitedSuccessfully => colorize("Ok", GREEN, no_color),
+            ServiceLifecycleStatus::ExitedWithError => colorize("NotOk", RED, no_color),
             ServiceLifecycleStatus::Stopped => colorize("Stopped", GRAY, no_color),
             ServiceLifecycleStatus::Skipped => colorize("Skipped", GRAY, no_color),
         };
@@ -710,7 +708,7 @@ fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
                         // Check exit code to determine if it was a full or partial success
                         match last.exit_code {
                             Some(0) => colorize("Idle", GRAY, no_color),
-                            Some(_) => colorize("PartialSuccess", DARK_GREEN, no_color),
+                            Some(_) => colorize("OkWithErr", DARK_GREEN, no_color),
                             None => colorize("Idle", GRAY, no_color),
                         }
                     }
@@ -899,11 +897,13 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     let rss_col = format_rss_column(unit.metrics.as_ref());
     let uptime = format_uptime_column(unit.uptime.as_ref());
     let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
-    let health_label = colorize(
-        &unit_health_label_with_context(unit),
-        unit_health_color(unit.health),
-        no_color,
-    );
+    let health_label_text = unit_health_label_with_context(unit);
+    let health_color = if health_label_text == "healthy-" {
+        GREEN // Darker green for healthy-
+    } else {
+        unit_health_color(unit.health)
+    };
+    let health_label = colorize(&health_label_text, health_color, no_color);
 
     let name_width = columns
         .first()
@@ -1186,7 +1186,7 @@ fn render_inspect(
             }
         } else {
             // Default chart visualization
-            render_metrics_chart(&filtered_samples, opts.no_color);
+            render_metrics_chart(&filtered_samples, opts.no_color, opts.tail);
         }
     }
 
@@ -1295,7 +1295,7 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
 }
 
 /// Renders a combined ASCII chart for CPU and RSS metrics over time
-fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
+fn render_metrics_chart(samples: &[MetricSample], no_color: bool, tail_mode: bool) {
     if samples.is_empty() {
         return;
     }
@@ -1311,11 +1311,18 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
         .fold(0.0, f64::max)
         .max(10.0); // Minimum 10% scale for visibility
 
-    let max_rss_gb = samples
+    let actual_max_rss_gb = samples
         .iter()
         .map(|s| s.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-        .fold(0.0, f64::max)
-        .max(0.1); // Minimum 0.1GB scale
+        .fold(0.0, f64::max);
+
+    // Add 1GB margin or 50% headroom, whichever is larger, with 0.1GB minimum
+    let max_rss_gb = if actual_max_rss_gb < 0.1 {
+        0.1 // Minimum scale
+    } else {
+        let margin = (actual_max_rss_gb * 0.5).max(1.0);
+        actual_max_rss_gb + margin
+    };
     // Downsample if we have more samples than width
     let step = if samples.len() > chart_width {
         samples.len() as f64 / chart_width as f64
@@ -1350,16 +1357,20 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
             let rss_val =
                 samples[sample_idx].rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
-            // Calculate heights, but ensure zero values are still visible (plot at height 1)
+            // Calculate heights - CPU grows from bottom up, RSS grows from top down
             let cpu_height = if cpu_val == 0.0 {
                 1
             } else {
                 ((cpu_val / max_cpu) * (chart_height - 1) as f64) as usize + 1
             };
-            let rss_height = if rss_val == 0.0 {
-                1
+
+            // RSS height is inverted - high values appear at top (low row numbers)
+            let rss_row = if rss_val == 0.0 {
+                chart_height - 1 // Zero RSS at bottom
             } else {
-                ((rss_val / max_rss_gb) * (chart_height - 1) as f64) as usize + 1
+                // Map RSS value to row (0 = top, chart_height-1 = bottom)
+                let normalized = (rss_val / max_rss_gb).min(1.0);
+                ((1.0 - normalized) * (chart_height - 1) as f64) as usize
             };
 
             let current_height = chart_height - row - 1;
@@ -1423,20 +1434,23 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
             }
 
             // Plot the data points
-            if current_height == cpu_height && current_height == rss_height {
-                // Both at same height - show both with a combined symbol
+            let is_cpu_point = current_height == cpu_height;
+            let is_rss_point = row == rss_row;
+
+            if is_cpu_point && is_rss_point {
+                // Both at same position - show both with a combined symbol
                 print!(
                     "{}✦{}",
                     if no_color { "" } else { ORANGE },
                     if no_color { "" } else { RESET }
                 );
-            } else if current_height == cpu_height {
+            } else if is_cpu_point {
                 print!(
                     "{}*{}",
                     if no_color { "" } else { GREEN },
                     if no_color { "" } else { RESET }
                 );
-            } else if current_height == rss_height {
+            } else if is_rss_point {
                 print!(
                     "{}•{}",
                     if no_color { "" } else { YELLOW },
@@ -1452,7 +1466,7 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
         if row == 0 {
             println!(" {:.2}GB", max_rss_gb);
         } else if row == chart_height - 1 {
-            println!(" {:.2}GB", -0.01); // Show small negative value for visual separation
+            println!(" 0.00GB"); // Show 0 at bottom
         } else if row == chart_height / 2 {
             println!(" {:.2}GB", max_rss_gb / 2.0);
         } else {
@@ -1472,13 +1486,19 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
         let start_time = samples.first().unwrap().timestamp;
         let end_time = samples.last().unwrap().timestamp;
 
+        let time_format = if tail_mode {
+            "%-I:%M:%S%p %Z" // Include seconds in tail mode: 7:00:45AM EST
+        } else {
+            "%-I:%M%p %Z" // Regular format: 7:00AM EST
+        };
+
         let start_label = start_time
             .with_timezone(&Local)
-            .format("%-I:%M%p %Z")  // 7:00AM EST format
+            .format(time_format)
             .to_string();
         let end_label = end_time
             .with_timezone(&Local)
-            .format("%-I:%M%p %Z")
+            .format(time_format)
             .to_string();
 
         let padding = chart_width.saturating_sub(start_label.len() + end_label.len());

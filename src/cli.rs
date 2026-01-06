@@ -209,8 +209,8 @@ pub enum Commands {
         #[arg(short, long, default_value = "50")]
         lines: usize,
 
-        /// Kind of logs to show: stdout, stderr, or supervisor (default: all).
-        #[arg(short = 'k', long)]
+        /// Kind of logs to show: stdout, stderr, or supervisor (default: stdout).
+        #[arg(short = 'k', long, default_value = "stdout")]
         kind: Option<String>,
     },
 

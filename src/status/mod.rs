@@ -564,7 +564,7 @@ fn derive_unit_health(
 
     match lifecycle {
         Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
-        Some(ServiceLifecycleStatus::Running) => return UnitHealth::Failing,
+        Some(ServiceLifecycleStatus::Running) => return UnitHealth::Healthy,
         Some(ServiceLifecycleStatus::Skipped) | Some(ServiceLifecycleStatus::Stopped) => {
             return UnitHealth::Inactive;
         }

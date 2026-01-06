@@ -113,9 +113,29 @@ Show all services including orphaned state (services removed from config):
 sysg status --all
 ```
 
+## Inspect
+
+Inspect a specific service or cron unit in detail:
+
+```sh
+sysg inspect myservice
+```
+
+View metrics with live updates:
+
+```sh
+sysg inspect myservice --tail
+```
+
+View metrics in JSON format for programmatic access:
+
+```sh
+sysg inspect myservice --json
+```
+
 ## Logs
 
-View the last 50 lines of logs for all services:
+View the last 50 lines of stdout logs (default):
 
 ```sh
 sysg logs
@@ -131,6 +151,12 @@ View a custom number of log lines for a service:
 
 ```sh
 sysg logs database --lines 100
+```
+
+View stderr logs instead of stdout:
+
+```sh
+sysg logs api-service --kind stderr
 ```
 
 ## Purge

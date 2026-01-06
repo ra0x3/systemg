@@ -37,10 +37,11 @@ $ sysg logs api-service --lines 100
 
 ### Filter by Log Kind
 
-View only specific types of logs using the `--kind` or `-k` flag:
+View specific types of logs using the `--kind` or `-k` flag:
 
 ```sh
-# View only stdout logs
+# View stdout logs (this is the default)
+$ sysg logs api-service
 $ sysg logs api-service --kind stdout
 
 # View only stderr logs
@@ -50,10 +51,7 @@ $ sysg logs api-service --kind stderr
 $ sysg logs --kind supervisor
 ```
 
-When no `--kind` flag is provided, all logs are displayed in the following order:
-1. Supervisor logs (if no service is specified)
-2. Service stdout logs
-3. Service stderr logs
+**Default behavior**: When no `--kind` flag is provided, only `stdout` logs are displayed. This changed in v0.17.0 to provide a cleaner default output. To view all log types together, you must specify each type separately or use multiple commands.
 
 ## How It Works
 
@@ -206,7 +204,7 @@ Arguments:
 
 Options:
   -l, --lines <LINES>      Number of lines to show (default: 50) [default: 50]
-  -k, --kind <KIND>        Kind of logs to show: stdout, stderr, or supervisor (default: all)
+  -k, --kind <KIND>        Kind of logs to show: stdout, stderr, or supervisor (default: stdout) [default: stdout]
       --log-level <LEVEL>  Override the logging verbosity for this invocation only
   -h, --help               Print help
 ```

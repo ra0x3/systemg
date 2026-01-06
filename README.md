@@ -257,10 +257,32 @@ $ sysg status --service webserver
 $ sysg status --all
 ```
 
+**Inspect** - Inspect a service or cron unit in detail:
+
+```sh
+# Inspect a specific service or cron unit by name or hash
+$ sysg inspect myservice
+
+# Show metrics in JSON format
+$ sysg inspect myservice --json
+
+# View only recent metrics (last 6 hours)
+$ sysg inspect myservice --since 21600
+
+# Display metrics in table format instead of chart
+$ sysg inspect myservice --table
+
+# Live tail mode - continuously updates the chart with real-time data
+$ sysg inspect myservice --tail
+
+# Live tail with custom time window (default: 5 seconds, max: 60 seconds)
+$ sysg inspect myservice --tail --tail-window 10
+```
+
 **Logs** - View logs for a specific service:
 
 ```sh
-# View the last 50 lines of logs for all services
+# View the last 50 lines of stdout logs (default)
 $ sysg logs
 
 # View logs for a specific service
@@ -268,6 +290,9 @@ $ sysg logs api-service
 
 # View a custom number of log lines
 $ sysg logs database --lines 100
+
+# View specific log type (stdout, stderr, or supervisor)
+$ sysg logs myservice --kind stderr
 ```
 
 **Log Level** - Override logging verbosity:
