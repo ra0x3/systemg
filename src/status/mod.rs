@@ -95,6 +95,7 @@ pub enum UnitHealth {
     Healthy,
     Degraded,
     Failing,
+    Inactive, // Service is stopped/not running - health is not applicable
 }
 
 /// Machine-readable snapshot of supervisor state, cached by the resident daemon.
@@ -565,7 +566,7 @@ fn derive_unit_health(
         Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
         Some(ServiceLifecycleStatus::Running) => return UnitHealth::Failing,
         Some(ServiceLifecycleStatus::Skipped) | Some(ServiceLifecycleStatus::Stopped) => {
-            return UnitHealth::Degraded;
+            return UnitHealth::Inactive;
         }
         Some(ServiceLifecycleStatus::ExitedSuccessfully) => return UnitHealth::Healthy,
         None => {}
@@ -580,7 +581,7 @@ fn derive_unit_health(
                     CronExecutionStatus::Failed(reason) => {
                         // Special case: "Failed to get PID" means systemg couldn't track the process
                         // This is not a health issue with the cron job itself
-                        if reason.contains("Failed to get PID") {
+                        if reason.starts_with("Failed to get PID") {
                             UnitHealth::Healthy
                         } else if last_run.exit_code.is_some()
                             || last_run.completed_at.is_some()
@@ -628,6 +629,7 @@ pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
         return OverallHealth::Degraded;
     }
 
+    // Note: Inactive units don't affect overall health since they're intentionally stopped
     OverallHealth::Healthy
 }
 

@@ -186,6 +186,14 @@ pub enum Commands {
         /// Display metrics in table format instead of chart visualization.
         #[arg(long)]
         table: bool,
+
+        /// Enable live tailing mode to show real-time updates.
+        #[arg(long)]
+        tail: bool,
+
+        /// Time window for tail mode in seconds (default: 5, max: 60).
+        #[arg(long, value_name = "SECONDS", default_value = "5")]
+        tail_window: u64,
     },
 
     /// Show logs for a specific service.

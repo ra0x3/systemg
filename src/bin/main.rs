@@ -223,6 +223,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             since,
             samples,
             table,
+            tail,
+            tail_window,
         } => {
             let mut effective_config = config.clone();
             if load_config(Some(&config)).is_err()
@@ -237,21 +239,87 @@ fn main() -> Result<(), Box<dyn Error>> {
                 process::exit(2);
             }
 
-            let render_opts = InspectRenderOptions {
-                json,
-                no_color,
-                since,
-                samples_limit: samples,
-                table,
-            };
+            // Validate tail_window is reasonable
+            let tail_window = tail_window.clamp(1, 60);
 
-            let health = render_inspect(&payload, &render_opts)?;
-            let exit_code = match health {
-                OverallHealth::Healthy => 0,
-                OverallHealth::Degraded => 1,
-                OverallHealth::Failing => 2,
-            };
-            process::exit(exit_code);
+            if tail && !json {
+                // Live tailing mode (not supported in JSON mode)
+                use std::sync::Arc;
+                use std::sync::atomic::{AtomicBool, Ordering};
+
+                let running = Arc::new(AtomicBool::new(true));
+                let r = running.clone();
+
+                // Set up Ctrl+C handler
+                ctrlc::set_handler(move || {
+                    r.store(false, Ordering::SeqCst);
+                    // Move cursor to bottom and show message
+                    print!("\x1B[999B\nStopping live tail...\n");
+                })?;
+
+                let mut last_health = OverallHealth::Healthy;
+
+                while running.load(Ordering::SeqCst) {
+                    // Clear terminal
+                    print!("\x1B[2J\x1B[1;1H");
+
+                    // Fetch fresh data
+                    let payload = fetch_inspect(&effective_config, &unit, samples)?;
+                    if payload.unit.is_none() {
+                        eprintln!("Unit '{unit}' not found.");
+                        process::exit(2);
+                    }
+
+                    // Update render options to use tail_window for filtering
+                    let tail_render_opts = InspectRenderOptions {
+                        json: false,
+                        no_color,
+                        since: Some(tail_window),
+                        samples_limit: samples,
+                        table,
+                        tail: true,
+                        tail_window,
+                    };
+
+                    last_health = render_inspect(&payload, &tail_render_opts)?;
+
+                    // Show tail mode indicator
+                    println!();
+                    println!(
+                        "Live tail mode ({}s window) - Press Ctrl+C to stop",
+                        tail_window
+                    );
+
+                    // Sleep for 1 second before next update
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+
+                let exit_code = match last_health {
+                    OverallHealth::Healthy => 0,
+                    OverallHealth::Degraded => 1,
+                    OverallHealth::Failing => 2,
+                };
+                process::exit(exit_code);
+            } else {
+                // Normal one-shot mode
+                let render_opts = InspectRenderOptions {
+                    json,
+                    no_color,
+                    since,
+                    samples_limit: samples,
+                    table,
+                    tail: false,
+                    tail_window,
+                };
+
+                let health = render_inspect(&payload, &render_opts)?;
+                let exit_code = match health {
+                    OverallHealth::Healthy => 0,
+                    OverallHealth::Degraded => 1,
+                    OverallHealth::Failing => 2,
+                };
+                process::exit(exit_code);
+            }
         }
         Commands::Logs {
             config,
@@ -332,6 +400,8 @@ struct InspectRenderOptions {
     since: Option<u64>,
     samples_limit: usize,
     table: bool,
+    tail: bool,
+    tail_window: u64,
 }
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
@@ -568,7 +638,36 @@ fn unit_health_label(health: UnitHealth) -> &'static str {
         UnitHealth::Healthy => "healthy",
         UnitHealth::Degraded => "degraded",
         UnitHealth::Failing => "failing",
+        UnitHealth::Inactive => "inactive",
     }
+}
+
+fn unit_health_label_with_context(unit: &UnitStatus) -> String {
+    // Special handling for crons with tracking issues or minor errors
+    if let Some(cron) = &unit.cron
+        && let Some(last) = &cron.last_run
+        && let Some(status) = &last.status
+    {
+        match status {
+            CronExecutionStatus::Failed(reason)
+                if reason.starts_with("Failed to get PID") =>
+            {
+                return "healthy-".to_string(); // Healthy but couldn't track properly
+            }
+            CronExecutionStatus::Success => {
+                // Check if it had a non-zero exit code that we're treating as success
+                if let Some(code) = last.exit_code
+                    && code == 0
+                {
+                    return "healthy+".to_string(); // Perfect health
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Default to the standard label
+    unit_health_label(unit.health).to_string()
 }
 
 fn unit_health_color(health: UnitHealth) -> &'static str {
@@ -576,6 +675,7 @@ fn unit_health_color(health: UnitHealth) -> &'static str {
         UnitHealth::Healthy => GREEN_BOLD,
         UnitHealth::Degraded => ORANGE,
         UnitHealth::Failing => RED_BOLD,
+        UnitHealth::Inactive => GRAY,
     }
 }
 
@@ -693,24 +793,36 @@ fn format_last_exit(
         return match &last.status {
             Some(CronExecutionStatus::Success) => {
                 if let Some(code) = last.exit_code {
-                    format!("exit {}{}", code, time_str)
+                    if time_str.is_empty() {
+                        format!("exit {}", code)
+                    } else {
+                        format!("exit {},{}", code, time_str)
+                    }
                 } else {
                     format!("cron ok{}", time_str)
                 }
             }
             Some(CronExecutionStatus::Failed(reason)) => {
                 if let Some(code) = last.exit_code {
-                    format!("exit {}{}", code, time_str)
+                    if time_str.is_empty() {
+                        format!("exit {}", code)
+                    } else {
+                        format!("exit {},{}", code, time_str)
+                    }
                 } else if reason.is_empty() {
                     format!("cron failed{}", time_str)
                 } else {
-                    // Truncate reason if it's too long
-                    let truncated_reason = if reason.len() > 20 {
-                        format!("{}...", &reason[..17])
+                    // Truncate reason if it's too long but keep full text recognizable
+                    let display_reason = if reason.len() > 24 {
+                        &reason[..24]
                     } else {
-                        reason.clone()
+                        reason.as_str()
                     };
-                    format!("failed: {}{}", truncated_reason, time_str)
+                    if time_str.is_empty() {
+                        format!("failed: {}", display_reason)
+                    } else {
+                        format!("failed: {},{}", display_reason, time_str)
+                    }
                 }
             }
             Some(CronExecutionStatus::OverlapError) => format!("overlap{}", time_str),
@@ -788,7 +900,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     let uptime = format_uptime_column(unit.uptime.as_ref());
     let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
     let health_label = colorize(
-        unit_health_label(unit.health),
+        &unit_health_label_with_context(unit),
         unit_health_color(unit.health),
         no_color,
     );
@@ -1049,7 +1161,14 @@ fn render_inspect(
             }
         } else {
             println!();
-            println!("Resource Usage Over Time");
+            if opts.tail {
+                println!(
+                    "Resource Usage Over Time (Live - {}s window)",
+                    opts.tail_window
+                );
+            } else {
+                println!("Resource Usage Over Time");
+            }
         }
 
         if opts.table {
@@ -1205,8 +1324,6 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
     };
 
     println!();
-    println!("Resource Usage Over Time");
-    println!();
 
     // Draw chart with dual y-axes
     for row in 0..chart_height {
@@ -1214,7 +1331,7 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
         if row == 0 {
             print!("{:>6.1}% ┤", max_cpu);
         } else if row == chart_height - 1 {
-            print!("{:>6.1}% ┤", 0.0);
+            print!("{:>6.1}% ┤", -1.0); // Show -1% to give visual separation
         } else if row == chart_height / 2 {
             print!("{:>6.1}% ┤", max_cpu / 2.0);
         } else {
@@ -1233,8 +1350,17 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
             let rss_val =
                 samples[sample_idx].rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
-            let cpu_height = ((cpu_val / max_cpu) * chart_height as f64) as usize;
-            let rss_height = ((rss_val / max_rss_gb) * chart_height as f64) as usize;
+            // Calculate heights, but ensure zero values are still visible (plot at height 1)
+            let cpu_height = if cpu_val == 0.0 {
+                1
+            } else {
+                ((cpu_val / max_cpu) * (chart_height - 1) as f64) as usize + 1
+            };
+            let rss_height = if rss_val == 0.0 {
+                1
+            } else {
+                ((rss_val / max_rss_gb) * (chart_height - 1) as f64) as usize + 1
+            };
 
             let current_height = chart_height - row - 1;
 
@@ -1297,7 +1423,14 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
             }
 
             // Plot the data points
-            if current_height == cpu_height {
+            if current_height == cpu_height && current_height == rss_height {
+                // Both at same height - show both with a combined symbol
+                print!(
+                    "{}✦{}",
+                    if no_color { "" } else { ORANGE },
+                    if no_color { "" } else { RESET }
+                );
+            } else if current_height == cpu_height {
                 print!(
                     "{}*{}",
                     if no_color { "" } else { GREEN },
@@ -1307,13 +1440,6 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
                 print!(
                     "{}•{}",
                     if no_color { "" } else { YELLOW },
-                    if no_color { "" } else { RESET }
-                );
-            } else if current_height == 0 && cpu_val == 0.0 && col % 3 == 0 {
-                // Show dots for 0% CPU on the baseline at intervals
-                print!(
-                    "{}·{}",
-                    if no_color { "" } else { GREEN },
                     if no_color { "" } else { RESET }
                 );
             } else {
@@ -1326,7 +1452,7 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
         if row == 0 {
             println!(" {:.2}GB", max_rss_gb);
         } else if row == chart_height - 1 {
-            println!(" {:.2}GB", 0.0);
+            println!(" {:.2}GB", -0.01); // Show small negative value for visual separation
         } else if row == chart_height / 2 {
             println!(" {:.2}GB", max_rss_gb / 2.0);
         } else {
@@ -1348,11 +1474,11 @@ fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
 
         let start_label = start_time
             .with_timezone(&Local)
-            .format("%H:%M:%S")
+            .format("%-I:%M%p %Z")  // 7:00AM EST format
             .to_string();
         let end_label = end_time
             .with_timezone(&Local)
-            .format("%H:%M:%S")
+            .format("%-I:%M%p %Z")
             .to_string();
 
         let padding = chart_width.saturating_sub(start_label.len() + end_label.len());
@@ -1373,6 +1499,7 @@ fn overall_health_from_unit(unit: &UnitStatus) -> OverallHealth {
         UnitHealth::Healthy => OverallHealth::Healthy,
         UnitHealth::Degraded => OverallHealth::Degraded,
         UnitHealth::Failing => OverallHealth::Failing,
+        UnitHealth::Inactive => OverallHealth::Healthy, // Inactive units don't affect overall health
     }
 }
 
