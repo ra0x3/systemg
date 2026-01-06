@@ -342,6 +342,7 @@ const RED_BOLD: &str = "\x1b[1;31m";
 const RED: &str = "\x1b[31m";
 const CYAN: &str = "\x1b[36m";
 const YELLOW: &str = "\x1b[33m";
+const ORANGE: &str = "\x1b[38;5;208m";
 const GRAY: &str = "\x1b[90m";
 const RESET: &str = "\x1b[0m";
 
@@ -528,7 +529,7 @@ fn overall_health_label(health: OverallHealth) -> &'static str {
 fn overall_health_color(health: OverallHealth) -> &'static str {
     match health {
         OverallHealth::Healthy => GREEN_BOLD,
-        OverallHealth::Degraded => YELLOW_BOLD,
+        OverallHealth::Degraded => ORANGE,
         OverallHealth::Failing => RED_BOLD,
     }
 }
@@ -544,7 +545,7 @@ fn unit_health_label(health: UnitHealth) -> &'static str {
 fn unit_health_color(health: UnitHealth) -> &'static str {
     match health {
         UnitHealth::Healthy => GREEN_BOLD,
-        UnitHealth::Degraded => YELLOW_BOLD,
+        UnitHealth::Degraded => ORANGE,
         UnitHealth::Failing => RED_BOLD,
     }
 }
@@ -576,7 +577,7 @@ fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
         if let Some(last) = cron.last_run.as_ref() {
             if let Some(status) = &last.status {
                 return match status {
-                    CronExecutionStatus::Success => colorize("Idle", GREEN, no_color),
+                    CronExecutionStatus::Success => colorize("Idle", GRAY, no_color),
                     CronExecutionStatus::Failed(_) => colorize("Failed", RED, no_color),
                     CronExecutionStatus::OverlapError => {
                         colorize("Overlap", YELLOW_BOLD, no_color)
@@ -899,8 +900,29 @@ fn render_inspect(
     let unit = payload.unit.as_ref().unwrap();
     let health = overall_health_from_unit(unit);
 
-    let filtered_samples =
-        filter_samples(&payload.samples, opts.since, opts.samples_limit);
+    // For cron units, get metrics from the last execution if available
+    let filtered_samples = if unit.kind == UnitKind::Cron {
+        // Try to get metrics from the last completed cron run
+        if let Some(cron_status) = &unit.cron {
+            if let Some(last_run) = cron_status.recent_runs.first() {
+                // Use metrics from the last run if available
+                if !last_run.metrics.is_empty() {
+                    filter_samples(&last_run.metrics, opts.since, opts.samples_limit)
+                } else {
+                    // No metrics available from last run
+                    vec![]
+                }
+            } else {
+                // No runs yet
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    } else {
+        // For regular services, use live samples
+        filter_samples(&payload.samples, opts.since, opts.samples_limit)
+    };
 
     if opts.json {
         let json_payload = InspectPayload {
@@ -955,29 +977,103 @@ fn render_inspect(
         println!("Metrics: not available (collector has not observed samples yet)");
     }
 
-    if filtered_samples.is_empty() {
-        println!("No metric samples to display.");
-        return Ok(health);
+    // Use chart visualization by default, table if requested
+    if !filtered_samples.is_empty() {
+        // For cron jobs, indicate we're showing last run's metrics
+        if unit.kind == UnitKind::Cron {
+            if let Some(cron_status) = &unit.cron
+                && let Some(last_run) = cron_status.recent_runs.first()
+            {
+                let run_time = last_run
+                    .started_at
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
+                println!();
+                println!("Resource Usage from Last Run ({}):", run_time);
+            }
+        } else {
+            println!();
+            println!("Resource Usage Over Time");
+        }
+
+        if opts.table {
+            // Legacy table view
+            println!();
+            println!("{:<24} {:>8} {:>10}", "TIMESTAMP", "CPU", "RSS");
+            println!("{:-<24} {:-<8} {:-<10}", "", "", "");
+            for sample in filtered_samples {
+                println!(
+                    "{:<24} {:>7.1}% {:>10}",
+                    format_timestamp(sample.timestamp),
+                    sample.cpu_percent,
+                    format_bytes(sample.rss_bytes),
+                );
+            }
+        } else {
+            // Default chart visualization
+            render_metrics_chart(&filtered_samples, opts.no_color);
+        }
     }
 
-    // Use chart visualization by default, table if requested
-    if opts.table {
-        // Legacy table view
+    // Show cron history for cron units
+    if unit.kind == UnitKind::Cron
+        && let Some(cron_status) = &unit.cron
+        && !cron_status.recent_runs.is_empty()
+    {
         println!();
-        println!("{:<24} {:>8} {:>10}", "TIMESTAMP", "CPU", "RSS");
-        println!("{:-<24} {:-<8} {:-<10}", "", "", "");
-        for sample in filtered_samples {
+        println!("Recent Cron Runs (last 10):");
+        println!("{:-<24} {:>10} {:>12} {:>10}", "", "", "", "");
+        println!(
+            "{:<24} {:>10} {:>12} {:>10}",
+            "STARTED", "STATUS", "DURATION", "EXIT CODE"
+        );
+        println!("{:-<24} {:-<10} {:-<12} {:-<10}", "", "", "", "");
+
+        let runs_to_show = cron_status.recent_runs.iter().take(10);
+        for run in runs_to_show {
+            let started = run
+                .started_at
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
+
+            let status = match &run.status {
+                Some(CronExecutionStatus::Success) => {
+                    colorize("Success", GREEN, opts.no_color)
+                }
+                Some(CronExecutionStatus::Failed(_)) => {
+                    colorize("Failed", RED, opts.no_color)
+                }
+                Some(CronExecutionStatus::OverlapError) => {
+                    colorize("Overlap", YELLOW_BOLD, opts.no_color)
+                }
+                None => colorize("Running", BRIGHT_GREEN, opts.no_color),
+            };
+
+            let duration = if let Some(completed) = run.completed_at {
+                let dur = completed.signed_duration_since(run.started_at);
+                if dur.num_seconds() < 60 {
+                    format!("{}s", dur.num_seconds())
+                } else if dur.num_minutes() < 60 {
+                    format!("{}m", dur.num_minutes())
+                } else {
+                    format!("{}h", dur.num_hours())
+                }
+            } else {
+                "-".to_string()
+            };
+
+            let exit_code = run
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string());
+
             println!(
-                "{:<24} {:>7.1}% {:>10}",
-                format_timestamp(sample.timestamp),
-                sample.cpu_percent,
-                format_bytes(sample.rss_bytes),
+                "{:<24} {:>10} {:>12} {:>10}",
+                started, status, duration, exit_code
             );
         }
-    } else {
-        // Default chart visualization
-        let terminal_width = 100; // Default terminal width, could be made dynamic
-        render_metrics_chart(&filtered_samples, terminal_width, opts.no_color);
     }
 
     Ok(health)
@@ -1024,25 +1120,15 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
         .to_string()
 }
 
-struct ChartParams<'a> {
-    samples: &'a [MetricSample],
-    chart_width: usize,
-    chart_height: usize,
-    max_value: f64,
-    unit_suffix: &'a str,
-    color: &'a str,
-    no_color: bool,
-}
-
-/// Renders an ASCII chart for CPU and RSS metrics over time
-fn render_metrics_chart(samples: &[MetricSample], terminal_width: usize, no_color: bool) {
+/// Renders a combined ASCII chart for CPU and RSS metrics over time
+fn render_metrics_chart(samples: &[MetricSample], no_color: bool) {
     if samples.is_empty() {
         return;
     }
 
-    // Chart dimensions
+    // Chart dimensions - fixed width for consistency
     let chart_height = 20;
-    let chart_width = terminal_width.min(120).saturating_sub(15); // Leave room for labels
+    let chart_width = 80; // Fixed width for neat formatting
 
     // Find max values for scaling
     let max_cpu = samples
@@ -1051,128 +1137,154 @@ fn render_metrics_chart(samples: &[MetricSample], terminal_width: usize, no_colo
         .fold(0.0, f64::max)
         .max(10.0); // Minimum 10% scale for visibility
 
-    let max_rss = samples
+    let max_rss_gb = samples
         .iter()
-        .map(|s| s.rss_bytes as f64)
-        .fold(0.0, f64::max);
-
-    // CPU Chart
-    println!();
-    println!(
-        "{}CPU Usage (%){}",
-        if no_color { "" } else { CYAN },
-        if no_color { "" } else { RESET }
-    );
-    println!();
-
-    let cpu_params = ChartParams {
-        samples,
-        chart_width,
-        chart_height,
-        max_value: max_cpu,
-        unit_suffix: "%",
-        color: CYAN,
-        no_color,
-    };
-    render_single_chart(cpu_params, |s| s.cpu_percent as f64);
-
-    // RSS Chart
-    println!();
-    println!(
-        "{}Memory Usage (RSS){}",
-        if no_color { "" } else { YELLOW },
-        if no_color { "" } else { RESET }
-    );
-    println!();
-
-    // Convert to GB for better readability
-    let max_rss_gb = max_rss / (1024.0 * 1024.0 * 1024.0);
-    let rss_params = ChartParams {
-        samples,
-        chart_width,
-        chart_height,
-        max_value: max_rss_gb,
-        unit_suffix: "GB",
-        color: YELLOW,
-        no_color,
-    };
-    render_single_chart(rss_params, |s| {
-        s.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
-    });
-}
-
-fn render_single_chart<F>(params: ChartParams, value_fn: F)
-where
-    F: Fn(&MetricSample) -> f64,
-{
-    let ChartParams {
-        samples,
-        chart_width,
-        chart_height,
-        max_value,
-        unit_suffix,
-        color,
-        no_color,
-    } = params;
+        .map(|s| s.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        .fold(0.0, f64::max)
+        .max(0.1); // Minimum 0.1GB scale
     // Downsample if we have more samples than width
-    let step = samples.len().saturating_sub(1).max(1) as f64
-        / (chart_width as f64 - 1.0).max(1.0);
+    let step = if samples.len() > chart_width {
+        samples.len() as f64 / chart_width as f64
+    } else {
+        1.0
+    };
 
-    // Draw Y-axis and chart
+    println!();
+    println!("Resource Usage Over Time");
+    println!();
+
+    // Draw chart with dual y-axes
     for row in 0..chart_height {
-        // Y-axis label
+        // Left Y-axis (CPU %)
         if row == 0 {
-            if unit_suffix == "GB" {
-                print!("{:>8.2}{} ┤", max_value, unit_suffix);
-            } else {
-                print!("{:>8.1}{} ┤", max_value, unit_suffix);
-            }
+            print!("{:>6.1}% ┤", max_cpu);
         } else if row == chart_height - 1 {
-            if unit_suffix == "GB" {
-                print!("{:>8.2}{} ┤", 0.0, unit_suffix);
-            } else {
-                print!("{:>8.1}{} ┤", 0.0, unit_suffix);
-            }
+            print!("{:>6.1}% ┤", 0.0);
         } else if row == chart_height / 2 {
-            if unit_suffix == "GB" {
-                print!("{:>8.2}{} ┤", max_value / 2.0, unit_suffix);
-            } else {
-                print!("{:>8.1}{} ┤", max_value / 2.0, unit_suffix);
-            }
+            print!("{:>6.1}% ┤", max_cpu / 2.0);
         } else {
-            print!("{:>10}┤", "");
+            print!("{:>8}┤", "");
         }
 
-        // Draw chart bars
+        // Draw the chart area
         for col in 0..chart_width {
-            let sample_idx = (col as f64 * step) as usize;
+            let sample_idx = ((col as f64) * step) as usize;
             if sample_idx >= samples.len() {
                 print!(" ");
                 continue;
             }
 
-            let value = value_fn(&samples[sample_idx]);
-            let bar_height = (value / max_value * chart_height as f64) as usize;
+            let cpu_val = samples[sample_idx].cpu_percent as f64;
+            let rss_val =
+                samples[sample_idx].rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
-            if chart_height - row - 1 < bar_height {
+            let cpu_height = ((cpu_val / max_cpu) * chart_height as f64) as usize;
+            let rss_height = ((rss_val / max_rss_gb) * chart_height as f64) as usize;
+
+            let current_height = chart_height - row - 1;
+
+            // Legend box in top-right
+            if row <= 3 && col >= chart_width - 20 && col < chart_width - 1 {
+                let legend_col = col - (chart_width - 20);
+                if row == 0 && legend_col < 19 {
+                    let legend = "┌─────────────────┐";
+                    print!("{}", legend.chars().nth(legend_col).unwrap_or(' '));
+                    continue;
+                } else if row == 1 && legend_col < 19 {
+                    if legend_col == 0 {
+                        print!("│");
+                    } else if legend_col == 1 {
+                        print!(" ");
+                    } else if legend_col == 2 {
+                        print!("{}", if no_color { "" } else { GREEN });
+                    } else if legend_col == 3 {
+                        print!("*");
+                    } else if legend_col == 4 {
+                        print!("{}", if no_color { "" } else { RESET });
+                    } else if (5..=11).contains(&legend_col) {
+                        print!(
+                            "{}",
+                            " CPU %  ".chars().nth(legend_col - 5).unwrap_or(' ')
+                        );
+                    } else if legend_col == 18 {
+                        print!("│");
+                    } else {
+                        print!(" ");
+                    }
+                    continue;
+                } else if row == 2 && legend_col < 19 {
+                    if legend_col == 0 {
+                        print!("│");
+                    } else if legend_col == 1 {
+                        print!(" ");
+                    } else if legend_col == 2 {
+                        print!("{}", if no_color { "" } else { YELLOW });
+                    } else if legend_col == 3 {
+                        print!("•");
+                    } else if legend_col == 4 {
+                        print!("{}", if no_color { "" } else { RESET });
+                    } else if (5..=11).contains(&legend_col) {
+                        print!(
+                            "{}",
+                            " RSS GB ".chars().nth(legend_col - 5).unwrap_or(' ')
+                        );
+                    } else if legend_col == 18 {
+                        print!("│");
+                    } else {
+                        print!(" ");
+                    }
+                    continue;
+                } else if row == 3 && legend_col < 19 {
+                    let legend = "└─────────────────┘";
+                    print!("{}", legend.chars().nth(legend_col).unwrap_or(' '));
+                    continue;
+                }
+            }
+
+            // Plot the data points
+            if current_height == cpu_height {
                 print!(
-                    "{}█{}",
-                    if no_color { "" } else { color },
+                    "{}*{}",
+                    if no_color { "" } else { GREEN },
+                    if no_color { "" } else { RESET }
+                );
+            } else if current_height == rss_height {
+                print!(
+                    "{}•{}",
+                    if no_color { "" } else { YELLOW },
+                    if no_color { "" } else { RESET }
+                );
+            } else if current_height == 0 && cpu_val == 0.0 && col % 3 == 0 {
+                // Show dots for 0% CPU on the baseline at intervals
+                print!(
+                    "{}·{}",
+                    if no_color { "" } else { GREEN },
                     if no_color { "" } else { RESET }
                 );
             } else {
                 print!(" ");
             }
         }
-        println!();
+
+        // Right Y-axis (RSS GB)
+        print!("┤");
+        if row == 0 {
+            println!(" {:.2}GB", max_rss_gb);
+        } else if row == chart_height - 1 {
+            println!(" {:.2}GB", 0.0);
+        } else if row == chart_height / 2 {
+            println!(" {:.2}GB", max_rss_gb / 2.0);
+        } else {
+            println!();
+        }
     }
 
     // X-axis
-    print!("{:>10}└", "");
+    print!("{:>8}└", "");
     for _ in 0..chart_width {
         print!("─");
     }
-    println!();
+    println!("┘");
 
     // Time labels
     if !samples.is_empty() {
@@ -1190,7 +1302,7 @@ where
 
         let padding = chart_width.saturating_sub(start_label.len() + end_label.len());
         print!(
-            "{:>10} {}{:padding$}{}",
+            "{:>8} {}{:padding$}{}",
             "",
             start_label,
             "",

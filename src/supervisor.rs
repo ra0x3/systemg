@@ -237,6 +237,7 @@ impl Supervisor {
         let cron_manager = self.cron_manager.clone();
         let config_path = self.config_path.clone();
         let detach_children = self.detach_children;
+        let metrics_store = self.metrics_store.clone();
 
         thread::spawn(move || {
             loop {
@@ -257,6 +258,8 @@ impl Supervisor {
                                 let cron_manager_clone = cron_manager.clone();
                                 let job_name_clone = job_name.clone();
                                 let cfg_clone = cfg.clone();
+                                let metrics_store_clone = metrics_store.clone();
+                                let service_hash = service_config.compute_hash();
 
                                 thread::spawn(move || {
                                     use crate::daemon::PidFile;
@@ -278,11 +281,24 @@ impl Supervisor {
                                                         "Cron job '{}' completed successfully",
                                                         job_name_clone
                                                     );
+
+                                                    // Get metrics for this cron execution
+                                                    let metrics = if let Ok(guard) =
+                                                        metrics_store_clone.read()
+                                                    {
+                                                        guard
+                                                            .snapshot_unit(&service_hash)
+                                                            .unwrap_or_default()
+                                                    } else {
+                                                        vec![]
+                                                    };
+
                                                     cron_manager_clone
                                                         .mark_job_completed(
                                                             &job_name_clone,
                                                             CronExecutionStatus::Success,
                                                             Some(0),
+                                                            metrics,
                                                         );
 
                                                     // Persist exit state to ServiceStateFile for status display
@@ -340,10 +356,18 @@ impl Supervisor {
                                                                             ),
                                                                         }
 
+                                                                        // Get metrics for this cron execution
+                                                                        let metrics = if let Ok(guard) = metrics_store_clone.read() {
+                                                                            guard.snapshot_unit(&service_hash).unwrap_or_default()
+                                                                        } else {
+                                                                            vec![]
+                                                                        };
+
                                                                         cron_manager_clone.mark_job_completed(
                                                                             &job_name_clone,
                                                                             status.clone(),
                                                                             exit_code,
+                                                                            metrics,
                                                                         );
 
                                                                         // Persist exit state to ServiceStateFile for status display
@@ -370,12 +394,20 @@ impl Supervisor {
                                                                             "Error waiting for cron job '{}': {}",
                                                                             job_name_clone, e
                                                                         );
+                                                                        // Get metrics (even for failed jobs)
+                                                                        let metrics = if let Ok(guard) = metrics_store_clone.read() {
+                                                                            guard.snapshot_unit(&service_hash).unwrap_or_default()
+                                                                        } else {
+                                                                            vec![]
+                                                                        };
+
                                                                         cron_manager_clone.mark_job_completed(
                                                                             &job_name_clone,
                                                                             CronExecutionStatus::Failed(
                                                                                 e.to_string(),
                                                                             ),
                                                                             None,
+                                                                            metrics,
                                                                         );
 
                                                                         // Persist error state to ServiceStateFile
@@ -405,6 +437,7 @@ impl Supervisor {
                                                                     "Failed to find PID for cron job '{}' in PID file",
                                                                     job_name_clone
                                                                 );
+                                                                // No metrics available since process didn't start
                                                                 cron_manager_clone.mark_job_completed(
                                                                     &job_name_clone,
                                                                     CronExecutionStatus::Failed(
@@ -412,6 +445,7 @@ impl Supervisor {
                                                                             .to_string(),
                                                                     ),
                                                                     None,
+                                                                    vec![],
                                                                 );
 
                                                                 // Persist error state to ServiceStateFile
@@ -435,6 +469,7 @@ impl Supervisor {
                                                                 "Failed to reload PID file for cron job '{}': {}",
                                                                 job_name_clone, e
                                                             );
+                                                            // No metrics available since process didn't start
                                                             cron_manager_clone.mark_job_completed(
                                                                 &job_name_clone,
                                                                 CronExecutionStatus::Failed(
@@ -444,6 +479,7 @@ impl Supervisor {
                                                                     ),
                                                                 ),
                                                                 None,
+                                                                vec![],
                                                             );
                                                         }
                                                     }
@@ -453,6 +489,7 @@ impl Supervisor {
                                                         "Failed to start cron job '{}': {}",
                                                         job_name_clone, e
                                                     );
+                                                    // No metrics available since process didn't start properly
                                                     cron_manager_clone
                                                         .mark_job_completed(
                                                             &job_name_clone,
@@ -460,6 +497,7 @@ impl Supervisor {
                                                                 e.to_string(),
                                                             ),
                                                             None,
+                                                            vec![],
                                                         );
                                                 }
                                             }
@@ -469,12 +507,14 @@ impl Supervisor {
                                                 "Failed to create daemon for cron job '{}': {}",
                                                 job_name_clone, e
                                             );
+                                            // No metrics available since daemon creation failed
                                             cron_manager_clone.mark_job_completed(
                                                 &job_name_clone,
                                                 CronExecutionStatus::Failed(
                                                     e.to_string(),
                                                 ),
                                                 None,
+                                                vec![],
                                             );
                                         }
                                     }

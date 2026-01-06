@@ -22,7 +22,7 @@ use crate::cron::{
 };
 use crate::daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile};
 use crate::error::{PidFileError, ProcessManagerError, ServiceStateError};
-use crate::metrics::{MetricsHandle, MetricsStore, MetricsSummary};
+use crate::metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary};
 
 #[cfg(not(target_os = "linux"))]
 use nix::sys::signal;
@@ -218,6 +218,8 @@ pub struct CronExecutionSummary {
     pub status: Option<CronExecutionStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<MetricSample>,
 }
 
 /// Thread-safe cache of the most recent status snapshot.
@@ -537,6 +539,7 @@ fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary 
         completed_at: record.completed_at.map(DateTime::<Utc>::from),
         status: record.status.clone(),
         exit_code: record.exit_code,
+        metrics: record.metrics.clone(),
     }
 }
 
@@ -1382,6 +1385,7 @@ mod tests {
             completed_at: Some(SystemTime::now()),
             status: Some(CronExecutionStatus::Success),
             exit_code: Some(0),
+            metrics: vec![],
         };
 
         let formatted = StatusManager::format_cron_status(&record);
@@ -1396,6 +1400,7 @@ mod tests {
             completed_at: Some(SystemTime::now()),
             status: Some(CronExecutionStatus::Failed("boom".into())),
             exit_code: Some(2),
+            metrics: vec![],
         };
 
         let formatted = StatusManager::format_cron_status(&record);
@@ -1506,6 +1511,7 @@ mod tests {
             completed_at: Some(Utc::now()),
             status: Some(CronExecutionStatus::Success),
             exit_code: Some(0),
+            metrics: vec![],
         };
 
         let cron_status = CronUnitStatus {

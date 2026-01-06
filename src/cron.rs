@@ -39,6 +39,9 @@ pub struct CronExecutionRecord {
     pub status: Option<CronExecutionStatus>,
     /// Exit code of the process (None if no exit code available).
     pub exit_code: Option<i32>,
+    /// Metrics collected during this execution (for resource usage display).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<crate::metrics::MetricSample>,
 }
 
 /// Tracks execution history and state for a single cron job.
@@ -322,6 +325,7 @@ impl CronManager {
                         completed_at: Some(now),
                         status: Some(CronExecutionStatus::OverlapError),
                         exit_code: None,
+                        metrics: vec![],
                     };
                     job.add_execution_record(record);
                     job.update_next_execution();
@@ -337,6 +341,7 @@ impl CronManager {
                         completed_at: None,
                         status: None,
                         exit_code: None,
+                        metrics: vec![],
                     };
                     job.add_execution_record(record);
                     job.update_next_execution();
@@ -354,6 +359,7 @@ impl CronManager {
         service_name: &str,
         status: CronExecutionStatus,
         exit_code: Option<i32>,
+        metrics: Vec<crate::metrics::MetricSample>,
     ) {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(job) = jobs.iter_mut().find(|j| j.service_name == service_name) {
@@ -364,6 +370,7 @@ impl CronManager {
                 record.completed_at = Some(SystemTime::now());
                 record.status = Some(status);
                 record.exit_code = exit_code;
+                record.metrics = metrics;
             }
 
             debug!("Cron job '{}' completed", service_name);
@@ -684,6 +691,7 @@ mod tests {
             "persisted_service",
             CronExecutionStatus::Success,
             Some(0),
+            vec![],
         );
 
         let service_hash = compute_test_hash(&cron_config);
