@@ -562,16 +562,6 @@ fn derive_unit_health(
         }
     }
 
-    match lifecycle {
-        Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
-        Some(ServiceLifecycleStatus::Running) => return UnitHealth::Healthy,
-        Some(ServiceLifecycleStatus::Skipped) | Some(ServiceLifecycleStatus::Stopped) => {
-            return UnitHealth::Inactive;
-        }
-        Some(ServiceLifecycleStatus::ExitedSuccessfully) => return UnitHealth::Healthy,
-        None => {}
-    }
-
     if let Some(cron_status) = cron {
         if let Some(last_run) = cron_status.last_run.as_ref() {
             if let Some(status) = &last_run.status {
@@ -606,6 +596,16 @@ fn derive_unit_health(
         }
 
         return UnitHealth::Degraded;
+    }
+
+    match lifecycle {
+        Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
+        Some(ServiceLifecycleStatus::Running) => return UnitHealth::Healthy,
+        Some(ServiceLifecycleStatus::Skipped) | Some(ServiceLifecycleStatus::Stopped) => {
+            return UnitHealth::Inactive;
+        }
+        Some(ServiceLifecycleStatus::ExitedSuccessfully) => return UnitHealth::Healthy,
+        None => {}
     }
 
     match kind {

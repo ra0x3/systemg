@@ -5,7 +5,7 @@ use nix::{
     unistd::{Pid, Uid},
 };
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     fs, io,
     io::Write,
@@ -270,7 +270,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         process::exit(2);
                     }
 
-                    // Update render options to use tail_window for filtering
                     let tail_render_opts = InspectRenderOptions {
                         json: false,
                         no_color,
@@ -412,6 +411,7 @@ const YELLOW_BOLD: &str = "\x1b[1;33m";
 const RED_BOLD: &str = "\x1b[1;31m";
 const RED: &str = "\x1b[31m";
 const CYAN: &str = "\x1b[36m";
+const CYAN_BOLD: &str = "\x1b[1;36m";
 const YELLOW: &str = "\x1b[33m";
 const ORANGE: &str = "\x1b[38;5;208m";
 const GRAY: &str = "\x1b[90m";
@@ -594,6 +594,13 @@ fn render_status(
             columns,
         )
     );
+
+    let (state_counts, health_counts) = count_states_and_health(&units);
+    println!(
+        "{}",
+        format_breakdown_banner(&state_counts, &health_counts, columns, opts.no_color)
+    );
+
     println!("{}", make_border(columns, '='));
     println!("{}", format_header_row(columns));
     println!("{}", make_border(columns, '-'));
@@ -861,6 +868,96 @@ fn format_banner(text: &str, columns: &[Column]) -> String {
     let inner_width = total_inner_width(columns);
     let content = ansi_pad(text, inner_width, Alignment::Center);
     format!("|{}|", content)
+}
+
+fn count_states_and_health(
+    units: &[UnitStatus],
+) -> (HashMap<String, usize>, HashMap<String, usize>) {
+    let mut state_counts: HashMap<String, usize> = HashMap::new();
+    let mut health_counts: HashMap<String, usize> = HashMap::new();
+
+    for unit in units {
+        let state_label = if let Some(process) = &unit.process {
+            match process.state {
+                ProcessState::Running => "Running",
+                ProcessState::Zombie => "Zombie",
+                ProcessState::Missing => "Missing",
+            }
+        } else if let Some(lifecycle) = unit.lifecycle {
+            match lifecycle {
+                ServiceLifecycleStatus::Running => "Running",
+                ServiceLifecycleStatus::ExitedSuccessfully => "Ok",
+                ServiceLifecycleStatus::ExitedWithError => "NotOk",
+                ServiceLifecycleStatus::Stopped => "Stopped",
+                ServiceLifecycleStatus::Skipped => "Skipped",
+            }
+        } else if unit.kind == UnitKind::Cron {
+            "Idle"
+        } else {
+            "Unknown"
+        };
+
+        *state_counts.entry(state_label.to_string()).or_insert(0) += 1;
+
+        let health_label = unit_health_label_with_context(unit);
+        *health_counts.entry(health_label).or_insert(0) += 1;
+    }
+
+    (state_counts, health_counts)
+}
+
+fn format_breakdown_banner(
+    state_counts: &HashMap<String, usize>,
+    health_counts: &HashMap<String, usize>,
+    columns: &[Column],
+    no_color: bool,
+) -> String {
+    let mut states: Vec<_> = state_counts.iter().collect();
+    states.sort_by_key(|(k, _)| k.as_str());
+    let state_str = states
+        .iter()
+        .map(|(state, count)| {
+            let color = match state.as_str() {
+                "Running" => BRIGHT_GREEN,
+                "Ok" => GREEN,
+                "NotOk" => RED,
+                "Zombie" | "Missing" => RED_BOLD,
+                "Stopped" | "Skipped" | "Idle" => GRAY,
+                _ => "",
+            };
+            format!("{}: {}", colorize(state, color, no_color), count)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut healths: Vec<_> = health_counts.iter().collect();
+    healths.sort_by_key(|(k, _)| k.as_str());
+    let health_str = healths
+        .iter()
+        .map(|(health, count)| {
+            let color = if health.starts_with("healthy") {
+                if health.ends_with('+') {
+                    GREEN_BOLD
+                } else {
+                    GREEN
+                }
+            } else if health.as_str() == "degraded" {
+                ORANGE
+            } else if health.as_str() == "failing" {
+                RED_BOLD
+            } else {
+                GRAY
+            };
+            format!("{}: {}", colorize(health, color, no_color), count)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let breakdown = format!(
+        "{}[States]{} {} | {}[Health]{} {}",
+        CYAN_BOLD, RESET, state_str, CYAN_BOLD, RESET, health_str
+    );
+    format_banner(&breakdown, columns)
 }
 
 fn format_header_row(columns: &[Column]) -> String {
