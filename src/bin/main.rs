@@ -336,6 +336,7 @@ struct InspectRenderOptions {
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
 const GREEN: &str = "\x1b[32m";
+const DARK_GREEN: &str = "\x1b[38;5;22m"; // Darker green for partial success
 const BRIGHT_GREEN: &str = "\x1b[92m";
 const YELLOW_BOLD: &str = "\x1b[1;33m";
 const RED_BOLD: &str = "\x1b[1;31m";
@@ -359,54 +360,6 @@ struct Column {
     width: usize,
     align: Alignment,
 }
-
-const TABLE_COLUMNS: [Column; 9] = [
-    Column {
-        title: "UNIT",
-        width: 24,
-        align: Alignment::Left,
-    },
-    Column {
-        title: "KIND",
-        width: 6,
-        align: Alignment::Left,
-    },
-    Column {
-        title: "STATE",
-        width: 12,
-        align: Alignment::Left,
-    },
-    Column {
-        title: "PID",
-        width: 8,
-        align: Alignment::Right,
-    },
-    Column {
-        title: "CPU",
-        width: 10,
-        align: Alignment::Right,
-    },
-    Column {
-        title: "RSS",
-        width: 10,
-        align: Alignment::Right,
-    },
-    Column {
-        title: "UPTIME",
-        width: 20,
-        align: Alignment::Left,
-    },
-    Column {
-        title: "LAST EXIT",
-        width: 18,
-        align: Alignment::Left,
-    },
-    Column {
-        title: "HEALTH",
-        width: 8,
-        align: Alignment::Center,
-    },
-];
 
 fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Error>> {
     match ipc::send_command(&ControlCommand::Status) {
@@ -468,7 +421,83 @@ fn render_status(
         .with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S %Z");
 
-    let columns = &TABLE_COLUMNS;
+    // Calculate the maximum widths for each column based on actual data
+    let max_unit_name_len = units
+        .iter()
+        .map(|unit| visible_length(&unit.name))
+        .max()
+        .unwrap_or(4)  // Minimum width of "UNIT" header
+        .max(4); // Ensure at least as wide as "UNIT" header
+
+    // Calculate maximum width for STATE column
+    let max_state_len = units
+        .iter()
+        .map(|unit| visible_length(&unit_state_label(unit, opts.no_color)))
+        .max()
+        .unwrap_or(5)  // Minimum width of "STATE" header
+        .max(5);
+
+    // Calculate maximum width for LAST_EXIT column
+    let max_last_exit_len = units
+        .iter()
+        .map(|unit| {
+            let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+            visible_length(&last_exit)
+        })
+        .max()
+        .unwrap_or(9)  // Minimum width of "LAST_EXIT" header
+        .max(9);
+
+    // Create dynamic columns with adjusted widths
+    let columns_array = [
+        Column {
+            title: "UNIT",
+            width: max_unit_name_len,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "KIND",
+            width: 6,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "STATE",
+            width: max_state_len,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "PID",
+            width: 8,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "CPU",
+            width: 10,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "RSS",
+            width: 10,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "UPTIME",
+            width: 18,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "LAST_EXIT",
+            width: max_last_exit_len,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "HEALTH",
+            width: 10,
+            align: Alignment::Left,
+        },
+    ];
+
+    let columns = &columns_array;
     let full_header_border = make_full_border(columns, '=');
     println!("{}", full_header_border);
     println!(
@@ -577,8 +606,33 @@ fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
         if let Some(last) = cron.last_run.as_ref() {
             if let Some(status) = &last.status {
                 return match status {
-                    CronExecutionStatus::Success => colorize("Idle", GRAY, no_color),
-                    CronExecutionStatus::Failed(_) => colorize("Failed", RED, no_color),
+                    CronExecutionStatus::Success => {
+                        // Check exit code to determine if it was a full or partial success
+                        match last.exit_code {
+                            Some(0) => colorize("Idle", GRAY, no_color),
+                            Some(_) => colorize("PartialSuccess", DARK_GREEN, no_color),
+                            None => colorize("Idle", GRAY, no_color),
+                        }
+                    }
+                    CronExecutionStatus::Failed(reason) => {
+                        // Special case: "Failed to get PID" is a tracking error, not a real failure
+                        // The job likely ran but systemg couldn't track it properly
+                        if reason.contains("Failed to get PID") {
+                            colorize("Idle", GRAY, no_color)
+                        } else if let Some(exit_code) = last.exit_code {
+                            // Job completed with an exit code
+                            if exit_code == 0 {
+                                // Marked as failed but exited successfully - treat as partial success
+                                colorize("PartialSuccess", DARK_GREEN, no_color)
+                            } else {
+                                // Real failure with non-zero exit
+                                colorize("Failed", RED, no_color)
+                            }
+                        } else {
+                            // Failed without completing
+                            colorize("Failed", RED, no_color)
+                        }
+                    }
                     CronExecutionStatus::OverlapError => {
                         colorize("Overlap", YELLOW_BOLD, no_color)
                     }
@@ -596,7 +650,7 @@ fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
 
 fn format_uptime_column(uptime: Option<&UptimeInfo>) -> String {
     if let Some(info) = uptime {
-        format!("{} ({}s)", info.human, info.seconds)
+        info.human.clone()
     } else {
         "-".to_string()
     }
@@ -777,8 +831,9 @@ fn format_row(values: &[String; 9], columns: &[Column]) -> String {
 
 fn ansi_pad(value: &str, width: usize, align: Alignment) -> String {
     let len = visible_length(value);
-    if len >= width {
-        return value.to_string();
+    if len > width {
+        // Truncate with ellipsis if content exceeds column width
+        return ellipsize(value, width);
     }
 
     let pad = width - len;

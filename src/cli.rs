@@ -175,12 +175,12 @@ pub enum Commands {
         #[arg(long = "no-color")]
         no_color: bool,
 
-        /// Only include samples captured in the last N seconds.
-        #[arg(long, value_name = "SECONDS")]
+        /// Only include samples captured in the last N seconds (default: 43200 = 12 hours).
+        #[arg(long, value_name = "SECONDS", default_value = "43200")]
         since: Option<u64>,
 
-        /// Maximum number of metric samples to display (default: 60).
-        #[arg(long, value_name = "COUNT", default_value = "60")]
+        /// Maximum number of metric samples to display (default: 720 = 12 minutes at 1 sample/sec).
+        #[arg(long, value_name = "COUNT", default_value = "720")]
         samples: usize,
 
         /// Display metrics in table format instead of chart visualization.

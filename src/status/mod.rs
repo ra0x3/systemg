@@ -576,8 +576,28 @@ fn derive_unit_health(
             if let Some(status) = &last_run.status {
                 return match status {
                     CronExecutionStatus::Success => UnitHealth::Healthy,
-                    CronExecutionStatus::OverlapError
-                    | CronExecutionStatus::Failed(_) => UnitHealth::Failing,
+                    CronExecutionStatus::OverlapError => UnitHealth::Failing,
+                    CronExecutionStatus::Failed(reason) => {
+                        // Special case: "Failed to get PID" means systemg couldn't track the process
+                        // This is not a health issue with the cron job itself
+                        if reason.contains("Failed to get PID") {
+                            UnitHealth::Healthy
+                        } else if last_run.exit_code.is_some()
+                            || last_run.completed_at.is_some()
+                        {
+                            // If the cron job has completed (has exit code or completion time),
+                            // it's not failing - it just had a non-zero exit in its last run
+                            // Exit code 0 is healthy, non-zero is degraded
+                            match last_run.exit_code {
+                                Some(0) => UnitHealth::Healthy,
+                                Some(_) => UnitHealth::Degraded,
+                                None => UnitHealth::Healthy, // Completed without exit code info
+                            }
+                        } else {
+                            // Still running and failing
+                            UnitHealth::Failing
+                        }
+                    }
                 };
             }
 

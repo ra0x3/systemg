@@ -17,7 +17,7 @@ use tracing::error;
 use crate::config::Config;
 use crate::daemon::{PidFile, ServiceStateFile};
 
-const DEFAULT_RETENTION_MINUTES: u64 = 60;
+const DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
 const DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 

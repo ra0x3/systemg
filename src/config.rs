@@ -29,7 +29,7 @@ pub struct Config {
     #[serde(default)]
     pub metrics: MetricsConfig,
 }
-const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 60;
+const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
 const METRICS_DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
 const METRICS_DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 const METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES: u64 = 256 * 1024;
