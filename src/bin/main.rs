@@ -1228,6 +1228,10 @@ fn render_inspect(
         format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref())
     );
 
+    if let Some(command) = &unit.command {
+        println!("Command: {}", command);
+    }
+
     if let Some(metrics) = unit.metrics.as_ref() {
         println!(
             "Metrics: latest {:.1}% CPU, avg {:.1}% CPU, max {:.1}% CPU, RSS {} across {} samples",

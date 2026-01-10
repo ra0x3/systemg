@@ -284,7 +284,7 @@ impl Supervisor {
 
                                                     // Get metrics for this cron execution
                                                     let metrics = if let Ok(guard) =
-                                                        metrics_store_clone.read()
+                                                        metrics_store_clone.try_read()
                                                     {
                                                         guard
                                                             .snapshot_unit(&service_hash)
@@ -357,7 +357,7 @@ impl Supervisor {
                                                                         }
 
                                                                         // Get metrics for this cron execution
-                                                                        let metrics = if let Ok(guard) = metrics_store_clone.read() {
+                                                                        let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
                                                                             guard.snapshot_unit(&service_hash).unwrap_or_default()
                                                                         } else {
                                                                             vec![]
@@ -395,7 +395,7 @@ impl Supervisor {
                                                                             job_name_clone, e
                                                                         );
                                                                         // Get metrics (even for failed jobs)
-                                                                        let metrics = if let Ok(guard) = metrics_store_clone.read() {
+                                                                        let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
                                                                             guard.snapshot_unit(&service_hash).unwrap_or_default()
                                                                         } else {
                                                                             vec![]
@@ -648,7 +648,7 @@ impl Supervisor {
 
                 let metrics_samples = if let Some(ref unit_status) = matching_unit {
                     self.metrics_store
-                        .read()
+                        .try_read()
                         .ok()
                         .map(|store| store.latest_samples(&unit_status.hash, limit))
                         .unwrap_or_default()

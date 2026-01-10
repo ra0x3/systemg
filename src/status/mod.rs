@@ -148,6 +148,8 @@ pub struct UnitStatus {
     pub cron: Option<CronUnitStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<UnitMetricsSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// Summarized metrics attached to a unit entry.
@@ -478,6 +480,11 @@ fn build_snapshot(
             .and_then(|store| store.summarize_unit(&hash))
             .map(UnitMetricsSummary::from);
 
+        // Get the command from the service config if available
+        let command = config
+            .and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")))
+            .map(|service_config| service_config.command.clone());
+
         units.push(UnitStatus {
             name: display_name,
             hash,
@@ -489,6 +496,7 @@ fn build_snapshot(
             last_exit,
             cron,
             metrics: metrics_summary,
+            command,
         });
     }
 
@@ -528,6 +536,7 @@ fn build_snapshot(
             last_exit: None,
             cron: None,
             metrics: metrics_summary,
+            command: None,
         });
     }
 
@@ -1508,6 +1517,7 @@ mod tests {
                 last_exit: None,
                 cron: None,
                 metrics: None,
+                command: None,
             },
             UnitStatus {
                 name: "svc-b".into(),
@@ -1520,6 +1530,7 @@ mod tests {
                 last_exit: None,
                 cron: None,
                 metrics: None,
+                command: None,
             },
         ];
 
