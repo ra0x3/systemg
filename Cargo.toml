@@ -1,6 +1,6 @@
 [package]
 name = "systemg"
-version = "0.17.0-rc8"
+version = "0.17.0-rc9"
 edition = "2024"
 license = "MIT"
 description = "A simple process manager."

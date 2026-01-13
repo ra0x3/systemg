@@ -101,9 +101,13 @@ pub enum UnitHealth {
 /// Machine-readable snapshot of supervisor state, cached by the resident daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusSnapshot {
+    /// Version identifier for the snapshot schema format.
     pub schema_version: String,
+    /// Timestamp when this snapshot was captured.
     pub captured_at: DateTime<Utc>,
+    /// Aggregate health status across all units.
     pub overall_health: OverallHealth,
+    /// List of all managed units and their current status.
     pub units: Vec<UnitStatus>,
 }
 

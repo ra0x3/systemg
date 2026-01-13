@@ -27,6 +27,9 @@ pub mod cli;
 /// Configuration management.
 pub mod config;
 
+/// Constants and configuration values for the daemon.
+pub mod constants;
+
 /// Runtime metrics collection and storage.
 pub mod metrics;
 

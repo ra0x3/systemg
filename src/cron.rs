@@ -127,6 +127,7 @@ pub enum EffectiveTimezone {
     Named(Tz),
 }
 
+/// Computes the next execution time for a cron schedule in the given timezone.
 fn compute_next_execution(
     schedule: &Schedule,
     tz: EffectiveTimezone,
@@ -168,6 +169,7 @@ impl CronManager {
         Self::default()
     }
 
+    /// Builds a CronJobState from service configuration and optionally restores persisted state.
     fn build_job_state(
         &self,
         service_name: &str,
@@ -365,7 +367,6 @@ impl CronManager {
         if let Some(job) = jobs.iter_mut().find(|j| j.service_name == service_name) {
             job.currently_running = false;
 
-            // Update the last execution record
             if let Some(record) = job.execution_history.back_mut() {
                 record.completed_at = Some(SystemTime::now());
                 record.status = Some(status);
@@ -382,19 +383,16 @@ impl CronManager {
     pub fn get_all_jobs(&self) -> Vec<CronJobState> {
         let jobs = self.jobs.lock().unwrap();
         jobs.iter()
-            .map(|job| {
-                // Create a debug-compatible clone
-                CronJobState {
-                    service_name: job.service_name.clone(),
-                    service_hash: job.service_hash.clone(),
-                    schedule: Schedule::from_str(&job.schedule.to_string()).unwrap(),
-                    last_execution: job.last_execution,
-                    next_execution: job.next_execution,
-                    currently_running: job.currently_running,
-                    execution_history: job.execution_history.clone(),
-                    timezone: job.timezone,
-                    timezone_label: job.timezone_label.clone(),
-                }
+            .map(|job| CronJobState {
+                service_name: job.service_name.clone(),
+                service_hash: job.service_hash.clone(),
+                schedule: Schedule::from_str(&job.schedule.to_string()).unwrap(),
+                last_execution: job.last_execution,
+                next_execution: job.next_execution,
+                currently_running: job.currently_running,
+                execution_history: job.execution_history.clone(),
+                timezone: job.timezone,
+                timezone_label: job.timezone_label.clone(),
             })
             .collect()
     }
@@ -405,6 +403,7 @@ impl CronManager {
         jobs.clear();
     }
 
+    /// Removes jobs that are no longer in the configuration.
     fn prune_inactive_jobs(&self, active_hashes: &HashSet<String>) {
         if let Ok(mut state) = self.state_file.lock() {
             let original_len = state.jobs.len();
@@ -418,6 +417,7 @@ impl CronManager {
         }
     }
 
+    /// Persists the state of a cron job to disk.
     fn persist_job_state(&self, job: &CronJobState) {
         if let Ok(mut state) = self.state_file.lock() {
             state.jobs.insert(
@@ -451,10 +451,12 @@ pub struct CronStateFile {
 }
 
 impl CronStateFile {
+    /// Returns the path to the cron state file.
     fn path() -> PathBuf {
         runtime::state_dir().join("cron_state.json")
     }
 
+    /// Saves the cron state to disk.
     fn save(&self) -> Result<(), std::io::Error> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
@@ -516,6 +518,8 @@ impl Default for PersistedCronJobState {
     }
 }
 
+/// Normalizes a cron expression to 6 fields if needed.
+/// Returns (normalized_expression, was_five_field).
 fn normalize_cron_expression(expr: &str) -> (String, bool) {
     let parts: Vec<&str> = expr.split_whitespace().collect();
     match parts.len() {
@@ -524,6 +528,8 @@ fn normalize_cron_expression(expr: &str) -> (String, bool) {
     }
 }
 
+/// Resolves the timezone for a cron job from configuration.
+/// Defaults to local timezone if not specified or invalid.
 fn resolve_timezone(
     cron_config: &CronConfig,
     service_name: &str,
@@ -570,6 +576,7 @@ mod tests {
 
     use crate::config::ServiceConfig;
 
+    /// Computes a test hash for a cron configuration.
     fn compute_test_hash(cron_config: &CronConfig) -> String {
         let service_config = ServiceConfig {
             command: "test_command".to_string(),
@@ -712,6 +719,7 @@ mod tests {
         crate::runtime::set_drop_privileges(false);
     }
 
+    /// Creates a test service with a cron configuration.
     fn service_with_cron(expr: &str) -> ServiceConfig {
         ServiceConfig {
             command: "/bin/true".into(),

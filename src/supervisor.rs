@@ -131,7 +131,6 @@ impl Supervisor {
             }
 
             if service_config.cron.is_none() {
-                // Check skip flag before starting service
                 if let Some(skip_config) = &service_config.skip {
                     match skip_config {
                         SkipConfig::Flag(true) => {
@@ -282,7 +281,6 @@ impl Supervisor {
                                                         job_name_clone
                                                     );
 
-                                                    // Get metrics for this cron execution
                                                     let metrics = if let Ok(guard) =
                                                         metrics_store_clone.try_read()
                                                     {
@@ -356,7 +354,6 @@ impl Supervisor {
                                                                             ),
                                                                         }
 
-                                                                        // Get metrics for this cron execution
                                                                         let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
                                                                             guard.snapshot_unit(&service_hash).unwrap_or_default()
                                                                         } else {
@@ -394,7 +391,6 @@ impl Supervisor {
                                                                             "Error waiting for cron job '{}': {}",
                                                                             job_name_clone, e
                                                                         );
-                                                                        // Get metrics (even for failed jobs)
                                                                         let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
                                                                             guard.snapshot_unit(&service_hash).unwrap_or_default()
                                                                         } else {

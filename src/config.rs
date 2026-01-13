@@ -707,7 +707,6 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
             }
         }
 
-        // Update service env to the merged version
         service.env = merged_env;
     }
 
@@ -1232,7 +1231,6 @@ services:
         // (Since ServiceConfig doesn't contain the name field, this is guaranteed)
         assert_eq!(hash.len(), 16);
 
-        // Create a "renamed" service (same config)
         let renamed_config = config.clone();
         let renamed_hash = renamed_config.compute_hash();
 
