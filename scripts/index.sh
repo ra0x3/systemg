@@ -10,9 +10,9 @@ while [ $# -gt 0 ]; do
     --version|-v)
       shift
       if [ -z "$1" ]; then
-        echo "Error: --version requires a version number"
-        echo "Usage: curl ... | sh -s -- --version VERSION"
-        echo "       curl ... | sh -s -- -v VERSION"
+        echo "❌ --version requires a version number"
+        echo ""
+        echo "  Usage: curl ... | sh -s -- --version VERSION"
         exit 1
       fi
       REQUESTED_VERSION="$1"
@@ -24,7 +24,6 @@ while [ $# -gt 0 ]; do
       echo "Usage:"
       echo "  Install latest:     curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh"
       echo "  Install specific:   curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version VERSION"
-      echo "  Install specific:   curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v VERSION"
       echo ""
       echo "Options:"
       echo "  --version, -v VERSION    Install or activate a specific version"
@@ -33,12 +32,12 @@ while [ $# -gt 0 ]; do
       echo "Examples:"
       echo "  curl ... | sh                        # Install latest version"
       echo "  curl ... | sh -s -- --version 0.15.6 # Install version 0.15.6"
-      echo "  curl ... | sh -s -- -v 0.15.6        # Install version 0.15.6 (short form)"
       exit 0
       ;;
     *)
-      echo "Unknown option: $1"
-      echo "Use --help for usage information"
+      echo "❌ Unknown option: $1"
+      echo ""
+      echo "  Use --help for usage information"
       exit 1
       ;;
   esac
@@ -79,7 +78,7 @@ if [ "$OS" = "linux" ]; then
   elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-unknown-linux-gnu"
   else
-    echo "Unsupported architecture: $ARCH"
+    echo "❌ Unsupported architecture: $ARCH"
     exit 1
   fi
 
@@ -89,36 +88,36 @@ elif [ "$OS" = "darwin" ]; then
   elif [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-apple-darwin"
   else
-    echo "Unsupported architecture: $ARCH"
+    echo "❌ Unsupported architecture: $ARCH"
     exit 1
   fi
 else
-  echo "Unsupported OS: $OS"
+  echo "❌ Unsupported OS: $OS"
   exit 1
 fi
 
 # -----------------------------
 # Determine version to install
 # -----------------------------
+echo "Setting up systemg..."
+echo ""
+
 if [ -n "$REQUESTED_VERSION" ]; then
   # User specified a version
   VERSION="$REQUESTED_VERSION"
   # Remove 'v' prefix if present
   VERSION="${VERSION#v}"
-  echo "Installing specified version: $VERSION"
 else
   # Fetch latest version
-  echo "Fetching latest version..."
   VERSION=$(
     curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest \
       | awk -F'"' '/tag_name/ {gsub(/^v/, "", $4); print $4}'
   )
 
   if [ -z "$VERSION" ]; then
-    echo "Failed to determine latest version from GitHub."
+    echo "❌ Failed to determine latest version from GitHub"
     exit 1
   fi
-  echo "Latest version: $VERSION"
 fi
 
 # -----------------------------
@@ -144,31 +143,34 @@ if [ -x "$VERSION_BINARY" ]; then
 
   if [ "$INSTALLED_VERSION" = "$VERSION" ]; then
     if [ "$CURRENT_ACTIVE_VERSION" = "$VERSION" ]; then
-      echo "sysg $VERSION is already installed and active."
+      echo "✔ sysg $VERSION is already installed and active"
+      echo ""
+      echo "  Run: sysg --help to get started"
+      echo ""
+      echo "✅ Setup complete!"
       exit 0
     else
-      echo "sysg $VERSION is already installed. Switching to it..."
       echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
       ln -sf "$VERSION_BINARY" "$SYSG_BIN_DIR/sysg"
-      echo "Switched to sysg $VERSION"
+      echo "✔ Switched to sysg $VERSION"
+      echo ""
+      echo "  Run: sysg --help to get started"
+      echo ""
+      echo "✅ Setup complete!"
       exit 0
     fi
   else
-    echo "Warning: Installed binary reports version $INSTALLED_VERSION (expected $VERSION)."
-    echo "Re-downloading..."
     rm -rf "$VERSION_DIR"
   fi
 fi
 
-echo "Installing sysg $VERSION..."
-
 FILE="sysg-$VERSION-$TARGET.tar.gz"
 URL="https://sh.sysg.dev/$FILE"
 
-echo "Downloading sysg $VERSION for $TARGET..."
-if ! curl -sSfL "$URL" -o "$FILE"; then
-  echo "Binary '$FILE' not available for your platform."
-  echo "Available releases: https://github.com/ra0x3/systemg/releases"
+if ! curl -sSfL "$URL" -o "$FILE" 2>/dev/null; then
+  echo "❌ Binary '$FILE' not available for your platform"
+  echo ""
+  echo "  Available releases: https://github.com/ra0x3/systemg/releases"
   exit 1
 fi
 
@@ -193,7 +195,7 @@ else
   if [ -n "$FOUND" ]; then
     BINARY="$FOUND"
   else
-    echo "Error: sysg binary not found after extraction."
+    echo "❌ sysg binary not found after extraction"
     cd "$OLDPWD"
     rm -rf "$TEMP_DIR"
     exit 1
@@ -218,11 +220,10 @@ DOWNLOADED_VERSION=$(
 )
 
 if [ -n "$DOWNLOADED_VERSION" ] && [ "$DOWNLOADED_VERSION" != "$VERSION" ]; then
-  echo "Downloaded sysg reports version $DOWNLOADED_VERSION (expected $VERSION)." >&2
-  if [ "${SYSG_INSTALL_ALLOW_VERSION_MISMATCH:-}" = "1" ]; then
-    echo "Continuing install because SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1." >&2
-  else
-    echo "Aborting install; please verify release artifacts or rerun with SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1." >&2
+  if [ "${SYSG_INSTALL_ALLOW_VERSION_MISMATCH:-}" != "1" ]; then
+    echo "❌ Version mismatch detected (got $DOWNLOADED_VERSION, expected $VERSION)" >&2
+    echo "" >&2
+    echo "  To continue anyway: SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1" >&2
     cd "$OLDPWD"
     rm -rf "$TEMP_DIR"
     exit 1
@@ -269,40 +270,46 @@ if [ -n "$SHELL_RC" ]; then
       echo "# Added by sysg installer"
       echo "$PATH_LINE"
     } >> "$SHELL_RC"
-    echo "Updated PATH in $SHELL_RC"
   fi
 fi
 
 export PATH="$HOME/.sysg/bin:$PATH"
 
 echo ""
-echo "sysg $VERSION installed successfully!"
+echo "✔ systemg successfully installed!"
 echo ""
-echo "Installation details:"
-echo "  Active version: $VERSION"
-echo "  Binary location: $VERSION_BINARY"
-echo "  Symlink: $SYSG_BIN_DIR/sysg -> $VERSION_BINARY"
+echo "  Version: $VERSION"
 echo ""
+echo "  Location: $HOME/.sysg/bin/sysg"
+echo ""
+echo ""
+echo "  Next: Run sysg --help to get started"
 
-# Show list of installed versions
-echo "Installed versions:"
-for version_path in "$SYSG_VERSIONS_DIR"/*; do
-  if [ -d "$version_path" ] && [ -x "$version_path/sysg" ]; then
-    version_name=$(basename "$version_path")
-    if [ "$version_name" = "$VERSION" ]; then
-      echo "  * $version_name (active)"
-    else
-      echo "    $version_name"
-    fi
+# Check if PATH needs to be updated
+PATH_NEEDS_UPDATE=0
+case ":$PATH:" in
+  *":$HOME/.sysg/bin:"*)
+    # Already in PATH
+    ;;
+  *)
+    PATH_NEEDS_UPDATE=1
+    ;;
+esac
+
+if [ $PATH_NEEDS_UPDATE -eq 1 ]; then
+  echo ""
+  echo "⚠ Setup notes:"
+  if [ -n "$SHELL_RC" ] && grep -q ".sysg/bin" "$SHELL_RC"; then
+    echo "  • Path configuration added to $SHELL_RC but not yet loaded. Run:"
+    echo ""
+    echo "  source $SHELL_RC"
+  else
+    echo "  • ~/.sysg/bin is not in your PATH. Run:"
+    echo ""
+    echo "  echo 'export PATH=\"\$HOME/.sysg/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
   fi
-done
-echo ""
+  echo ""
+fi
 
-echo "To start using sysg:"
-echo "  - Restart your terminal, OR"
-echo "  - Run: export PATH=\"\$HOME/.sysg/bin:\$PATH\""
 echo ""
-echo "To switch versions later:"
-echo "  curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version VERSION"
-echo ""
-echo "Run 'sysg --help' to get started."
+echo "✅ Installation complete!"

@@ -2,6 +2,7 @@ use std::{
     fs, io,
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -13,7 +14,11 @@ use crate::{
     cron::{CronExecutionStatus, CronManager},
     daemon::{Daemon, ServiceLifecycleStatus, ServiceReadyState, ServiceStateFile},
     error::ProcessManagerError,
-    ipc::{self, ControlCommand, ControlResponse},
+    ipc::{self, ControlCommand, ControlResponse, InspectPayload},
+    metrics::{self, MetricsCollector, MetricsHandle},
+    status::{
+        StatusCache, StatusRefresher, StatusSnapshot, collect_snapshot_from_runtime,
+    },
 };
 
 use thiserror::Error;
@@ -30,6 +35,9 @@ pub enum SupervisorError {
     /// I/O error.
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// Metrics subsystem error.
+    #[error(transparent)]
+    Metrics(#[from] metrics::MetricsError),
 }
 
 /// Long-lived supervisor that keeps `systemg` alive in daemon mode and reacts to CLI commands.
@@ -39,6 +47,10 @@ pub struct Supervisor {
     detach_children: bool,
     cron_manager: CronManager,
     service_filter: Option<String>,
+    status_cache: StatusCache,
+    status_refresher: Option<StatusRefresher>,
+    metrics_store: MetricsHandle,
+    metrics_collector: Option<MetricsCollector>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,12 +71,22 @@ impl Supervisor {
         cron_manager.sync_from_config(&config)?;
 
         let daemon = Daemon::from_config(config, detach_children)?;
+        let config_arc = daemon.config();
+        let metrics_settings = config_arc
+            .metrics
+            .to_settings(config_arc.project_dir.as_deref().map(Path::new));
+        let metrics_store = metrics::shared_store(metrics_settings)?;
+        let status_cache = StatusCache::new(StatusSnapshot::empty());
         Ok(Self {
             config_path,
             daemon,
             detach_children,
             cron_manager,
             service_filter,
+            status_cache,
+            status_refresher: None,
+            metrics_store,
+            metrics_collector: None,
         })
     }
 
@@ -109,7 +131,6 @@ impl Supervisor {
             }
 
             if service_config.cron.is_none() {
-                // Check skip flag before starting service
                 if let Some(skip_config) = &service_config.skip {
                     match skip_config {
                         SkipConfig::Flag(true) => {
@@ -171,10 +192,51 @@ impl Supervisor {
         // state stays accurate.
         self.daemon.ensure_monitoring()?;
 
+        let config_handle = self.daemon.config();
+        let pid_handle = self.daemon.pid_file_handle();
+        let state_handle = self.daemon.service_state_handle();
+
+        match collect_snapshot_from_runtime(
+            Arc::clone(&config_handle),
+            &pid_handle,
+            &state_handle,
+            Some(&self.metrics_store),
+        ) {
+            Ok(snapshot) => self.status_cache.replace(snapshot),
+            Err(err) => error!("failed to build initial status snapshot: {err}"),
+        }
+
+        let cache_clone = self.status_cache.clone();
+        let config_for_refresh = Arc::clone(&config_handle);
+        let pid_for_refresh = Arc::clone(&pid_handle);
+        let state_for_refresh = Arc::clone(&state_handle);
+        let metrics_for_refresh = self.metrics_store.clone();
+        self.status_refresher = Some(StatusRefresher::spawn(
+            cache_clone,
+            Duration::from_secs(1),
+            move || {
+                collect_snapshot_from_runtime(
+                    Arc::clone(&config_for_refresh),
+                    &pid_for_refresh,
+                    &state_for_refresh,
+                    Some(&metrics_for_refresh),
+                )
+            },
+        ));
+
+        let metrics_handle = self.metrics_store.clone();
+        self.metrics_collector = Some(MetricsCollector::spawn(
+            metrics_handle,
+            Arc::clone(&config_handle),
+            pid_handle,
+            state_handle,
+        ));
+
         // Spawn cron checker thread
         let cron_manager = self.cron_manager.clone();
         let config_path = self.config_path.clone();
         let detach_children = self.detach_children;
+        let metrics_store = self.metrics_store.clone();
 
         thread::spawn(move || {
             loop {
@@ -195,6 +257,8 @@ impl Supervisor {
                                 let cron_manager_clone = cron_manager.clone();
                                 let job_name_clone = job_name.clone();
                                 let cfg_clone = cfg.clone();
+                                let metrics_store_clone = metrics_store.clone();
+                                let service_hash = service_config.compute_hash();
 
                                 thread::spawn(move || {
                                     use crate::daemon::PidFile;
@@ -216,11 +280,23 @@ impl Supervisor {
                                                         "Cron job '{}' completed successfully",
                                                         job_name_clone
                                                     );
+
+                                                    let metrics = if let Ok(guard) =
+                                                        metrics_store_clone.try_read()
+                                                    {
+                                                        guard
+                                                            .snapshot_unit(&service_hash)
+                                                            .unwrap_or_default()
+                                                    } else {
+                                                        vec![]
+                                                    };
+
                                                     cron_manager_clone
                                                         .mark_job_completed(
                                                             &job_name_clone,
                                                             CronExecutionStatus::Success,
                                                             Some(0),
+                                                            metrics,
                                                         );
 
                                                     // Persist exit state to ServiceStateFile for status display
@@ -278,10 +354,17 @@ impl Supervisor {
                                                                             ),
                                                                         }
 
+                                                                        let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
+                                                                            guard.snapshot_unit(&service_hash).unwrap_or_default()
+                                                                        } else {
+                                                                            vec![]
+                                                                        };
+
                                                                         cron_manager_clone.mark_job_completed(
                                                                             &job_name_clone,
                                                                             status.clone(),
                                                                             exit_code,
+                                                                            metrics,
                                                                         );
 
                                                                         // Persist exit state to ServiceStateFile for status display
@@ -308,12 +391,19 @@ impl Supervisor {
                                                                             "Error waiting for cron job '{}': {}",
                                                                             job_name_clone, e
                                                                         );
+                                                                        let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
+                                                                            guard.snapshot_unit(&service_hash).unwrap_or_default()
+                                                                        } else {
+                                                                            vec![]
+                                                                        };
+
                                                                         cron_manager_clone.mark_job_completed(
                                                                             &job_name_clone,
                                                                             CronExecutionStatus::Failed(
                                                                                 e.to_string(),
                                                                             ),
                                                                             None,
+                                                                            metrics,
                                                                         );
 
                                                                         // Persist error state to ServiceStateFile
@@ -343,6 +433,7 @@ impl Supervisor {
                                                                     "Failed to find PID for cron job '{}' in PID file",
                                                                     job_name_clone
                                                                 );
+                                                                // No metrics available since process didn't start
                                                                 cron_manager_clone.mark_job_completed(
                                                                     &job_name_clone,
                                                                     CronExecutionStatus::Failed(
@@ -350,6 +441,7 @@ impl Supervisor {
                                                                             .to_string(),
                                                                     ),
                                                                     None,
+                                                                    vec![],
                                                                 );
 
                                                                 // Persist error state to ServiceStateFile
@@ -373,6 +465,7 @@ impl Supervisor {
                                                                 "Failed to reload PID file for cron job '{}': {}",
                                                                 job_name_clone, e
                                                             );
+                                                            // No metrics available since process didn't start
                                                             cron_manager_clone.mark_job_completed(
                                                                 &job_name_clone,
                                                                 CronExecutionStatus::Failed(
@@ -382,6 +475,7 @@ impl Supervisor {
                                                                     ),
                                                                 ),
                                                                 None,
+                                                                vec![],
                                                             );
                                                         }
                                                     }
@@ -391,6 +485,7 @@ impl Supervisor {
                                                         "Failed to start cron job '{}': {}",
                                                         job_name_clone, e
                                                     );
+                                                    // No metrics available since process didn't start properly
                                                     cron_manager_clone
                                                         .mark_job_completed(
                                                             &job_name_clone,
@@ -398,6 +493,7 @@ impl Supervisor {
                                                                 e.to_string(),
                                                             ),
                                                             None,
+                                                            vec![],
                                                         );
                                                 }
                                             }
@@ -407,12 +503,14 @@ impl Supervisor {
                                                 "Failed to create daemon for cron job '{}': {}",
                                                 job_name_clone, e
                                             );
+                                            // No metrics available since daemon creation failed
                                             cron_manager_clone.mark_job_completed(
                                                 &job_name_clone,
                                                 CronExecutionStatus::Failed(
                                                     e.to_string(),
                                                 ),
                                                 None,
+                                                vec![],
                                             );
                                         }
                                     }
@@ -436,18 +534,15 @@ impl Supervisor {
                         let should_shutdown = matches!(command, ControlCommand::Shutdown);
                         debug!("Supervisor received command: {:?}", command);
                         match self.handle_command(command) {
-                            Ok(response @ ControlResponse::Ok)
-                            | Ok(response @ ControlResponse::Message(_)) => {
-                                let _ = ipc::write_response(&mut stream, &response);
+                            Ok(response) => {
+                                if let Err(err) =
+                                    ipc::write_response(&mut stream, &response)
+                                {
+                                    error!("Failed to write supervisor response: {err}");
+                                }
                                 if should_shutdown {
                                     shutdown_requested = true;
                                 }
-                            }
-                            Ok(ControlResponse::Error(msg)) => {
-                                let _ = ipc::write_response(
-                                    &mut stream,
-                                    &ControlResponse::Error(msg.clone()),
-                                );
                             }
                             Err(err) => {
                                 error!("Supervisor command failed: {err}");
@@ -489,6 +584,7 @@ impl Supervisor {
                     let config = self.daemon.config();
                     if let Some(service_config) = config.services.get(&service_name) {
                         self.daemon.start_service(&service_name, service_config)?;
+                        self.refresh_status_cache();
                         Ok(ControlResponse::Message(format!(
                             "Service '{service_name}' started"
                         )))
@@ -500,17 +596,20 @@ impl Supervisor {
                 } else {
                     // Start all services
                     self.daemon.start_services_blocking()?;
+                    self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services started".into()))
                 }
             }
             ControlCommand::Stop { service } => {
                 if let Some(service) = service {
                     self.daemon.stop_service(&service)?;
+                    self.refresh_status_cache();
                     Ok(ControlResponse::Message(format!(
                         "Service '{service}' stopped"
                     )))
                 } else {
                     self.daemon.stop_services()?;
+                    self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services stopped".into()))
                 }
             }
@@ -520,6 +619,7 @@ impl Supervisor {
                         self.reload_config(Path::new(&path))?;
                     }
                     self.restart_single_service(&service)?;
+                    self.refresh_status_cache();
                     Ok(ControlResponse::Message(format!(
                         "Service '{service}' restarted"
                     )))
@@ -529,12 +629,42 @@ impl Supervisor {
                         .map(PathBuf::from)
                         .unwrap_or_else(|| self.config_path.clone());
                     self.reload_config(&target_path)?;
+                    self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services restarted".into()))
                 }
             }
+            ControlCommand::Inspect { unit, samples } => {
+                let limit = samples as usize;
+                let snapshot = self.status_cache.snapshot();
+                let matching_unit = snapshot
+                    .units
+                    .iter()
+                    .find(|status| status.name == unit || status.hash == unit)
+                    .cloned();
+
+                let metrics_samples = if let Some(ref unit_status) = matching_unit {
+                    self.metrics_store
+                        .try_read()
+                        .ok()
+                        .map(|store| store.latest_samples(&unit_status.hash, limit))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                Ok(ControlResponse::Inspect(Box::new(InspectPayload {
+                    unit: matching_unit,
+                    samples: metrics_samples,
+                })))
+            }
             ControlCommand::Shutdown => {
                 self.daemon.stop_services()?;
+                self.refresh_status_cache();
                 Ok(ControlResponse::Message("Supervisor shutting down".into()))
+            }
+            ControlCommand::Status => {
+                self.refresh_status_cache();
+                Ok(ControlResponse::Status(self.status_cache.snapshot()))
             }
         }
     }
@@ -551,14 +681,68 @@ impl Supervisor {
 
         info!("Reloading configuration from {:?}", resolved);
         let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
+
+        if let Some(collector) = self.metrics_collector.take() {
+            collector.stop();
+        }
+        if let Some(refresher) = self.status_refresher.take() {
+            refresher.stop();
+        }
+
         self.daemon.stop_services()?;
         self.daemon.shutdown_monitor();
+
+        let metrics_settings = config
+            .metrics
+            .to_settings(config.project_dir.as_deref().map(Path::new));
         self.daemon = Daemon::from_config(config.clone(), self.detach_children)?;
         self.config_path = resolved;
 
         self.cron_manager.sync_from_config(&config)?;
 
         self.daemon.start_services_nonblocking()?;
+        self.daemon.ensure_monitoring()?;
+
+        self.metrics_store = metrics::shared_store(metrics_settings)?;
+        let metrics_handle = self.metrics_store.clone();
+
+        let config_handle = self.daemon.config();
+        let pid_handle = self.daemon.pid_file_handle();
+        let state_handle = self.daemon.service_state_handle();
+
+        if let Ok(snapshot) = collect_snapshot_from_runtime(
+            Arc::clone(&config_handle),
+            &pid_handle,
+            &state_handle,
+            Some(&self.metrics_store),
+        ) {
+            self.status_cache.replace(snapshot);
+        }
+
+        let cache_clone = self.status_cache.clone();
+        let refresh_config = Arc::clone(&config_handle);
+        let refresh_pid = Arc::clone(&pid_handle);
+        let refresh_state = Arc::clone(&state_handle);
+        let refresh_metrics = self.metrics_store.clone();
+        self.status_refresher = Some(StatusRefresher::spawn(
+            cache_clone,
+            Duration::from_secs(1),
+            move || {
+                collect_snapshot_from_runtime(
+                    Arc::clone(&refresh_config),
+                    &refresh_pid,
+                    &refresh_state,
+                    Some(&refresh_metrics),
+                )
+            },
+        ));
+
+        self.metrics_collector = Some(MetricsCollector::spawn(
+            metrics_handle,
+            config_handle,
+            pid_handle,
+            state_handle,
+        ));
         Ok(())
     }
 
@@ -576,7 +760,29 @@ impl Supervisor {
         Ok(())
     }
 
+    fn refresh_status_cache(&mut self) {
+        let config = self.daemon.config();
+        let pid_handle = self.daemon.pid_file_handle();
+        let state_handle = self.daemon.service_state_handle();
+
+        match collect_snapshot_from_runtime(
+            config,
+            &pid_handle,
+            &state_handle,
+            Some(&self.metrics_store),
+        ) {
+            Ok(snapshot) => self.status_cache.replace(snapshot),
+            Err(err) => error!("failed to refresh status snapshot: {err}"),
+        }
+    }
+
     fn shutdown_runtime(&mut self) -> Result<(), SupervisorError> {
+        if let Some(collector) = self.metrics_collector.take() {
+            collector.stop();
+        }
+        if let Some(refresher) = self.status_refresher.take() {
+            refresher.stop();
+        }
         self.daemon.stop_services()?;
         self.daemon.shutdown_monitor();
         ipc::cleanup_runtime()?;

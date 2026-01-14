@@ -1,6 +1,7 @@
 //! Cron scheduling for services.
 use crate::config::{Config, CronConfig};
 use crate::error::ProcessManagerError;
+use crate::runtime;
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
@@ -38,6 +39,9 @@ pub struct CronExecutionRecord {
     pub status: Option<CronExecutionStatus>,
     /// Exit code of the process (None if no exit code available).
     pub exit_code: Option<i32>,
+    /// Metrics collected during this execution (for resource usage display).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<crate::metrics::MetricSample>,
 }
 
 /// Tracks execution history and state for a single cron job.
@@ -123,6 +127,7 @@ pub enum EffectiveTimezone {
     Named(Tz),
 }
 
+/// Computes the next execution time for a cron schedule in the given timezone.
 fn compute_next_execution(
     schedule: &Schedule,
     tz: EffectiveTimezone,
@@ -164,6 +169,7 @@ impl CronManager {
         Self::default()
     }
 
+    /// Builds a CronJobState from service configuration and optionally restores persisted state.
     fn build_job_state(
         &self,
         service_name: &str,
@@ -321,6 +327,7 @@ impl CronManager {
                         completed_at: Some(now),
                         status: Some(CronExecutionStatus::OverlapError),
                         exit_code: None,
+                        metrics: vec![],
                     };
                     job.add_execution_record(record);
                     job.update_next_execution();
@@ -336,6 +343,7 @@ impl CronManager {
                         completed_at: None,
                         status: None,
                         exit_code: None,
+                        metrics: vec![],
                     };
                     job.add_execution_record(record);
                     job.update_next_execution();
@@ -353,16 +361,17 @@ impl CronManager {
         service_name: &str,
         status: CronExecutionStatus,
         exit_code: Option<i32>,
+        metrics: Vec<crate::metrics::MetricSample>,
     ) {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(job) = jobs.iter_mut().find(|j| j.service_name == service_name) {
             job.currently_running = false;
 
-            // Update the last execution record
             if let Some(record) = job.execution_history.back_mut() {
                 record.completed_at = Some(SystemTime::now());
                 record.status = Some(status);
                 record.exit_code = exit_code;
+                record.metrics = metrics;
             }
 
             debug!("Cron job '{}' completed", service_name);
@@ -374,19 +383,16 @@ impl CronManager {
     pub fn get_all_jobs(&self) -> Vec<CronJobState> {
         let jobs = self.jobs.lock().unwrap();
         jobs.iter()
-            .map(|job| {
-                // Create a debug-compatible clone
-                CronJobState {
-                    service_name: job.service_name.clone(),
-                    service_hash: job.service_hash.clone(),
-                    schedule: Schedule::from_str(&job.schedule.to_string()).unwrap(),
-                    last_execution: job.last_execution,
-                    next_execution: job.next_execution,
-                    currently_running: job.currently_running,
-                    execution_history: job.execution_history.clone(),
-                    timezone: job.timezone,
-                    timezone_label: job.timezone_label.clone(),
-                }
+            .map(|job| CronJobState {
+                service_name: job.service_name.clone(),
+                service_hash: job.service_hash.clone(),
+                schedule: Schedule::from_str(&job.schedule.to_string()).unwrap(),
+                last_execution: job.last_execution,
+                next_execution: job.next_execution,
+                currently_running: job.currently_running,
+                execution_history: job.execution_history.clone(),
+                timezone: job.timezone,
+                timezone_label: job.timezone_label.clone(),
             })
             .collect()
     }
@@ -397,6 +403,7 @@ impl CronManager {
         jobs.clear();
     }
 
+    /// Removes jobs that are no longer in the configuration.
     fn prune_inactive_jobs(&self, active_hashes: &HashSet<String>) {
         if let Ok(mut state) = self.state_file.lock() {
             let original_len = state.jobs.len();
@@ -410,6 +417,7 @@ impl CronManager {
         }
     }
 
+    /// Persists the state of a cron job to disk.
     fn persist_job_state(&self, job: &CronJobState) {
         if let Ok(mut state) = self.state_file.lock() {
             state.jobs.insert(
@@ -443,11 +451,12 @@ pub struct CronStateFile {
 }
 
 impl CronStateFile {
+    /// Returns the path to the cron state file.
     fn path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/cron_state.json", home))
+        runtime::state_dir().join("cron_state.json")
     }
 
+    /// Saves the cron state to disk.
     fn save(&self) -> Result<(), std::io::Error> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
@@ -509,6 +518,8 @@ impl Default for PersistedCronJobState {
     }
 }
 
+/// Normalizes a cron expression to 6 fields if needed.
+/// Returns (normalized_expression, was_five_field).
 fn normalize_cron_expression(expr: &str) -> (String, bool) {
     let parts: Vec<&str> = expr.split_whitespace().collect();
     match parts.len() {
@@ -517,6 +528,8 @@ fn normalize_cron_expression(expr: &str) -> (String, bool) {
     }
 }
 
+/// Resolves the timezone for a cron job from configuration.
+/// Defaults to local timezone if not specified or invalid.
 fn resolve_timezone(
     cron_config: &CronConfig,
     service_name: &str,
@@ -563,10 +576,17 @@ mod tests {
 
     use crate::config::ServiceConfig;
 
+    /// Computes a test hash for a cron configuration.
     fn compute_test_hash(cron_config: &CronConfig) -> String {
         let service_config = ServiceConfig {
             command: "test_command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -648,6 +668,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", home);
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let manager = CronManager::new();
         let cron_config = CronConfig {
@@ -676,6 +698,7 @@ mod tests {
             "persisted_service",
             CronExecutionStatus::Success,
             Some(0),
+            vec![],
         );
 
         let service_hash = compute_test_hash(&cron_config);
@@ -687,17 +710,26 @@ mod tests {
         assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
         assert_eq!(record.exit_code, Some(0));
 
-        if let Some(original) = original_home {
-            unsafe {
-                std::env::set_var("HOME", original);
-            }
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
+    /// Creates a test service with a cron configuration.
     fn service_with_cron(expr: &str) -> ServiceConfig {
         ServiceConfig {
             command: "/bin/true".into(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -737,6 +769,7 @@ mod tests {
             services: services_v1,
             project_dir: None,
             env: None,
+            metrics: crate::config::MetricsConfig::default(),
         };
 
         manager.sync_from_config(&config_v1).unwrap();
@@ -749,6 +782,7 @@ mod tests {
             services: services_v2,
             project_dir: None,
             env: None,
+            metrics: crate::config::MetricsConfig::default(),
         };
 
         // Compute hashes for each service
@@ -773,10 +807,12 @@ mod tests {
         assert!(state.jobs().contains_key(&job_three_hash));
         assert!(!state.jobs().contains_key(&job_one_hash));
 
-        if let Some(original) = original_home {
-            unsafe {
-                std::env::set_var("HOME", original);
-            }
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }

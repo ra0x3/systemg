@@ -1,5 +1,12 @@
 //! Module for managing and monitoring system services.
+use crate::constants::{
+    DEFAULT_SHELL, DaemonLock, DeploymentStrategy, MAX_STATUS_LOG_LINES, PID_FILE_NAME,
+    PID_LOCK_SUFFIX, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
+    PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL,
+    SERVICE_START_TIMEOUT, SHELL_COMMAND_FLAG, STATE_FILE_NAME,
+};
 use crate::logs::{resolve_log_path, spawn_log_writer};
+use crate::runtime;
 use fs2::FileExt;
 use reqwest::blocking::Client;
 use serde::de::Error as _;
@@ -14,6 +21,7 @@ use std::{
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
+    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -95,14 +103,12 @@ pub struct PidFile {
 impl PidFile {
     /// Returns the PID file path
     fn path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/pid.json", home))
+        runtime::state_dir().join(PID_FILE_NAME)
     }
 
     /// Returns the lock file path
     fn lock_path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/pid.json.lock", home))
+        runtime::state_dir().join(format!("{}{}", PID_FILE_NAME, PID_LOCK_SUFFIX))
     }
 
     /// Acquires an exclusive lock on the PID file lock file.
@@ -260,8 +266,7 @@ pub struct ServiceStateFile {
 
 impl ServiceStateFile {
     fn path() -> PathBuf {
-        let home = std::env::var("HOME").expect("HOME not set");
-        PathBuf::from(format!("{}/.local/share/systemg/state.json", home))
+        runtime::state_dir().join(STATE_FILE_NAME)
     }
 
     /// Loads the service state file from disk, creating an empty one if it doesn't exist.
@@ -343,8 +348,8 @@ fn run_hook(
         hook_label, service_name, action.command
     );
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(&action.command);
+    let mut cmd = Command::new(DEFAULT_SHELL);
+    cmd.arg(SHELL_COMMAND_FLAG).arg(&action.command);
 
     for (key, value) in collect_service_env(env, project_root, service_name) {
         cmd.env(key, value);
@@ -466,6 +471,176 @@ struct DetachedService {
     pid: u32,
 }
 
+// Thread-local storage for tracking currently held locks to enforce ordering.
+thread_local! {
+    static HELD_LOCKS: std::cell::RefCell<HashSet<DaemonLock>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// A guard that enforces lock ordering and automatically tracks held locks.
+struct OrderedLockGuard<'a, T> {
+    guard: std::sync::MutexGuard<'a, T>,
+    lock_type: DaemonLock,
+}
+
+impl<'a, T> Drop for OrderedLockGuard<'a, T> {
+    fn drop(&mut self) {
+        HELD_LOCKS.with(|held| {
+            held.borrow_mut().remove(&self.lock_type);
+        });
+    }
+}
+
+impl<'a, T> std::ops::Deref for OrderedLockGuard<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<'a, T> std::ops::DerefMut for OrderedLockGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+/// Helper function to acquire a lock with ordering enforcement.
+fn acquire_lock<'a, T>(
+    mutex: &'a Arc<Mutex<T>>,
+    lock_type: DaemonLock,
+) -> Result<OrderedLockGuard<'a, T>, ProcessManagerError> {
+    // Check if we can acquire this lock given what we're already holding
+    HELD_LOCKS.with(|held| {
+        let held_locks = held.borrow();
+        for existing_lock in held_locks.iter() {
+            if lock_type <= *existing_lock {
+                panic!(
+                    "Lock ordering violation! Attempting to acquire {:?} (priority {}) \
+                     while holding {:?} (priority {}). Locks must be acquired in ascending order.",
+                    lock_type, lock_type.priority(),
+                    existing_lock, existing_lock.priority()
+                );
+            }
+        }
+    });
+
+    // Acquire the lock
+    let guard = mutex.lock()?;
+
+    // Track that we're holding this lock
+    HELD_LOCKS.with(|held| {
+        held.borrow_mut().insert(lock_type);
+    });
+
+    Ok(OrderedLockGuard { guard, lock_type })
+}
+
+/// Shared context for daemon operations to reduce function parameters and ensure
+/// consistent lock ordering.
+///
+/// Lock ordering is enforced via the `DaemonLock` enum. Always acquire locks in
+/// ascending order of their priority values to prevent deadlocks:
+/// 1. Processes → 2. PidFile → 3. StateFile → 4. RestartCounts → 5. ManualStopFlags → 6. RestartSuppressed
+#[derive(Clone)]
+struct DaemonContext {
+    /// Shared map of running service processes.
+    processes: Arc<Mutex<HashMap<String, Child>>>,
+    /// The PID file for tracking service PIDs.
+    pid_file: Arc<Mutex<PidFile>>,
+    /// Persistent state for recording service lifecycle transitions.
+    state_file: Arc<Mutex<ServiceStateFile>>,
+    /// Reference to the service configuration.
+    config: Arc<Config>,
+    /// Base directory for resolving relative service commands and assets.
+    project_root: PathBuf,
+    /// Whether child services should be detached from systemg (legacy behavior).
+    detach_children: bool,
+    /// Tracks the number of restart attempts for each service.
+    restart_counts: Arc<Mutex<HashMap<String, u32>>>,
+    /// Services that were explicitly stopped this cycle, used to treat exits as manual.
+    manual_stop_flags: Arc<Mutex<HashSet<String>>>,
+    /// Services whose automatic restarts are temporarily suppressed.
+    restart_suppressed: Arc<Mutex<HashSet<String>>>,
+    /// Flag indicating whether the monitoring loop should remain active.
+    running: Arc<AtomicBool>,
+    /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
+    #[cfg(target_os = "linux")]
+    thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+impl DaemonContext {
+    /// Acquires the processes lock with ordering enforcement.
+    fn lock_processes(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashMap<String, Child>>, ProcessManagerError> {
+        acquire_lock(&self.processes, DaemonLock::Processes)
+    }
+
+    /// Acquires the pid_file lock with ordering enforcement.
+    fn lock_pid_file(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, PidFile>, ProcessManagerError> {
+        acquire_lock(&self.pid_file, DaemonLock::PidFile)
+    }
+
+    /// Acquires the state_file lock with ordering enforcement.
+    #[allow(dead_code)]
+    fn lock_state_file(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, ServiceStateFile>, ProcessManagerError> {
+        acquire_lock(&self.state_file, DaemonLock::StateFile)
+    }
+
+    /// Acquires the restart_counts lock with ordering enforcement.
+    fn lock_restart_counts(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashMap<String, u32>>, ProcessManagerError> {
+        acquire_lock(&self.restart_counts, DaemonLock::RestartCounts)
+    }
+
+    /// Acquires the manual_stop_flags lock with ordering enforcement.
+    fn lock_manual_stop_flags(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashSet<String>>, ProcessManagerError> {
+        acquire_lock(&self.manual_stop_flags, DaemonLock::ManualStopFlags)
+    }
+
+    /// Acquires the restart_suppressed lock with ordering enforcement.
+    fn lock_restart_suppressed(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashSet<String>>, ProcessManagerError> {
+        acquire_lock(&self.restart_suppressed, DaemonLock::RestartSuppressed)
+    }
+
+    /// Creates a cancellation token for a Linux service thread.
+    #[cfg(target_os = "linux")]
+    fn create_cancellation_token(&self, service_name: &str) -> Arc<AtomicBool> {
+        let token = Arc::new(AtomicBool::new(false));
+        // Note: thread_cancellation_tokens doesn't need ordering enforcement as it's Linux-specific
+        let mut tokens = self.thread_cancellation_tokens.lock().unwrap();
+        tokens.insert(service_name.to_string(), Arc::clone(&token));
+        token
+    }
+
+    /// Signals a Linux service thread to stop.
+    #[cfg(target_os = "linux")]
+    fn cancel_service_thread(&self, service_name: &str) {
+        let mut tokens = self.thread_cancellation_tokens.lock().unwrap();
+        if let Some(token) = tokens.remove(service_name) {
+            token.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Cleans up all Linux service thread cancellation tokens.
+    #[cfg(target_os = "linux")]
+    fn cancel_all_service_threads(&self) {
+        let mut tokens = self.thread_cancellation_tokens.lock().unwrap();
+        for (_, token) in tokens.drain() {
+            token.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 /// Manages services, ensuring they start, stop, and restart as needed.
 pub struct Daemon {
     /// Shared map of running service processes.
@@ -490,9 +665,30 @@ pub struct Daemon {
     manual_stop_flags: Arc<Mutex<HashSet<String>>>,
     /// Services whose automatic restarts are temporarily suppressed.
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
+    /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
+    #[cfg(target_os = "linux")]
+    thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl Daemon {
+    /// Creates a DaemonContext from the current Daemon state.
+    fn context(&self) -> DaemonContext {
+        DaemonContext {
+            processes: Arc::clone(&self.processes),
+            pid_file: Arc::clone(&self.pid_file),
+            state_file: Arc::clone(&self.state_file),
+            config: Arc::clone(&self.config),
+            project_root: self.project_root.clone(),
+            detach_children: self.detach_children,
+            restart_counts: Arc::clone(&self.restart_counts),
+            manual_stop_flags: Arc::clone(&self.manual_stop_flags),
+            restart_suppressed: Arc::clone(&self.restart_suppressed),
+            running: Arc::clone(&self.running),
+            #[cfg(target_os = "linux")]
+            thread_cancellation_tokens: Arc::clone(&self.thread_cancellation_tokens),
+        }
+    }
+
     /// Recursively collects all descendant process IDs for the given root PID using the system
     /// process tree. Returns a set containing the root PID and all child processes.
     fn collect_descendants(root_pid: u32) -> HashSet<u32> {
@@ -551,7 +747,7 @@ impl Daemon {
     /// character (R=running, S=sleeping, Z=zombie, X=dead, etc.) or None if the process doesn't exist.
     #[cfg(target_os = "linux")]
     fn read_proc_state(pid: u32) -> Option<char> {
-        let stat_path_str = format!("/proc/{pid}/stat");
+        let stat_path_str = format!("/proc/{}/stat", pid);
         let stat_path = Path::new(&stat_path_str);
         let contents = fs::read_to_string(stat_path).ok()?;
         let mut parts = contents.split_whitespace();
@@ -625,9 +821,6 @@ impl Daemon {
         let mut pending = Self::collect_descendants(root_pid);
         pending.insert(root_pid);
 
-        const CHECKS: usize = 10;
-        const INTERVAL: Duration = Duration::from_millis(100);
-
         let supervisor_pgid = unsafe { libc::getpgid(0) };
         let child_pgid = unsafe { libc::getpgid(root_pid as libc::pid_t) };
 
@@ -640,7 +833,8 @@ impl Daemon {
                         Some(code) if code == libc::ESRCH => {}
                         Some(code) if code == libc::EPERM => {
                             warn!(
-                                "Insufficient permissions to signal process group {child_pgid} for '{service_name}'"
+                                "Insufficient permissions to signal process group {} for '{}'",
+                                child_pgid, service_name
                             );
                         }
                         _ => {
@@ -655,7 +849,12 @@ impl Daemon {
 
         signal_group(SIGTERM as libc::c_int);
         pending = Self::send_signal_to_pids(service_name, pending, SIGTERM)?;
-        pending = Self::wait_for_exit(service_name, pending, CHECKS, INTERVAL)?;
+        pending = Self::wait_for_exit(
+            service_name,
+            pending,
+            PROCESS_READY_CHECKS,
+            PROCESS_CHECK_INTERVAL,
+        )?;
 
         if pending.is_empty() {
             return Ok(());
@@ -663,7 +862,12 @@ impl Daemon {
 
         signal_group(SIGKILL as libc::c_int);
         pending = Self::send_signal_to_pids(service_name, pending, SIGKILL)?;
-        pending = Self::wait_for_exit(service_name, pending, CHECKS, INTERVAL)?;
+        pending = Self::wait_for_exit(
+            service_name,
+            pending,
+            PROCESS_READY_CHECKS,
+            PROCESS_CHECK_INTERVAL,
+        )?;
 
         if pending.is_empty() {
             Ok(())
@@ -673,7 +877,8 @@ impl Daemon {
                 source: std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     format!(
-                        "Failed to terminate process tree rooted at PID {root_pid} for '{service_name}'"
+                        "Failed to terminate process tree rooted at PID {} for '{}'",
+                        root_pid, service_name
                     ),
                 ),
             })
@@ -742,6 +947,8 @@ impl Daemon {
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
             manual_stop_flags: Arc::new(Mutex::new(HashSet::new())),
             restart_suppressed: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(target_os = "linux")]
+            thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -758,6 +965,16 @@ impl Daemon {
     /// Returns a reference to the configuration.
     pub fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config)
+    }
+
+    /// Returns a handle to the shared PID file so callers can inspect process IDs.
+    pub fn pid_file_handle(&self) -> Arc<Mutex<PidFile>> {
+        Arc::clone(&self.pid_file)
+    }
+
+    /// Returns a handle to the persisted service state store.
+    pub fn service_state_handle(&self) -> Arc<Mutex<ServiceStateFile>> {
+        Arc::clone(&self.state_file)
     }
 
     /// Explicitly records a skipped service in the persistent state store, clearing any stale PID.
@@ -873,31 +1090,45 @@ impl Daemon {
     ///
     /// # Arguments
     /// * `service_name` - The name of the service.
-    /// * `command` - The command string to execute.
-    /// * `env` - Optional environment variables.
+    /// * `service_config` - The service configuration for command/env/runtime settings.
     /// * `processes` - Shared process tracking map.
     ///
     /// # Returns
     /// A [`Child`] process handle if successful.
     fn launch_attached_service(
         service_name: &str,
-        command: &str,
-        env: Option<EnvConfig>,
+        service_config: &ServiceConfig,
         working_dir: PathBuf,
         processes: Arc<Mutex<HashMap<String, Child>>>,
         detach_children: bool,
     ) -> Result<u32, ProcessManagerError> {
+        let command = &service_config.command;
         debug!("Launching service: '{service_name}' with command: `{command}`");
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
+        let mut cmd = Command::new(DEFAULT_SHELL);
+        cmd.arg(SHELL_COMMAND_FLAG).arg(command);
         cmd.current_dir(&working_dir);
 
         debug!("Executing command: {cmd:?}");
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let merged_env = collect_service_env(&env, &working_dir, service_name);
+        let mut merged_env =
+            collect_service_env(&service_config.env, &working_dir, service_name);
+
+        let privilege = crate::privilege::PrivilegeContext::from_service(
+            service_name,
+            service_config,
+        )
+        .map_err(|source| ProcessManagerError::PrivilegeSetupFailed {
+            service: service_name.to_string(),
+            source,
+        })?;
+
+        for (key, value) in privilege.user.env_overrides() {
+            merged_env.insert(key, value);
+        }
+
         if !merged_env.is_empty() {
             let keys: Vec<_> = merged_env.keys().cloned().collect();
             debug!("Setting environment variables: {:?}", keys);
@@ -905,6 +1136,8 @@ impl Daemon {
                 cmd.env(key, value);
             }
         }
+
+        let privilege_clone = privilege.clone();
 
         unsafe {
             cmd.pre_exec(move || {
@@ -939,7 +1172,10 @@ impl Daemon {
                     }
                 }
 
-                Ok(())
+                privilege_clone.apply_pre_exec().map_err(|err| {
+                    eprintln!("systemg pre_exec: privilege setup failed: {}", err);
+                    err
+                })
             });
         }
 
@@ -959,6 +1195,12 @@ impl Daemon {
                 }
 
                 processes.lock()?.insert(service_name.to_string(), child);
+
+                if let Err(err) = privilege.apply_post_spawn(pid as libc::pid_t) {
+                    warn!(
+                        "Failed to apply post-spawn privilege adjustments for '{service_name}': {err}"
+                    );
+                }
                 Ok(pid)
             }
             Err(e) => {
@@ -969,6 +1211,68 @@ impl Daemon {
                 })
             }
         }
+    }
+
+    /// Common logic for service startup that's shared between Linux and non-Linux platforms.
+    /// Returns Ok(Some(state)) if the service was skipped or completed immediately,
+    /// Ok(None) if the service should continue with platform-specific startup.
+    fn start_service_common(
+        &self,
+        name: &str,
+        service: &ServiceConfig,
+    ) -> Result<Option<ServiceReadyState>, ProcessManagerError> {
+        info!("Starting service: {name}");
+
+        // Remove from restart suppressed list
+        {
+            let mut suppressed = self.restart_suppressed.lock()?;
+            suppressed.remove(name);
+        }
+
+        // Check skip flag
+        if let Some(skip_config) = &service.skip {
+            match skip_config {
+                SkipConfig::Flag(true) => {
+                    info!("Skipping service '{name}' due to skip flag");
+                    self.mark_skipped(name)?;
+                    return Ok(Some(ServiceReadyState::CompletedSuccess));
+                }
+                SkipConfig::Flag(false) => {
+                    debug!("Skip flag for '{name}' disabled; starting service");
+                }
+                SkipConfig::Command(skip_command) => {
+                    match self.evaluate_skip_condition(name, skip_command) {
+                        Ok(true) => {
+                            info!("Skipping service '{name}' due to skip condition");
+                            self.mark_skipped(name)?;
+                            return Ok(Some(ServiceReadyState::CompletedSuccess));
+                        }
+                        Ok(false) => {
+                            debug!(
+                                "Skip condition for '{name}' evaluated to false, starting service"
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Failed to evaluate skip condition for '{name}': {err}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run pre-start command if configured
+        if let Some(pre_start) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.pre_start.as_ref())
+        {
+            info!("Running pre-start command for '{name}': {pre_start}");
+            self.run_pre_start_command(name, pre_start)?;
+        }
+
+        Ok(None)
     }
 
     /// Starts all services and blocks until they exit.
@@ -1013,7 +1317,8 @@ impl Daemon {
 
             if service.cron.is_some() {
                 info!(
-                    "Skipping cron-managed service '{service_name}' during bulk start; scheduled execution will launch it"
+                    "Skipping cron-managed service '{}' during bulk start; scheduled execution will launch it",
+                    service_name
                 );
                 healthy_services.insert(service_name.clone());
                 continue 'service_loop;
@@ -1131,8 +1436,8 @@ impl Daemon {
     ) -> Result<bool, ProcessManagerError> {
         debug!("Evaluating skip condition for '{service_name}': `{skip_command}`");
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(skip_command);
+        let mut cmd = Command::new(DEFAULT_SHELL);
+        cmd.arg(SHELL_COMMAND_FLAG).arg(skip_command);
         cmd.current_dir(&self.project_root);
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
@@ -1179,13 +1484,10 @@ impl Daemon {
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        const MAX_WAIT: Duration = Duration::from_secs(5);
-        const POLL_INTERVAL: Duration = Duration::from_millis(50);
-
         let mut waited = Duration::ZERO;
         let mut seen_running_once = false;
 
-        while waited <= MAX_WAIT {
+        while waited <= SERVICE_START_TIMEOUT {
             match Self::probe_service_state(service_name, processes, pid_file)? {
                 ServiceProbe::Running => {
                     if seen_running_once {
@@ -1193,8 +1495,8 @@ impl Daemon {
                     }
 
                     seen_running_once = true;
-                    thread::sleep(POLL_INTERVAL);
-                    waited += POLL_INTERVAL;
+                    thread::sleep(SERVICE_POLL_INTERVAL);
+                    waited += SERVICE_POLL_INTERVAL;
                     continue;
                 }
                 ServiceProbe::Exited(status) => {
@@ -1213,8 +1515,8 @@ impl Daemon {
                     });
                 }
                 ServiceProbe::NotStarted => {
-                    thread::sleep(POLL_INTERVAL);
-                    waited += POLL_INTERVAL;
+                    thread::sleep(SERVICE_POLL_INTERVAL);
+                    waited += SERVICE_POLL_INTERVAL;
                     continue;
                 }
             }
@@ -1288,30 +1590,28 @@ impl Daemon {
 
             if service.cron.is_some() {
                 info!(
-                    "Skipping cron-managed service '{service_name}' during restart; scheduled execution will launch it"
+                    "Skipping cron-managed service '{}' during restart; scheduled execution will launch it",
+                    service_name
                 );
                 continue;
             }
 
             restarted_services.push(service_name.clone());
 
-            let strategy = service
+            let strategy_str = service
                 .deployment
                 .as_ref()
-                .and_then(|deployment| deployment.strategy.as_deref())
-                .unwrap_or("immediate");
+                .and_then(|deployment| deployment.strategy.as_deref());
+
+            let strategy = strategy_str
+                .and_then(|s| DeploymentStrategy::from_str(s).ok())
+                .unwrap_or_default();
 
             match strategy {
-                "rolling" => {
+                DeploymentStrategy::Rolling => {
                     self.rolling_restart_service(&service_name, service)?;
                 }
-                "immediate" => {
-                    self.immediate_restart_service(&service_name, service)?;
-                }
-                other => {
-                    warn!(
-                        "Unknown deployment strategy '{other}' for service '{service_name}', falling back to immediate restart."
-                    );
+                DeploymentStrategy::Immediate => {
                     self.immediate_restart_service(&service_name, service)?;
                 }
             }
@@ -1329,23 +1629,20 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
     ) -> Result<(), ProcessManagerError> {
-        let strategy = service
+        let strategy_str = service
             .deployment
             .as_ref()
-            .and_then(|deployment| deployment.strategy.as_deref())
-            .unwrap_or("immediate");
+            .and_then(|deployment| deployment.strategy.as_deref());
+
+        let strategy = strategy_str
+            .and_then(|s| DeploymentStrategy::from_str(s).ok())
+            .unwrap_or_default();
 
         match strategy {
-            "rolling" => {
+            DeploymentStrategy::Rolling => {
                 self.rolling_restart_service(name, service)?;
             }
-            "immediate" => {
-                self.immediate_restart_service(name, service)?;
-            }
-            other => {
-                warn!(
-                    "Unknown deployment strategy '{other}' for service '{name}', falling back to immediate restart."
-                );
+            DeploymentStrategy::Immediate => {
                 self.immediate_restart_service(name, service)?;
             }
         }
@@ -1673,8 +1970,6 @@ impl Daemon {
     /// Scans the last 50 lines of a service's stderr log for port conflict indicators. Returns
     /// true if common port conflict messages are detected (e.g., "address already in use", EADDRINUSE).
     fn logs_indicate_port_conflict(service_name: &str) -> bool {
-        const MAX_LINES: usize = 50;
-
         let path = resolve_log_path(service_name, "stderr");
         if !path.exists() {
             return false;
@@ -1683,10 +1978,11 @@ impl Daemon {
         match File::open(&path) {
             Ok(file) => {
                 let reader = BufReader::new(file);
-                let mut buffer: VecDeque<String> = VecDeque::with_capacity(MAX_LINES);
+                let mut buffer: VecDeque<String> =
+                    VecDeque::with_capacity(MAX_STATUS_LOG_LINES);
 
                 for line in reader.lines().map_while(Result::ok) {
-                    if buffer.len() == MAX_LINES {
+                    if buffer.len() == MAX_STATUS_LOG_LINES {
                         buffer.pop_front();
                     }
                     buffer.push_back(line);
@@ -1731,9 +2027,6 @@ impl Daemon {
         &self,
         services: &[String],
     ) -> Result<(), ProcessManagerError> {
-        const POST_RESTART_VERIFY_ATTEMPTS: usize = 2;
-        const POST_RESTART_VERIFY_DELAY: Duration = Duration::from_millis(200);
-
         let mut failed = Vec::new();
 
         for service_name in services {
@@ -1872,59 +2165,13 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        info!("Starting service: {name}");
-
-        {
-            let mut suppressed = self.restart_suppressed.lock()?;
-            suppressed.remove(name);
-        }
-
-        // Check skip flag
-        if let Some(skip_config) = &service.skip {
-            match skip_config {
-                SkipConfig::Flag(true) => {
-                    info!("Skipping service '{name}' due to skip flag");
-                    self.mark_skipped(name)?;
-                    return Ok(ServiceReadyState::CompletedSuccess);
-                }
-                SkipConfig::Flag(false) => {
-                    debug!("Skip flag for '{name}' disabled; starting service");
-                }
-                SkipConfig::Command(skip_command) => {
-                    match self.evaluate_skip_condition(name, skip_command) {
-                        Ok(true) => {
-                            info!("Skipping service '{name}' due to skip condition");
-                            self.mark_skipped(name)?;
-                            return Ok(ServiceReadyState::CompletedSuccess);
-                        }
-                        Ok(false) => {
-                            debug!(
-                                "Skip condition for '{name}' evaluated to false, starting service"
-                            );
-                        }
-                        Err(err) => {
-                            warn!(
-                                "Failed to evaluate skip condition for '{name}': {err}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Run pre-start command if configured
-        if let Some(pre_start) = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.pre_start.as_ref())
-        {
-            info!("Running pre-start command for '{name}': {pre_start}");
-            self.run_pre_start_command(name, pre_start)?;
+        // Use common startup logic
+        if let Some(state) = self.start_service_common(name, service)? {
+            return Ok(state);
         }
 
         let processes = Arc::clone(&self.processes);
-        let command = service.command.clone();
-        let env = service.env.clone();
+        let service_config = service.clone();
         let service_name = name.to_string();
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
@@ -1935,8 +2182,7 @@ impl Daemon {
 
             match Daemon::launch_attached_service(
                 &service_name,
-                &command,
-                env,
+                &service_config,
                 working_dir.clone(),
                 processes.clone(),
                 detach_children,
@@ -2064,58 +2310,24 @@ impl Daemon {
         use std::sync::mpsc;
         use std::thread;
 
-        info!("Starting service: {name}");
-
-        // Check skip flag
-        if let Some(skip_config) = &service.skip {
-            match skip_config {
-                SkipConfig::Flag(true) => {
-                    info!("Skipping service '{name}' due to skip flag");
-                    self.mark_skipped(name)?;
-                    return Ok(ServiceReadyState::CompletedSuccess);
-                }
-                SkipConfig::Flag(false) => {
-                    debug!("Skip flag for '{name}' disabled; starting service");
-                }
-                SkipConfig::Command(skip_command) => {
-                    match self.evaluate_skip_condition(name, skip_command) {
-                        Ok(true) => {
-                            info!("Skipping service '{name}' due to skip condition");
-                            self.mark_skipped(name)?;
-                            return Ok(ServiceReadyState::CompletedSuccess);
-                        }
-                        Ok(false) => {
-                            debug!(
-                                "Skip condition for '{name}' evaluated to false, starting service"
-                            );
-                        }
-                        Err(err) => {
-                            warn!(
-                                "Failed to evaluate skip condition for '{name}': {err}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Run pre-start command if configured
-        if let Some(pre_start) = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.pre_start.as_ref())
-        {
-            info!("Running pre-start command for '{name}': {pre_start}");
-            self.run_pre_start_command(name, pre_start)?;
+        // Use common startup logic
+        if let Some(state) = self.start_service_common(name, service)? {
+            return Ok(state);
         }
 
         let processes = Arc::clone(&self.processes);
-        let command = service.command.clone();
-        let env = service.env.clone();
+        let service_config = service.clone();
         let service_name = name.to_string();
+        let service_name_for_token = service_name.clone();
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
+
+        // Create a cancellation token for this service thread
+        let cancellation_token = self
+            .context()
+            .create_cancellation_token(&service_name_for_token);
+
         let (tx, rx) = mpsc::channel();
         // Spawn the thread, but DO NOT join it.
         thread::spawn(move || {
@@ -2123,8 +2335,7 @@ impl Daemon {
 
             let launch_result = Daemon::launch_attached_service(
                 &service_name,
-                &command,
-                env,
+                &service_config,
                 working_dir.clone(),
                 processes.clone(),
                 detach_children,
@@ -2158,9 +2369,13 @@ impl Daemon {
                         return;
                     }
 
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(60));
+                    // Keep the thread alive but check for cancellation periodically
+                    while !cancellation_token.load(Ordering::SeqCst) {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
                     }
+                    debug!(
+                        "Service thread for '{service_name}' terminated by cancellation token"
+                    );
                 }
                 Err(e) => {
                     error!("Failed to start service '{service_name}': {e}");
@@ -2353,6 +2568,10 @@ impl Daemon {
             suppressed_guard.insert(service_name.to_string());
         }
 
+        // Cancel the Linux service thread if it exists
+        #[cfg(target_os = "linux")]
+        self.context().cancel_service_thread(service_name);
+
         let was_running = { self.pid_file.lock()?.get(service_name).is_some() };
 
         let result = Self::stop_service_with_handles(
@@ -2399,16 +2618,10 @@ impl Daemon {
     /// Recursively stops any services that depend (directly or indirectly) on the specified root
     /// service. Used when a dependency crashes so downstream workloads do not continue in a broken
     /// state.
-    #[allow(clippy::too_many_arguments)]
     fn stop_dependents(
         root: &str,
         reverse_dependencies: &HashMap<String, Vec<String>>,
-        processes: &Arc<Mutex<HashMap<String, Child>>>,
-        pid_file: &Arc<Mutex<PidFile>>,
-        state_file: &Arc<Mutex<ServiceStateFile>>,
-        config: &Arc<Config>,
-        manual_stop_flags: &Arc<Mutex<HashSet<String>>>,
-        restart_suppressed: &Arc<Mutex<HashSet<String>>>,
+        ctx: &DaemonContext,
     ) {
         let mut stack: Vec<String> =
             reverse_dependencies.get(root).cloned().unwrap_or_default();
@@ -2417,28 +2630,32 @@ impl Daemon {
         while let Some(service) = stack.pop() {
             warn!("Stopping dependent service '{service}' because '{root}' failed.");
 
-            if let Ok(mut guard) = manual_stop_flags.lock() {
+            if let Ok(mut guard) = ctx.lock_manual_stop_flags() {
                 guard.insert(service.clone());
             }
-            if let Ok(mut guard) = restart_suppressed.lock() {
+            if let Ok(mut guard) = ctx.lock_restart_suppressed() {
                 guard.insert(service.clone());
             }
 
             if let Err(err) = Self::stop_service_with_handles(
-                &service, processes, pid_file, state_file, config,
+                &service,
+                &ctx.processes,
+                &ctx.pid_file,
+                &ctx.state_file,
+                &ctx.config,
             ) {
                 error!(
                     "Failed to stop dependent service '{service}' after '{root}' failure: {err}"
                 );
-                if let Ok(mut guard) = manual_stop_flags.lock() {
+                if let Ok(mut guard) = ctx.lock_manual_stop_flags() {
                     guard.remove(&service);
                 }
-                if let Ok(mut guard) = restart_suppressed.lock() {
+                if let Ok(mut guard) = ctx.lock_restart_suppressed() {
                     guard.remove(&service);
                 }
             }
 
-            if let Ok(mut guard) = pid_file.lock() {
+            if let Ok(mut guard) = ctx.lock_pid_file() {
                 if let Err(err) = guard.remove(&service)
                     && !matches!(err, PidFileError::ServiceNotFound)
                 {
@@ -2493,30 +2710,10 @@ impl Daemon {
             debug!("Starting service monitoring thread...");
             self.running.store(true, Ordering::SeqCst);
 
-            let processes = Arc::clone(&self.processes);
-            let config = Arc::clone(&self.config);
-            let running = Arc::clone(&self.running);
-            let pid_file = Arc::clone(&self.pid_file);
-            let state_file = Arc::clone(&self.state_file);
-            let detach_children = self.detach_children;
-            let project_root = self.project_root.clone();
-            let restart_counts = Arc::clone(&self.restart_counts);
-            let manual_stop_flags = Arc::clone(&self.manual_stop_flags);
-            let restart_suppressed = Arc::clone(&self.restart_suppressed);
+            let ctx = self.context();
 
             let handle = thread::spawn(move || {
-                Self::monitor_loop(
-                    processes,
-                    config,
-                    pid_file,
-                    state_file,
-                    running,
-                    detach_children,
-                    project_root,
-                    restart_counts,
-                    manual_stop_flags,
-                    restart_suppressed,
-                );
+                Self::monitor_loop(ctx);
             });
 
             *handle_slot = Some(handle);
@@ -2539,27 +2736,15 @@ impl Daemon {
     }
 
     /// Monitors all running services and restarts them if they exit unexpectedly.
-    #[allow(clippy::too_many_arguments)]
-    fn monitor_loop(
-        processes: Arc<Mutex<HashMap<String, Child>>>,
-        config: Arc<Config>,
-        pid_file: Arc<Mutex<PidFile>>,
-        state_file: Arc<Mutex<ServiceStateFile>>,
-        running: Arc<AtomicBool>,
-        detach_children: bool,
-        project_root: PathBuf,
-        restart_counts: Arc<Mutex<HashMap<String, u32>>>,
-        manual_stop_flags: Arc<Mutex<HashSet<String>>>,
-        restart_suppressed: Arc<Mutex<HashSet<String>>>,
-    ) {
-        while running.load(Ordering::SeqCst) {
+    fn monitor_loop(ctx: DaemonContext) {
+        while ctx.running.load(Ordering::SeqCst) {
             let mut exited_services = Vec::new();
             let mut restarted_services = Vec::new();
             let mut failed_services = Vec::new();
             let mut active_services = 0;
 
             {
-                let mut locked_processes = processes.lock().unwrap();
+                let mut locked_processes = ctx.lock_processes().unwrap();
                 for (name, child) in locked_processes.iter_mut() {
                     match child.try_wait() {
                         Ok(Some(status)) => {
@@ -2580,11 +2765,11 @@ impl Daemon {
             }
 
             if !exited_services.is_empty() {
-                let mut pid_file_guard = pid_file.lock().unwrap();
+                let mut pid_file_guard = ctx.lock_pid_file().unwrap();
 
                 for (name, exit_status) in exited_services {
                     let manually_stopped = {
-                        let mut manual_guard = manual_stop_flags.lock().unwrap();
+                        let mut manual_guard = ctx.lock_manual_stop_flags().unwrap();
                         if manual_guard.remove(&name) {
                             true
                         } else {
@@ -2592,7 +2777,7 @@ impl Daemon {
                         }
                     };
                     let restart_suppressed_for_service =
-                        restart_suppressed.lock().unwrap().contains(&name);
+                        ctx.lock_restart_suppressed().unwrap().contains(&name);
                     let exit_success = exit_status.success();
                     let exit_code = exit_status.code();
                     #[cfg(unix)]
@@ -2607,7 +2792,8 @@ impl Daemon {
 
                     // Only run OnStop hooks if the service wasn't manually stopped
                     // (manual stops already run the hook in stop_service_with_intent)
-                    if !manually_stopped && let Some(service) = config.services.get(&name)
+                    if !manually_stopped
+                        && let Some(service) = ctx.config.services.get(&name)
                     {
                         let env = service.env.clone();
                         if let Some(action) = service
@@ -2621,7 +2807,7 @@ impl Daemon {
                                 HookStage::OnStop,
                                 hook_outcome,
                                 &name,
-                                &project_root,
+                                &ctx.project_root,
                             );
                         }
                     }
@@ -2636,8 +2822,8 @@ impl Daemon {
                             );
                         }
                         if let Err(err) = Self::persist_service_state(
-                            &config,
-                            &state_file,
+                            &ctx.config,
+                            &ctx.state_file,
                             &name,
                             ServiceLifecycleStatus::Stopped,
                             None,
@@ -2648,7 +2834,7 @@ impl Daemon {
                                 "Failed to persist stopped state for '{name}' after manual stop: {err}"
                             );
                         }
-                        if let Ok(mut counts) = restart_counts.lock() {
+                        if let Ok(mut counts) = ctx.lock_restart_counts() {
                             counts.remove(&name);
                         }
                     } else if restart_suppressed_for_service {
@@ -2656,8 +2842,8 @@ impl Daemon {
                             "Automatic restart suppressed for service '{name}' after exit."
                         );
                         if let Err(err) = Self::persist_service_state(
-                            &config,
-                            &state_file,
+                            &ctx.config,
+                            &ctx.state_file,
                             &name,
                             ServiceLifecycleStatus::Stopped,
                             None,
@@ -2668,7 +2854,7 @@ impl Daemon {
                                 "Failed to persist suppressed state for '{name}': {err}"
                             );
                         }
-                        if let Ok(mut counts) = restart_counts.lock() {
+                        if let Ok(mut counts) = ctx.lock_restart_counts() {
                             counts.remove(&name);
                         }
                     } else if !exit_success {
@@ -2676,7 +2862,8 @@ impl Daemon {
                         failed_services.push(name.clone());
 
                         // Check if service should be restarted based on its restart_policy
-                        let should_restart = config
+                        let should_restart = ctx
+                            .config
                             .services
                             .get(&name)
                             .map(|s| s.restart_policy.as_deref())
@@ -2694,8 +2881,8 @@ impl Daemon {
                             );
                         }
                         if let Err(err) = Self::persist_service_state(
-                            &config,
-                            &state_file,
+                            &ctx.config,
+                            &ctx.state_file,
                             &name,
                             ServiceLifecycleStatus::ExitedWithError,
                             None,
@@ -2712,8 +2899,8 @@ impl Daemon {
                             error!("Failed to remove '{name}' from PID file: {e}");
                         }
                         if let Err(err) = Self::persist_service_state(
-                            &config,
-                            &state_file,
+                            &ctx.config,
+                            &ctx.state_file,
                             &name,
                             ServiceLifecycleStatus::ExitedSuccessfully,
                             None,
@@ -2726,23 +2913,14 @@ impl Daemon {
                         }
                     }
 
-                    processes.lock().unwrap().remove(&name);
+                    ctx.processes.lock().unwrap().remove(&name);
                 }
             }
 
             if !failed_services.is_empty() {
-                let reverse = config.reverse_dependencies();
+                let reverse = ctx.config.reverse_dependencies();
                 for failed in failed_services {
-                    Self::stop_dependents(
-                        &failed,
-                        &reverse,
-                        &processes,
-                        &pid_file,
-                        &state_file,
-                        &config,
-                        &manual_stop_flags,
-                        &restart_suppressed,
-                    );
+                    Self::stop_dependents(&failed, &reverse, &ctx);
                 }
             }
 
@@ -2751,20 +2929,8 @@ impl Daemon {
             }
 
             for name in restarted_services {
-                if let Some(service) = config.services.get(&name) {
-                    Self::handle_restart(
-                        &name,
-                        service,
-                        Arc::clone(&processes),
-                        detach_children,
-                        Arc::clone(&pid_file),
-                        Arc::clone(&state_file),
-                        project_root.clone(),
-                        Arc::clone(&config),
-                        Arc::clone(&restart_counts),
-                        Arc::clone(&manual_stop_flags),
-                        Arc::clone(&restart_suppressed),
-                    );
+                if let Some(service) = ctx.config.services.get(&name) {
+                    Self::handle_restart(&name, service, ctx.clone());
                 }
             }
 
@@ -2775,29 +2941,15 @@ impl Daemon {
     }
 
     /// Handles restarting a service if its restart policy allows.
-    #[allow(clippy::too_many_arguments)]
-    fn handle_restart(
-        name: &str,
-        service: &ServiceConfig,
-        processes: Arc<Mutex<HashMap<String, Child>>>,
-        detach_children: bool,
-        pid_file: Arc<Mutex<PidFile>>,
-        state_file: Arc<Mutex<ServiceStateFile>>,
-        project_root: PathBuf,
-        config: Arc<Config>,
-        restart_counts: Arc<Mutex<HashMap<String, u32>>>,
-        manual_stop_flags: Arc<Mutex<HashSet<String>>>,
-        restart_suppressed: Arc<Mutex<HashSet<String>>>,
-    ) {
+    fn handle_restart(name: &str, service: &ServiceConfig, ctx: DaemonContext) {
         let name = name.to_string();
-        let command = service.command.clone();
-        let env = service.env.clone();
+        let service_clone = service.clone();
         let hooks = service.hooks.clone();
         let max_restarts = service.max_restarts;
 
         // Check restart count before attempting restart
         {
-            let mut counts = restart_counts.lock().unwrap();
+            let mut counts = ctx.restart_counts.lock().unwrap();
             let count = counts.entry(name.clone()).or_insert(0);
             *count += 1;
 
@@ -2819,14 +2971,11 @@ impl Daemon {
             .parse::<u64>()
             .unwrap_or(5);
 
-        let restart_counts_clone = Arc::clone(&restart_counts);
-        let restart_suppressed_clone = Arc::clone(&restart_suppressed);
-
         let _ = thread::spawn(move || {
             warn!("Restarting '{name}' after {backoff} seconds...");
             thread::sleep(Duration::from_secs(backoff));
 
-            if restart_suppressed_clone
+            if ctx.restart_suppressed
                 .lock()
                 .map(|guard| guard.contains(&name))
                 .unwrap_or(false)
@@ -2834,13 +2983,13 @@ impl Daemon {
                 info!(
                     "Skipping automatic restart of '{name}' because it is currently suppressed."
                 );
-                if let Ok(mut counts) = restart_counts.lock() {
+                if let Ok(mut counts) = ctx.restart_counts.lock() {
                     counts.remove(&name);
                 }
                 return;
             }
 
-            if manual_stop_flags
+            if ctx.manual_stop_flags
                 .lock()
                 .map(|mut guard| guard.remove(&name))
                 .unwrap_or(false)
@@ -2848,7 +2997,7 @@ impl Daemon {
                 info!(
                     "Skipping automatic restart of '{name}' due to concurrent manual stop."
                 );
-                if let Ok(mut counts) = restart_counts.lock() {
+                if let Ok(mut counts) = ctx.restart_counts.lock() {
                     counts.remove(&name);
                 }
                 return;
@@ -2856,16 +3005,15 @@ impl Daemon {
 
             let restart_result = Daemon::launch_attached_service(
                 &name,
-                &command,
-                env.clone(),
-                project_root.clone(),
-                Arc::clone(&processes),
-                detach_children,
+                &service_clone,
+                ctx.project_root.clone(),
+                Arc::clone(&ctx.processes),
+                ctx.detach_children,
             );
 
             match restart_result {
                 Ok(pid) => {
-                    let record_result = pid_file
+                    let record_result = ctx.pid_file
                         .lock()
                         .map_err(ProcessManagerError::from)
                         .and_then(|mut guard| {
@@ -2892,11 +3040,11 @@ impl Daemon {
                         {
                             run_hook(
                                 action,
-                                &env,
+                                &service_clone.env,
                                 HookStage::OnStart,
                                 HookOutcome::Error,
                                 &name,
-                                &project_root,
+                                &ctx.project_root,
                             );
                         }
 
@@ -2906,11 +3054,11 @@ impl Daemon {
                         {
                             run_hook(
                                 action,
-                                &env,
+                                &service_clone.env,
                                 HookStage::OnRestart,
                                 HookOutcome::Error,
                                 &name,
-                                &project_root,
+                                &ctx.project_root,
                             );
                         }
 
@@ -2919,18 +3067,18 @@ impl Daemon {
 
                     match Self::wait_for_service_ready_with_handles(
                         &name,
-                        &processes,
-                        &pid_file,
+                        &ctx.processes,
+                        &ctx.pid_file,
                     ) {
                         Ok(ServiceReadyState::Running) => {
                             // Reset restart counter after successful restart
-                            if let Ok(mut counts) = restart_counts_clone.lock() {
+                            if let Ok(mut counts) = ctx.lock_restart_counts() {
                                 counts.insert(name.clone(), 0);
                             }
 
                             if let Err(err) = Self::persist_service_state(
-                                &config,
-                                &state_file,
+                                &ctx.config,
+                                &ctx.state_file,
                                 &name,
                                 ServiceLifecycleStatus::Running,
                                 Some(pid),
@@ -2948,11 +3096,11 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnStart,
                                     HookOutcome::Success,
                                     &name,
-                                    &project_root,
+                                    &ctx.project_root,
                                 );
                             }
 
@@ -2962,28 +3110,28 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnRestart,
                                     HookOutcome::Success,
                                     &name,
-                                    &project_root,
+                                    &ctx.project_root,
                                 );
                             }
 
-                            if let Ok(mut pid_file_guard) = pid_file.lock()
+                            if let Ok(mut pid_file_guard) = ctx.pid_file.lock()
                                 && let Ok(latest) = PidFile::reload()
                             {
                                 *pid_file_guard = latest;
                             }
                         }
                         Ok(ServiceReadyState::CompletedSuccess) => {
-                            if let Ok(mut counts) = restart_counts_clone.lock() {
+                            if let Ok(mut counts) = ctx.lock_restart_counts() {
                                 counts.insert(name.clone(), 0);
                             }
 
                             if let Err(err) = Self::persist_service_state(
-                                &config,
-                                &state_file,
+                                &ctx.config,
+                                &ctx.state_file,
                                 &name,
                                 ServiceLifecycleStatus::ExitedSuccessfully,
                                 None,
@@ -3001,11 +3149,11 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnStart,
                                     HookOutcome::Success,
                                     &name,
-                                    &project_root,
+                                    &ctx.project_root,
                                 );
                             }
 
@@ -3015,11 +3163,11 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnRestart,
                                     HookOutcome::Success,
                                     &name,
-                                    &project_root,
+                                    &ctx.project_root,
                                 );
                             }
                         }
@@ -3034,11 +3182,11 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnStart,
                                     HookOutcome::Error,
                                     &name,
-                                    &project_root,
+                                    &ctx.project_root,
                                 );
                             }
 
@@ -3048,11 +3196,11 @@ impl Daemon {
                             {
                                 run_hook(
                                     action,
-                                    &env,
+                                    &service_clone.env,
                                     HookStage::OnRestart,
                                     HookOutcome::Error,
                                     &name,
-                                    &project_root,
+                                    &ctx.project_root,
                                 );
                             }
                         }
@@ -3067,11 +3215,11 @@ impl Daemon {
                     {
                         run_hook(
                             action,
-                            &env,
+                            &service_clone.env,
                             HookStage::OnStart,
                             HookOutcome::Error,
                             &name,
-                            &project_root,
+                            &ctx.project_root,
                         );
                     }
 
@@ -3081,17 +3229,28 @@ impl Daemon {
                     {
                         run_hook(
                             action,
-                            &env,
+                            &service_clone.env,
                             HookStage::OnRestart,
                             HookOutcome::Error,
                             &name,
-                            &project_root,
+                            &ctx.project_root,
                         );
                     }
                 }
             }
         })
         .join();
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        // Ensure monitoring is stopped
+        self.shutdown_monitor();
+
+        // Cancel all Linux service threads
+        #[cfg(target_os = "linux")]
+        self.context().cancel_all_service_threads();
     }
 }
 
@@ -3111,6 +3270,12 @@ mod tests {
         ServiceConfig {
             command: command.to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -3138,9 +3303,10 @@ mod tests {
             services,
             project_dir: Some(dir.to_string_lossy().to_string()),
             env: None,
+            metrics: crate::config::MetricsConfig::default(),
         };
 
-        // Validate order to mirror load_config behaviour.
+        // Validate order to mirror load_config behavior.
         config.service_start_order().unwrap();
 
         Daemon::new(config, pid_file, state_file, false)
@@ -3152,9 +3318,15 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let original = env::var("HOME").ok();
+        let temp_home = temp.path().to_path_buf();
         unsafe {
-            env::set_var("HOME", temp.path());
+            env::set_var("HOME", &temp_home);
         }
+        crate::runtime::init_with_test_home(&temp_home);
+        crate::runtime::set_drop_privileges(false);
+
+        fs::create_dir_all(crate::runtime::state_dir()).unwrap();
+        fs::create_dir_all(crate::runtime::log_dir()).unwrap();
         test(temp.path());
         match original {
             Some(val) => unsafe {
@@ -3164,6 +3336,8 @@ mod tests {
                 env::remove_var("HOME");
             },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -3724,7 +3898,7 @@ fi
     fn terminate_process_tree_kills_all_descendants() {
         with_temp_home(|_| {
             // Create a parent process that spawns children
-            let mut cmd = Command::new("sh");
+            let mut cmd = Command::new(DEFAULT_SHELL);
             cmd.arg("-c");
             cmd.arg("sh -c 'sleep 60' & sh -c 'sleep 60' & sleep 60");
             cmd.stdin(Stdio::null());

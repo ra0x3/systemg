@@ -74,6 +74,14 @@ pub struct Cli {
     #[arg(long, value_name = "LEVEL", global = true)]
     pub log_level: Option<LogLevelArg>,
 
+    /// Opt into privileged system mode. Requires running as root.
+    #[arg(long = "sys", global = true)]
+    pub sys: bool,
+
+    /// Drop privileges after performing privileged setup.
+    #[arg(long = "drop-privileges", global = true)]
+    pub drop_privileges: bool,
+
     /// The command to execute.
     #[command(subcommand)]
     pub command: Commands,
@@ -136,6 +144,56 @@ pub enum Commands {
         /// Show all services including orphaned state (services not in current config).
         #[arg(long)]
         all: bool,
+
+        /// Emit machine-readable JSON output instead of a table.
+        #[arg(long)]
+        json: bool,
+
+        /// Disable ANSI colors in output.
+        #[arg(long = "no-color")]
+        no_color: bool,
+
+        /// Continuously refresh status at the provided interval in seconds.
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+    },
+
+    /// Inspect a single service or cron unit in detail.
+    Inspect {
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
+        config: String,
+
+        /// Name or hash of the unit to inspect.
+        unit: String,
+
+        /// Emit machine-readable JSON output instead of a report.
+        #[arg(long)]
+        json: bool,
+
+        /// Disable ANSI colors in output.
+        #[arg(long = "no-color")]
+        no_color: bool,
+
+        /// Only include samples captured in the last N seconds (default: 43200 = 12 hours).
+        #[arg(long, value_name = "SECONDS", default_value = "43200")]
+        since: Option<u64>,
+
+        /// Maximum number of metric samples to display (default: 720 = 12 minutes at 1 sample/sec).
+        #[arg(long, value_name = "COUNT", default_value = "720")]
+        samples: usize,
+
+        /// Display metrics in table format instead of chart visualization.
+        #[arg(long)]
+        table: bool,
+
+        /// Enable live tailing mode to show real-time updates.
+        #[arg(long)]
+        tail: bool,
+
+        /// Time window for tail mode in seconds (default: 5, max: 60).
+        #[arg(long, value_name = "SECONDS", default_value = "5")]
+        tail_window: u64,
     },
 
     /// Show logs for a specific service.
@@ -151,8 +209,8 @@ pub enum Commands {
         #[arg(short, long, default_value = "50")]
         lines: usize,
 
-        /// Kind of logs to show: stdout, stderr, or supervisor (default: all).
-        #[arg(short = 'k', long)]
+        /// Kind of logs to show: stdout, stderr, or supervisor (default: stdout).
+        #[arg(short = 'k', long, default_value = "stdout")]
         kind: Option<String>,
     },
 

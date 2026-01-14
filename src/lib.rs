@@ -27,6 +27,12 @@ pub mod cli;
 /// Configuration management.
 pub mod config;
 
+/// Constants and configuration values for the daemon.
+pub mod constants;
+
+/// Runtime metrics collection and storage.
+pub mod metrics;
+
 /// Cron scheduling for services.
 pub mod cron;
 
@@ -51,3 +57,9 @@ pub mod supervisor;
 /// Test utilities for synchronizing environment variable modifications.
 #[doc(hidden)]
 pub mod test_utils;
+
+/// Runtime context helpers for managing directories and privilege mode.
+pub mod runtime;
+
+/// Privilege management and resource handling utilities.
+pub mod privilege;

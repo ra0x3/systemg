@@ -6,10 +6,12 @@ use std::{
     collections::{BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use strum_macros::AsRefStr;
 
 use crate::error::ProcessManagerError;
+use crate::metrics::{MetricsSettings, SpilloverSettings};
 
 /// Represents the structure of the configuration file.
 #[derive(Debug, Deserialize, Clone)]
@@ -23,6 +25,82 @@ pub struct Config {
     /// Optional environment variables that apply to all services by default.
     /// Service-level env configurations override these root-level settings.
     pub env: Option<EnvConfig>,
+    /// Metrics collection configuration.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+}
+const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
+const METRICS_DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
+const METRICS_DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
+const METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES: u64 = 256 * 1024;
+
+/// Top-level metrics configuration block.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Number of minutes to retain in-memory samples (minimum: 1).
+    pub retention_minutes: u64,
+    /// Sampling interval in seconds (clamped between 1 and 60).
+    pub sample_interval_secs: u64,
+    /// Maximum memory used across all ring buffers (bytes).
+    pub max_memory_bytes: usize,
+    /// Optional directory path for spillover segments.
+    pub spillover_path: Option<String>,
+    /// Maximum bytes to persist on disk for spillover segments.
+    pub spillover_max_bytes: Option<u64>,
+    /// Preferred segment size when rotating spillover files.
+    pub spillover_segment_bytes: Option<u64>,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            retention_minutes: METRICS_DEFAULT_RETENTION_MINUTES,
+            sample_interval_secs: METRICS_DEFAULT_SAMPLE_INTERVAL_SECS,
+            max_memory_bytes: METRICS_DEFAULT_MAX_MEMORY_BYTES,
+            spillover_path: None,
+            spillover_max_bytes: None,
+            spillover_segment_bytes: None,
+        }
+    }
+}
+
+impl MetricsConfig {
+    /// Converts the configuration into runtime settings.
+    pub fn to_settings(&self, project_dir: Option<&Path>) -> MetricsSettings {
+        let retention_minutes = self.retention_minutes.max(1);
+        let sample_interval_secs = self.sample_interval_secs.clamp(1, 60);
+        let max_memory_bytes = self.max_memory_bytes.max(128 * 1024);
+
+        let spillover = self.spillover_path.as_ref().and_then(|raw| {
+            let mut path = PathBuf::from(raw);
+            if path.is_relative()
+                && let Some(base) = project_dir
+            {
+                path = base.join(path);
+            }
+
+            let max_bytes = self.spillover_max_bytes.unwrap_or(6 * 1024 * 1024);
+            if max_bytes == 0 {
+                return None;
+            }
+
+            Some(SpilloverSettings {
+                directory: path,
+                max_bytes,
+                segment_bytes: self
+                    .spillover_segment_bytes
+                    .unwrap_or(METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES),
+            })
+        });
+
+        MetricsSettings {
+            retention: Duration::from_secs(retention_minutes * 60),
+            sample_interval: Duration::from_secs(sample_interval_secs),
+            max_memory_bytes,
+            spillover,
+        }
+    }
 }
 
 /// Skip configuration for a service.
@@ -37,12 +115,25 @@ pub enum SkipConfig {
 }
 
 /// Configuration for an individual service.
-#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[derive(Debug, Default, Deserialize, Clone, serde::Serialize)]
 pub struct ServiceConfig {
     /// Command used to start the service.
     pub command: String,
     /// Optional environment variables for the service.
     pub env: Option<EnvConfig>,
+    /// User that should own the running process.
+    pub user: Option<String>,
+    /// Primary group for the running process.
+    pub group: Option<String>,
+    /// Supplementary groups to apply after switching users.
+    #[serde(default, rename = "supplementary_groups")]
+    pub supplementary_groups: Option<Vec<String>>,
+    /// Resource limit configuration applied prior to exec.
+    pub limits: Option<LimitsConfig>,
+    /// Linux capabilities retained for the service when started as root.
+    pub capabilities: Option<Vec<String>>,
+    /// Namespace and confinement settings for sandboxed execution.
+    pub isolation: Option<IsolationConfig>,
     /// Restart policy (e.g., "always", "on-failure", "never").
     pub restart_policy: Option<String>,
     /// Backoff time before restarting a failed service.
@@ -59,6 +150,180 @@ pub struct ServiceConfig {
     pub cron: Option<CronConfig>,
     /// Optional skip configuration that determines if the service should be skipped.
     pub skip: Option<SkipConfig>,
+}
+
+/// Resource limit overrides configured per service.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct LimitsConfig {
+    /// Maximum number of open file descriptors (`RLIMIT_NOFILE`).
+    pub nofile: Option<LimitValue>,
+    /// Maximum number of processes (`RLIMIT_NPROC`).
+    pub nproc: Option<LimitValue>,
+    /// Maximum locked memory in bytes (`RLIMIT_MEMLOCK`).
+    pub memlock: Option<LimitValue>,
+    /// CPU scheduling priority (`nice` value, -20..19).
+    pub nice: Option<i32>,
+    /// CPU affinity mask specified as CPU indices.
+    pub cpu_affinity: Option<Vec<u16>>,
+    /// Optional cgroup v2 parameters applied after spawn.
+    pub cgroup: Option<CgroupConfig>,
+}
+
+/// Configuration options for cgroup v2 controllers.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct CgroupConfig {
+    /// Absolute path for the cgroup base; defaults to `/sys/fs/cgroup/systemg` when omitted.
+    pub root: Option<String>,
+    /// Memory limit written to `memory.max` (e.g., `512M`, `max`).
+    pub memory_max: Option<String>,
+    /// CPU quota written to `cpu.max` (e.g., `max` or `200000 100000`).
+    pub cpu_max: Option<String>,
+    /// CPU weight written to `cpu.weight` (between 1 and 10000).
+    pub cpu_weight: Option<u64>,
+}
+
+/// Value accepted for `setrlimit`-backed configuration entries.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum LimitValue {
+    /// A fixed numeric soft+hard limit.
+    Fixed(u64),
+    /// Unlimited (maps to `RLIM_INFINITY`).
+    Unlimited,
+}
+
+impl<'de> Deserialize<'de> for LimitValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LimitVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for LimitVisitor {
+            type Value = LimitValue;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str(
+                    "a non-negative integer, an optional size suffix (e.g. 512M), or 'unlimited'",
+                )
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(LimitValue::Fixed(value))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match parse_limit(value) {
+                    Ok(bytes) => Ok(LimitValue::Fixed(bytes)),
+                    Err(LimitParseError::Unlimited) => Ok(LimitValue::Unlimited),
+                    Err(LimitParseError::Invalid(_)) => {
+                        Err(E::invalid_value(serde::de::Unexpected::Str(value), &self))
+                    }
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 0 {
+                    return Err(E::invalid_value(
+                        serde::de::Unexpected::Signed(value),
+                        &"non-negative integer",
+                    ));
+                }
+                Ok(LimitValue::Fixed(value as u64))
+            }
+        }
+
+        deserializer.deserialize_any(LimitVisitor)
+    }
+}
+
+#[derive(Debug)]
+enum LimitParseError {
+    Unlimited,
+    Invalid(String),
+}
+
+fn parse_limit(input: &str) -> Result<u64, LimitParseError> {
+    let trimmed = input.trim();
+    if trimmed.eq_ignore_ascii_case("unlimited") {
+        return Err(LimitParseError::Unlimited);
+    }
+
+    let normalized = trimmed.replace('_', "");
+    let without_bytes = normalized.trim_end_matches(&['B', 'b'][..]);
+
+    let (number_part, factor) = match without_bytes.chars().last() {
+        Some(suffix) if suffix.is_ascii_alphabetic() => {
+            let len = without_bytes.len() - suffix.len_utf8();
+            let number_part = &without_bytes[..len];
+            let multiplier = match suffix.to_ascii_uppercase() {
+                'K' => 1u128 << 10,
+                'M' => 1u128 << 20,
+                'G' => 1u128 << 30,
+                'T' => 1u128 << 40,
+                _ => return Err(LimitParseError::Invalid(trimmed.to_string())),
+            };
+            (number_part.trim(), multiplier)
+        }
+        _ => (without_bytes.trim(), 1u128),
+    };
+
+    if number_part.is_empty() {
+        return Err(LimitParseError::Invalid(trimmed.to_string()));
+    }
+
+    let value = number_part
+        .parse::<u128>()
+        .map_err(|_| LimitParseError::Invalid(trimmed.to_string()))?;
+
+    let bytes = value
+        .checked_mul(factor)
+        .ok_or_else(|| LimitParseError::Invalid(trimmed.to_string()))?;
+
+    u64::try_from(bytes).map_err(|_| LimitParseError::Invalid(trimmed.to_string()))
+}
+
+impl std::fmt::Display for LimitParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LimitParseError::Unlimited => write!(f, "value represents unlimited"),
+            LimitParseError::Invalid(value) => write!(f, "invalid limit value '{value}'"),
+        }
+    }
+}
+
+impl std::error::Error for LimitParseError {}
+
+/// Linux namespace and confinement options.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct IsolationConfig {
+    /// Enable network namespace isolation.
+    pub network: Option<bool>,
+    /// Enable mount namespace isolation.
+    pub mount: Option<bool>,
+    /// Enable PID namespace isolation.
+    pub pid: Option<bool>,
+    /// Enable user namespace isolation.
+    pub user: Option<bool>,
+    /// Apply seccomp filtering profile.
+    pub seccomp: Option<String>,
+    /// AppArmor profile to enforce.
+    pub apparmor_profile: Option<String>,
+    /// SELinux context to apply.
+    pub selinux_context: Option<String>,
+    /// Restrict device access similar to `PrivateDevices`.
+    pub private_devices: Option<bool>,
+    /// Restrict temporary directories similar to `PrivateTmp`.
+    pub private_tmp: Option<bool>,
 }
 
 impl ServiceConfig {
@@ -442,7 +707,6 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
             }
         }
 
-        // Update service env to the merged version
         service.env = merged_env;
     }
 
@@ -554,6 +818,12 @@ services:
         ServiceConfig {
             command: "echo ok".into(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -578,6 +848,7 @@ services:
             services,
             project_dir: None,
             env: None,
+            metrics: MetricsConfig::default(),
         };
 
         let order = config.service_start_order().unwrap();
@@ -594,6 +865,7 @@ services:
             services,
             project_dir: None,
             env: None,
+            metrics: MetricsConfig::default(),
         };
 
         match config.service_start_order() {
@@ -619,6 +891,7 @@ services:
             services,
             project_dir: None,
             env: None,
+            metrics: MetricsConfig::default(),
         };
 
         match config.service_start_order() {
@@ -824,6 +1097,12 @@ services:
         let config1 = ServiceConfig {
             command: "test command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: Some("always".to_string()),
             backoff: Some("5s".to_string()),
             max_restarts: Some(3),
@@ -840,6 +1119,12 @@ services:
         let config2 = ServiceConfig {
             command: "test command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: Some("always".to_string()),
             backoff: Some("5s".to_string()),
             max_restarts: Some(3),
@@ -868,6 +1153,12 @@ services:
         let base_config = ServiceConfig {
             command: "test command".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: None,
             backoff: None,
             max_restarts: None,
@@ -914,6 +1205,12 @@ services:
         let config = ServiceConfig {
             command: "echo hello".to_string(),
             env: None,
+            user: None,
+            group: None,
+            supplementary_groups: None,
+            limits: None,
+            capabilities: None,
+            isolation: None,
             restart_policy: Some("always".to_string()),
             backoff: None,
             max_restarts: None,
@@ -934,7 +1231,6 @@ services:
         // (Since ServiceConfig doesn't contain the name field, this is guaranteed)
         assert_eq!(hash.len(), 16);
 
-        // Create a "renamed" service (same config)
         let renamed_config = config.clone();
         let renamed_hash = renamed_config.compute_hash();
 
@@ -942,5 +1238,28 @@ services:
             hash, renamed_hash,
             "Hash should be the same after 'renaming' (using same config)"
         );
+    }
+
+    #[test]
+    fn parse_limit_accepts_suffixes() {
+        let kib = parse_limit("4K").expect("parse 4K");
+        assert_eq!(kib, 4 * 1024);
+
+        let mib = parse_limit("512M").expect("parse 512M");
+        assert_eq!(mib, 512 * 1024 * 1024);
+
+        let gib = parse_limit("1G").expect("parse 1G");
+        assert_eq!(gib, 1024 * 1024 * 1024);
+
+        let plain = parse_limit("1_000").expect("parse underscores");
+        assert_eq!(plain, 1_000);
+    }
+
+    #[test]
+    fn parse_limit_rejects_invalid_strings() {
+        match parse_limit("ten") {
+            Err(LimitParseError::Invalid(msg)) => assert_eq!(msg, "ten"),
+            other => panic!("expected invalid error, got {other:?}"),
+        }
     }
 }

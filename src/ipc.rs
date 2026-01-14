@@ -1,3 +1,8 @@
+use crate::{
+    metrics::MetricSample,
+    runtime,
+    status::{StatusSnapshot, UnitStatus},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -9,8 +14,7 @@ use thiserror::Error;
 
 /// Directory under `$HOME` where runtime artifacts (PID/socket files) are stored.
 fn runtime_dir() -> Result<PathBuf, ControlError> {
-    let home = std::env::var("HOME").map_err(|_| ControlError::MissingHome)?;
-    let path = PathBuf::from(home).join(".local/share/systemg");
+    let path = runtime::state_dir();
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -51,6 +55,15 @@ pub enum ControlCommand {
     },
     /// Shutdown the supervisor daemon.
     Shutdown,
+    /// Fetch the cached status snapshot from the supervisor.
+    Status,
+    /// Inspect an individual unit with metrics.
+    Inspect {
+        /// Name or hash of the unit to inspect.
+        unit: String,
+        /// Maximum number of samples to return.
+        samples: u32,
+    },
 }
 
 /// Response sent by the supervisor.
@@ -62,6 +75,20 @@ pub enum ControlResponse {
     Message(String),
     /// Command failed with an error message.
     Error(String),
+    /// Current status snapshot payload.
+    Status(StatusSnapshot),
+    /// Inspect payload including recent samples.
+    Inspect(Box<InspectPayload>),
+}
+
+/// Inspect response payload.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InspectPayload {
+    /// Optional status details for the requested unit.
+    pub unit: Option<UnitStatus>,
+    /// Recent metric samples associated with the unit.
+    #[serde(default)]
+    pub samples: Vec<MetricSample>,
 }
 
 /// Errors raised by the control channel helpers.
@@ -249,6 +276,14 @@ mod tests {
         let shutdown = ControlCommand::Shutdown;
         let json = serde_json::to_string(&shutdown).unwrap();
         assert!(json.contains("Shutdown"));
+
+        let inspect = ControlCommand::Inspect {
+            unit: "svc".to_string(),
+            samples: 10,
+        };
+        let json = serde_json::to_string(&inspect).unwrap();
+        assert!(json.contains("Inspect"));
+        assert!(json.contains("\"samples\":10"));
     }
 
     #[test]
@@ -266,6 +301,15 @@ mod tests {
         let json = serde_json::to_string(&error).unwrap();
         assert!(json.contains("Error"));
         assert!(json.contains("Failed to stop"));
+
+        let inspect_payload = InspectPayload {
+            unit: None,
+            samples: Vec::new(),
+        };
+        let json =
+            serde_json::to_string(&ControlResponse::Inspect(Box::new(inspect_payload)))
+                .unwrap();
+        assert!(json.contains("Inspect"));
     }
 
     #[test]
@@ -276,6 +320,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let pid = 12345;
         write_supervisor_pid(pid).unwrap();
@@ -293,6 +339,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -303,6 +351,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let config = PathBuf::from("/path/to/config.yaml");
         write_config_hint(&config).unwrap();
@@ -320,6 +370,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -330,6 +382,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let command = ControlCommand::Shutdown;
         let result = send_command(&command);
@@ -341,6 +395,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -349,7 +405,13 @@ mod tests {
         let socket_path = temp.path().join("test.sock");
 
         // Create a Unix socket pair for testing
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                return;
+            }
+            Err(err) => panic!("failed to bind test socket: {err}"),
+        };
 
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -416,6 +478,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let dir = runtime_dir().unwrap();
         assert!(dir.ends_with(".local/share/systemg"));
@@ -426,6 +490,8 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
@@ -436,6 +502,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         let path = socket_path().unwrap();
         assert!(path.ends_with("control.sock"));
@@ -445,14 +513,19 @@ mod tests {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
     }
 
     #[test]
     fn empty_config_hint_handled() {
+        let _guard = crate::test_utils::env_lock();
         let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
         unsafe {
             std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
 
         // Write empty string
         let hint_path = config_hint_path().unwrap();
@@ -462,5 +535,13 @@ mod tests {
         // Should return None for empty content
         let hint = read_config_hint().unwrap();
         assert_eq!(hint, None);
+
+        // Restore original HOME
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }
