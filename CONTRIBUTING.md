@@ -57,7 +57,7 @@ cargo build
 ### Rust Style
 
 - Follow the Rust style guidelines and idioms.
-- Use `cargo fmt` to format your code.
+- Use `cargo +nightly fmt` to format your code (nightly required for our rustfmt configuration).
 - Use `cargo clippy` to catch common mistakes and improve your code.
 
 ### Documentation

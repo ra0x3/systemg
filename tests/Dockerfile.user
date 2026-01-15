@@ -1,0 +1,28 @@
+# User mode UAT testing for systemg
+FROM ubuntu:22.04
+
+# Install build dependencies and runtime requirements
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    git \
+    nodejs \
+    npm \
+    python3 \
+    python3-pip \
+    supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install sysg using the official install script (gets correct binary for platform)
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+
+# Create test user for user-mode testing
+RUN useradd -m -s /bin/bash testuser
+USER testuser
+WORKDIR /home/testuser
+
+# Copy test projects and scripts
+COPY --chown=testuser:testuser tests/docker/user/ /home/testuser/
+
+# Run the simplified test for now
+CMD ["/bin/bash", "simple_test.sh"]

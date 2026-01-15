@@ -1,0 +1,33 @@
+# Kernel mode UAT testing for systemg - Real sysadmin scenarios
+FROM ubuntu:22.04
+
+# Install minimal dependencies for testing
+RUN apt-get update && apt-get install -y \
+    curl \
+    sudo \
+    python3 \
+    nodejs \
+    npm \
+    procps \
+    lsof \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install sysg using the official install script (gets correct binary for platform)
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+
+# Create directories for kernel mode operation
+RUN mkdir -p /var/run/systemg /var/log/systemg /etc/systemg
+RUN chmod 755 /var/run/systemg /var/log/systemg /etc/systemg
+
+# Copy test infrastructure
+COPY tests/docker/kernel/run_kernel_tests.sh /root/run_kernel_tests.sh
+COPY tests/docker/kernel/services/ /root/services/
+RUN chmod +x /root/run_kernel_tests.sh
+
+# Set up proper init system (systemd requires --privileged)
+ENV container=docker
+STOPSIGNAL SIGRTMIN+3
+
+# Run kernel mode tests
+WORKDIR /root
+CMD ["/bin/bash", "/root/run_kernel_tests.sh"]

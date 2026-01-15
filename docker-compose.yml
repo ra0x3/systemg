@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # User mode testing - simulates developer workflows
+  systemg-user:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile.user
+    container_name: systemg-user-test
+    environment:
+      - USER_MODE=true
+      - TEST_ENV=docker
+    volumes:
+      # Mount source for live updates during development
+      - ./src:/systemg/src:ro
+      - ./Cargo.toml:/systemg/Cargo.toml:ro
+      - ./Cargo.lock:/systemg/Cargo.lock:ro
+    networks:
+      - systemg-test
+    depends_on:
+      - test-redis
+      - test-postgres
+
+  # Kernel mode testing - requires privileged mode for system operations
+  systemg-kernel:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile.kernel
+    container_name: systemg-kernel-test
+    privileged: true
+    environment:
+      - KERNEL_MODE=true
+      - TEST_ENV=docker
+    volumes:
+      # System directories for kernel mode
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
+      - ./src:/systemg/src:ro
+      - ./Cargo.toml:/systemg/Cargo.toml:ro
+      - ./Cargo.lock:/systemg/Cargo.lock:ro
+    tmpfs:
+      - /run
+      - /tmp
+    networks:
+      - systemg-test
+    depends_on:
+      - test-redis
+      - test-postgres
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - apparmor:unconfined
+
+  # Test infrastructure services
+  test-redis:
+    image: redis:7-alpine
+    container_name: systemg-test-redis
+    ports:
+      - "16379:6379"
+    networks:
+      - systemg-test
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  test-postgres:
+    image: postgres:15-alpine
+    container_name: systemg-test-postgres
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+    ports:
+      - "15432:5432"
+    networks:
+      - systemg-test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+networks:
+  systemg-test:
+    driver: bridge
+
+volumes:
+  postgres-data:

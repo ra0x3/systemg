@@ -1,0 +1,32 @@
+# CI-optimized user mode UAT testing for systemg
+FROM rust:1.75 AS builder
+
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+# User mode test environment
+FROM ubuntu:22.04
+
+# Install minimal dependencies for testing
+RUN apt-get update && apt-get install -y \
+    curl \
+    python3 \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy systemg binary from builder
+COPY --from=builder /app/target/release/sysg /usr/local/bin/
+RUN chmod +x /usr/local/bin/sysg
+
+# Create test user
+RUN useradd -m -s /bin/bash testuser
+USER testuser
+WORKDIR /home/testuser
+
+# Copy test scripts
+COPY --chown=testuser:testuser tests/docker/user/ /home/testuser/
+
+# Run user mode tests
+CMD ["/bin/bash", "run_user_tests.sh"]

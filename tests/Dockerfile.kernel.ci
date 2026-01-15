@@ -1,0 +1,59 @@
+# CI-optimized kernel mode UAT testing for systemg
+FROM rust:1.75 AS builder
+
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+# Kernel mode test environment
+FROM ubuntu:22.04
+
+# Install minimal dependencies for testing
+RUN apt-get update && apt-get install -y \
+    curl \
+    sudo \
+    python3 \
+    procps \
+    lsof \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy systemg binary from builder
+COPY --from=builder /app/target/release/sysg /usr/local/bin/
+RUN chmod +x /usr/local/bin/sysg
+
+# Create directories for kernel mode
+RUN mkdir -p /var/run/systemg /var/log/systemg /etc/systemg
+RUN chmod 755 /var/run/systemg /var/log/systemg /etc/systemg
+
+# Create mock users for service testing
+RUN useradd -r -s /bin/false postgres || true
+RUN useradd -r -s /bin/false redis || true
+
+# Create required directories for mock services
+RUN mkdir -p /var/lib/postgresql /var/lib/redis /var/log/nginx /var/cache/nginx /backup
+RUN chown postgres:postgres /var/lib/postgresql
+RUN chown redis:redis /var/lib/redis
+
+# Copy test infrastructure
+COPY tests/docker/kernel/run_kernel_tests.sh /root/run_kernel_tests.sh
+COPY tests/docker/kernel/services/ /root/services/
+RUN chmod +x /root/run_kernel_tests.sh
+
+# Install mock service binaries
+RUN cp /root/services/mock_postgres.sh /usr/local/bin/postgres && \
+    cp /root/services/mock_nginx.sh /usr/local/bin/nginx && \
+    cp /root/services/mock_redis.sh /usr/local/bin/redis-server && \
+    cp /root/services/mock_pg_isready.sh /usr/local/bin/pg_isready && \
+    cp /root/services/mock_redis_cli.sh /usr/local/bin/redis-cli && \
+    cp /root/services/mock_initdb.sh /usr/local/bin/initdb && \
+    cp /root/services/mock_pg_dump.sh /usr/local/bin/pg_dump && \
+    chmod +x /usr/local/bin/postgres /usr/local/bin/nginx /usr/local/bin/redis-server \
+             /usr/local/bin/pg_isready /usr/local/bin/redis-cli /usr/local/bin/initdb \
+             /usr/local/bin/pg_dump
+
+# Set up environment for systemd-like behavior
+ENV container=docker
+WORKDIR /root
+
+# Run kernel mode tests
+CMD ["/bin/bash", "/root/run_kernel_tests.sh"]

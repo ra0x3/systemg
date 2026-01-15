@@ -162,6 +162,7 @@ jobs:
       - name: Cargo build
         run: cargo build --locked
 
+  # These tests run in parallel after clippy passes
   cargo-test:
     name: Cargo Test
     runs-on: ubuntu-latest
@@ -179,12 +180,82 @@ jobs:
       - name: Run Tests
         run: cargo test --verbose
 
+  # Docker UAT tests run in parallel with cargo-test
+  # Tests both user mode and kernel mode scenarios
+  docker-uat-tests:
+    name: Docker UAT Tests
+    runs-on: ubuntu-latest
+    needs: [clippy]
+    strategy:
+      matrix:
+        test-mode: [user, kernel]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (${{ matrix.test-mode }})
+        run: |
+          # Build the Docker image using CI-specific Dockerfile
+          docker build -f tests/Dockerfile.${{ matrix.test-mode }}.ci -t systemg-${{ matrix.test-mode }}:ci .
+
+      - name: Run Docker UAT tests (${{ matrix.test-mode }})
+        id: run-tests
+        run: |
+          set -e
+
+          # Create a directory for test output
+          mkdir -p test-output
+
+          # Run the Docker container with appropriate settings
+          if [ "${{ matrix.test-mode }}" = "kernel" ]; then
+            # Kernel mode needs privileged access
+            docker run \
+              --rm \
+              --privileged \
+              --cap-add SYS_ADMIN \
+              --cap-add NET_ADMIN \
+              --security-opt apparmor:unconfined \
+              -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+              -v $(pwd)/test-output:/test-output \
+              systemg-${{ matrix.test-mode }}:ci | tee test-output/${{ matrix.test-mode }}.log
+          else
+            # User mode can run without special privileges
+            docker run \
+              --rm \
+              -v $(pwd)/test-output:/test-output \
+              systemg-${{ matrix.test-mode }}:ci | tee test-output/${{ matrix.test-mode }}.log
+          fi
+
+          # Extract test results for job summary
+          if grep -q "All.*tests passed successfully" test-output/${{ matrix.test-mode }}.log; then
+            echo "✅ ${{ matrix.test-mode }} mode: All tests passed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ ${{ matrix.test-mode }} mode: Some tests failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-${{ matrix.test-mode }}-logs
+          path: test-output/${{ matrix.test-mode }}.log
+
   upload-release-binaries:
     name: Upload Release Binaries
     runs-on: ${{ matrix.job.os }}
     permissions:
       contents: write
-    needs: [cargo-test]
+    needs: [cargo-test, docker-uat-tests]
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
@@ -231,15 +302,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         if: matrix.job.cross_image
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v3
 
       - name: Setup custom cross env ${{ matrix.job.cross_image }}
         if: matrix.job.cross_image
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v5
         with:
           context: ci
           file: ${{ matrix.job.cross_dockerfile }}
@@ -260,7 +331,7 @@ jobs:
           targets: ${{ matrix.job.target }}
 
       - name: Install cross
-        uses: baptiste0928/cargo-install@v1
+        uses: baptiste0928/cargo-install@v3
         with:
           crate: cross
           cache-key: ${{ matrix.job.target }}
@@ -325,14 +396,12 @@ jobs:
           tar -czvf "$SYSG_ZIP_FILE_NAME" "$SYSG_ARTIFACT"
 
       - name: Upload Sysg Artifact
-        uses: actions/upload-release-asset@v1
+        uses: softprops/action-gh-release@v1
+        if: github.event_name == 'release'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./${{ env.SYSG_ZIP_FILE_NAME }}
-          asset_name: ${{ env.SYSG_ZIP_FILE_NAME }}
-          asset_content_type: application/gzip
+          files: ./${{ env.SYSG_ZIP_FILE_NAME }}
 
 #      - name: Notify if Job Fails
 #        uses: ravsamhq/notify-slack-action@v2
