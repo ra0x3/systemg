@@ -175,25 +175,10 @@ pub enum Commands {
         #[arg(long = "no-color")]
         no_color: bool,
 
-        /// Only include samples captured in the last N seconds (default: 43200 = 12 hours).
-        #[arg(long, value_name = "SECONDS", default_value = "43200")]
-        since: Option<u64>,
-
-        /// Maximum number of metric samples to display (default: 720 = 12 minutes at 1 sample/sec).
-        #[arg(long, value_name = "COUNT", default_value = "720")]
-        samples: usize,
-
-        /// Display metrics in table format instead of chart visualization.
-        #[arg(long)]
-        table: bool,
-
-        /// Enable live tailing mode to show real-time updates.
-        #[arg(long)]
-        tail: bool,
-
-        /// Time window for tail mode in seconds (default: 5, max: 60).
-        #[arg(long, value_name = "SECONDS", default_value = "5")]
-        tail_window: u64,
+        /// Time window to display (e.g., "5s" for live, "12h" for historical).
+        /// Short durations (<=60s) enable live mode with auto-refresh.
+        #[arg(long, default_value = "5s")]
+        window: String,
     },
 
     /// Show logs for a specific service.

@@ -21,6 +21,9 @@ use predicates as _;
 #[cfg(test)]
 use tempfile as _;
 
+/// Charting and visualization with gnuplot.
+pub mod charting;
+
 /// CLI interface.
 pub mod cli;
 

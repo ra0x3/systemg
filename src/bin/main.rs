@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use systemg::{
+    charting::{self, ChartConfig, is_live_window, parse_window_duration},
     cli::{Cli, Commands, parse_args},
     config::load_config,
     cron::{CronExecutionStatus, CronStateFile},
@@ -220,11 +221,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             unit,
             json,
             no_color,
-            since,
-            samples,
-            table,
-            tail,
-            tail_window,
+            window,
         } => {
             let mut effective_config = config.clone();
             if load_config(Some(&config)).is_err()
@@ -233,17 +230,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                 effective_config = hint.to_string_lossy().to_string();
             }
 
-            let payload = fetch_inspect(&effective_config, &unit, samples)?;
-            if payload.unit.is_none() {
-                eprintln!("Unit '{unit}' not found.");
-                process::exit(2);
-            }
+            // Parse the window duration
+            let window_seconds = match parse_window_duration(&window) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Invalid window duration '{}': {}", window, e);
+                    process::exit(1);
+                }
+            };
 
-            // Validate tail_window is reasonable
-            let tail_window = tail_window.clamp(1, 60);
+            let is_live = is_live_window(window_seconds) && !json;
 
-            if tail && !json {
-                // Live tailing mode (not supported in JSON mode)
+            // Calculate samples limit based on window
+            let samples_limit = if window_seconds < 3600 {
+                window_seconds as usize // For short windows, 1 sample per second
+            } else {
+                720 // For longer windows, cap at 720 samples
+            };
+
+            if is_live {
+                // Live mode with auto-refresh
                 use std::sync::Arc;
                 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -253,8 +259,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // Set up Ctrl+C handler
                 ctrlc::set_handler(move || {
                     r.store(false, Ordering::SeqCst);
-                    // Move cursor to bottom and show message
-                    print!("\x1B[999B\nStopping live tail...\n");
+                    print!("\x1B[999B\nStopping live view...\n");
                 })?;
 
                 let mut last_health = OverallHealth::Healthy;
@@ -264,30 +269,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                     print!("\x1B[2J\x1B[1;1H");
 
                     // Fetch fresh data
-                    let payload = fetch_inspect(&effective_config, &unit, samples)?;
+                    let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
                     if payload.unit.is_none() {
                         eprintln!("Unit '{unit}' not found.");
                         process::exit(2);
                     }
 
-                    let tail_render_opts = InspectRenderOptions {
+                    let render_opts = InspectRenderOptions {
                         json: false,
                         no_color,
-                        since: Some(tail_window),
-                        samples_limit: samples,
-                        table,
-                        tail: true,
-                        tail_window,
+                        window_seconds,
+                        window_desc: window.clone(),
+                        samples_limit,
+                        is_live: true,
                     };
 
-                    last_health = render_inspect(&payload, &tail_render_opts)?;
+                    last_health = render_inspect(&payload, &render_opts)?;
 
-                    // Show tail mode indicator
+                    // Show live mode indicator
                     println!();
-                    println!(
-                        "Live tail mode ({}s window) - Press Ctrl+C to stop",
-                        tail_window
-                    );
+                    println!("Live view ({}) - Press Ctrl+C to stop", window);
 
                     // Sleep for 1 second before next update
                     std::thread::sleep(std::time::Duration::from_secs(1));
@@ -300,15 +301,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
                 process::exit(exit_code);
             } else {
-                // Normal one-shot mode
+                // Historical mode - one-shot
+                let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
+                if payload.unit.is_none() {
+                    eprintln!("Unit '{unit}' not found.");
+                    process::exit(2);
+                }
+
                 let render_opts = InspectRenderOptions {
                     json,
                     no_color,
-                    since,
-                    samples_limit: samples,
-                    table,
-                    tail: false,
-                    tail_window,
+                    window_seconds,
+                    window_desc: window.clone(),
+                    samples_limit,
+                    is_live: false,
                 };
 
                 let health = render_inspect(&payload, &render_opts)?;
@@ -396,11 +402,10 @@ struct StatusRenderOptions<'a> {
 struct InspectRenderOptions {
     json: bool,
     no_color: bool,
-    since: Option<u64>,
+    window_seconds: u64,
+    window_desc: String,
     samples_limit: usize,
-    table: bool,
-    tail: bool,
-    tail_window: u64,
+    is_live: bool,
 }
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
@@ -1171,7 +1176,11 @@ fn render_inspect(
             if let Some(last_run) = cron_status.recent_runs.first() {
                 // Use metrics from the last run if available
                 if !last_run.metrics.is_empty() {
-                    filter_samples(&last_run.metrics, opts.since, opts.samples_limit)
+                    filter_samples(
+                        &last_run.metrics,
+                        Some(opts.window_seconds),
+                        opts.samples_limit,
+                    )
                 } else {
                     // No metrics available from last run
                     vec![]
@@ -1185,7 +1194,11 @@ fn render_inspect(
         }
     } else {
         // For regular services, use live samples
-        filter_samples(&payload.samples, opts.since, opts.samples_limit)
+        filter_samples(
+            &payload.samples,
+            Some(opts.window_seconds),
+            opts.samples_limit,
+        )
     };
 
     if opts.json {
@@ -1245,50 +1258,36 @@ fn render_inspect(
         println!("Metrics: not available (collector has not observed samples yet)");
     }
 
-    // Use chart visualization by default, table if requested
+    // Use gnuplot visualization for metrics
     if !filtered_samples.is_empty() {
         // For cron jobs, indicate we're showing last run's metrics
-        if unit.kind == UnitKind::Cron {
-            if let Some(cron_status) = &unit.cron
-                && let Some(last_run) = cron_status.recent_runs.first()
-            {
-                let run_time = last_run
-                    .started_at
-                    .with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string();
-                println!();
-                println!("Resource Usage from Last Run ({}):", run_time);
-            }
-        } else {
+        if unit.kind == UnitKind::Cron
+            && let Some(cron_status) = &unit.cron
+            && let Some(last_run) = cron_status.recent_runs.first()
+        {
+            let run_time = last_run
+                .started_at
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
             println!();
-            if opts.tail {
-                println!(
-                    "Resource Usage Over Time (Live - {}s window)",
-                    opts.tail_window
-                );
-            } else {
-                println!("Resource Usage Over Time");
-            }
+            println!("Resource Usage from Last Run ({}):", run_time);
         }
 
-        if opts.table {
-            // Legacy table view
-            println!();
-            println!("{:<24} {:>8} {:>10}", "TIMESTAMP", "CPU", "RSS");
-            println!("{:-<24} {:-<8} {:-<10}", "", "", "");
-            for sample in filtered_samples {
-                println!(
-                    "{:<24} {:>7.1}% {:>10}",
-                    format_timestamp(sample.timestamp),
-                    sample.cpu_percent,
-                    format_bytes(sample.rss_bytes),
-                );
-            }
-        } else {
-            // Default chart visualization
-            render_metrics_chart(&filtered_samples, opts.no_color, opts.tail);
+        // Use gnuplot for charting
+        let chart_config = ChartConfig {
+            no_color: opts.no_color,
+            is_live: opts.is_live,
+            window_desc: opts.window_desc.clone(),
+        };
+
+        if let Err(e) = charting::render_metrics_chart(&filtered_samples, &chart_config) {
+            warn!("Failed to render chart: {}", e);
+            // Fallback is handled within render_metrics_chart
         }
+    } else if !opts.json {
+        println!();
+        println!("No metrics available for the specified window.");
     }
 
     // Show cron history for cron units
@@ -1386,233 +1385,6 @@ fn filter_samples(
     }
 
     filtered
-}
-
-fn format_timestamp(timestamp: DateTime<Utc>) -> String {
-    timestamp
-        .with_timezone(&Local)
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string()
-}
-
-/// Renders a combined ASCII chart for CPU and RSS metrics over time
-fn render_metrics_chart(samples: &[MetricSample], no_color: bool, tail_mode: bool) {
-    if samples.is_empty() {
-        return;
-    }
-
-    // Chart dimensions - fixed width for consistency
-    let chart_height = 20;
-    let chart_width = 80; // Fixed width for neat formatting
-
-    // Find max values for scaling
-    let max_cpu = samples
-        .iter()
-        .map(|s| s.cpu_percent as f64)
-        .fold(0.0, f64::max)
-        .max(10.0); // Minimum 10% scale for visibility
-
-    let actual_max_rss_gb = samples
-        .iter()
-        .map(|s| s.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-        .fold(0.0, f64::max);
-
-    // Add 1GB margin or 50% headroom, whichever is larger, with 0.1GB minimum
-    let max_rss_gb = if actual_max_rss_gb < 0.1 {
-        0.1 // Minimum scale
-    } else {
-        let margin = (actual_max_rss_gb * 0.5).max(1.0);
-        actual_max_rss_gb + margin
-    };
-    // Downsample if we have more samples than width
-    let step = if samples.len() > chart_width {
-        samples.len() as f64 / chart_width as f64
-    } else {
-        1.0
-    };
-
-    println!();
-
-    // Draw chart with dual y-axes
-    for row in 0..chart_height {
-        // Left Y-axis (CPU %)
-        if row == 0 {
-            print!("{:>6.1}% ┤", max_cpu);
-        } else if row == chart_height - 1 {
-            print!("{:>6.1}% ┤", -1.0); // Show -1% to give visual separation
-        } else if row == chart_height / 2 {
-            print!("{:>6.1}% ┤", max_cpu / 2.0);
-        } else {
-            print!("{:>8}┤", "");
-        }
-
-        // Draw the chart area
-        for col in 0..chart_width {
-            let sample_idx = ((col as f64) * step) as usize;
-            if sample_idx >= samples.len() {
-                print!(" ");
-                continue;
-            }
-
-            let cpu_val = samples[sample_idx].cpu_percent as f64;
-            let rss_val =
-                samples[sample_idx].rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-
-            // Calculate heights - CPU grows from bottom up, RSS grows from top down
-            let cpu_height = if cpu_val == 0.0 {
-                1
-            } else {
-                ((cpu_val / max_cpu) * (chart_height - 1) as f64) as usize + 1
-            };
-
-            // RSS height is inverted - high values appear at top (low row numbers)
-            let rss_row = if rss_val == 0.0 {
-                chart_height - 1 // Zero RSS at bottom
-            } else {
-                // Map RSS value to row (0 = top, chart_height-1 = bottom)
-                let normalized = (rss_val / max_rss_gb).min(1.0);
-                ((1.0 - normalized) * (chart_height - 1) as f64) as usize
-            };
-
-            let current_height = chart_height - row - 1;
-
-            // Legend box in top-right
-            if row <= 3 && col >= chart_width - 20 && col < chart_width - 1 {
-                let legend_col = col - (chart_width - 20);
-                if row == 0 && legend_col < 19 {
-                    let legend = "┌─────────────────┐";
-                    print!("{}", legend.chars().nth(legend_col).unwrap_or(' '));
-                    continue;
-                } else if row == 1 && legend_col < 19 {
-                    if legend_col == 0 {
-                        print!("│");
-                    } else if legend_col == 1 {
-                        print!(" ");
-                    } else if legend_col == 2 {
-                        print!("{}", if no_color { "" } else { GREEN });
-                    } else if legend_col == 3 {
-                        print!("*");
-                    } else if legend_col == 4 {
-                        print!("{}", if no_color { "" } else { RESET });
-                    } else if (5..=11).contains(&legend_col) {
-                        print!(
-                            "{}",
-                            " CPU %  ".chars().nth(legend_col - 5).unwrap_or(' ')
-                        );
-                    } else if legend_col == 18 {
-                        print!("│");
-                    } else {
-                        print!(" ");
-                    }
-                    continue;
-                } else if row == 2 && legend_col < 19 {
-                    if legend_col == 0 {
-                        print!("│");
-                    } else if legend_col == 1 {
-                        print!(" ");
-                    } else if legend_col == 2 {
-                        print!("{}", if no_color { "" } else { YELLOW });
-                    } else if legend_col == 3 {
-                        print!("•");
-                    } else if legend_col == 4 {
-                        print!("{}", if no_color { "" } else { RESET });
-                    } else if (5..=11).contains(&legend_col) {
-                        print!(
-                            "{}",
-                            " RSS GB ".chars().nth(legend_col - 5).unwrap_or(' ')
-                        );
-                    } else if legend_col == 18 {
-                        print!("│");
-                    } else {
-                        print!(" ");
-                    }
-                    continue;
-                } else if row == 3 && legend_col < 19 {
-                    let legend = "└─────────────────┘";
-                    print!("{}", legend.chars().nth(legend_col).unwrap_or(' '));
-                    continue;
-                }
-            }
-
-            // Plot the data points
-            let is_cpu_point = current_height == cpu_height;
-            let is_rss_point = row == rss_row;
-
-            if is_cpu_point && is_rss_point {
-                // Both at same position - show both with a combined symbol
-                print!(
-                    "{}✦{}",
-                    if no_color { "" } else { ORANGE },
-                    if no_color { "" } else { RESET }
-                );
-            } else if is_cpu_point {
-                print!(
-                    "{}*{}",
-                    if no_color { "" } else { GREEN },
-                    if no_color { "" } else { RESET }
-                );
-            } else if is_rss_point {
-                print!(
-                    "{}•{}",
-                    if no_color { "" } else { YELLOW },
-                    if no_color { "" } else { RESET }
-                );
-            } else {
-                print!(" ");
-            }
-        }
-
-        // Right Y-axis (RSS GB)
-        print!("┤");
-        if row == 0 {
-            println!(" {:.2}GB", max_rss_gb);
-        } else if row == chart_height - 1 {
-            println!(" 0.00GB"); // Show 0 at bottom
-        } else if row == chart_height / 2 {
-            println!(" {:.2}GB", max_rss_gb / 2.0);
-        } else {
-            println!();
-        }
-    }
-
-    // X-axis
-    print!("{:>8}└", "");
-    for _ in 0..chart_width {
-        print!("─");
-    }
-    println!("┘");
-
-    // Time labels
-    if !samples.is_empty() {
-        let start_time = samples.first().unwrap().timestamp;
-        let end_time = samples.last().unwrap().timestamp;
-
-        let time_format = if tail_mode {
-            "%-I:%M:%S%p %Z" // Include seconds in tail mode: 7:00:45AM EST
-        } else {
-            "%-I:%M%p %Z" // Regular format: 7:00AM EST
-        };
-
-        let start_label = start_time
-            .with_timezone(&Local)
-            .format(time_format)
-            .to_string();
-        let end_label = end_time
-            .with_timezone(&Local)
-            .format(time_format)
-            .to_string();
-
-        let padding = chart_width.saturating_sub(start_label.len() + end_label.len());
-        print!(
-            "{:>8} {}{:padding$}{}",
-            "",
-            start_label,
-            "",
-            end_label,
-            padding = padding
-        );
-        println!();
-    }
 }
 
 fn overall_health_from_unit(unit: &UnitStatus) -> OverallHealth {
