@@ -3,14 +3,20 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::{
+    collections::HashMap,
+    fs,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
+
 use assert_cmd::cargo::cargo_bin_cmd;
 use common::{HomeEnvGuard, is_process_alive, wait_for_pid, wait_for_pid_removed};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use std::{fs, thread};
-use systemg::config::{Config, MetricsConfig, ServiceConfig, load_config};
-use systemg::daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile};
+use systemg::{
+    config::{Config, MetricsConfig, ServiceConfig, load_config},
+    daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
+};
 use tempfile::tempdir;
 
 fn wait_for_pid_change(service: &str, previous: u32) -> u32 {

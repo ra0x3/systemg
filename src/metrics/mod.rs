@@ -1,21 +1,28 @@
 #![allow(missing_docs)]
+use std::{
+    collections::{HashMap, VecDeque},
+    fs,
+    io::Write,
+    mem,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, SystemTime},
+};
+
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::fs;
-use std::io::Write;
-use std::mem;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread;
-use std::time::{Duration, SystemTime};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use thiserror::Error;
 use tracing::error;
 
-use crate::config::Config;
-use crate::daemon::{PidFile, ServiceStateFile};
+use crate::{
+    config::Config,
+    daemon::{PidFile, ServiceStateFile},
+};
 
 const DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;

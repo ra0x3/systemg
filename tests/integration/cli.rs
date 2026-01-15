@@ -1,17 +1,16 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use assert_cmd::Command;
-use common::HomeEnvGuard;
-#[cfg(target_os = "linux")]
-use common::{is_process_alive, wait_for_path};
-use std::fs;
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 #[cfg(target_os = "linux")]
 use std::process::Command as StdCommand;
-use std::thread;
-use std::time::Duration;
+use std::{fs, thread, time::Duration};
+
+use assert_cmd::Command;
+use common::HomeEnvGuard;
+#[cfg(target_os = "linux")]
+use common::{is_process_alive, wait_for_path};
 use tempfile::tempdir;
 
 #[cfg(unix)]

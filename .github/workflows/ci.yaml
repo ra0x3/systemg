@@ -114,17 +114,16 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
 
       - name: Cache Cargo Dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install rustfmt
-        run: rustup component add rustfmt
-
       - name: Run Rustfmt
-        run: cargo fmt -- --check
+        run: cargo +nightly fmt -- --check
 
   clippy:
     name: Clippy

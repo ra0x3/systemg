@@ -1,6 +1,7 @@
 //! Command-line interface for Systemg.
-use clap::{Parser, Subcommand};
 use std::str::FromStr;
+
+use clap::{Parser, Subcommand};
 use tracing::level_filters::LevelFilter;
 
 /// Wrapper around `LevelFilter` so clap can parse log levels from either

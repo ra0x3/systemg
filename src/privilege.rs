@@ -1,27 +1,19 @@
 //! Privilege and resource management helpers for service spawning.
 #[cfg(target_os = "linux")]
-use crate::config::CgroupConfig;
-use crate::config::{IsolationConfig, LimitValue, LimitsConfig, ServiceConfig};
-use crate::runtime;
+use std::collections::HashSet;
+#[cfg(not(target_os = "linux"))]
+use std::convert::TryInto;
+#[cfg(target_os = "linux")]
+use std::fs;
+use std::{collections::HashMap, io, path::PathBuf};
+
 use libc::{RLIM_INFINITY, RLIMIT_MEMLOCK, c_int, id_t, rlimit};
 #[cfg(target_os = "linux")]
 use libc::{c_uint, size_t};
 use nix::unistd::{Group, Uid, User, getgid, getuid};
-use std::collections::HashMap;
-#[cfg(target_os = "linux")]
-use std::collections::HashSet;
-#[cfg(not(target_os = "linux"))]
-use std::convert::TryInto;
-use std::io;
-use std::path::PathBuf;
-use tracing::warn;
-
 #[cfg(target_os = "linux")]
 use tracing::info;
-
-#[cfg(target_os = "linux")]
-use std::fs;
-
+use tracing::warn;
 #[cfg(target_os = "linux")]
 use {
     caps::{CapSet, Capability, errors::CapsError},
@@ -30,6 +22,13 @@ use {
         unistd::Pid,
     },
     std::str::FromStr,
+};
+
+#[cfg(target_os = "linux")]
+use crate::config::CgroupConfig;
+use crate::{
+    config::{IsolationConfig, LimitValue, LimitsConfig, ServiceConfig},
+    runtime,
 };
 
 /// Captures the target user, group, and home metadata that a service should
@@ -386,8 +385,7 @@ impl PrivilegeContext {
 
         #[cfg(target_os = "linux")]
         {
-            use nix::errno::Errno;
-            use nix::sched::CloneFlags;
+            use nix::{errno::Errno, sched::CloneFlags};
 
             let mut flags = CloneFlags::empty();
             if isolation.network.unwrap_or(false) {
@@ -604,9 +602,10 @@ fn sanitize_for_fs(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
+
     use super::*;
     use crate::runtime;
-    use std::io::ErrorKind;
 
     fn base_service() -> ServiceConfig {
         ServiceConfig {
@@ -659,8 +658,9 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
-    use super::*;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn apply_cgroup_settings_writes_files_to_custom_root() {

@@ -1,17 +1,20 @@
 //! Configuration management for Systemg.
-use regex::Regex;
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     env, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
+
+use regex::Regex;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use strum_macros::AsRefStr;
 
-use crate::error::ProcessManagerError;
-use crate::metrics::{MetricsSettings, SpilloverSettings};
+use crate::{
+    error::ProcessManagerError,
+    metrics::{MetricsSettings, SpilloverSettings},
+};
 
 /// Represents the structure of the configuration file.
 #[derive(Debug, Deserialize, Clone)]
@@ -728,10 +731,11 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::fs::File;
-    use std::io::Write;
+    use std::{fs::File, io::Write};
+
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn test_load_env_file() {

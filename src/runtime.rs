@@ -1,13 +1,12 @@
 //! Helpers for resolving runtime paths based on the current privilege mode.
+#[cfg(test)]
+use std::path::Path;
 use std::{
     env,
     os::fd::RawFd,
     path::PathBuf,
     sync::{OnceLock, RwLock},
 };
-
-#[cfg(test)]
-use std::path::Path;
 
 #[cfg(unix)]
 use libc;
@@ -227,10 +226,12 @@ pub fn capture_socket_activation() {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+
+    use tempfile::tempdir;
+
     use super::*;
     use crate::test_utils::env_lock;
-    use std::env;
-    use tempfile::tempdir;
 
     #[test]
     fn user_mode_uses_home_scoped_paths() {

@@ -1,10 +1,13 @@
 //! Gnuplot-based charting for metrics visualization.
 
+use std::{
+    error::Error,
+    fmt::Write as FmtWrite,
+    io::Write,
+    process::{Command, Stdio},
+};
+
 use chrono::Local;
-use std::error::Error;
-use std::fmt::Write as FmtWrite;
-use std::io::Write;
-use std::process::{Command, Stdio};
 
 use crate::metrics::MetricSample;
 

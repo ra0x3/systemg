@@ -1,11 +1,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::{fs, thread, time::Duration};
+
 use assert_cmd::Command;
 use common::HomeEnvGuard;
-use std::fs;
-use std::thread;
-use std::time::Duration;
 use tempfile::tempdir;
 
 #[test]

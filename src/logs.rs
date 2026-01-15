@@ -1,5 +1,6 @@
 //! Module for managing and displaying logs of system services.
-use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError, runtime};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::Command;
 use std::{
     collections::BTreeSet,
     env,
@@ -9,10 +10,10 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
+
 use tracing::debug;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::process::Command;
+use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError, runtime};
 
 /// Returns the path to the log file for a given service and kind (stdout or stderr).
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
@@ -457,10 +458,14 @@ impl LogManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::fs::{self, File};
-    use std::path::Path;
+    use std::{
+        fs::{self, File},
+        path::Path,
+    };
+
     use tempfile::tempdir_in;
+
+    use super::*;
 
     #[test]
     fn resolve_log_path_matches_hyphenated_files() {

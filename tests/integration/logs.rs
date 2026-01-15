@@ -2,13 +2,14 @@
 mod common;
 
 #[cfg(target_os = "linux")]
-use assert_cmd::Command;
-#[cfg(target_os = "linux")]
-use common::HomeEnvGuard;
-#[cfg(target_os = "linux")]
 use std::env;
 #[cfg(target_os = "linux")]
 use std::fs;
+
+#[cfg(target_os = "linux")]
+use assert_cmd::Command;
+#[cfg(target_os = "linux")]
+use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
 use systemg::daemon::PidFile;
 #[cfg(target_os = "linux")]

@@ -1,18 +1,24 @@
 //! Cron scheduling for services.
-use crate::config::{Config, CronConfig};
-use crate::error::ProcessManagerError;
-use crate::runtime;
+use std::{
+    collections::{HashSet, VecDeque},
+    fs,
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
+
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
-use std::fs;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use tracing::{debug, info, warn};
+
+use crate::{
+    config::{Config, CronConfig},
+    error::ProcessManagerError,
+    runtime,
+};
 
 /// Maximum number of execution history entries to keep per cron job.
 const MAX_EXECUTION_HISTORY: usize = 10;
@@ -570,10 +576,13 @@ fn resolve_timezone(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::time::{Duration, SystemTime};
-    use std::{collections::HashMap, fs};
+    use std::{
+        collections::HashMap,
+        fs,
+        time::{Duration, SystemTime},
+    };
 
+    use super::*;
     use crate::config::ServiceConfig;
 
     /// Computes a test hash for a cron configuration.

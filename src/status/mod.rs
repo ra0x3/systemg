@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 //! Status management for services in the daemon.
-use nix::unistd::{Pid, getpgid};
-use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use std::time::UNIX_EPOCH;
 use std::{
     collections::{BTreeSet, HashMap},
     process::Command,
@@ -12,28 +12,28 @@ use std::{
     thread,
     time::Duration,
 };
+#[cfg(target_os = "linux")]
+use std::{fs, path::Path};
+
+use chrono::{DateTime, Local, Utc};
+use chrono_tz::Tz;
+#[cfg(not(target_os = "linux"))]
+use nix::sys::signal;
+use nix::unistd::{Pid, getpgid};
+use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessesToUpdate, System};
 use thiserror::Error;
 use tracing::{debug, error};
 
-use crate::config::Config;
-use crate::cron::{
-    CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
+use crate::{
+    config::Config,
+    cron::{
+        CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
+    },
+    daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    error::{PidFileError, ProcessManagerError, ServiceStateError},
+    metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary},
 };
-use crate::daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile};
-use crate::error::{PidFileError, ProcessManagerError, ServiceStateError};
-use crate::metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary};
-
-#[cfg(not(target_os = "linux"))]
-use nix::sys::signal;
-#[cfg(target_os = "linux")]
-use std::{fs, path::Path};
-
-#[cfg(target_os = "linux")]
-use std::time::UNIX_EPOCH;
-
-use chrono::{DateTime, Local, Utc};
-use chrono_tz::Tz;
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
 const RED_BOLD: &str = "\x1b[1;31m";
@@ -1404,14 +1404,15 @@ impl StatusManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::time::SystemTime;
-
     use std::{
         env, fs,
         sync::{Arc, Mutex},
+        time::SystemTime,
     };
+
     use tempfile::tempdir_in;
+
+    use super::*;
 
     #[test]
     fn format_cron_status_success_includes_green_exit_code() {

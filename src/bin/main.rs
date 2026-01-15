@@ -1,9 +1,3 @@
-use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
-use libc::{SIGKILL, SIGTERM, getpgrp, killpg};
-use nix::{
-    sys::signal,
-    unistd::{Pid, Uid},
-};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
@@ -16,10 +10,14 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use sysinfo::{ProcessesToUpdate, System};
-use tracing::{error, info, warn};
-use tracing_subscriber::EnvFilter;
 
+use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
+use libc::{SIGKILL, SIGTERM, getpgrp, killpg};
+use nix::{
+    sys::signal,
+    unistd::{Pid, Uid},
+};
+use sysinfo::{ProcessesToUpdate, System};
 use systemg::{
     charting::{self, ChartConfig, is_live_window, parse_window_duration},
     cli::{Cli, Commands, parse_args},
@@ -37,6 +35,8 @@ use systemg::{
     },
     supervisor::Supervisor,
 };
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
@@ -250,8 +250,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             if is_live {
                 // Live mode with auto-refresh
-                use std::sync::Arc;
-                use std::sync::atomic::{AtomicBool, Ordering};
+                use std::sync::{
+                    Arc,
+                    atomic::{AtomicBool, Ordering},
+                };
 
                 let running = Arc::new(AtomicBool::new(true));
                 let r = running.clone();

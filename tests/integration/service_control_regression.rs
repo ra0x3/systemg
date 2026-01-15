@@ -1,9 +1,10 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::{fs, thread, time::Duration};
+
 use assert_cmd::{Command, cargo::cargo_bin_cmd};
 use common::{HomeEnvGuard, is_process_alive, wait_for_pid, wait_for_pid_removed};
-use std::{fs, thread, time::Duration};
 use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},

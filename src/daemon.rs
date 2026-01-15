@@ -1,17 +1,4 @@
 //! Module for managing and monitoring system services.
-use crate::constants::{
-    DEFAULT_SHELL, DaemonLock, DeploymentStrategy, MAX_STATUS_LOG_LINES, PID_FILE_NAME,
-    PID_LOCK_SUFFIX, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
-    PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL,
-    SERVICE_START_TIMEOUT, SHELL_COMMAND_FLAG, STATE_FILE_NAME,
-};
-use crate::logs::{resolve_log_path, spawn_log_writer};
-use crate::runtime;
-use fs2::FileExt;
-use reqwest::blocking::Client;
-use serde::de::Error as _;
-use serde::{Deserialize, Serialize};
-use serde_yaml;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
@@ -29,14 +16,30 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+use fs2::FileExt;
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize, de::Error as _};
+use serde_yaml;
 use sysinfo::{ProcessesToUpdate, System};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::config::{
-    Config, EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage,
-    ServiceConfig, SkipConfig,
+use crate::{
+    config::{
+        Config, EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage,
+        ServiceConfig, SkipConfig,
+    },
+    constants::{
+        DEFAULT_SHELL, DaemonLock, DeploymentStrategy, MAX_STATUS_LOG_LINES,
+        PID_FILE_NAME, PID_LOCK_SUFFIX, POST_RESTART_VERIFY_ATTEMPTS,
+        POST_RESTART_VERIFY_DELAY, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
+        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SHELL_COMMAND_FLAG,
+        STATE_FILE_NAME,
+    },
+    error::{PidFileError, ProcessManagerError, ServiceStateError},
+    logs::{resolve_log_path, spawn_log_writer},
+    runtime,
 };
-use crate::error::{PidFileError, ProcessManagerError, ServiceStateError};
 
 /// Build the environment map for a service, giving inline `env.vars` precedence over entries loaded
 /// from `env.file`.
@@ -1790,9 +1793,11 @@ impl Daemon {
         service_name: &str,
         command: &str,
     ) -> Result<(), ProcessManagerError> {
-        use std::io::{BufRead, BufReader};
-        use std::process::Stdio;
-        use std::thread;
+        use std::{
+            io::{BufRead, BufReader},
+            process::Stdio,
+            thread,
+        };
 
         let mut child = Command::new("sh")
             .arg("-c")
@@ -2307,8 +2312,7 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        use std::sync::mpsc;
-        use std::thread;
+        use std::{sync::mpsc, thread};
 
         // Use common startup logic
         if let Some(state) = self.start_service_common(name, service)? {
@@ -3256,7 +3260,6 @@ impl Drop for Daemon {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::{
         collections::HashMap,
         env, fs,
@@ -3264,6 +3267,8 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    use super::*;
 
     /// Helper to build a minimal service definition for unit tests.
     fn make_service(command: &str, deps: &[&str]) -> ServiceConfig {

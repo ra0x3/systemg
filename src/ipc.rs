@@ -1,16 +1,18 @@
-use crate::{
-    metrics::MetricSample,
-    runtime,
-    status::{StatusSnapshot, UnitStatus},
-};
-use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
 };
+
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::{
+    metrics::MetricSample,
+    runtime,
+    status::{StatusSnapshot, UnitStatus},
+};
 
 /// Directory under `$HOME` where runtime artifacts (PID/socket files) are stored.
 fn runtime_dir() -> Result<PathBuf, ControlError> {
@@ -244,9 +246,11 @@ pub fn cleanup_runtime() -> Result<(), ControlError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::os::unix::net::UnixListener;
+
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn control_command_serialization() {

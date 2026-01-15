@@ -1,12 +1,13 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::fs;
+
 use assert_cmd::Command;
 use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
 use common::wait_for_pid_removed;
 use serde_json::Value;
-use std::fs;
 #[cfg(target_os = "linux")]
 use systemg::daemon::{Daemon, PidFile};
 use systemg::{
@@ -205,8 +206,10 @@ services:
 
 #[cfg(target_os = "linux")]
 fn wait_for_z_state(pid: u32) {
-    use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::{
+        path::Path,
+        time::{Duration, Instant},
+    };
 
     let path = format!("/proc/{pid}/stat");
     let stat_path = Path::new(&path);

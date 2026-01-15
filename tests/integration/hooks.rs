@@ -1,8 +1,9 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{HomeEnvGuard, wait_for_lines};
 use std::fs;
+
+use common::{HomeEnvGuard, wait_for_lines};
 use systemg::{config::load_config, daemon::Daemon};
 use tempfile::tempdir;
 

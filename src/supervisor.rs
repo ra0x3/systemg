@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -20,8 +21,6 @@ use crate::{
         StatusCache, StatusRefresher, StatusSnapshot, collect_snapshot_from_runtime,
     },
 };
-
-use thiserror::Error;
 
 /// Errors emitted by the resident supervisor runtime.
 #[derive(Debug, Error)]
@@ -813,8 +812,10 @@ impl Supervisor {
         pid: u32,
         job_name: &str,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
-        use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-        use nix::unistd::Pid;
+        use nix::{
+            sys::wait::{WaitPidFlag, WaitStatus, waitpid},
+            unistd::Pid,
+        };
 
         let pid = Pid::from_raw(pid as i32);
         const MAX_WAIT_TIME: Duration = Duration::from_secs(3600); // 1 hour max

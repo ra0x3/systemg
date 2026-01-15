@@ -1,4 +1,7 @@
 max_width = 90
-edition = "2021"
+edition = "2024"
 use_try_shorthand = true
 use_field_init_shorthand = true
+unstable_features = true
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"

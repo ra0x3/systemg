@@ -1,18 +1,17 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::path::Path;
-use std::time::Duration;
-use std::{fs, thread};
-use systemg::{config::load_config, daemon::Daemon};
-use tempfile::tempdir;
-
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
+use std::{fs, thread, time::Duration};
+
+use common::HomeEnvGuard;
+use systemg::{config::load_config, daemon::Daemon};
+use tempfile::tempdir;
 
 #[test]
 fn restart_kills_detached_descendants() {

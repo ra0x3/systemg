@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
-use std::env;
 use std::{
-    fs,
+    env, fs,
     path::Path,
     thread,
     time::{Duration, Instant},
 };
+
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use systemg::daemon::PidFile;
 

@@ -5,21 +5,19 @@
 
 #![warn(unused_crate_dependencies)]
 // These dependencies are only used in the binary (src/bin/main.rs)
-use ctrlc as _;
-use strum as _;
-use tracing_subscriber as _;
-
-// OpenSSL is only needed for static linking on Linux
-#[cfg(target_os = "linux")]
-use openssl_sys as _;
-
 // Test dependencies are only used in test code
 #[cfg(test)]
 use assert_cmd as _;
+use ctrlc as _;
+// OpenSSL is only needed for static linking on Linux
+#[cfg(target_os = "linux")]
+use openssl_sys as _;
 #[cfg(test)]
 use predicates as _;
+use strum as _;
 #[cfg(test)]
 use tempfile as _;
+use tracing_subscriber as _;
 
 /// Charting and visualization with gnuplot.
 pub mod charting;

@@ -1,11 +1,16 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::{
+    fs,
+    sync::{Arc, Mutex},
+};
+
 use common::{HomeEnvGuard, wait_for_path};
-use std::fs;
-use std::sync::{Arc, Mutex};
-use systemg::config::load_config;
-use systemg::daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile};
+use systemg::{
+    config::load_config,
+    daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
+};
 use tempfile::tempdir;
 
 #[test]
