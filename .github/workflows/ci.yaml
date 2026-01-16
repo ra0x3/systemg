@@ -256,7 +256,7 @@ jobs:
     runs-on: ${{ matrix.job.os }}
     permissions:
       contents: write
-    needs: [cargo-test, docker-uat-tests]
+    needs: [cargo-test]
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
     strategy:
       matrix:
@@ -419,7 +419,6 @@ jobs:
 #        env:
 #          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_NOTIFY_BUILD }}
 
-
   upload-s3:
     name: Upload Binaries to S3
     if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
@@ -458,7 +457,6 @@ jobs:
                 "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
             | jq -r '.[] | select(.name | endswith(".tar.gz")) | "\(.browser_download_url) \(.name)"'
           )
-
 
   cargo-publish:
     name: Publish to crates.io
