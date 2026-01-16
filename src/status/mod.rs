@@ -320,7 +320,7 @@ impl Drop for StatusRefresher {
 }
 
 /// Builds a fresh snapshot from the supervisor runtime, locking shared state while collecting.
-pub fn collect_snapshot_from_runtime(
+pub fn collect_runtime_snapshot(
     config: Arc<Config>,
     pid_file: &Arc<Mutex<PidFile>>,
     service_state: &Arc<Mutex<ServiceStateFile>>,
@@ -346,7 +346,7 @@ pub fn collect_snapshot_from_runtime(
 }
 
 /// Builds a snapshot purely from persisted state on disk.
-pub fn collect_snapshot_from_disk(
+pub fn collect_disk_snapshot(
     config: Option<Config>,
 ) -> Result<StatusSnapshot, StatusError> {
     let pid_file = PidFile::load()?;

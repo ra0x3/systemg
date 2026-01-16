@@ -409,6 +409,21 @@ impl CronManager {
         jobs.clear();
     }
 
+    /// Get the last execution status for a specific cron job (for testing).
+    pub fn get_last_execution_status(
+        &self,
+        service_name: &str,
+    ) -> Option<CronExecutionStatus> {
+        let jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs.iter().find(|j| j.service_name == service_name) {
+            job.execution_history
+                .back()
+                .and_then(|record| record.status.clone())
+        } else {
+            None
+        }
+    }
+
     /// Removes jobs that are no longer in the configuration.
     fn prune_inactive_jobs(&self, active_hashes: &HashSet<String>) {
         if let Ok(mut state) = self.state_file.lock() {

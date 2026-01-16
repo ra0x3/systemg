@@ -1,7 +1,4 @@
-//! Systemg is a lightweight process management tool used to quickly run, monitor, and
-//! manage background services on Unix-like operating systems. It provides a simple
-//! CLI interface to start, stop, and check the status of services, along with logging
-//! capabilities and lifecycle hooks for service management.
+//! Lightweight process manager for Unix services.
 
 #![warn(unused_crate_dependencies)]
 // These dependencies are only used in the binary (src/bin/main.rs)
@@ -19,48 +16,48 @@ use strum as _;
 use tempfile as _;
 use tracing_subscriber as _;
 
-/// Charting and visualization with gnuplot.
+/// Gnuplot charting.
 pub mod charting;
 
-/// CLI interface.
+/// CLI parsing.
 pub mod cli;
 
-/// Configuration management.
+/// Config loading.
 pub mod config;
 
-/// Constants and configuration values for the daemon.
+/// Constants.
 pub mod constants;
 
-/// Runtime metrics collection and storage.
+/// Metrics.
 pub mod metrics;
 
-/// Cron scheduling for services.
+/// Cron scheduler.
 pub mod cron;
 
-/// Daemon process management.
+/// Process daemon.
 pub mod daemon;
 
-/// IPC helpers for communicating with the resident supervisor.
+/// IPC with supervisor.
 pub mod ipc;
 
-/// Error handling.
+/// Errors.
 pub mod error;
 
-/// Logs management.
+/// Log streaming.
 pub mod logs;
 
-/// Status manager.
+/// Status tracking.
 pub mod status;
 
-/// Supervisor runtime that powers daemonised deployments.
+/// Supervisor daemon.
 pub mod supervisor;
 
-/// Test utilities for synchronizing environment variable modifications.
+/// Test utils.
 #[doc(hidden)]
 pub mod test_utils;
 
-/// Runtime context helpers for managing directories and privilege mode.
+/// Runtime paths and modes.
 pub mod runtime;
 
-/// Privilege management and resource handling utilities.
+/// Privilege dropping.
 pub mod privilege;

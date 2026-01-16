@@ -105,7 +105,7 @@ impl PrivilegeContext {
 
         let euid = getuid();
         let requested_user = service.user.clone().or_else(|| {
-            if runtime::drop_privileges_requested() && euid.is_root() {
+            if runtime::should_drop_privileges() && euid.is_root() {
                 Some("nobody".to_string())
             } else {
                 None

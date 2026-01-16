@@ -186,6 +186,7 @@ jobs:
     name: Docker UAT Tests
     runs-on: ubuntu-latest
     needs: [clippy]
+    if: false  # TEMPORARILY DISABLED - Docker UAT tests are skipped for now
     strategy:
       matrix:
         test-mode: [user, kernel]

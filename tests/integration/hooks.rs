@@ -46,7 +46,7 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
     let daemon = Daemon::from_config(config, false).expect("create daemon");
 
-    daemon.start_services_nonblocking().expect("start services");
+    daemon.start_services().expect("start services");
 
     let lines = wait_for_lines(&hook_log, 1);
     assert_eq!(lines, vec!["START:file_only:service_only".to_string()]);
@@ -110,7 +110,7 @@ services:
     let daemon = Daemon::from_config(config.clone(), false).expect("create daemon");
 
     // Start service (will fail since state.txt doesn't exist)
-    daemon.start_services_nonblocking().expect("start services");
+    daemon.start_services().expect("start services");
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let lines = wait_for_lines(&hook_log, 2);

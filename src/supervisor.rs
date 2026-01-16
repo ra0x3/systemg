@@ -17,12 +17,10 @@ use crate::{
     error::ProcessManagerError,
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
     metrics::{self, MetricsCollector, MetricsHandle},
-    status::{
-        StatusCache, StatusRefresher, StatusSnapshot, collect_snapshot_from_runtime,
-    },
+    status::{StatusCache, StatusRefresher, StatusSnapshot, collect_runtime_snapshot},
 };
 
-/// Errors emitted by the resident supervisor runtime.
+/// Supervisor errors.
 #[derive(Debug, Error)]
 pub enum SupervisorError {
     /// Process management error.
@@ -39,7 +37,7 @@ pub enum SupervisorError {
     Metrics(#[from] metrics::MetricsError),
 }
 
-/// Long-lived supervisor that keeps `systemg` alive in daemon mode and reacts to CLI commands.
+/// Daemon supervisor that handles CLI commands.
 pub struct Supervisor {
     config_path: PathBuf,
     daemon: Daemon,
@@ -59,7 +57,7 @@ struct CronCompletionOutcome {
 }
 
 impl Supervisor {
-    /// Creates a new supervisor from a config path.
+    /// Creates supervisor with config.
     pub fn new(
         config_path: PathBuf,
         detach_children: bool,
@@ -89,7 +87,7 @@ impl Supervisor {
         })
     }
 
-    /// Starts the supervisor event loop, managing services and responding to control commands.
+    /// Runs the event loop.
     pub fn run(&mut self) -> Result<(), SupervisorError> {
         match self.run_internal() {
             Err(SupervisorError::Io(ref err))
@@ -195,7 +193,7 @@ impl Supervisor {
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
-        match collect_snapshot_from_runtime(
+        match collect_runtime_snapshot(
             Arc::clone(&config_handle),
             &pid_handle,
             &state_handle,
@@ -214,7 +212,7 @@ impl Supervisor {
             cache_clone,
             Duration::from_secs(1),
             move || {
-                collect_snapshot_from_runtime(
+                collect_runtime_snapshot(
                     Arc::clone(&config_for_refresh),
                     &pid_for_refresh,
                     &state_for_refresh,
@@ -428,34 +426,66 @@ impl Supervisor {
                                                                     debug!("Failed to remove cron job '{}' from PID file: {}", job_name_clone, err);
                                                                 }
                                                             } else {
-                                                                error!(
-                                                                    "Failed to find PID for cron job '{}' in PID file",
-                                                                    job_name_clone
-                                                                );
-                                                                // No metrics available since process didn't start
-                                                                cron_manager_clone.mark_job_completed(
-                                                                    &job_name_clone,
-                                                                    CronExecutionStatus::Failed(
-                                                                        "Failed to get PID from PID file"
-                                                                            .to_string(),
-                                                                    ),
-                                                                    None,
-                                                                    vec![],
-                                                                );
-
-                                                                // Persist error state to ServiceStateFile
-                                                                if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
-                                                                    && let Ok(mut state_file) =
-                                                                        ServiceStateFile::load()
-                                                                    && let Err(err) = state_file.set(
-                                                                        &service_hash,
-                                                                        ServiceLifecycleStatus::ExitedWithError,
-                                                                        None,
-                                                                        None,
-                                                                        None,
-                                                                    )
+                                                                // PID not found - check if the job already completed successfully
+                                                                // This can happen when a cron job completes very quickly
+                                                                let already_completed = if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
+                                                                    && let Ok(state_file) = ServiceStateFile::load()
+                                                                    && let Some(entry) = state_file.get(&service_hash)
                                                                 {
-                                                                    warn!("Failed to persist cron job '{}' error state: {}", job_name_clone, err);
+                                                                    matches!(entry.status, ServiceLifecycleStatus::ExitedSuccessfully)
+                                                                        || (entry.status == ServiceLifecycleStatus::ExitedWithError && entry.exit_code == Some(0))
+                                                                } else {
+                                                                    false
+                                                                };
+
+                                                                if already_completed {
+                                                                    debug!(
+                                                                        "Cron job '{}' already completed before PID tracking",
+                                                                        job_name_clone
+                                                                    );
+                                                                    // Job completed successfully before we could track it
+                                                                    let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
+                                                                        guard.snapshot_unit(&service_hash).unwrap_or_default()
+                                                                    } else {
+                                                                        vec![]
+                                                                    };
+
+                                                                    cron_manager_clone.mark_job_completed(
+                                                                        &job_name_clone,
+                                                                        CronExecutionStatus::Success,
+                                                                        Some(0),
+                                                                        metrics,
+                                                                    );
+                                                                } else {
+                                                                    error!(
+                                                                        "Failed to find PID for cron job '{}' in PID file and job has not completed",
+                                                                        job_name_clone
+                                                                    );
+                                                                    // No metrics available since process didn't start
+                                                                    cron_manager_clone.mark_job_completed(
+                                                                        &job_name_clone,
+                                                                        CronExecutionStatus::Failed(
+                                                                            "Failed to get PID from PID file"
+                                                                                .to_string(),
+                                                                        ),
+                                                                        None,
+                                                                        vec![],
+                                                                    );
+
+                                                                    // Persist error state to ServiceStateFile
+                                                                    if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
+                                                                        && let Ok(mut state_file) =
+                                                                            ServiceStateFile::load()
+                                                                        && let Err(err) = state_file.set(
+                                                                            &service_hash,
+                                                                            ServiceLifecycleStatus::ExitedWithError,
+                                                                            None,
+                                                                            None,
+                                                                            None,
+                                                                        )
+                                                                    {
+                                                                        warn!("Failed to persist cron job '{}' error state: {}", job_name_clone, err);
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -699,7 +729,7 @@ impl Supervisor {
 
         self.cron_manager.sync_from_config(&config)?;
 
-        self.daemon.start_services_nonblocking()?;
+        self.daemon.start_services()?;
         self.daemon.ensure_monitoring()?;
 
         self.metrics_store = metrics::shared_store(metrics_settings)?;
@@ -709,7 +739,7 @@ impl Supervisor {
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
-        if let Ok(snapshot) = collect_snapshot_from_runtime(
+        if let Ok(snapshot) = collect_runtime_snapshot(
             Arc::clone(&config_handle),
             &pid_handle,
             &state_handle,
@@ -727,7 +757,7 @@ impl Supervisor {
             cache_clone,
             Duration::from_secs(1),
             move || {
-                collect_snapshot_from_runtime(
+                collect_runtime_snapshot(
                     Arc::clone(&refresh_config),
                     &refresh_pid,
                     &refresh_state,
@@ -764,7 +794,7 @@ impl Supervisor {
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
-        match collect_snapshot_from_runtime(
+        match collect_runtime_snapshot(
             config,
             &pid_handle,
             &state_handle,
@@ -805,6 +835,19 @@ impl Supervisor {
     /// Shutdown for testing.
     pub fn shutdown_for_test(&mut self) -> Result<(), SupervisorError> {
         self.shutdown_runtime()
+    }
+
+    /// Get the last execution status for a cron job (for testing).
+    pub fn get_last_cron_execution_status(
+        &self,
+        job_name: &str,
+    ) -> Option<CronExecutionStatus> {
+        self.cron_manager.get_last_execution_status(job_name)
+    }
+
+    /// Get the cron manager for testing.
+    pub fn get_cron_manager_for_test(&self) -> CronManager {
+        self.cron_manager.clone()
     }
 
     /// Waits for a cron job process to complete and returns the final outcome.

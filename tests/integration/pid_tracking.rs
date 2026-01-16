@@ -107,9 +107,7 @@ fn restart_updates_state_with_new_pid() {
     };
 
     let daemon = build_daemon(config);
-    daemon
-        .start_services_nonblocking()
-        .expect("failed to start services");
+    daemon.start_services().expect("failed to start services");
 
     let initial_pid = wait_for_pid("flaky");
     let new_pid = wait_for_pid_change("flaky", initial_pid);
@@ -191,7 +189,7 @@ services:
         .compute_hash();
     let daemon = Daemon::from_config(config, false).expect("daemon from config");
 
-    daemon.start_services_nonblocking().expect("start services");
+    daemon.start_services().expect("start services");
 
     let pid = wait_for_pid("resilient");
     assert!(is_process_alive(pid), "service should be running");
@@ -241,9 +239,7 @@ services:
     let config = systemg::config::load_config(Some(config_path.to_str().unwrap()))
         .expect("load config");
     let daemon = build_daemon(config);
-    daemon
-        .start_services_nonblocking()
-        .expect("failed to start services");
+    daemon.start_services().expect("failed to start services");
 
     let pid = wait_for_pid("steady");
     assert!(is_process_alive(pid));

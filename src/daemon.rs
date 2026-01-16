@@ -1,4 +1,4 @@
-//! Module for managing and monitoring system services.
+//! Service management daemon.
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
@@ -41,8 +41,7 @@ use crate::{
     runtime,
 };
 
-/// Build the environment map for a service, giving inline `env.vars` precedence over entries loaded
-/// from `env.file`.
+/// Builds env map for service (inline vars override file entries).
 fn collect_service_env(
     env: &Option<EnvConfig>,
     project_root: &Path,
@@ -96,26 +95,23 @@ fn collect_service_env(
     resolved
 }
 
-/// Represents the PID file structure
+/// PID tracking file.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct PidFile {
-    /// Map of service names to their respective PIDs.
+    /// Service name -> PID map.
     services: HashMap<String, u32>,
 }
 
 impl PidFile {
-    /// Returns the PID file path
     fn path() -> PathBuf {
         runtime::state_dir().join(PID_FILE_NAME)
     }
 
-    /// Returns the lock file path
     fn lock_path() -> PathBuf {
         runtime::state_dir().join(format!("{}{}", PID_FILE_NAME, PID_LOCK_SUFFIX))
     }
 
-    /// Acquires an exclusive lock on the PID file lock file.
-    /// Returns the locked file handle which will auto-release when dropped.
+    /// Gets exclusive lock (auto-releases on drop).
     fn acquire_lock() -> Result<File, PidFileError> {
         let lock_path = Self::lock_path();
         fs::create_dir_all(lock_path.parent().unwrap())?;
@@ -133,12 +129,12 @@ impl PidFile {
         Ok(lock_file)
     }
 
-    /// Returns the services map.
+    /// Returns a reference to the services map.
     pub fn services(&self) -> &HashMap<String, u32> {
         &self.services
     }
 
-    /// Loads the PID file from disk with file locking
+    /// Loads with file locking.
     pub fn load() -> Result<Self, PidFileError> {
         let _lock = Self::acquire_lock()?;
 
@@ -152,12 +148,12 @@ impl PidFile {
         // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Return the PID for a specific service
+    /// Returns the PID for a specific service.
     pub fn pid_for(&self, service: &str) -> Option<u32> {
         self.services.get(service).copied()
     }
 
-    /// Reloads the PID file from disk with file locking
+    /// Reloads from disk.
     pub fn reload() -> Result<Self, PidFileError> {
         let _lock = Self::acquire_lock()?;
 
@@ -168,7 +164,7 @@ impl PidFile {
         // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Saves the current state to the PID file with file locking
+    /// Saves to disk.
     pub fn save(&self) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
@@ -179,7 +175,7 @@ impl PidFile {
         // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Inserts a new service PID and saves atomically with file locking
+    /// Atomically inserts PID.
     pub fn insert(&mut self, service: &str, pid: u32) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
@@ -200,7 +196,7 @@ impl PidFile {
         // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Removes a service and saves atomically with file locking
+    /// Atomically removes service.
     pub fn remove(&mut self, service: &str) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
@@ -223,29 +219,29 @@ impl PidFile {
         // Lock is automatically released when _lock goes out of scope
     }
 
-    /// Retrieves a service PID
+    /// Gets the PID for a service.
     pub fn get(&self, service: &str) -> Option<u32> {
         self.services.get(service).copied()
     }
 }
 
-/// Enumerates the persisted lifecycle states for managed services.
+/// Service lifecycle states.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceLifecycleStatus {
-    /// Service is currently running.
+    /// Currently running.
     Running,
-    /// Service was skipped due to skip configuration.
+    /// Skipped via config.
     Skipped,
-    /// Service exited successfully (exit code 0).
+    /// Clean exit (code 0).
     ExitedSuccessfully,
-    /// Service exited with an error (non-zero exit code or signal).
+    /// Error exit (non-zero/signal).
     ExitedWithError,
-    /// Service was manually stopped.
+    /// Manually stopped.
     Stopped,
 }
 
-/// Persisted service runtime metadata used to inform status reporting.
+/// Service runtime metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceStateEntry {
     /// Current lifecycle status of the service.
@@ -644,37 +640,37 @@ impl DaemonContext {
     }
 }
 
-/// Manages services, ensuring they start, stop, and restart as needed.
+/// Service manager daemon.
 pub struct Daemon {
-    /// Shared map of running service processes.
+    /// Running processes.
     processes: Arc<Mutex<HashMap<String, Child>>>,
-    /// Reference to the service configuration.
+    /// Service config.
     config: Arc<Config>,
-    /// The PID file for tracking service PIDs.
+    /// PID tracking.
     pid_file: Arc<Mutex<PidFile>>,
-    /// Persistent state for recording service lifecycle transitions.
+    /// Lifecycle state.
     state_file: Arc<Mutex<ServiceStateFile>>,
-    /// Whether child services should be detached from systemg (legacy behavior).
+    /// Detach children (legacy).
     detach_children: bool,
-    /// Base directory for resolving relative service commands and assets.
+    /// Project root dir.
     project_root: PathBuf,
-    /// Flag indicating whether the monitoring loop should remain active.
+    /// Monitor loop active flag.
     running: Arc<AtomicBool>,
-    /// Handle to the background monitoring thread once spawned.
+    /// Monitor thread handle.
     monitor_handle: Arc<Mutex<Option<thread::JoinHandle<()>>>>,
-    /// Tracks the number of restart attempts for each service.
+    /// Restart attempt counts.
     restart_counts: Arc<Mutex<HashMap<String, u32>>>,
-    /// Services that were explicitly stopped this cycle, used to treat exits as manual.
+    /// Manual stop tracking.
     manual_stop_flags: Arc<Mutex<HashSet<String>>>,
-    /// Services whose automatic restarts are temporarily suppressed.
+    /// Suppressed auto-restarts.
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
-    /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
+    /// Linux thread cancellation.
     #[cfg(target_os = "linux")]
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl Daemon {
-    /// Creates a DaemonContext from the current Daemon state.
+    /// Creates context snapshot.
     fn context(&self) -> DaemonContext {
         DaemonContext {
             processes: Arc::clone(&self.processes),
@@ -692,8 +688,7 @@ impl Daemon {
         }
     }
 
-    /// Recursively collects all descendant process IDs for the given root PID using the system
-    /// process tree. Returns a set containing the root PID and all child processes.
+    /// Gets all descendant PIDs recursively.
     fn collect_descendants(root_pid: u32) -> HashSet<u32> {
         let mut system = System::new();
         system.refresh_processes(ProcessesToUpdate::All, true);
@@ -717,9 +712,7 @@ impl Daemon {
         descendants
     }
 
-    /// Sends a signal to a process and checks if it's still running. When signal is None, performs
-    /// a liveness check (signal 0). Returns true if the process is alive, false if it doesn't exist.
-    /// On Linux, also checks /proc/{pid}/stat to detect zombie processes.
+    /// Signals process. None = liveness check. Also detects Linux zombies.
     fn signal_pid(
         service_name: &str,
         pid: u32,
@@ -1286,24 +1279,18 @@ impl Daemon {
         Ok(())
     }
 
-    /// Starts all services and returns immediately, keeping the monitor loop alive in the
-    /// background. Intended for the long-lived supervisor process.
-    pub fn start_services_nonblocking(&self) -> Result<(), ProcessManagerError> {
+    /// Starts all services with background monitoring.
+    pub fn start_services(&self) -> Result<(), ProcessManagerError> {
         self.start_all_services()?;
         self.spawn_monitor_thread()
     }
 
-    /// Ensures the background monitor thread is running.
-    ///
-    /// The supervisor starts services individually in daemon mode, so it needs
-    /// a way to activate the monitor loop afterwards. This method is a thin
-    /// wrapper around the internal `spawn_monitor_thread` helper that keeps the
-    /// existing guard logic (only spawning when no active monitor exists).
+    /// Ensures monitor thread is running (for supervisor mode).
     pub fn ensure_monitoring(&self) -> Result<(), ProcessManagerError> {
         self.spawn_monitor_thread()
     }
 
-    /// Executes the start workflow without waiting on the monitor thread.
+    /// Starts all services (no monitoring wait).
     fn start_all_services(&self) -> Result<(), ProcessManagerError> {
         info!("Starting all services...");
 
@@ -1473,16 +1460,12 @@ impl Daemon {
         &self,
         service_name: &str,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        Self::wait_for_service_ready_with_handles(
-            service_name,
-            &self.processes,
-            &self.pid_file,
-        )
+        Self::wait_for_ready(service_name, &self.processes, &self.pid_file)
     }
 
     /// Internal implementation of wait_for_service_ready that accepts explicit handles for processes
     /// and PID file. This allows the function to be called from both instance methods and static contexts.
-    fn wait_for_service_ready_with_handles(
+    fn wait_for_ready(
         service_name: &str,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
@@ -1695,7 +1678,7 @@ impl Daemon {
                     );
 
                     if let Some(detached) = previous.take() {
-                        self.terminate_detached_service(name, detached)?;
+                        self.terminate_service(name, detached)?;
                     }
 
                     self.start_service(name, service)?
@@ -1763,7 +1746,7 @@ impl Daemon {
         }
 
         if let Some(detached) = previous.take() {
-            self.terminate_detached_service(name, detached)?;
+            self.terminate_service(name, detached)?;
         }
 
         Ok(())
@@ -2131,7 +2114,7 @@ impl Daemon {
     }
 
     /// Terminates the detached instance once the replacement is known healthy.
-    fn terminate_detached_service(
+    fn terminate_service(
         &self,
         service_name: &str,
         mut detached: DetachedService,
@@ -2153,17 +2136,9 @@ impl Daemon {
         Ok(())
     }
 
-    /// Starts a single service and stores it in the process map.
+    /// Starts service (Unix/macOS).
     ///
-    /// This implementation is intended for **Unix/macOS platforms only**.
-    ///
-    /// On these systems, services can be safely launched inside threads using `Command::spawn`,
-    /// and the thread may exit immediately after spawning the child process. The child will continue
-    /// running independently without issue.
-    ///
-    /// This function spawns the service in a dedicated thread, immediately joins that thread to ensure
-    /// errors are surfaced synchronously. The child process is inserted into the shared process map,
-    /// and its PID is recorded in the PID file.
+    /// Thread can exit after spawn - child runs independently.
     #[cfg(not(target_os = "linux"))]
     pub fn start_service(
         &self,
@@ -2291,21 +2266,9 @@ impl Daemon {
         }
     }
 
-    /// Starts a single service and stores it in the process map.
+    /// Starts service (Linux).
     ///
-    /// This implementation is intended for **Linux platforms only**.
-    ///
-    /// On Linux, services are launched in their own process groups and configured with
-    /// `PR_SET_PDEATHSIG` to receive a `SIGTERM` if the parent thread exits. Because of this,
-    /// the thread that spawns the service must remain alive for the lifetime of the child
-    /// process to prevent premature termination.
-    ///
-    /// This function launches the service in a detached thread and inserts the child process
-    /// into the shared process map and PID file. After spawning, the thread enters a blocking
-    /// loop to ensure it stays alive, preserving the relationship required by `PR_SET_PDEATHSIG`.
-    ///
-    /// The service itself is monitored and managed separately, so the thread’s only responsibility
-    /// is to maintain parent liveness for the child process.
+    /// Uses PR_SET_PDEATHSIG - parent thread must stay alive or child gets SIGTERM.
     #[cfg(target_os = "linux")]
     pub fn start_service(
         &self,
@@ -2556,7 +2519,6 @@ impl Daemon {
     /// Stops a specific service by name.
     ///
     /// If the service is running, it will be terminated and removed from the process map.
-    /// This function correctly handles both Unix/macOS and Linux semantics for process groups.
     fn stop_service_with_intent(
         &self,
         service_name: &str,
@@ -3069,7 +3031,7 @@ impl Daemon {
                         return;
                     }
 
-                    match Self::wait_for_service_ready_with_handles(
+                    match Self::wait_for_ready(
                         &name,
                         &ctx.processes,
                         &ctx.pid_file,
@@ -3400,7 +3362,7 @@ fi
             services.insert("app".into(), service);
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services_nonblocking().unwrap();
+            daemon.start_services().unwrap();
 
             // Ensure the initial instance is running.
             thread::sleep(Duration::from_millis(100));
@@ -3505,7 +3467,7 @@ fi
             services.insert("worker".into(), make_service("sh worker.sh", &["web"]));
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services_nonblocking().unwrap();
+            daemon.start_services().unwrap();
             daemon.shutdown_monitor();
 
             let content = fs::read_to_string(dir.join("order.log")).unwrap();
@@ -3529,7 +3491,7 @@ fi
             );
 
             let daemon = create_daemon(dir, services);
-            let result = daemon.start_services_nonblocking();
+            let result = daemon.start_services();
             assert!(result.is_err());
             assert!(!dir.join("started.log").exists());
             daemon.shutdown_monitor();
@@ -3552,7 +3514,7 @@ fi
             services.insert("child".into(), make_service("sh child.sh", &["parent"]));
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services_nonblocking().unwrap();
+            daemon.start_services().unwrap();
 
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -3681,7 +3643,7 @@ fi
             services.insert("test_service".into(), make_service("sleep 60", &[]));
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services_nonblocking().unwrap();
+            daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(100));
 
@@ -3735,7 +3697,7 @@ fi
             );
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services_nonblocking().unwrap();
+            daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(100));
 
@@ -3805,7 +3767,7 @@ fi
             services.insert("test_service".into(), service);
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services_nonblocking().unwrap();
+            daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(50));
 
@@ -3884,7 +3846,7 @@ fi
             services.insert("hooked_service".into(), service);
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services_nonblocking().unwrap();
+            daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(100));
 

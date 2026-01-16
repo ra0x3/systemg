@@ -41,7 +41,7 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
     let daemon = Daemon::from_config(config.clone(), false).expect("daemon from config");
 
-    daemon.start_services_nonblocking().expect("start services");
+    daemon.start_services().expect("start services");
 
     wait_for_file_value(&normal_marker, "normal");
     thread::sleep(Duration::from_millis(300));

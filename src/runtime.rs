@@ -1,4 +1,4 @@
-//! Helpers for resolving runtime paths based on the current privilege mode.
+//! Runtime paths and privilege modes.
 #[cfg(test)]
 use std::path::Path;
 use std::{
@@ -11,12 +11,12 @@ use std::{
 #[cfg(unix)]
 use libc;
 
-/// Runtime mode that determines where state and logs should be written.
+/// Where to store state/logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
-    /// Standard userspace mode; state lives under the invoking user's home directory.
+    /// User home dir (~/.local/share/systemg).
     User,
-    /// System mode; state is stored in system directories that require elevated privileges.
+    /// System dirs (/var/lib/systemg).
     System,
 }
 
@@ -82,9 +82,7 @@ impl RuntimeContext {
     }
 }
 
-/// Updates the global runtime directories for the provided mode. Subsequent calls overwrite the
-/// active configuration, allowing different invocations within the same process (e.g., supervisor
-/// forks) to operate with the correct context.
+/// Sets runtime mode. Can be called multiple times (e.g., supervisor forks).
 pub fn init(mode: RuntimeMode) {
     let mut guard = context_lock().write().expect("runtime context poisoned");
     let drop_privileges = guard.drop_privileges;
@@ -106,7 +104,7 @@ pub fn init_with_test_home(home: &Path) {
     *guard = context;
 }
 
-/// Returns the current runtime mode.
+/// Returns the current runtime mode (User or System).
 pub fn mode() -> RuntimeMode {
     context_lock()
         .read()
@@ -114,7 +112,7 @@ pub fn mode() -> RuntimeMode {
         .mode
 }
 
-/// Returns the root directory for runtime state (PID files, sockets, etc.).
+/// State dir (PIDs, sockets).
 pub fn state_dir() -> PathBuf {
     context_lock()
         .read()
@@ -123,7 +121,7 @@ pub fn state_dir() -> PathBuf {
         .clone()
 }
 
-/// Returns the directory where supervisor and service logs should reside.
+/// Log directory.
 pub fn log_dir() -> PathBuf {
     context_lock()
         .read()
@@ -132,7 +130,7 @@ pub fn log_dir() -> PathBuf {
         .clone()
 }
 
-/// Returns the list of configuration directories searched for global config files.
+/// Config search paths.
 pub fn config_dirs() -> Vec<PathBuf> {
     context_lock()
         .read()
@@ -141,27 +139,27 @@ pub fn config_dirs() -> Vec<PathBuf> {
         .clone()
 }
 
-/// Configures whether systemg should drop privileges after binding privileged resources.
+/// Sets privilege drop flag.
 pub fn set_drop_privileges(drop: bool) {
     let mut guard = context_lock().write().expect("runtime context poisoned");
     guard.drop_privileges = drop;
 }
 
-/// Indicates whether the CLI requested privilege dropping post-startup.
-pub fn drop_privileges_requested() -> bool {
+/// Returns whether privileges should be dropped.
+pub fn should_drop_privileges() -> bool {
     context_lock()
         .read()
         .expect("runtime context poisoned")
         .drop_privileges
 }
 
-/// Stores file descriptors inherited via socket activation (e.g., systemd `LISTEN_FDS`).
+/// Stores socket activation FDs (systemd LISTEN_FDS).
 pub fn set_activation_fds(fds: Vec<RawFd>) {
     let mut guard = context_lock().write().expect("runtime context poisoned");
     guard.activation_fds = fds;
 }
 
-/// Returns the list of file descriptors inherited via socket activation.
+/// Returns the socket activation file descriptors.
 pub fn activation_fds() -> Vec<RawFd> {
     context_lock()
         .read()
@@ -170,13 +168,13 @@ pub fn activation_fds() -> Vec<RawFd> {
         .clone()
 }
 
-/// Clears any recorded activation file descriptors.
+/// Clears the socket activation file descriptors.
 pub fn clear_activation_fds() {
     let mut guard = context_lock().write().expect("runtime context poisoned");
     guard.activation_fds.clear();
 }
 
-/// Captures socket activation file descriptors if provided by the init system.
+/// Captures socket activation FDs from init system.
 #[cfg(unix)]
 pub fn capture_socket_activation() {
     use std::os::unix::io::RawFd as UnixRawFd;
@@ -253,7 +251,7 @@ mod tests {
         assert_eq!(state_dir(), expected_state);
         assert_eq!(log_dir(), expected_logs);
         assert_eq!(config_dirs(), vec![expected_config]);
-        assert!(drop_privileges_requested());
+        assert!(should_drop_privileges());
 
         if let Some(previous) = original_home {
             unsafe { env::set_var("HOME", previous) };
@@ -270,7 +268,7 @@ mod tests {
         assert_eq!(state_dir(), PathBuf::from("/var/lib/systemg"));
         assert_eq!(log_dir(), PathBuf::from("/var/log/systemg"));
         assert_eq!(config_dirs(), vec![PathBuf::from("/etc/systemg")]);
-        assert!(!drop_privileges_requested());
+        assert!(!should_drop_privileges());
     }
 
     #[test]

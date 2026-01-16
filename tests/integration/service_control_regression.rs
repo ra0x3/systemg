@@ -15,7 +15,7 @@ use tempfile::tempdir;
 /// This tests the exact scenario reported: sysg stop -s <service> reports stopped but process still runs
 // #[test] // Disabled - Covered by individual_service_start_stop in service_control.rs
 #[allow(dead_code)]
-fn individual_service_stop_kills_actual_process() {
+fn stop_kills_process() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");
@@ -98,7 +98,7 @@ services:
 /// This tests: sysg start -s <service> when supervisor is already running
 // #[test] // Disabled - Covered by individual_service_start_stop in service_control.rs
 #[allow(dead_code)]
-fn individual_service_start_when_supervisor_running() {
+fn start_with_supervisor_running() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");
@@ -190,7 +190,7 @@ services:
 /// This tests that sysg status correctly shows when a process is actually dead vs alive
 // #[test] // Disabled - Functionality covered by other tests
 #[allow(dead_code)]
-fn status_reflects_actual_process_state() {
+fn status_reflects_process_state() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");
@@ -210,7 +210,7 @@ services:
     let daemon = Daemon::from_config(config, false).unwrap();
 
     // Start service
-    daemon.start_services_nonblocking().unwrap();
+    daemon.start_services().unwrap();
     let pid = wait_for_pid("test_service");
     assert!(is_process_alive(pid), "Process should be alive initially");
 
@@ -245,7 +245,7 @@ services:
 /// Test the exact scenario from the bug report: stopping a service individually leaves processes running
 // #[test] // Disabled - Covered by restart_kills_detached_descendants in process.rs
 #[allow(dead_code)]
-fn stop_service_terminates_all_child_processes() {
+fn stop_terminates_children() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");
@@ -265,7 +265,7 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
     let daemon = Daemon::from_config(config.clone(), false).unwrap();
 
-    daemon.start_services_nonblocking().unwrap();
+    daemon.start_services().unwrap();
     thread::sleep(Duration::from_millis(500));
 
     let main_pid = wait_for_pid("python_service");
@@ -287,7 +287,7 @@ services:
 }
 
 #[test]
-fn purge_retains_configured_services_in_status() {
+fn purge_retains_config_services() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");

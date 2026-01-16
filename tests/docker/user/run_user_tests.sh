@@ -19,12 +19,12 @@ log_test() {
 
 log_success() {
     echo -e "${GREEN}[PASS]${NC} $1"
-    ((TESTS_PASSED++))
+    ((++TESTS_PASSED))
 }
 
 log_fail() {
     echo -e "${RED}[FAIL]${NC} $1"
-    ((TESTS_FAILED++))
+    ((++TESTS_FAILED))
 }
 
 log_info() {
@@ -34,7 +34,7 @@ log_info() {
 # Clean up function
 cleanup() {
     log_info "Cleaning up..."
-    sysg purge --force 2>/dev/null || true
+    sysg purge 2>/dev/null || true
     pkill -f "sysg supervisor" 2>/dev/null || true
     rm -rf ~/test-project
 }
@@ -51,34 +51,36 @@ log_test "Scenario 1: Full-stack web application with hot reload"
 mkdir -p ~/test-project/backend ~/test-project/frontend ~/test-project/services
 cd ~/test-project
 
-# Create backend API
+# Create backend API without external dependencies
 cat > backend/server.js <<'EOF'
-const express = require('express');
-const app = express();
-const PORT = process.env.PORT || 3000;
+const http = require('http');
 
-app.get('/api/health', (req, res) => {
-    res.json({ status: 'healthy', time: new Date() });
-});
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
-app.get('/api/data', (req, res) => {
-    res.json({ data: 'Sample data from API' });
-});
-
-app.listen(PORT, () => {
-    console.log(`Backend API running on port ${PORT}`);
-});
-EOF
-
-cat > backend/package.json <<'EOF'
-{
-  "name": "backend",
-  "version": "1.0.0",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+const requestListener = (req, res) => {
+  if (req.url === '/api/health') {
+    const body = JSON.stringify({ status: 'healthy', time: new Date().toISOString() });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(body);
+    return;
   }
-}
+
+  if (req.url === '/api/data') {
+    const body = JSON.stringify({ data: 'Sample data from API' });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(body);
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not found' }));
+};
+
+const server = http.createServer(requestListener);
+
+server.listen(PORT, () => {
+  console.log(`Backend API running on port ${PORT}`);
+});
 EOF
 
 # Create frontend
@@ -137,26 +139,23 @@ done
 EOF
 chmod +x services/processor.sh
 
-# Create sysg configuration
-cat > sysg.yaml <<'EOF'
+# Create systemg configuration
+log_info "Writing systemg.yaml configuration..."
+cat > systemg.yaml <<'EOF'
+version: "1"
+
 services:
   backend:
-    command: node server.js
-    working_dir: ./backend
+    command: node backend/server.js
     environment:
       PORT: 3000
-      NODE_ENV: development
-    pre_start: |
-      echo "Installing backend dependencies..."
-      cd backend && npm install express 2>/dev/null || true
     health_check:
       command: curl -f http://localhost:3000/api/health
       interval: 10
       retries: 3
 
   frontend:
-    command: python3 server.py
-    working_dir: ./frontend
+    command: python3 frontend/server.py
     environment:
       PORT: 8080
     depends_on:
@@ -183,32 +182,27 @@ services:
     command: |
       echo "Warming cache..."
       curl -s http://localhost:3000/api/data > /dev/null
-    cron: "*/5 * * * *"
+    cron:
+      expression: "*/5 * * * *"
     depends_on:
       - backend
 EOF
 
-# Initialize project
-log_info "Initializing development project..."
-if sysg init; then
-    log_success "Project initialized"
-else
-    log_fail "Failed to initialize project"
-fi
+log_success "Configuration written"
 
 # Start all services
 log_info "Starting all development services..."
-if sysg start; then
+if sysg start --config systemg.yaml; then
     log_success "All services started"
 else
     log_fail "Failed to start services"
-    sysg status
+    sysg status --config systemg.yaml
 fi
 
 sleep 5
 
 # Verify services are running
-STATUS=$(sysg status)
+STATUS=$(sysg status --config systemg.yaml)
 echo "$STATUS"
 
 if echo "$STATUS" | grep -q "backend.*running"; then
@@ -226,9 +220,9 @@ fi
 # Test hot reload scenario
 log_info "Testing development hot reload..."
 echo "// Added comment" >> backend/server.js
-sysg restart backend
+sysg restart --service backend --config systemg.yaml
 sleep 3
-if sysg status | grep -q "backend.*running"; then
+if sysg status --config systemg.yaml | grep -q "backend.*running"; then
     log_success "Backend restarted for hot reload"
 else
     log_fail "Backend restart failed"
@@ -239,7 +233,7 @@ fi
 # ==============================================================================
 log_test "Scenario 2: Microservices with service discovery"
 
-cat >> sysg.yaml <<'EOF'
+cat >> systemg.yaml <<'EOF'
 
   auth_service:
     command: python3 -c "import time; print('Auth service started'); [time.sleep(1) for _ in iter(int, 1)]"
@@ -269,18 +263,20 @@ EOF
 
 # Reload configuration
 log_info "Adding microservices..."
-if sysg reload; then
+if sysg restart --config systemg.yaml; then
     log_success "Configuration reloaded with microservices"
 else
     log_fail "Failed to reload configuration"
 fi
 
 # Start new services
-sysg start auth_service user_service notification_service
+for svc in auth_service user_service notification_service; do
+    sysg start --service "$svc" --config systemg.yaml
+done
 sleep 3
 
 # Test service dependencies
-if sysg status | grep -q "notification_service.*running"; then
+if sysg status --config systemg.yaml | grep -q "notification_service.*running"; then
     log_success "Microservices started with correct dependencies"
 else
     log_fail "Microservice dependency chain failed"
@@ -292,30 +288,33 @@ fi
 log_test "Scenario 3: Development workflow automation"
 
 # Add development automation services
-cat >> sysg.yaml <<'EOF'
+cat >> systemg.yaml <<'EOF'
 
   test_runner:
     command: |
       echo "Running tests..."
       echo "✓ Unit tests passed"
       echo "✓ Integration tests passed"
-    cron: "*/30 * * * *"
+    cron:
+      expression: "*/30 * * * *"
     skip: false
 
   code_formatter:
     command: |
       echo "Formatting code..."
       echo "Formatted 5 files"
-    cron: "@hourly"
+    cron:
+      expression: "@hourly"
 
   dependency_checker:
     command: |
       echo "Checking for outdated dependencies..."
       echo "All dependencies up to date"
-    cron: "0 9 * * MON"
+    cron:
+      expression: "0 9 * * MON"
 EOF
 
-sysg reload
+sysg restart --config systemg.yaml
 log_success "Development automation services configured"
 
 # ==============================================================================
@@ -325,7 +324,7 @@ log_test "Scenario 4: Debugging and troubleshooting workflows"
 
 # Test log streaming
 log_info "Testing log aggregation..."
-sysg logs --lines 20 > /tmp/aggregated.log
+sysg logs --config systemg.yaml --lines 20 > /tmp/aggregated.log
 if [ -s /tmp/aggregated.log ]; then
     log_success "Log aggregation working"
 else
@@ -334,7 +333,7 @@ fi
 
 # Test service-specific debugging
 log_info "Debugging specific service..."
-sysg logs worker --follow &
+timeout 5 sysg logs --config systemg.yaml worker &
 LOG_PID=$!
 sleep 2
 kill $LOG_PID 2>/dev/null
@@ -342,7 +341,7 @@ log_success "Service-specific log streaming works"
 
 # Test metrics/inspection
 log_info "Collecting performance metrics..."
-if sysg inspect > /tmp/user_metrics.json 2>/dev/null; then
+if sysg inspect --config systemg.yaml backend --json > /tmp/user_metrics.json 2>/dev/null; then
     log_success "Metrics collection successful"
 else
     log_fail "Metrics collection failed"
@@ -353,7 +352,7 @@ fi
 # ==============================================================================
 log_test "Scenario 5: Local CI/CD pipeline"
 
-cat >> sysg.yaml <<'EOF'
+cat >> systemg.yaml <<'EOF'
 
   ci_build:
     command: |
@@ -382,11 +381,11 @@ cat >> sysg.yaml <<'EOF'
 EOF
 
 log_info "Running CI/CD pipeline..."
-sysg reload
-sysg start ci_build
+sysg restart --config systemg.yaml
+sysg start --service ci_build --config systemg.yaml
 sleep 8
 
-if sysg status | grep -q "ci_deploy.*completed"; then
+if sysg status --config systemg.yaml | grep -q "ci_deploy.*completed"; then
     log_success "CI/CD pipeline executed successfully"
 else
     log_fail "CI/CD pipeline failed"
@@ -399,8 +398,10 @@ log_test "Scenario 6: Environment presets and profiles"
 
 # Test stopping development services
 log_info "Stopping non-essential services..."
-sysg stop processor cache_warmer test_runner
-if sysg status | grep -q "processor.*stopped"; then
+for svc in processor cache_warmer test_runner; do
+    sysg stop --service "$svc" --config systemg.yaml || true
+done
+if sysg status --config systemg.yaml | grep -q "processor.*stopped"; then
     log_success "Selective service management works"
 else
     log_fail "Failed to stop specific services"
@@ -409,8 +410,8 @@ fi
 # Test restart with different configuration
 log_info "Switching to production mode..."
 export NODE_ENV=production
-sysg restart backend
-if sysg status | grep -q "backend.*running"; then
+sysg restart --service backend --config systemg.yaml
+if sysg status --config systemg.yaml | grep -q "backend.*running"; then
     log_success "Environment-based restart successful"
 else
     log_fail "Environment switch failed"
@@ -422,7 +423,7 @@ fi
 log_test "Scenario 7: Development session cleanup"
 
 log_info "Performing graceful shutdown..."
-if sysg stop --graceful; then
+if sysg stop --config systemg.yaml; then
     log_success "Graceful shutdown completed"
 else
     log_fail "Graceful shutdown failed"

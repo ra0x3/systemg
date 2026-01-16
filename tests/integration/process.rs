@@ -50,7 +50,7 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
     let daemon = Daemon::from_config(config.clone(), false).unwrap();
 
-    daemon.start_services_nonblocking().unwrap();
+    daemon.start_services().unwrap();
     thread::sleep(Duration::from_millis(500));
 
     // Collect child PIDs
@@ -206,7 +206,7 @@ services:
         .clone();
     let daemon = Daemon::from_config(config, false).expect("daemon from config");
 
-    daemon.start_services_nonblocking().expect("start services");
+    daemon.start_services().expect("start services");
 
     let first_parent_pid = common::wait_for_pid("detacher");
     common::wait_for_path(&child_pid_path);
@@ -300,7 +300,7 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
     let daemon = Daemon::from_config(config, false).expect("daemon from config");
 
-    daemon.start_services_nonblocking().expect("start services");
+    daemon.start_services().expect("start services");
 
     let real_pid = common::wait_for_pid("stale");
 

@@ -8,7 +8,7 @@ use systemg::{config::load_config, daemon::Daemon};
 use tempfile::tempdir;
 
 #[test]
-fn individual_service_start_stop() {
+fn service_start_stop() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");
@@ -35,7 +35,7 @@ services:
     let daemon = Daemon::from_config(config.clone(), false).unwrap();
 
     // Start all services
-    daemon.start_services_nonblocking().unwrap();
+    daemon.start_services().unwrap();
 
     thread::sleep(Duration::from_millis(500));
 
@@ -92,7 +92,7 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
     let daemon = Daemon::from_config(config.clone(), false).unwrap();
 
-    daemon.start_services_nonblocking().unwrap();
+    daemon.start_services().unwrap();
 
     let pid1 = wait_for_pid("sleepy");
     assert!(common::is_process_alive(pid1));
@@ -117,7 +117,7 @@ services:
 }
 
 #[test]
-fn manual_stop_suppresses_pending_restart() {
+fn manual_stop_prevents_restart() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");
@@ -144,8 +144,8 @@ services:
     let daemon = Daemon::from_config(config, false).unwrap();
 
     // Start services - the flaky service should start running briefly before failing
-    let result = daemon.start_services_nonblocking();
-    println!("start_services_nonblocking result: {:?}", result);
+    let result = daemon.start_services();
+    println!("start_services result: {:?}", result);
     result.unwrap();
 
     thread::sleep(Duration::from_secs(4));
@@ -202,7 +202,7 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
     let daemon = Daemon::from_config(config, false).unwrap();
 
-    daemon.start_services_nonblocking().unwrap();
+    daemon.start_services().unwrap();
     thread::sleep(Duration::from_millis(200));
 
     assert!(!marker.exists(), "Skipped service should not execute");
@@ -211,7 +211,7 @@ services:
 }
 
 #[test]
-fn skip_flag_controls_service_execution() {
+fn skip_flag_controls_execution() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");

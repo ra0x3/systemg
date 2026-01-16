@@ -31,7 +31,7 @@ use systemg::{
     status::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, StatusSnapshot,
         UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
-        collect_snapshot_from_disk, compute_overall_health,
+        collect_disk_snapshot, compute_overall_health,
     },
     supervisor::Supervisor,
 };
@@ -448,8 +448,7 @@ fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Er
         .into()),
         Err(ControlError::NotAvailable) => {
             let config = load_config(Some(config_path)).ok();
-            collect_snapshot_from_disk(config)
-                .map_err(|err| Box::new(err) as Box<dyn Error>)
+            collect_disk_snapshot(config).map_err(|err| Box::new(err) as Box<dyn Error>)
         }
         Err(err) => Err(Box::new(err)),
     }
@@ -656,7 +655,7 @@ fn unit_health_label(health: UnitHealth) -> &'static str {
     }
 }
 
-fn unit_health_label_with_context(unit: &UnitStatus) -> String {
+fn health_label_extended(unit: &UnitStatus) -> String {
     // Special handling for crons with tracking issues or minor errors
     if let Some(cron) = &unit.cron
         && let Some(last) = &cron.last_run
@@ -906,7 +905,7 @@ fn count_states_and_health(
 
         *state_counts.entry(state_label.to_string()).or_insert(0) += 1;
 
-        let health_label = unit_health_label_with_context(unit);
+        let health_label = health_label_extended(unit);
         *health_counts.entry(health_label).or_insert(0) += 1;
     }
 
@@ -1001,7 +1000,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     let rss_col = format_rss_column(unit.metrics.as_ref());
     let uptime = format_uptime_column(unit.uptime.as_ref());
     let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
-    let health_label_text = unit_health_label_with_context(unit);
+    let health_label_text = health_label_extended(unit);
     let health_color = if health_label_text == "healthy-" {
         GREEN // Darker green for healthy-
     } else {
@@ -1145,7 +1144,7 @@ fn fetch_inspect(
         .into()),
         Err(ControlError::NotAvailable) => {
             let config = load_config(Some(config_path))?;
-            let snapshot = collect_snapshot_from_disk(Some(config))?;
+            let snapshot = collect_disk_snapshot(Some(config))?;
             let unit_status = snapshot
                 .units
                 .into_iter()
@@ -1399,7 +1398,7 @@ fn overall_health_from_unit(unit: &UnitStatus) -> OverallHealth {
 }
 
 fn purge_all_state() -> Result<(), Box<dyn Error>> {
-    stop_resident_supervisors();
+    stop_supervisors();
 
     let runtime_dir = runtime::state_dir();
 
@@ -1414,7 +1413,7 @@ fn purge_all_state() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn stop_resident_supervisors() {
+fn stop_supervisors() {
     let candidates = gather_supervisor_pids();
 
     if candidates.is_empty() {
@@ -1462,7 +1461,7 @@ fn stop_resident_supervisors() {
     }
 
     for pid in survivors {
-        forcefully_terminate_supervisor(pid);
+        force_kill(pid);
     }
 }
 
@@ -1483,7 +1482,7 @@ fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
             continue;
         }
 
-        if is_daemonized_supervisor_process(process) {
+        if is_supervisor(process) {
             set.insert(pid.as_u32() as libc::pid_t);
         }
     }
@@ -1491,7 +1490,7 @@ fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
     set
 }
 
-fn is_daemonized_supervisor_process(process: &sysinfo::Process) -> bool {
+fn is_supervisor(process: &sysinfo::Process) -> bool {
     let cmd = process.cmd();
     if cmd.is_empty() {
         return false;
@@ -1528,7 +1527,7 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     while Instant::now() < deadline {
         match signal::kill(target, None) {
             Ok(_) => {
-                if supervisor_process_exited(pid) {
+                if process_exited(pid) {
                     return true;
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -1537,7 +1536,7 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
                 if err == nix::Error::from(nix::errno::Errno::ESRCH) {
                     return true;
                 }
-                if supervisor_process_exited(pid) {
+                if process_exited(pid) {
                     return true;
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -1548,7 +1547,7 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     false
 }
 
-fn forcefully_terminate_supervisor(pid: libc::pid_t) {
+fn force_kill(pid: libc::pid_t) {
     if wait_for_supervisor_exit(pid, Duration::from_millis(100)) {
         return;
     }
@@ -1574,7 +1573,7 @@ fn forcefully_terminate_supervisor(pid: libc::pid_t) {
     let _ = wait_for_supervisor_exit(pid, Duration::from_secs(2));
 }
 
-fn supervisor_process_exited(pid: libc::pid_t) -> bool {
+fn process_exited(pid: libc::pid_t) -> bool {
     let proc_root = PathBuf::from(format!("/proc/{pid}"));
     if !proc_root.exists() {
         return true;

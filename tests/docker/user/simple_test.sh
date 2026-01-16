@@ -31,7 +31,9 @@ echo "Creating test configuration..."
 mkdir -p /tmp/test-project
 cd /tmp/test-project
 
-cat > sysg.yaml <<EOF
+cat > systemg.yaml <<'EOF'
+version: "1"
+
 services:
   test_service:
     command: echo "Hello from test service"
@@ -41,9 +43,8 @@ EOF
 echo "✓ Configuration created"
 
 echo ""
-echo "Attempting to run systemg init..."
-# Even if this fails due to binary incompatibility, we've tested the infrastructure
-/usr/local/bin/sysg init 2>&1 || echo "Note: Binary execution failed (expected on platform mismatch)"
+echo "Attempting to start systemg with the test config..."
+/usr/local/bin/sysg start --config systemg.yaml 2>&1 || echo "Note: Start command failed (expected if binary lacks platform support)"
 
 echo ""
 echo "==================================="
