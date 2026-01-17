@@ -265,10 +265,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })?;
 
                 let mut last_health = OverallHealth::Healthy;
+                let mut first_iteration = true;
 
                 while running.load(Ordering::SeqCst) {
-                    // Clear terminal
-                    print!("\x1B[2J\x1B[1;1H");
+                    // Clear terminal and move cursor to top-left
+                    if first_iteration {
+                        // Full clear on first iteration
+                        print!("\x1B[2J\x1B[H");
+                        first_iteration = false;
+                    } else {
+                        // Just move cursor to home for updates
+                        print!("\x1B[H");
+                    }
+                    io::stdout().flush()?;
 
                     // Fetch fresh data
                     let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
@@ -1255,8 +1264,12 @@ fn render_inspect(
             format_bytes(metrics.latest_rss_bytes),
             metrics.samples,
         );
+    } else if unit.kind == UnitKind::Cron {
+        println!("Metrics: awaiting next cron execution");
+    } else if unit.process.is_some() {
+        println!("Metrics: collector initializing (may take a few seconds)");
     } else {
-        println!("Metrics: not available (collector has not observed samples yet)");
+        println!("Metrics: not available (service not running)");
     }
 
     // Use gnuplot visualization for metrics

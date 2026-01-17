@@ -16,7 +16,7 @@ use strum as _;
 use tempfile as _;
 use tracing_subscriber as _;
 
-/// Gnuplot charting.
+/// ASCII charting.
 pub mod charting;
 
 /// CLI parsing.
