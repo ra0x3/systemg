@@ -5,15 +5,13 @@ title: Getting Started
 
 # Getting Started
 
-`systemg` is a lightweight, Rust-based process manager built for speed, simplicity, and clarity.
-It manages long-running services, fires lifecycle [webhooks](./webhooks.md), and can operate
-cron-style automation alongside your always-on workloads.
+systemg is a **general-purpose program composer** that transforms arbitrary programs into coherent systems. Built in Rust with no runtime dependencies, it composes programs with explicit lifecycles, dependencies, and health monitoring—turning collections of processes into systems you can reason about, evolve, and deploy cleanly.
 
-This guide walks you through installation and basic usage.
+This guide walks you through installation and basic usage of systemg's composition capabilities.
 
 ## System requirements
 
-> `systemg` has minimal system dependencies, which is one of its key advantages over systemd.
+> systemg runs as a single binary with no external dependencies, leveraging existing OS primitives when available while maintaining complete independence.
 
 **Currently supported:**
 

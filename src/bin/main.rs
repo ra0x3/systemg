@@ -19,7 +19,7 @@ use nix::{
 };
 use sysinfo::{ProcessesToUpdate, System};
 use systemg::{
-    charting::{self, ChartConfig, is_live_window, parse_window_duration},
+    charting::{self, ChartConfig, parse_window_duration},
     cli::{Cli, Commands, parse_args},
     config::load_config,
     cron::{CronExecutionStatus, CronStateFile},
@@ -239,8 +239,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             };
 
-            let is_live = is_live_window(window_seconds) && !json;
-
             // Calculate samples limit based on window
             let samples_limit = if window_seconds < 3600 {
                 window_seconds as usize // For short windows, 1 sample per second
@@ -248,94 +246,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 720 // For longer windows, cap at 720 samples
             };
 
-            if is_live {
-                // Live mode with auto-refresh
-                use std::sync::{
-                    Arc,
-                    atomic::{AtomicBool, Ordering},
-                };
-
-                let running = Arc::new(AtomicBool::new(true));
-                let r = running.clone();
-
-                // Set up Ctrl+C handler
-                ctrlc::set_handler(move || {
-                    r.store(false, Ordering::SeqCst);
-                    print!("\x1B[999B\nStopping live view...\n");
-                })?;
-
-                let mut last_health = OverallHealth::Healthy;
-                let mut first_iteration = true;
-
-                while running.load(Ordering::SeqCst) {
-                    // Clear terminal and move cursor to top-left
-                    if first_iteration {
-                        // Full clear on first iteration
-                        print!("\x1B[2J\x1B[H");
-                        first_iteration = false;
-                    } else {
-                        // Just move cursor to home for updates
-                        print!("\x1B[H");
-                    }
-                    io::stdout().flush()?;
-
-                    // Fetch fresh data
-                    let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
-                    if payload.unit.is_none() {
-                        eprintln!("Unit '{unit}' not found.");
-                        process::exit(2);
-                    }
-
-                    let render_opts = InspectRenderOptions {
-                        json: false,
-                        no_color,
-                        window_seconds,
-                        window_desc: window.clone(),
-                        samples_limit,
-                        is_live: true,
-                    };
-
-                    last_health = render_inspect(&payload, &render_opts)?;
-
-                    // Show live mode indicator
-                    println!();
-                    println!("Live view ({}) - Press Ctrl+C to stop", window);
-
-                    // Sleep for 1 second before next update
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-
-                let exit_code = match last_health {
-                    OverallHealth::Healthy => 0,
-                    OverallHealth::Degraded => 1,
-                    OverallHealth::Failing => 2,
-                };
-                process::exit(exit_code);
-            } else {
-                // Historical mode - one-shot
-                let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
-                if payload.unit.is_none() {
-                    eprintln!("Unit '{unit}' not found.");
-                    process::exit(2);
-                }
-
-                let render_opts = InspectRenderOptions {
-                    json,
-                    no_color,
-                    window_seconds,
-                    window_desc: window.clone(),
-                    samples_limit,
-                    is_live: false,
-                };
-
-                let health = render_inspect(&payload, &render_opts)?;
-                let exit_code = match health {
-                    OverallHealth::Healthy => 0,
-                    OverallHealth::Degraded => 1,
-                    OverallHealth::Failing => 2,
-                };
-                process::exit(exit_code);
+            let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
+            if payload.unit.is_none() {
+                eprintln!("Unit '{unit}' not found.");
+                process::exit(2);
             }
+
+            let render_opts = InspectRenderOptions {
+                json,
+                no_color,
+                window_seconds,
+                window_desc: window.clone(),
+                samples_limit,
+            };
+
+            let health = render_inspect(&payload, &render_opts)?;
+            let exit_code = match health {
+                OverallHealth::Healthy => 0,
+                OverallHealth::Degraded => 1,
+                OverallHealth::Failing => 2,
+            };
+            process::exit(exit_code);
         }
         Commands::Logs {
             config,
@@ -416,7 +347,6 @@ struct InspectRenderOptions {
     window_seconds: u64,
     window_desc: String,
     samples_limit: usize,
-    is_live: bool,
 }
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
@@ -1291,7 +1221,6 @@ fn render_inspect(
         // Use gnuplot for charting
         let chart_config = ChartConfig {
             no_color: opts.no_color,
-            is_live: opts.is_live,
             window_desc: opts.window_desc.clone(),
         };
 

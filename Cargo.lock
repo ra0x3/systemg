@@ -1215,12 +1215,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
-name = "rasciichart"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "169941e6194846e04dab31b8d31504d8e3f5d1c20c4b520e57664f6cab83ac6b"
-
-[[package]]
 name = "rayon"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1619,7 +1613,6 @@ dependencies = [
  "nix 0.29.0",
  "openssl-sys",
  "predicates 2.1.5",
- "rasciichart",
  "regex",
  "reqwest",
  "serde",

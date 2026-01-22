@@ -30,10 +30,11 @@
 
 ---
 
-# Systemg - A Lightweight Process Manager
+# systemg - A General-Purpose Program Composer
 
-Systemg is a **simple, fast, and dependency-free process manager** written in Rust.
-It aims to provide **a minimal alternative to systemd** and other heavyweight service managers, focusing on **ease of use**, **clarity**, and **performance**.
+systemg is a **general-purpose program composer** that transforms arbitrary programs into coherent systems with explicit lifecycles, dependencies, and health monitoring. Instead of managing individual daemons or containers, it focuses on **composition over mechanics**—turning a collection of processes into a system you can reason about, evolve, and deploy cleanly.
+
+Built on top of existing OS primitives like systemd and cgroups, systemg inherits their stability while adding higher-level intent: how programs relate, start, roll, and recover together.
 
 ---
 
@@ -82,20 +83,19 @@ When the supervisor is running it remains active in the background, holding serv
 
 ## Why systemg
 
-Traditional process managers like **systemd** are complex, heavy, and introduce unnecessary dependencies.
-Systemg offers a **lightweight**, **configuration-driven** solution that's **easy to set up and maintain**.
+Traditional service managers focus on the mechanics of keeping processes alive. systemg takes a different approach: it's about **composing programs into systems**. While tools like systemd manage individual units with complex dependency chains, systemg lets you declare how programs work together as a coherent whole—with explicit lifecycles, health checks, and deployment strategies that make the system's behavior predictable and evolvable.
 
 ### Features
 
-- **Declarative YAML Configuration** - Define services, dependencies, and restart policies easily.
-- **Automatic Process Monitoring** - Restart crashed services based on custom policies.
-- **Dependency-Aware Startup** - Honour `depends_on` chains, skip unhealthy dependencies, and cascade stop dependents on failure.
-- **Environment Variable Support** - Load variables from `.env` files and per-service configurations.
-- **Rolling Deployments** - Orchestrate zero-downtime restarts with pre-start commands, health probes, and grace periods.
-- **Lifecycle Webhooks** - Trigger outbound notifications or remediation scripts on start/stop/restart outcomes with per-hook timeouts. See [Webhooks documentation](docs/docs/webhooks.md).
-- **Cron Scheduling** - Run short-lived, recurring tasks on a cron schedule with overlap detection and execution history.
-- **Minimal & Fast** - Built with Rust, designed for performance and low resource usage.
-- **No Root Required** - Unlike systemd, it doesn't take over PID 1.
+- **Program Composition** - Declare how programs relate and work together, not just individual service configs.
+- **Explicit Lifecycles** - Define startup sequences, health checks, and recovery behaviors as first-class concepts.
+- **Dependency Orchestration** - Programs start in topological order with health-aware cascading on failures.
+- **Rolling Deployments** - Built-in blue-green swaps with health validation—no external deployment tools needed.
+- **Environment Inheritance** - Consistent environment propagation from `.env` files across all composed programs.
+- **Lifecycle Webhooks** - Integrate with external systems through event-driven notifications. See [Webhooks documentation](docs/docs/webhooks.md).
+- **Cron Scheduling** - Short-lived tasks run alongside services with proper overlap detection.
+- **OS Primitive Integration** - Leverages systemd/cgroups when available while maintaining userspace simplicity.
+- **Single Static Binary** - No runtime dependencies, instant startup, predictable memory usage.
 
 ### Privileged Mode (Optional)
 
@@ -266,17 +266,11 @@ $ sysg inspect myservice
 # Show metrics in JSON format
 $ sysg inspect myservice --json
 
-# View only recent metrics (last 6 hours)
-$ sysg inspect myservice --since 21600
+# Display only the most recent data (last 2 minutes)
+$ sysg inspect myservice --window 2m
 
-# Display metrics in table format instead of chart
-$ sysg inspect myservice --table
-
-# Live tail mode - continuously updates the chart with real-time data
-$ sysg inspect myservice --tail
-
-# Live tail with custom time window (default: 5 seconds, max: 60 seconds)
-$ sysg inspect myservice --tail --tail-window 10
+# Render output without ANSI coloring
+$ sysg inspect myservice --no-color
 ```
 
 **Logs** - View logs for a specific service:
@@ -305,14 +299,15 @@ $ sysg start --log-level 4
 
 ### Comparison
 
-| Feature            | Systemg       | systemd         | Supervisor   | Docker Compose  |
+| Feature            | systemg       | systemd         | Supervisor   | Docker Compose  |
 |--------------------|-----------------|-----------------|-----------------|------------------|
-| **Lightweight**    | ✓             | ✗ (Heavy)       | ✗ (Python)   | ✗ (Containers)  |
-| **No Dependencies**| ✓             | ✗ (DBus, etc.)  | ✗ (Python)   | ✗ (Docker)      |
-| **Simple Config**  | YAML          | Complex Units   | INI          | YAML            |
-| **Process Monitoring** | ✓        | ✓               | ✓            | ✓               |
-| **PID 1 Required?**| ✗             | ✓               | ✗            | ✗               |
-| **Handles Dependencies?** | ✓    | ✓               | ✗            | ✓               |
+| **Focus**          | Program Composition | System Management | Process Supervision | Container Orchestration |
+| **Abstractions**   | Systems of Programs | Individual Units | Individual Processes | Container Services |
+| **Configuration**  | Declarative YAML | Unit Files | INI Files | YAML |
+| **Dependencies**   | Topological with Health | Complex Chains | Manual Priority | Service Links |
+| **Deployment**     | Built-in Rolling | External Tools | Manual | Recreate/Rolling |
+| **Runtime Deps**   | None | DBus, Journal | Python | Docker Daemon |
+| **OS Integration** | Optional | Required (PID 1) | None | Container Runtime |
 
 ---
 
