@@ -254,7 +254,6 @@ mod tests {
 
     #[test]
     fn control_command_serialization() {
-        // Test Start command
         let start = ControlCommand::Start {
             service: Some("test_service".to_string()),
         };
@@ -262,12 +261,10 @@ mod tests {
         assert!(json.contains("Start"));
         assert!(json.contains("test_service"));
 
-        // Test Stop command
         let stop = ControlCommand::Stop { service: None };
         let json = serde_json::to_string(&stop).unwrap();
         assert!(json.contains("Stop"));
 
-        // Test Restart command
         let restart = ControlCommand::Restart {
             config: Some("config.yaml".to_string()),
             service: Some("service".to_string()),
@@ -276,7 +273,6 @@ mod tests {
         assert!(json.contains("Restart"));
         assert!(json.contains("config.yaml"));
 
-        // Test Shutdown command
         let shutdown = ControlCommand::Shutdown;
         let json = serde_json::to_string(&shutdown).unwrap();
         assert!(json.contains("Shutdown"));
@@ -333,12 +329,10 @@ mod tests {
         let read_pid = read_supervisor_pid().unwrap();
         assert_eq!(read_pid, Some(pid));
 
-        // Cleanup
         cleanup_runtime().unwrap();
         let read_pid = read_supervisor_pid().unwrap();
         assert_eq!(read_pid, None);
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -364,12 +358,10 @@ mod tests {
         let hint = read_config_hint().unwrap();
         assert_eq!(hint, Some(config));
 
-        // Cleanup
         cleanup_runtime().unwrap();
         let hint = read_config_hint().unwrap();
         assert_eq!(hint, None);
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -394,7 +386,6 @@ mod tests {
 
         assert!(matches!(result, Err(ControlError::NotAvailable)));
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -408,7 +399,6 @@ mod tests {
         let temp = tempdir().unwrap();
         let socket_path = temp.path().join("test.sock");
 
-        // Create a Unix socket pair for testing
         let listener = match UnixListener::bind(&socket_path) {
             Ok(listener) => listener,
             Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
@@ -420,19 +410,15 @@ mod tests {
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
 
-            // Read command
             let cmd = read_command(&mut stream).unwrap();
             assert!(matches!(cmd, ControlCommand::Start { .. }));
 
-            // Write response
             let response = ControlResponse::Message("Started".to_string());
             write_response(&mut stream, &response).unwrap();
         });
 
-        // Give the thread time to start
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // Connect and send command
         let mut stream = UnixStream::connect(&socket_path).unwrap();
         let command = ControlCommand::Start {
             service: Some("test".to_string()),
@@ -442,7 +428,6 @@ mod tests {
         stream.write_all(b"\n").unwrap();
         stream.flush().unwrap();
 
-        // Read response
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
@@ -489,7 +474,6 @@ mod tests {
         assert!(dir.ends_with(".local/share/systemg"));
         assert!(dir.exists());
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -512,7 +496,6 @@ mod tests {
         let path = socket_path().unwrap();
         assert!(path.ends_with("control.sock"));
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -531,16 +514,13 @@ mod tests {
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
 
-        // Write empty string
         let hint_path = config_hint_path().unwrap();
         fs::create_dir_all(hint_path.parent().unwrap()).unwrap();
         fs::write(&hint_path, "").unwrap();
 
-        // Should return None for empty content
         let hint = read_config_hint().unwrap();
         assert_eq!(hint, None);
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },

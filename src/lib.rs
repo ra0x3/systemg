@@ -1,12 +1,9 @@
 //! Lightweight process manager for Unix services.
 
 #![warn(unused_crate_dependencies)]
-// These dependencies are only used in the binary (src/bin/main.rs)
-// Test dependencies are only used in test code
 #[cfg(test)]
 use assert_cmd as _;
 use ctrlc as _;
-// OpenSSL is only needed for static linking on Linux
 #[cfg(target_os = "linux")]
 use openssl_sys as _;
 #[cfg(test)]

@@ -1187,7 +1187,7 @@ fn render_inspect(
 
     if let Some(metrics) = unit.metrics.as_ref() {
         println!(
-            "Metrics: latest {:.1}% CPU, avg {:.1}% CPU, max {:.1}% CPU, RSS {} across {} samples",
+            "Metrics: latest {:.4}% CPU, avg {:.4}% CPU, max {:.4}% CPU, RSS {} across {} samples",
             metrics.latest_cpu_percent,
             metrics.average_cpu_percent,
             metrics.max_cpu_percent,

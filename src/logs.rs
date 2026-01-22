@@ -110,7 +110,6 @@ impl TailMode {
                 cmd.arg(stderr_path);
             }
             _ => {
-                // Default: show stdout first, then stderr
                 cmd.arg(stdout_path).arg(stderr_path);
             }
         }
@@ -168,8 +167,6 @@ fn resolve_tail_targets(
 
 /// Creates the log directory if it doesn't exist.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
-    // Capture log path now, before spawning thread, to avoid race conditions
-    // with runtime context changes during test cleanup
     let path = get_log_path(service, kind);
     thread::spawn(move || {
         if let Some(parent) = path.parent() {
@@ -321,7 +318,6 @@ impl LogManager {
     ) -> Result<(), LogsManagerError> {
         debug!("Fetching logs for all services...");
 
-        // Display alert message for users
         println!(
             "\n\
             ╭{}╮\n\

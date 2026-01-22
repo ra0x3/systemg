@@ -327,7 +327,6 @@ impl CronManager {
                         "Cron job '{}' is scheduled to run but previous execution is still running",
                         job.service_name
                     );
-                    // Record overlap error
                     let record = CronExecutionRecord {
                         started_at: now,
                         completed_at: Some(now),
@@ -343,7 +342,6 @@ impl CronManager {
                     job.currently_running = true;
                     job.last_execution = Some(now);
 
-                    // Start execution record
                     let record = CronExecutionRecord {
                         started_at: now,
                         completed_at: None,
@@ -485,9 +483,6 @@ impl CronStateFile {
         }
         let data = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
 
-        // Use explicit File operations with sync_all() to ensure data is flushed to disk
-        // before returning. This prevents race conditions in tests on Linux where the OS
-        // might buffer writes and the file could be read as empty before the buffer is flushed.
         use std::io::Write;
         let mut file = fs::File::create(&path)?;
         file.write_all(data.as_bytes())?;
@@ -734,7 +729,6 @@ mod tests {
         assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
         assert_eq!(record.exit_code, Some(0));
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },
@@ -809,7 +803,6 @@ mod tests {
             metrics: crate::config::MetricsConfig::default(),
         };
 
-        // Compute hashes for each service
         let job_two_hash = service_with_cron("*/2 * * * * *").compute_hash();
         let job_three_hash = service_with_cron("0 */5 * * * *").compute_hash();
         let job_one_hash = service_with_cron("* * * * * *").compute_hash();
@@ -831,7 +824,6 @@ mod tests {
         assert!(state.jobs().contains_key(&job_three_hash));
         assert!(!state.jobs().contains_key(&job_one_hash));
 
-        // Restore original HOME
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
             None => unsafe { std::env::remove_var("HOME") },

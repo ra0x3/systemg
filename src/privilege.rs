@@ -278,7 +278,6 @@ impl PrivilegeContext {
             return Ok(());
         }
 
-        // Apply supplementary groups first
         if !self.user.supplementary.is_empty() {
             let mut buf = self.user.supplementary.clone();
             buf.insert(0, self.user.gid.unwrap_or_else(|| getgid().as_raw()));
@@ -310,7 +309,6 @@ impl PrivilegeContext {
 
     #[cfg(target_os = "linux")]
     fn apply_capabilities_pre_user(&self) -> io::Result<()> {
-        // Capability management requires root privileges. Skip if not running as root.
         if !getuid().is_root() {
             return Ok(());
         }
@@ -340,7 +338,6 @@ impl PrivilegeContext {
             caps::set(None, set, &caps).map_err(caps_err)?;
         }
 
-        // Ambient capabilities are set after the user switch.
         caps::clear(None, CapSet::Ambient).map_err(caps_err)?;
         Ok(())
     }
@@ -355,10 +352,6 @@ impl PrivilegeContext {
 
     #[cfg(target_os = "linux")]
     fn apply_capabilities_post_user(&self) -> io::Result<()> {
-        // Capability management requires root privileges. Skip if not running as root.
-        // Note: After a user switch, getuid() reflects the new non-root user, but if we
-        // started as root we would have already handled capabilities in apply_capabilities_pre_user.
-        // This function is a no-op for non-root processes.
         if self.user.uid.is_none() && !getuid().is_root() {
             return Ok(());
         }
@@ -704,7 +697,6 @@ mod linux_tests {
             ..PrivilegeContext::default()
         };
 
-        // On non-root CI this will log a warning (EPERM) but should not error.
         assert!(ctx.apply_isolation().is_ok());
     }
 }

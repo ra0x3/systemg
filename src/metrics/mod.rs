@@ -24,9 +24,9 @@ use crate::{
     daemon::{PidFile, ServiceStateFile},
 };
 
-const DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
+const DEFAULT_RETENTION_MINUTES: u64 = 720;
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
-const DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+const DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Sample collected for a managed unit at a specific timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,7 +153,6 @@ impl MetricsStore {
 
         let buffer = self.units.entry(unit_hash.to_string()).or_default();
 
-        // Estimate sample size (fixed struct + hashed key overhead negligible).
         let sample_estimated_bytes = mem::size_of::<MetricSample>();
         buffer.samples.push_back(sample.clone());
         buffer.estimated_bytes = buffer
@@ -163,7 +162,6 @@ impl MetricsStore {
             .total_estimated_bytes
             .saturating_add(sample_estimated_bytes);
 
-        // Retention pruning.
         while let Some(front) = buffer.samples.front() {
             if front.timestamp >= retention_cutoff {
                 break;
@@ -199,7 +197,6 @@ impl MetricsStore {
             return Ok(());
         }
 
-        // Purge oldest samples across units until within budget.
         let mut unit_keys: Vec<String> = self.units.keys().cloned().collect();
         unit_keys.sort();
         while self.total_estimated_bytes > self.settings.max_memory_bytes {
@@ -417,7 +414,6 @@ impl MetricsSpillover {
                 if self.current.as_ref().map(|w| w.path.clone())
                     == Some(meta.path.clone())
                 {
-                    // Can't remove active segment; rotate first.
                     self.rotate_segment()?;
                     if let Some(writer) = self.current.take()
                         && let Some(back) = self.segments.back_mut()

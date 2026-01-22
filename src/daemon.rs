@@ -123,7 +123,6 @@ impl PidFile {
             .truncate(false)
             .open(&lock_path)?;
 
-        // Acquire exclusive lock (blocks until available)
         lock_file.lock_exclusive()?;
 
         Ok(lock_file)
@@ -145,7 +144,6 @@ impl PidFile {
         let contents = fs::read_to_string(path)?;
         let pid_data = serde_json::from_str::<Self>(&contents)?;
         Ok(pid_data)
-        // Lock is automatically released when _lock goes out of scope
     }
 
     /// Returns the PID for a specific service.
@@ -161,7 +159,6 @@ impl PidFile {
         let contents = fs::read_to_string(&path)?;
         let pid_data = serde_json::from_str::<Self>(&contents)?;
         Ok(pid_data)
-        // Lock is automatically released when _lock goes out of scope
     }
 
     /// Saves to disk.
@@ -172,7 +169,6 @@ impl PidFile {
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
-        // Lock is automatically released when _lock goes out of scope
     }
 
     /// Atomically inserts PID.
@@ -193,7 +189,6 @@ impl PidFile {
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
-        // Lock is automatically released when _lock goes out of scope
     }
 
     /// Atomically removes service.
@@ -216,7 +211,6 @@ impl PidFile {
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
-        // Lock is automatically released when _lock goes out of scope
     }
 
     /// Gets the PID for a service.
