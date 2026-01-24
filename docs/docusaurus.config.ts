@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'systemg',
-  tagline: 'systemd, for busy people',
+  tagline: 'General-Purpose Program Composer',
   favicon: 'https://i.imgur.com/hqwS335.png',
 
   // Set the production url of your site here

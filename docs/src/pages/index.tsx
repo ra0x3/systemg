@@ -21,8 +21,8 @@ function HomepageHeader() {
           className="hero__subtitle"
           style={{ fontSize: "0.9rem", opacity: 0.8, marginTop: "0.5rem" }}
         >
-          <code>systemg</code> is for people who need a <em>process manager</em>
-          , not an <em>operating system</em>
+          <code>systemg</code> transforms arbitrary programs into{" "}
+          <em>coherent systems</em> with explicit lifecycles and dependencies
         </p>
       </div>
     </header>

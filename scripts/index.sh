@@ -1,15 +1,12 @@
 #!/bin/sh
 set -e
 
-# -----------------------------
-# Parse command line arguments
-# -----------------------------
 REQUESTED_VERSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --version|-v)
       shift
-      if [ -z "$1" ]; then
+      if [ -z "${1:-}" ]; then
         echo "❌ --version requires a version number"
         echo ""
         echo "  Usage: curl ... | sh -s -- --version VERSION"
@@ -46,42 +43,28 @@ done
 ARCH=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
-# -----------------------------
-# Setup directory structure
-# -----------------------------
 SYSG_ROOT="$HOME/.sysg"
 SYSG_BIN_DIR="$SYSG_ROOT/bin"
 SYSG_VERSIONS_DIR="$SYSG_ROOT/versions"
 SYSG_ACTIVE_VERSION_FILE="$SYSG_ROOT/active-version"
 
-mkdir -p "$SYSG_BIN_DIR"
-mkdir -p "$SYSG_VERSIONS_DIR"
+mkdir -p "$SYSG_BIN_DIR" "$SYSG_VERSIONS_DIR"
 
-# -----------------------------
-# Detect platform + target triple
-# -----------------------------
 if [ "$OS" = "linux" ]; then
   if [ "$ARCH" = "x86_64" ]; then
     TARGET="x86_64-unknown-linux-gnu"
-
-    # Detect Debian/Ubuntu
     if [ -r /etc/os-release ]; then
-      # shellcheck disable=SC1091
       . /etc/os-release
       case "${ID:-}:${ID_LIKE:-}" in
-        debian:*|*:debian*|debian:debian*)
-          TARGET="x86_64-unknown-linux-gnu-debian"
-          ;;
+        debian:*|*:debian*|debian:debian*) TARGET="x86_64-unknown-linux-gnu-debian" ;;
       esac
     fi
-
   elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-unknown-linux-gnu"
   else
     echo "❌ Unsupported architecture: $ARCH"
     exit 1
   fi
-
 elif [ "$OS" = "darwin" ]; then
   if [ "$ARCH" = "x86_64" ]; then
     TARGET="x86_64-apple-darwin"
@@ -96,45 +79,39 @@ else
   exit 1
 fi
 
-# -----------------------------
-# Determine version to install
-# -----------------------------
 echo "Setting up systemg..."
 echo ""
 
-if [ -n "$REQUESTED_VERSION" ]; then
-  # User specified a version
-  VERSION="$REQUESTED_VERSION"
-  # Remove 'v' prefix if present
-  VERSION="${VERSION#v}"
-else
-  # Fetch latest version
-  VERSION=$(
-    curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest \
-      | awk -F'"' '/tag_name/ {gsub(/^v/, "", $4); print $4}'
-  )
+LATEST_VERSION=""
+fetch_latest() {
+  curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest \
+    | awk -F'"' '/tag_name/ {gsub(/^v/, "", $4); print $4}'
+}
 
+if [ -n "$REQUESTED_VERSION" ]; then
+  VERSION="${REQUESTED_VERSION#v}"
+  LATEST_VERSION="$(fetch_latest)"
+  if [ -z "$LATEST_VERSION" ]; then
+    LATEST_VERSION="$VERSION"
+  fi
+else
+  VERSION="$(fetch_latest)"
   if [ -z "$VERSION" ]; then
     echo "❌ Failed to determine latest version from GitHub"
     exit 1
   fi
+  LATEST_VERSION="$VERSION"
 fi
 
-# -----------------------------
-# Check if version is already installed
-# -----------------------------
 VERSION_DIR="$SYSG_VERSIONS_DIR/$VERSION"
 VERSION_BINARY="$VERSION_DIR/sysg"
 
-# Check current active version
 CURRENT_ACTIVE_VERSION=""
 if [ -f "$SYSG_ACTIVE_VERSION_FILE" ]; then
   CURRENT_ACTIVE_VERSION=$(cat "$SYSG_ACTIVE_VERSION_FILE" 2>/dev/null || echo "")
 fi
 
-# If this version is already installed
 if [ -x "$VERSION_BINARY" ]; then
-  # Verify the installed binary actually reports the correct version
   INSTALLED_VERSION=$(
     "$VERSION_BINARY" --version 2>/dev/null \
       | awk 'NR==1 {print $2; exit}' \
@@ -174,37 +151,29 @@ if ! curl -sSfL "$URL" -o "$FILE" 2>/dev/null; then
   exit 1
 fi
 
-# -----------------------------
-# Extract
-# -----------------------------
-# Create a temporary directory for extraction
 TEMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'sysg-install')
+ORIGINAL_DIR="$PWD"
 cd "$TEMP_DIR"
 
-tar -xzf "$OLDPWD/$FILE"
-rm "$OLDPWD/$FILE"
+tar -xzf "$ORIGINAL_DIR/$FILE"
+rm "$ORIGINAL_DIR/$FILE"
 
-# Find the sysg binary after extraction
 if [ -f "sysg" ]; then
   BINARY="sysg"
 elif [ -d "sysg-$VERSION-$TARGET" ] && [ -f "sysg-$VERSION-$TARGET/sysg" ]; then
   BINARY="sysg-$VERSION-$TARGET/sysg"
 else
-  # Fallback: search for a sysg binary
   FOUND="$(find . -maxdepth 2 -type f -name sysg | head -n 1)"
   if [ -n "$FOUND" ]; then
     BINARY="$FOUND"
   else
     echo "❌ sysg binary not found after extraction"
-    cd "$OLDPWD"
+    cd "$ORIGINAL_DIR"
     rm -rf "$TEMP_DIR"
     exit 1
   fi
 fi
 
-# -----------------------------
-# Verify and install
-# -----------------------------
 chmod +x "$BINARY"
 
 RESOLVED_BINARY="$BINARY"
@@ -224,46 +193,37 @@ if [ -n "$DOWNLOADED_VERSION" ] && [ "$DOWNLOADED_VERSION" != "$VERSION" ]; then
     echo "❌ Version mismatch detected (got $DOWNLOADED_VERSION, expected $VERSION)" >&2
     echo "" >&2
     echo "  To continue anyway: SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1" >&2
-    cd "$OLDPWD"
+    cd "$ORIGINAL_DIR"
     rm -rf "$TEMP_DIR"
     exit 1
   fi
 fi
 
-# Create version-specific directory and install
 mkdir -p "$VERSION_DIR"
 mv "$BINARY" "$VERSION_BINARY"
 
-# Create/update symlink to active version
 ln -sf "$VERSION_BINARY" "$SYSG_BIN_DIR/sysg"
-
-# Mark this version as active
 echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
 
-# Clean up
-cd "$OLDPWD"
+cd "$ORIGINAL_DIR"
 rm -rf "$TEMP_DIR"
 
-# -----------------------------
-# Shell PATH update
-# -----------------------------
 PATH_LINE='export PATH="$HOME/.sysg/bin:$PATH"'
 SHELL_RC=""
 
-if [ -n "$BASH_VERSION" ]; then
+if [ -n "${BASH_VERSION:-}" ]; then
   SHELL_RC="$HOME/.bashrc"
-elif [ -n "$ZSH_VERSION" ]; then
+elif [ -n "${ZSH_VERSION:-}" ]; then
   SHELL_RC="$HOME/.zshrc"
-elif echo "$SHELL" | grep -q "bash"; then
+elif echo "${SHELL:-}" | grep -q "bash"; then
   SHELL_RC="$HOME/.bashrc"
-elif echo "$SHELL" | grep -q "zsh"; then
+elif echo "${SHELL:-}" | grep -q "zsh"; then
   SHELL_RC="$HOME/.zshrc"
 fi
 
 if [ -n "$SHELL_RC" ]; then
   mkdir -p "$(dirname "$SHELL_RC")"
   touch "$SHELL_RC"
-
   if ! grep -q ".sysg/bin" "$SHELL_RC"; then
     {
       echo ""
@@ -275,25 +235,109 @@ fi
 
 export PATH="$HOME/.sysg/bin:$PATH"
 
-echo ""
-echo "✔ systemg successfully installed!"
-echo ""
-echo "  Version: $VERSION"
-echo ""
-echo "  Location: $HOME/.sysg/bin/sysg"
-echo ""
-echo ""
-echo "  Next: Run sysg --help to get started"
+# ---- UI ----
+if [ -t 1 ]; then
+  BOLD="$(printf '\033[1m')"
+  DIM="$(printf '\033[2m')"
+  RESET="$(printf '\033[0m')"
 
-# Check if PATH needs to be updated
+  C_BORDER_MAIN="$(printf '\033[38;2;96;96;96m')"      # ~ #606060
+  C_BORDER_SUB="$(printf '\033[38;2;168;208;248m')"    # ~ #A8D0F8
+  C_LOGO="$(printf '\033[38;2;0;159;255m')"            # ~ #009FFF
+  C_TEXT="$(printf '\033[38;2;248;248;248m')"          # ~ #F8F8F8
+  C_MUTED="$(printf '\033[38;2;96;96;96m')"            # ~ #606060
+  C_MUTED2="$(printf '\033[38;2;136;136;136m')"        # ~ #888888
+  C_GREEN="$(printf '\033[38;2;176;200;151m')"         # ~ #B0C897
+else
+  BOLD=""; DIM=""; RESET=""
+  C_BORDER_MAIN=""; C_BORDER_SUB=""; C_LOGO=""; C_TEXT=""; C_MUTED=""; C_MUTED2=""; C_GREEN=""
+fi
+
+term_cols() {
+  if [ -r /dev/tty ]; then
+    stty size </dev/tty 2>/dev/null | awk '{print $2; exit}' && return
+  fi
+  if command -v tput >/dev/null 2>&1; then
+    tput cols 2>/dev/null && return
+  fi
+  stty size 2>/dev/null | awk '{print $2; exit}' && return
+  echo 80
+}
+
+# Box inner width is 78 characters (between the │ borders)
+BOX_INNER=78
+
+# Helper to center text within the box
+center_text() {
+  text="$1"
+  len=${#text}
+  total_pad=$((BOX_INNER - len))
+  left_pad=$((total_pad / 2))
+  right_pad=$((total_pad - left_pad))
+  printf "%*s%s%*s" "$left_pad" "" "$text" "$right_pad" ""
+}
+
+# Helper to create a labeled row: "Label:    Value" with proper padding
+label_row() {
+  label="$1"
+  value="$2"
+  left_margin=20
+  label_width=12
+  content="${label}$(printf '%*s' $((label_width - ${#label})) '')${value}"
+  content_len=${#content}
+  right_pad=$((BOX_INNER - left_margin - content_len))
+  printf "%*s%s%*s" "$left_margin" "" "$content" "$right_pad" ""
+}
+
+WIDTH=94
+COLS="$(term_cols)"
+if [ "$COLS" -gt "$WIDTH" ]; then
+  PAD=$(( (COLS - WIDTH) / 2 ))
+else
+  PAD=0
+fi
+
+p() { printf "%*s%s\n" "$PAD" "" "$1"; }
+
+# Calculate dynamic padding for version string
+VERSION_LABEL="systemg ${VERSION}"
+VERSION_CENTERED="$(center_text "$VERSION_LABEL")"
+
+echo ""
+p "${C_BORDER_MAIN}╭──────────────────────────────────────────────────────────────────────────────╮${RESET}"
+p "${C_BORDER_MAIN}│                                                                              │${RESET}"
+p "${C_BORDER_MAIN}│                                                                              │${RESET}"
+p "${C_BORDER_MAIN}│                               ${C_LOGO}█▀▀ █▄█ █▀▀ ▀█▀ █▀▀ █▀▄▀█ █▀▀${C_BORDER_MAIN}                               │${RESET}"
+p "${C_BORDER_MAIN}│                               ${C_LOGO}▄█  █  ▄█   █  █▄▄ █ ▀ █ █▄█${C_BORDER_MAIN}                               │${RESET}"
+p "${C_BORDER_MAIN}│                                                                              │${RESET}"
+p "${C_BORDER_MAIN}│${C_TEXT}${BOLD}${VERSION_CENTERED}${RESET}${C_BORDER_MAIN}│${RESET}"
+p "${C_BORDER_MAIN}│$(center_text "https://sysg.dev")│${RESET}"
+p "${C_BORDER_MAIN}│                                                                              │${RESET}"
+p "${C_BORDER_MAIN}│$(label_row "Server:" "Local")│${RESET}"
+p "${C_BORDER_MAIN}│$(label_row "Releases:" "github.com/ra0x3/systemg/releases")│${RESET}"
+p "${C_BORDER_MAIN}│                                                                              │${RESET}"
+p "${C_BORDER_MAIN}╰──────────────────────────────────────────────────────────────────────────────╯${RESET}"
+
+p ""
+p "${C_BORDER_SUB}╭──────────────────────────────────────────────────────────────────────────────╮${RESET}"
+p "${C_BORDER_SUB}│${C_TEXT}${BOLD}$(center_text "systemg 1.0 is coming!")${RESET}${C_BORDER_SUB}│${RESET}"
+p "${C_BORDER_SUB}│${C_MUTED2}${DIM}$(center_text "Pin \`sysg < 1\` in production, then upgrade when you're ready.")${RESET}${C_BORDER_SUB}│${RESET}"
+p "${C_BORDER_SUB}╰──────────────────────────────────────────────────────────────────────────────╯${RESET}"
+
+if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$VERSION" ]; then
+  p ""
+  UPDATE_LABEL="Update available: ${LATEST_VERSION}"
+  UPDATE_CMD="Run: curl -fsSL https://sh.sysg.dev | sh"
+  p "${C_BORDER_SUB}╭──────────────────────────────────────────────────────────────────────────────╮${RESET}"
+  p "${C_BORDER_SUB}│${C_TEXT}${BOLD}$(center_text "$UPDATE_LABEL")${RESET}${C_BORDER_SUB}│${RESET}"
+  p "${C_BORDER_SUB}│${C_MUTED2}${DIM}$(center_text "$UPDATE_CMD")${RESET}${C_BORDER_SUB}│${RESET}"
+  p "${C_BORDER_SUB}╰──────────────────────────────────────────────────────────────────────────────╯${RESET}"
+fi
+
 PATH_NEEDS_UPDATE=0
 case ":$PATH:" in
-  *":$HOME/.sysg/bin:"*)
-    # Already in PATH
-    ;;
-  *)
-    PATH_NEEDS_UPDATE=1
-    ;;
+  *":$HOME/.sysg/bin:"*) ;;
+  *) PATH_NEEDS_UPDATE=1 ;;
 esac
 
 if [ $PATH_NEEDS_UPDATE -eq 1 ]; then
@@ -302,11 +346,11 @@ if [ $PATH_NEEDS_UPDATE -eq 1 ]; then
   if [ -n "$SHELL_RC" ] && grep -q ".sysg/bin" "$SHELL_RC"; then
     echo "  • Path configuration added to $SHELL_RC but not yet loaded. Run:"
     echo ""
-    echo "  source $SHELL_RC"
+    echo "    . \"$SHELL_RC\""
   else
     echo "  • ~/.sysg/bin is not in your PATH. Run:"
     echo ""
-    echo "  echo 'export PATH=\"\$HOME/.sysg/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
+    echo "    echo 'export PATH=\"\$HOME/.sysg/bin:\$PATH\"' >> ~/.bashrc && . ~/.bashrc"
   fi
   echo ""
 fi
