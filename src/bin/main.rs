@@ -28,6 +28,7 @@ use systemg::{
     logs::{LogManager, resolve_log_path},
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
+    spawn::SpawnedChild,
     status::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, StatusSnapshot,
         UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
@@ -404,6 +405,7 @@ const CYAN_BOLD: &str = "\x1b[1;36m";
 const YELLOW: &str = "\x1b[33m";
 const ORANGE: &str = "\x1b[38;5;208m";
 const GRAY: &str = "\x1b[90m";
+const MAGENTA: &str = "\x1b[35m";
 const RESET: &str = "\x1b[0m";
 
 #[derive(Clone, Copy)]
@@ -556,7 +558,7 @@ fn render_status(
     ];
 
     let columns = &columns_array;
-    let full_header_border = make_full_border(columns, '=');
+    let full_header_border = make_full_border(columns, '_');
     println!("{}", full_header_border);
     println!(
         "{}",
@@ -589,15 +591,26 @@ fn render_status(
         format_breakdown_banner(&state_counts, &health_counts, columns, opts.no_color)
     );
 
-    println!("{}", make_border(columns, '='));
+    println!("{}", make_border(columns, '_'));
     println!("{}", format_header_row(columns));
     println!("{}", make_border(columns, '-'));
 
     for unit in &units {
         println!("{}", format_unit_row(unit, columns, opts.no_color));
+        // Print spawned children in tree format
+        if !unit.spawned_children.is_empty() {
+            for (idx, child) in unit.spawned_children.iter().enumerate() {
+                let is_last = idx == unit.spawned_children.len() - 1;
+                let prefix = if is_last { "└─" } else { "├─" };
+                println!(
+                    "{}",
+                    format_spawned_child_row(child, columns, opts.no_color, prefix)
+                );
+            }
+        }
     }
 
-    println!("{}", make_border(columns, '='));
+    println!("{}", make_border(columns, '_'));
     println!("{}", full_header_border);
 
     io::stdout().flush()?;
@@ -746,6 +759,28 @@ fn format_uptime_column(uptime: Option<&UptimeInfo>) -> String {
         info.human.clone()
     } else {
         "-".to_string()
+    }
+}
+
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s", seconds)
+    } else if seconds < 3600 {
+        let minutes = seconds / 60;
+        let secs = seconds % 60;
+        if secs > 0 {
+            format!("{}m {}s", minutes, secs)
+        } else {
+            format!("{}m", minutes)
+        }
+    } else {
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        if minutes > 0 {
+            format!("{}h {}m", hours, minutes)
+        } else {
+            format!("{}h", hours)
+        }
     }
 }
 
@@ -1015,6 +1050,60 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     format_row(&values, columns)
 }
 
+fn format_spawned_child_row(
+    child: &SpawnedChild,
+    columns: &[Column],
+    no_color: bool,
+    prefix: &str,
+) -> String {
+    let child_name = format!("{} {}", prefix, child.name);
+    let state = colorize("Running", BRIGHT_GREEN, no_color);
+    let pid = child.pid.to_string();
+    let cpu_col = "-".to_string();
+    let rss_col = "-".to_string();
+
+    let uptime = {
+        let elapsed = child.spawned_at.elapsed();
+        format_duration(elapsed.as_secs())
+    };
+
+    let last_exit = "-".to_string();
+    let health_label = colorize("healthy", GREEN_BOLD, no_color);
+
+    let display_name = if let Some(provider) = &child.provider {
+        format!("{} # {} agent", child_name, provider)
+    } else {
+        child_name
+    };
+
+    let name_width = columns
+        .first()
+        .map(|col| col.width)
+        .unwrap_or_else(|| display_name.len());
+
+    let display_name_final = if visible_length(&display_name) > name_width {
+        ellipsize(&display_name, name_width)
+    } else {
+        display_name
+    };
+
+    let kind_label = colorize("spawn", MAGENTA, no_color);
+
+    let values = [
+        display_name_final,
+        kind_label,
+        state,
+        pid,
+        cpu_col,
+        rss_col,
+        uptime,
+        last_exit,
+        health_label,
+    ];
+
+    format_row(&values, columns)
+}
+
 fn format_row(values: &[String; 9], columns: &[Column]) -> String {
     let mut row = String::from("|");
     for (value, column) in values.iter().zip(columns.iter()) {
@@ -1226,6 +1315,29 @@ fn render_inspect(
 
     if let Some(command) = &unit.command {
         println!("Command: {}", command);
+    }
+
+    if !unit.spawned_children.is_empty() {
+        println!();
+        println!("Spawned Processes ({} total):", unit.spawned_children.len());
+        println!("{:-<60}", "");
+        for child in &unit.spawned_children {
+            let elapsed = child.spawned_at.elapsed();
+            let uptime = format_duration(elapsed.as_secs());
+            let provider_info = if let Some(provider) = &child.provider {
+                format!(" ({} agent)", provider)
+            } else {
+                String::new()
+            };
+            println!(
+                "  ├─ {}{} [PID: {}, Uptime: {}]",
+                child.name, provider_info, child.pid, uptime
+            );
+            if child.depth > 0 {
+                println!("  │  └─ Spawn depth: {}", child.depth);
+            }
+        }
+        println!("{:-<60}", "");
     }
 
     if let Some(metrics) = unit.metrics.as_ref() {

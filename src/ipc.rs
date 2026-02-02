@@ -99,7 +99,10 @@ pub enum ControlResponse {
     /// Inspect payload including recent samples.
     Inspect(Box<InspectPayload>),
     /// Spawn response with child PID.
-    Spawned { pid: u32 },
+    Spawned {
+        /// PID of the spawned child process.
+        pid: u32,
+    },
 }
 
 /// Inspect response payload.

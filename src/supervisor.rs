@@ -222,6 +222,7 @@ impl Supervisor {
             &pid_handle,
             &state_handle,
             Some(&self.metrics_store),
+            Some(&self.spawn_manager),
         ) {
             Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to build initial status snapshot: {err}"),
@@ -232,6 +233,7 @@ impl Supervisor {
         let pid_for_refresh = Arc::clone(&pid_handle);
         let state_for_refresh = Arc::clone(&state_handle);
         let metrics_for_refresh = self.metrics_store.clone();
+        let spawn_manager_for_refresh = self.spawn_manager.clone();
         self.status_refresher = Some(StatusRefresher::spawn(
             cache_clone,
             Duration::from_secs(1),
@@ -241,6 +243,7 @@ impl Supervisor {
                     &pid_for_refresh,
                     &state_for_refresh,
                     Some(&metrics_for_refresh),
+                    Some(&spawn_manager_for_refresh),
                 )
             },
         ));
@@ -860,6 +863,7 @@ impl Supervisor {
             &pid_handle,
             &state_handle,
             Some(&self.metrics_store),
+            Some(&self.spawn_manager),
         ) {
             self.status_cache.replace(snapshot);
         }
@@ -869,6 +873,7 @@ impl Supervisor {
         let refresh_pid = Arc::clone(&pid_handle);
         let refresh_state = Arc::clone(&state_handle);
         let refresh_metrics = self.metrics_store.clone();
+        let refresh_spawn_manager = self.spawn_manager.clone();
         self.status_refresher = Some(StatusRefresher::spawn(
             cache_clone,
             Duration::from_secs(1),
@@ -878,6 +883,7 @@ impl Supervisor {
                     &refresh_pid,
                     &refresh_state,
                     Some(&refresh_metrics),
+                    Some(&refresh_spawn_manager),
                 )
             },
         ));
@@ -915,6 +921,7 @@ impl Supervisor {
             &pid_handle,
             &state_handle,
             Some(&self.metrics_store),
+            Some(&self.spawn_manager),
         ) {
             Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to refresh status snapshot: {err}"),

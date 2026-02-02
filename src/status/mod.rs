@@ -33,6 +33,7 @@ use crate::{
     daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary},
+    spawn::{DynamicSpawnManager, SpawnedChild},
 };
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
@@ -154,6 +155,8 @@ pub struct UnitStatus {
     pub metrics: Option<UnitMetricsSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawned_children: Vec<SpawnedChild>,
 }
 
 /// Summarized metrics attached to a unit entry.
@@ -325,6 +328,7 @@ pub fn collect_runtime_snapshot(
     pid_file: &Arc<Mutex<PidFile>>,
     service_state: &Arc<Mutex<ServiceStateFile>>,
     metrics: Option<&MetricsHandle>,
+    spawn_manager: Option<&DynamicSpawnManager>,
 ) -> Result<StatusSnapshot, StatusError> {
     let pid_guard = pid_file.lock().map_err(|_| StatusError::PidFilePoisoned)?;
     let mut state_guard = service_state
@@ -342,6 +346,7 @@ pub fn collect_runtime_snapshot(
         &mut state_guard,
         &cron_state,
         metrics_guard.as_deref(),
+        spawn_manager,
     ))
 }
 
@@ -360,6 +365,7 @@ pub fn collect_disk_snapshot(
         &mut service_state,
         &cron_state,
         None,
+        None,
     ))
 }
 
@@ -369,6 +375,7 @@ fn build_snapshot(
     service_state: &mut ServiceStateFile,
     cron_state: &CronStateFile,
     metrics_store: Option<&MetricsStore>,
+    spawn_manager: Option<&DynamicSpawnManager>,
 ) -> StatusSnapshot {
     let mut hash_to_name: HashMap<String, String> = HashMap::new();
     let mut hash_kind: HashMap<String, UnitKind> = HashMap::new();
@@ -489,6 +496,15 @@ fn build_snapshot(
             .and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")))
             .map(|service_config| service_config.command.clone());
 
+        // Get spawned children for this process if we have a PID
+        let spawned_children = if let Some(runtime) = &process_runtime
+            && let Some(manager) = spawn_manager
+        {
+            manager.get_children(runtime.pid)
+        } else {
+            Vec::new()
+        };
+
         units.push(UnitStatus {
             name: display_name,
             hash,
@@ -501,6 +517,7 @@ fn build_snapshot(
             cron,
             metrics: metrics_summary,
             command,
+            spawned_children,
         });
     }
 
@@ -529,6 +546,12 @@ fn build_snapshot(
             .and_then(|store| store.summarize_unit(service_name))
             .map(UnitMetricsSummary::from);
 
+        let spawned_children = if let Some(manager) = spawn_manager {
+            manager.get_children(pid_value)
+        } else {
+            Vec::new()
+        };
+
         units.push(UnitStatus {
             name: service_name.clone(),
             hash: service_name.clone(),
@@ -541,6 +564,7 @@ fn build_snapshot(
             cron: None,
             metrics: metrics_summary,
             command: None,
+            spawned_children,
         });
     }
 
@@ -1523,6 +1547,7 @@ mod tests {
                 cron: None,
                 metrics: None,
                 command: None,
+                spawned_children: Vec::new(),
             },
             UnitStatus {
                 name: "svc-b".into(),
@@ -1536,6 +1561,7 @@ mod tests {
                 cron: None,
                 metrics: None,
                 command: None,
+                spawned_children: Vec::new(),
             },
         ];
 

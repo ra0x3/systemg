@@ -113,6 +113,7 @@ pub struct SpawnedChild {
 }
 
 /// Manages dynamic spawning for all services.
+#[derive(Clone)]
 pub struct DynamicSpawnManager {
     /// Map from service name to its spawn tree.
     spawn_trees: Arc<Mutex<HashMap<String, SpawnTree>>>,
