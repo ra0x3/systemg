@@ -5,6 +5,7 @@ This agent adapts its behavior based on instruction files passed via --goal.
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,6 +15,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+# Configure logging with stdout handler
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stdout,
+    force=True
+)
+logger = logging.getLogger("meta_agent")
 
 WORK_DIR = Path(os.environ.get("WORK_DIR", "/tmp/meta_agents"))
 FINAL_WAIT_SECONDS = int(os.environ.get("META_AGENT_WAIT_SECONDS", "90"))
@@ -59,7 +69,7 @@ def load_instructions(instruction_file):
     instruction_path = script_dir / instruction_file
 
     if not instruction_path.exists():
-        print(f"ERROR: Instruction file not found: {instruction_path}")
+        logger.error(f"Instruction file not found: {instruction_path}")
         return None
 
     with open(instruction_path, 'r') as f:
@@ -147,16 +157,16 @@ def record_root_summary(
     root_file = WORK_DIR / "root_agent_output.txt"
     with open(root_file, "w") as handle:
         json.dump(root_output, handle, indent=2)
-    print(f"[ROOT] Saved output to {root_file}")
+    logger.info(f"[ROOT] Saved output to {root_file}")
 
 def execute_root_logic(task: str) -> bool:
     """Coordinate the bottom-up multiplication chain."""
-    print("[ROOT] Executing root agent logic")
+    logger.info("[ROOT] Executing root agent logic")
 
     try:
         x_values = parse_chain_parameters(task)
     except ValueError as err:
-        print(f"[ROOT] ERROR: {err}")
+        logger.error(f"[ROOT] {err}")
         record_root_summary(
             False,
             [],
@@ -167,12 +177,12 @@ def execute_root_logic(task: str) -> bool:
         )
         return False
 
-    print(f"[ROOT] Multipliers: {x_values}")
+    logger.info(f"[ROOT] Multipliers: {x_values}")
 
     clear_previous_outputs()
 
     expected_result = compute_expected_product(x_values)
-    print(f"[ROOT] Expected final product: {expected_result}")
+    logger.info(f"[ROOT] Expected final product: {expected_result}")
 
     config_payload = {
         "x_values": x_values,
@@ -183,14 +193,14 @@ def execute_root_logic(task: str) -> bool:
     config_file = WORK_DIR / "chain_config.json"
     with open(config_file, "w") as handle:
         json.dump(config_payload, handle, indent=2)
-    print(f"[ROOT] Saved chain configuration to {config_file}")
+    logger.info(f"[ROOT] Saved chain configuration to {config_file}")
 
     first_goal = (
         "INSTRUCTIONS:RECURSIVE_INSTRUCTIONS.md - "
         f"Multiply chain for {len(x_values)} values"
     )
 
-    print(f"[ROOT] Dispatching first child with goal: {first_goal}")
+    logger.info(f"[ROOT] Dispatching first child with goal: {first_goal}")
     pid = spawn_agent("agent_1", first_goal, 1)
     if not pid:
         record_root_summary(
@@ -203,14 +213,14 @@ def execute_root_logic(task: str) -> bool:
         )
         return False
 
-    print(f"[ROOT] Spawned agent_1 with PID {pid}")
+    logger.info(f"[ROOT] Spawned agent_1 with PID {pid}")
 
-    print(
+    logger.info(
         f"[ROOT] Waiting for agent_1 result (timeout {FINAL_WAIT_SECONDS}s)"
     )
     agent_one_payload = wait_for_agent_output(1, FINAL_WAIT_SECONDS)
     if not agent_one_payload:
-        print("[ROOT] ERROR: agent_1 did not complete in time")
+        logger.error("[ROOT] agent_1 did not complete in time")
         record_root_summary(
             False,
             x_values,
@@ -223,7 +233,7 @@ def execute_root_logic(task: str) -> bool:
 
     actual_raw_result = agent_one_payload.get("result")
     if actual_raw_result is None:
-        print("[ROOT] ERROR: agent_1 result missing")
+        logger.error("[ROOT] agent_1 result missing")
         record_root_summary(
             False,
             x_values,
@@ -241,15 +251,15 @@ def execute_root_logic(task: str) -> bool:
         else:
             payload = wait_for_agent_output(depth_idx, 2)
         if payload is None:
-            print(f"[ROOT] WARNING: Missing output for agent_{depth_idx}")
+            logger.warning(f"[ROOT] Missing output for agent_{depth_idx}")
             continue
         ordered_outputs.append(payload)
 
     try:
         actual_result = int(actual_raw_result)
     except (TypeError, ValueError):
-        print(
-            f"[ROOT] ERROR: agent_1 result is not an integer: {actual_raw_result}"
+        logger.error(
+            f"[ROOT] agent_1 result is not an integer: {actual_raw_result}"
         )
         record_root_summary(
             False,
@@ -261,14 +271,14 @@ def execute_root_logic(task: str) -> bool:
         )
         return False
 
-    print(f"[ROOT] Final result reported: {actual_result}")
+    logger.info(f"[ROOT] Final result reported: {actual_result}")
 
     success = actual_result == expected_result
     if success:
-        print("[ROOT] Success: multiplication chain completed")
+        logger.info("[ROOT] Success: multiplication chain completed")
     else:
-        print(
-            "[ROOT] ERROR: Final product mismatch "
+        logger.error(
+            "[ROOT] Final product mismatch "
             f"(expected {expected_result}, got {actual_result})"
         )
 
@@ -284,25 +294,25 @@ def execute_root_logic(task: str) -> bool:
 
 def execute_recursive_logic(task: str, depth: int) -> bool:
     """Execute one level of the multiplication chain."""
-    print(f"[{depth}] Executing recursive agent logic")
+    logger.info(f"[{depth}] Executing recursive agent logic")
 
     config_path = WORK_DIR / "chain_config.json"
     try:
         with open(config_path, "r") as handle:
             config = json.load(handle)
     except FileNotFoundError:
-        print(f"[{depth}] ERROR: Missing chain_config.json")
+        logger.error(f"[{depth}] Missing chain_config.json")
         return False
 
     x_values = config.get("x_values", [])
     total_depth = config.get("total_depth", len(x_values))
 
     if depth < 1 or depth > len(x_values):
-        print(f"[{depth}] ERROR: Depth out of range for provided values")
+        logger.error(f"[{depth}] Depth out of range for provided values")
         return False
 
     current_multiplier = x_values[depth - 1]
-    print(f"[{depth}] Current multiplier: {current_multiplier}")
+    logger.info(f"[{depth}] Current multiplier: {current_multiplier}")
 
     child_result = 1
     if depth < total_depth:
@@ -311,30 +321,30 @@ def execute_recursive_logic(task: str, depth: int) -> bool:
             "INSTRUCTIONS:RECURSIVE_INSTRUCTIONS.md - "
             f"Multiply chain for remaining values (depth {depth + 1})"
         )
-        print(f"[{depth}] Spawning child {child_name} -> goal: {child_goal}")
+        logger.info(f"[{depth}] Spawning child {child_name} -> goal: {child_goal}")
         child_pid = spawn_agent(child_name, child_goal, depth + 1)
         if not child_pid:
-            print(f"[{depth}] ERROR: Failed to spawn child agent {child_name}")
+            logger.error(f"[{depth}] Failed to spawn child agent {child_name}")
             return False
 
-        print(f"[{depth}] Waiting for child result from depth {depth + 1}")
+        logger.info(f"[{depth}] Waiting for child result from depth {depth + 1}")
         child_payload = wait_for_agent_output(depth + 1, FINAL_WAIT_SECONDS)
         if not child_payload:
-            print(f"[{depth}] ERROR: Child agent {child_name} timed out")
+            logger.error(f"[{depth}] Child agent {child_name} timed out")
             return False
 
         try:
             child_result = int(child_payload.get("result", 0))
         except (TypeError, ValueError):
-            print(f"[{depth}] ERROR: Child result is not an integer: {child_payload}")
+            logger.error(f"[{depth}] Child result is not an integer: {child_payload}")
             return False
 
-        print(f"[{depth}] Child result: {child_result}")
+        logger.info(f"[{depth}] Child result: {child_result}")
     else:
-        print(f"[{depth}] Base case reached; using child result = 1")
+        logger.info(f"[{depth}] Base case reached; using child result = 1")
 
     result = current_multiplier * child_result
-    print(f"[{depth}] Computed result: {result}")
+    logger.info(f"[{depth}] Computed result: {result}")
 
     output = {
         "agent_name": f"agent_{depth}",
@@ -348,19 +358,33 @@ def execute_recursive_logic(task: str, depth: int) -> bool:
     output_file = WORK_DIR / f"agent_{depth}_output.txt"
     with open(output_file, "w") as handle:
         json.dump(output, handle, indent=2)
-    print(f"[{depth}] Saved output to {output_file}")
+    logger.info(f"[{depth}] Saved output to {output_file}")
+
+    # Keep agent alive briefly to show full spawn tree in status
+    if depth > 0:
+        logger.info(f"[{depth}] Keeping alive briefly for status visibility...")
+        time.sleep(8 - min(depth * 2, 6))  # Stagger the exit times
 
     return True
 
 def spawn_agent(name: str, goal: str, depth: int) -> Optional[int]:
     """Spawn a child agent via `sysg` or fall back to direct execution."""
-    print(f"[SPAWN] Spawning {name} with goal: {goal}")
+    logger.info(f"[SPAWN] Spawning {name} with goal: {goal}")
 
     script_dir = Path(__file__).resolve().parent
-    sysg_path = shutil.which("sysg")
+    # Use workspace release binary
+    sysg_path = script_dir / ".." / ".." / "target" / "release" / "sysg"
 
-    if sysg_path is None:
-        print("[SPAWN] WARNING: `sysg` not found on PATH; running child directly")
+    if not sysg_path.exists():
+        # Fall back to system sysg if workspace binary doesn't exist
+        sysg_path_str = shutil.which("sysg")
+        if sysg_path_str:
+            sysg_path = Path(sysg_path_str)
+        else:
+            sysg_path = None
+
+    if sysg_path is None or not sysg_path.exists():
+        logger.warning("[SPAWN] `sysg` not found; running child directly")
         env = os.environ.copy()
         env["SPAWN_DEPTH"] = str(depth)
         env["AGENT_NAME"] = name
@@ -368,17 +392,20 @@ def spawn_agent(name: str, goal: str, depth: int) -> Optional[int]:
         process = subprocess.Popen(
             ["python3", str(script_dir / "agent.py")],
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
-        print(f"[SPAWN] Directly launched child process PID {process.pid}")
+        logger.info(f"[SPAWN] Directly launched child process PID {process.pid}")
         return process.pid
 
+    # Get current process PID to pass as parent
+    current_pid = os.getpid()
+
     command = [
-        sysg_path,
+        str(sysg_path),
         "spawn",
         "--name",
         name,
+        "--parent-pid",
+        str(current_pid),
         "--provider",
         "claude",
         "--goal",
@@ -402,31 +429,31 @@ def spawn_agent(name: str, goal: str, depth: int) -> Optional[int]:
         stdout, stderr = process.communicate(timeout=15)
     except subprocess.TimeoutExpired:
         process.kill()
-        print(f"[SPAWN] ERROR: sysg spawn command timed out for {name}")
+        logger.error(f"[SPAWN] sysg spawn command timed out for {name}")
         return None
 
     stdout = (stdout or "").strip()
     stderr = (stderr or "").strip()
 
     if process.returncode != 0:
-        print(f"[SPAWN] ERROR: Failed to spawn {name} (exit code {process.returncode})")
+        logger.error(f"[SPAWN] Failed to spawn {name} (exit code {process.returncode})")
         if stdout:
-            print(f"[SPAWN] stdout: {stdout}")
+            logger.info(f"[SPAWN] stdout: {stdout}")
         if stderr:
-            print(f"[SPAWN] stderr: {stderr}")
+            logger.info(f"[SPAWN] stderr: {stderr}")
         return None
 
     pid_match = re.search(r"(\d+)", stdout)
     if not pid_match:
-        print(f"[SPAWN] ERROR: Could not parse PID from output: '{stdout}'")
+        logger.error(f"[SPAWN] Could not parse PID from output: '{stdout}'")
         if stderr:
-            print(f"[SPAWN] stderr: {stderr}")
+            logger.info(f"[SPAWN] stderr: {stderr}")
         return None
 
     pid = int(pid_match.group(1))
-    print(f"[SPAWN] Spawned {name} with PID: {pid}")
+    logger.info(f"[SPAWN] Spawned {name} with PID: {pid}")
     if stderr:
-        print(f"[SPAWN] stderr: {stderr}")
+        logger.info(f"[SPAWN] stderr: {stderr}")
     return pid
 
 def main():
@@ -438,20 +465,20 @@ def main():
     depth = agent_info["depth"]
     goal = agent_info["goal"]
 
-    print(f"[AGENT] Universal agent starting...")
-    print(f"[AGENT] Name: {agent_info['name']}")
-    print(f"[AGENT] Depth: {depth}")
-    print(f"[AGENT] Parent PID: {agent_info['parent_pid']}")
-    print(f"[AGENT] Goal: {goal}")
+    logger.info(f"[AGENT] Universal agent starting...")
+    logger.info(f"[AGENT] Name: {agent_info['name']}")
+    logger.info(f"[AGENT] Depth: {depth}")
+    logger.info(f"[AGENT] Parent PID: {agent_info['parent_pid']}")
+    logger.info(f"[AGENT] Goal: {goal}")
 
     # Read and parse instructions
     instruction_file, task = read_instructions(goal)
-    print(f"[AGENT] Using instructions: {instruction_file}")
-    print(f"[AGENT] Task: {task}")
+    logger.info(f"[AGENT] Using instructions: {instruction_file}")
+    logger.info(f"[AGENT] Task: {task}")
 
     instructions = load_instructions(instruction_file)
     if not instructions:
-        print("[AGENT] ERROR: Could not load instructions")
+        logger.error("[AGENT] Could not load instructions")
         sys.exit(1)
 
     # Execute based on role/instructions
@@ -461,11 +488,14 @@ def main():
         success = execute_recursive_logic(task, depth)
 
     if success:
-        print(f"[AGENT] {agent_info['name']} completed successfully")
+        logger.info(f"[AGENT] {agent_info['name']} completed successfully")
         if depth == 0:
-            print(f"[AGENT] Root summary saved at {WORK_DIR / 'root_agent_output.txt'}")
+            logger.info(f"[AGENT] Root summary saved at {WORK_DIR / 'root_agent_output.txt'}")
+            # Keep root agent running briefly to show sub-agents in status
+            logger.info("[AGENT] Keeping process alive briefly for status visibility...")
+            time.sleep(10)
     else:
-        print(f"[AGENT] {agent_info['name']} failed")
+        logger.info(f"[AGENT] {agent_info['name']} failed")
         sys.exit(1)
 
 if __name__ == "__main__":

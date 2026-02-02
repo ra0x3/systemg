@@ -134,6 +134,34 @@ impl StatusSnapshot {
     }
 }
 
+/// Hierarchical status for a dynamically spawned child process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpawnedProcessNode {
+    pub child: SpawnedChild,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<SpawnedProcessNode>,
+}
+
+impl SpawnedProcessNode {
+    pub fn new(child: SpawnedChild, children: Vec<SpawnedProcessNode>) -> Self {
+        Self { child, children }
+    }
+}
+
+fn build_spawn_tree(
+    manager: &DynamicSpawnManager,
+    parent_pid: u32,
+) -> Vec<SpawnedProcessNode> {
+    manager
+        .get_children(parent_pid)
+        .into_iter()
+        .map(|child| {
+            let descendants = build_spawn_tree(manager, child.pid);
+            SpawnedProcessNode::new(child, descendants)
+        })
+        .collect()
+}
+
 /// Status entry for a managed service or cron unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnitStatus {
@@ -156,7 +184,7 @@ pub struct UnitStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub spawned_children: Vec<SpawnedChild>,
+    pub spawned_children: Vec<SpawnedProcessNode>,
 }
 
 /// Summarized metrics attached to a unit entry.
@@ -500,7 +528,7 @@ fn build_snapshot(
         let spawned_children = if let Some(runtime) = &process_runtime
             && let Some(manager) = spawn_manager
         {
-            manager.get_children(runtime.pid)
+            build_spawn_tree(manager, runtime.pid)
         } else {
             Vec::new()
         };
@@ -547,7 +575,7 @@ fn build_snapshot(
             .map(UnitMetricsSummary::from);
 
         let spawned_children = if let Some(manager) = spawn_manager {
-            manager.get_children(pid_value)
+            build_spawn_tree(manager, pid_value)
         } else {
             Vec::new()
         };
