@@ -41,9 +41,9 @@ impl SpawnTree {
     pub fn from_config(service_name: String, config: &SpawnLimitsConfig) -> Self {
         Self {
             service_name,
-            max_depth: config.max_depth.unwrap_or(3) as usize,
-            max_children: config.max_children.unwrap_or(100) as usize,
-            max_descendants: config.max_descendants.unwrap_or(500) as usize,
+            max_depth: config.depth.unwrap_or(3) as usize,
+            max_children: config.children.unwrap_or(100) as usize,
+            max_descendants: config.descendants.unwrap_or(500) as usize,
             memory_quota: config
                 .total_memory
                 .as_ref()

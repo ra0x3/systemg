@@ -224,13 +224,14 @@ version: "1"
 services:
   orchestrator:
     command: "python orchestrator.py"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_children: 100         # Direct children limit
-      max_depth: 3              # Maximum spawn tree depth
-      max_descendants: 500      # Total across all levels
-      total_memory: "2GB"       # Shared by entire tree
-      termination_policy: "cascade"  # Clean up all children on exit
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 100           # Direct children limit
+        depth: 3                # Maximum spawn tree depth
+        descendants: 500        # Total across all levels
+        total_memory: "2GB"     # Shared by entire tree
+        termination_policy: "cascade"  # Clean up all children on exit
 ```
 
 Key features:
@@ -325,7 +326,7 @@ $ sysg logs myservice --kind stderr
 **Spawn** - Dynamically spawn child processes from parent services:
 
 ```sh
-# Spawn a worker process (parent must have spawn_mode: dynamic)
+# Spawn a worker process (parent must have spawn.mode: dynamic)
 $ sysg spawn --name worker_1 -- python worker.py
 12345  # Returns the child PID
 

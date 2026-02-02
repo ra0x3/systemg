@@ -632,28 +632,33 @@ services:
 
 ### Dynamic Process Spawning
 
-#### `spawn_mode` (optional)
+#### `spawn` (optional)
 
-Controls whether a service can dynamically spawn child processes at runtime. When set to `"dynamic"`, the service can use the `sysg spawn` command to create tracked child processes.
-
-Valid values:
-- `"static"` *(default)* – Service cannot spawn tracked children
-- `"dynamic"` – Service can spawn child processes that inherit monitoring and logging
+Configuration for dynamic process spawning. Allows services to create tracked child processes at runtime using the `sysg spawn` command.
 
 ```yaml
 services:
   orchestrator:
     command: "python orchestrator.py"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_children: 100
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 100
 ```
 
-#### `spawn_limits` (optional)
+#### `spawn.mode` (optional)
 
-Resource limits and policies for dynamically spawned children. Only applies when `spawn_mode` is `"dynamic"`.
+Controls whether a service can dynamically spawn child processes.
 
-#### `spawn_limits.max_children` (optional)
+Valid values:
+- `"static"` *(default)* – Service cannot spawn tracked children
+- `"dynamic"` – Service can spawn child processes that inherit monitoring and logging
+
+#### `spawn.limits` (optional)
+
+Resource limits and policies for dynamically spawned children. Only applies when `spawn.mode` is `"dynamic"`.
+
+#### `spawn.limits.children` (optional)
 
 Maximum number of direct child processes this service can spawn. Default: `100`.
 
@@ -661,12 +666,13 @@ Maximum number of direct child processes this service can spawn. Default: `100`.
 services:
   orchestrator:
     command: "./orchestrator"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_children: 50
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 50
 ```
 
-#### `spawn_limits.max_depth` (optional)
+#### `spawn.limits.depth` (optional)
 
 Maximum depth of the spawn tree (levels of recursion). Prevents infinite spawn chains. Default: `3`.
 
@@ -674,12 +680,13 @@ Maximum depth of the spawn tree (levels of recursion). Prevents infinite spawn c
 services:
   orchestrator:
     command: "./orchestrator"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_depth: 2  # orchestrator -> child -> grandchild (no deeper)
+    spawn:
+      mode: "dynamic"
+      limits:
+        depth: 2  # orchestrator -> child -> grandchild (no deeper)
 ```
 
-#### `spawn_limits.max_descendants` (optional)
+#### `spawn.limits.descendants` (optional)
 
 Total maximum number of descendants across all levels. Default: `500`.
 
@@ -687,12 +694,13 @@ Total maximum number of descendants across all levels. Default: `500`.
 services:
   orchestrator:
     command: "./orchestrator"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_descendants: 200
+    spawn:
+      mode: "dynamic"
+      limits:
+        descendants: 200
 ```
 
-#### `spawn_limits.total_memory` (optional)
+#### `spawn.limits.total_memory` (optional)
 
 Memory limit shared by the entire spawn tree. Supports `K/M/G/T` suffixes.
 
@@ -700,12 +708,13 @@ Memory limit shared by the entire spawn tree. Supports `K/M/G/T` suffixes.
 services:
   orchestrator:
     command: "./orchestrator"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      total_memory: "2GB"
+    spawn:
+      mode: "dynamic"
+      limits:
+        total_memory: "2GB"
 ```
 
-#### `spawn_limits.termination_policy` (optional)
+#### `spawn.limits.termination_policy` (optional)
 
 Policy for handling process termination in spawn trees. Valid values:
 
@@ -717,9 +726,10 @@ Policy for handling process termination in spawn trees. Valid values:
 services:
   orchestrator:
     command: "./orchestrator"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      termination_policy: "cascade"
+    spawn:
+      mode: "dynamic"
+      limits:
+        termination_policy: "cascade"
 ```
 
 #### Complete Dynamic Spawn Example
@@ -729,23 +739,25 @@ services:
   # Parent service that can spawn workers dynamically
   task_orchestrator:
     command: "python orchestrator.py"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_children: 100       # Direct children limit
-      max_depth: 3            # Maximum spawn tree depth
-      max_descendants: 500    # Total across all levels
-      total_memory: "2GB"     # Shared by entire tree
-      termination_policy: "cascade"  # Clean up all children on exit
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 100       # Direct children limit
+        depth: 3            # Maximum spawn tree depth
+        descendants: 500    # Total across all levels
+        total_memory: "2GB"     # Shared by entire tree
+        termination_policy: "cascade"  # Clean up all children on exit
 
   # Agent spawner for autonomous tasks
   agent_controller:
     command: "./agent_controller"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_children: 20
-      max_depth: 2            # Agents can spawn sub-agents
-      max_descendants: 50
-      termination_policy: "orphan"  # Let agents finish their work
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 20
+        depth: 2            # Agents can spawn sub-agents
+        descendants: 50
+        termination_policy: "orphan"  # Let agents finish their work
 ```
 
 Child processes spawned from these services:

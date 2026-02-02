@@ -5,7 +5,7 @@ title: spawn
 
 ## Overview
 
-The `spawn` command dynamically creates child processes from parent services configured with `spawn_mode: dynamic`. It enables runtime process creation with full monitoring, logging, and resource limit enforcement.
+The `spawn` command dynamically creates child processes from parent services configured with `spawn.mode: dynamic`. It enables runtime process creation with full monitoring, logging, and resource limit enforcement.
 
 ## Usage
 
@@ -57,16 +57,17 @@ $ sysg spawn --name optimizer --provider claude --goal "Optimize database querie
 
 ### Parent Service Requirements
 
-Only services configured with `spawn_mode: dynamic` can spawn child processes:
+Only services configured with `spawn.mode: dynamic` can spawn child processes:
 
 ```yaml
 services:
   orchestrator:
     command: "python orchestrator.py"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_children: 100
-      max_depth: 3
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 100
+        depth: 3
 ```
 
 ### Spawn Authorization Process
@@ -189,7 +190,7 @@ Multiple layers prevent runaway spawning:
 ### Recursive Spawn Control
 
 Children can spawn their own children if:
-- Parent service has `spawn_mode: dynamic`
+- Parent service has `spawn.mode: dynamic`
 - Current depth < max_depth
 - Total descendants < max_descendants
 - Rate limits not exceeded
@@ -279,7 +280,7 @@ wait  # Wait for all background spawns to complete
 
 1. **Name Uniqueness**: Use descriptive, unique names for spawned processes
 2. **TTL Usage**: Set TTL for temporary tasks to ensure cleanup
-3. **Resource Planning**: Configure appropriate spawn_limits based on workload
+3. **Resource Planning**: Configure appropriate spawn.limits based on workload
 4. **Error Handling**: Check spawn return codes and handle failures
 5. **Monitoring**: Use `sysg status` to monitor spawn trees
 6. **Cleanup**: Ensure proper termination_policy for your use case

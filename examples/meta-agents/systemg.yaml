@@ -3,12 +3,13 @@ version: "1"
 services:
   meta_agent_root:
     command: "python3 agent.py"
-    spawn_mode: "dynamic"
-    spawn_limits:
-      max_children: 10        # Can spawn up to 10 direct children
-      max_depth: 6            # Root (0) + 5 recursive levels
-      max_descendants: 50     # Total agents across all levels
-      termination_policy: "cascade"  # Clean up all agents on exit
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 10          # Can spawn up to 10 direct children
+        depth: 6              # Root (0) + 5 recursive levels
+        descendants: 50       # Total agents across all levels
+        termination_policy: "cascade"  # Clean up all agents on exit
     env:
       vars:
         AGENT_GOAL: "INSTRUCTIONS:ROOT_INSTRUCTIONS.md - Compute chain with X=[2,3,4]"

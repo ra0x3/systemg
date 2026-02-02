@@ -159,7 +159,7 @@ sysg logs api-service --kind stderr
 
 ## Spawn
 
-Dynamically spawn child processes from parent services configured with `spawn_mode: dynamic`:
+Dynamically spawn child processes from parent services configured with `spawn.mode: dynamic`:
 
 ```sh
 sysg spawn --name worker_1 -- python worker.py

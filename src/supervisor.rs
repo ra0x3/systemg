@@ -90,10 +90,11 @@ impl Supervisor {
 
         let spawn_manager = DynamicSpawnManager::new();
         for (service_name, service_config) in &config.services {
-            if let Some(SpawnMode::Dynamic) = service_config.spawn_mode
-                && let Some(ref spawn_limits) = service_config.spawn_limits
+            if let Some(ref spawn) = service_config.spawn
+                && let Some(SpawnMode::Dynamic) = spawn.mode
+                && let Some(ref limits) = spawn.limits
             {
-                spawn_manager.register_service(service_name.clone(), spawn_limits)?;
+                spawn_manager.register_service(service_name.clone(), limits)?;
             }
         }
 

@@ -3349,8 +3349,7 @@ mod tests {
             hooks: None,
             cron: None,
             skip: None,
-            spawn_mode: None,
-            spawn_limits: None,
+            spawn: None,
         }
     }
 
