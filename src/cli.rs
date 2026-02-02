@@ -202,6 +202,33 @@ pub enum Commands {
 
     /// Purge all systemg state and runtime files.
     Purge,
+
+    /// Spawn a dynamic child process from a parent service.
+    Spawn {
+        /// Name for the spawned child process.
+        #[arg(long)]
+        name: String,
+
+        /// Time-to-live in seconds (optional).
+        #[arg(long)]
+        ttl: Option<u64>,
+
+        /// Environment variables (can be specified multiple times).
+        #[arg(long, value_delimiter = ',')]
+        env: Vec<String>,
+
+        /// LLM provider for autonomous agents (e.g., claude, openai).
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// Goal for autonomous agent execution.
+        #[arg(long)]
+        goal: Option<String>,
+
+        /// Command and arguments to execute (required unless --provider is specified).
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
 }
 
 /// Parses command-line arguments and returns a `Cli` struct.

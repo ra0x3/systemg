@@ -94,6 +94,7 @@ Traditional service managers focus on the mechanics of keeping processes alive. 
 - **Environment Inheritance** - Consistent environment propagation from `.env` files across all composed programs.
 - **Lifecycle Webhooks** - Integrate with external systems through event-driven notifications. See [Webhooks documentation](docs/docs/webhooks.md).
 - **Cron Scheduling** - Short-lived tasks run alongside services with proper overlap detection.
+- **Dynamic Process Spawning** - Parent services can spawn tracked child processes with resource limits and hierarchical monitoring.
 - **OS Primitive Integration** - Leverages systemd/cgroups when available while maintaining userspace simplicity.
 - **Single Static Binary** - No runtime dependencies, instant startup, predictable memory usage.
 
@@ -214,6 +215,38 @@ Key features:
 
 Note: Cron jobs do not support restart policies, as they are designed to be short-lived tasks that complete and exit.
 
+### Dynamic Process Spawning
+
+Services can dynamically spawn child processes at runtime with full tracking and resource limits:
+
+```yaml
+version: "1"
+services:
+  orchestrator:
+    command: "python orchestrator.py"
+    spawn_mode: "dynamic"
+    spawn_limits:
+      max_children: 100         # Direct children limit
+      max_depth: 3              # Maximum spawn tree depth
+      max_descendants: 500      # Total across all levels
+      total_memory: "2GB"       # Shared by entire tree
+      termination_policy: "cascade"  # Clean up all children on exit
+```
+
+Key features:
+- **Process Tree Tracking** - Child processes inherit parent's monitoring and logging
+- **Resource Limits** - Configurable limits prevent fork bombs and runaway spawning
+- **Rate Limiting** - Built-in protection (10 spawns/second) prevents abuse
+- **Flexible Spawning** - Support for both traditional workers and LLM-powered agents
+- **TTL Support** - Automatic cleanup of temporary processes after specified duration
+
+From your application code, spawn children using the CLI:
+
+```python
+# Python example
+subprocess.run(["sysg", "spawn", "--name", "worker_1", "--ttl", "3600", "--", "python", "worker.py"])
+```
+
 #### Additional Commands
 
 The `sysg` command-line interface provides several subcommands for managing processes:
@@ -287,6 +320,23 @@ $ sysg logs database --lines 100
 
 # View specific log type (stdout, stderr, or supervisor)
 $ sysg logs myservice --kind stderr
+```
+
+**Spawn** - Dynamically spawn child processes from parent services:
+
+```sh
+# Spawn a worker process (parent must have spawn_mode: dynamic)
+$ sysg spawn --name worker_1 -- python worker.py
+12345  # Returns the child PID
+
+# Spawn with time-to-live for automatic cleanup
+$ sysg spawn --name temp_worker --ttl 3600 -- ./process.sh
+
+# Spawn with environment variables
+$ sysg spawn --name worker --env KEY=value --env PORT=8080 -- node app.js
+
+# Spawn an autonomous agent with LLM provider
+$ sysg spawn --name optimizer --provider claude --goal "Optimize database queries"
 ```
 
 **Log Level** - Override logging verbosity:

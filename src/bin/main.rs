@@ -329,6 +329,49 @@ fn main() -> Result<(), Box<dyn Error>> {
             purge_all_state()?;
             println!("All systemg state has been purged");
         }
+        Commands::Spawn {
+            name,
+            ttl,
+            env,
+            provider,
+            goal,
+            command,
+        } => {
+            if command.is_empty() && provider.is_none() {
+                error!("Either --provider or a command must be specified");
+                std::process::exit(1);
+            }
+
+            let parent_pid = std::process::id();
+
+            let spawn_cmd = ControlCommand::Spawn {
+                parent_pid,
+                name: name.clone(),
+                command,
+                env,
+                ttl,
+                provider,
+                goal,
+            };
+
+            match ipc::send_command(&spawn_cmd) {
+                Ok(ControlResponse::Spawned { pid }) => {
+                    println!("{}", pid);
+                }
+                Ok(ControlResponse::Error(msg)) => {
+                    error!("Failed to spawn child: {}", msg);
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    error!("Unexpected response from supervisor");
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    error!("Failed to communicate with supervisor: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1677,6 +1720,10 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
         Ok(ControlResponse::Ok) => Ok(()),
         Ok(ControlResponse::Status(_)) => Ok(()),
         Ok(ControlResponse::Inspect(_)) => Ok(()),
+        Ok(ControlResponse::Spawned { pid }) => {
+            println!("Spawned process with PID: {}", pid);
+            Ok(())
+        }
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Err(ControlError::NotAvailable) => {
             warn!("No running systemg supervisor found; skipping command");

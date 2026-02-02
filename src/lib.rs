@@ -49,6 +49,9 @@ pub mod status;
 /// Supervisor daemon.
 pub mod supervisor;
 
+/// Dynamic spawn management.
+pub mod spawn;
+
 /// Test utils.
 #[doc(hidden)]
 pub mod test_utils;

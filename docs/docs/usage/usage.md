@@ -157,6 +157,32 @@ View stderr logs instead of stdout:
 sysg logs api-service --kind stderr
 ```
 
+## Spawn
+
+Dynamically spawn child processes from parent services configured with `spawn_mode: dynamic`:
+
+```sh
+sysg spawn --name worker_1 -- python worker.py
+```
+
+Spawn with time-to-live (TTL) for automatic cleanup:
+
+```sh
+sysg spawn --name temp_worker --ttl 3600 -- ./process.sh
+```
+
+Spawn an autonomous agent:
+
+```sh
+sysg spawn --name optimizer --provider claude --goal "Optimize database queries"
+```
+
+Spawned processes:
+- Inherit parent's monitoring and logging
+- Appear in `sysg status` with hierarchical display
+- Subject to configured spawn limits
+- Support both traditional workers and LLM-powered agents
+
 ## Purge
 
 Remove all systemg state and runtime files for a fresh start:

@@ -614,6 +614,8 @@ mod tests {
             hooks: None,
             cron: Some(cron_config.clone()),
             skip: None,
+            spawn_mode: None,
+            spawn_limits: None,
         };
         service_config.compute_hash()
     }
@@ -759,6 +761,8 @@ mod tests {
                 timezone: None,
             }),
             skip: None,
+            spawn_mode: None,
+            spawn_limits: None,
         }
     }
 

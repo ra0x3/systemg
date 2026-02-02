@@ -11,12 +11,13 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{SkipConfig, load_config},
+    config::{SkipConfig, SpawnMode, load_config},
     cron::{CronExecutionStatus, CronManager},
     daemon::{Daemon, ServiceLifecycleStatus, ServiceReadyState, ServiceStateFile},
     error::ProcessManagerError,
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
     metrics::{self, MetricsCollector, MetricsHandle},
+    spawn::{DynamicSpawnManager, SpawnedChild},
     status::{StatusCache, StatusRefresher, StatusSnapshot, collect_runtime_snapshot},
 };
 
@@ -48,6 +49,18 @@ pub struct Supervisor {
     status_refresher: Option<StatusRefresher>,
     metrics_store: MetricsHandle,
     metrics_collector: Option<MetricsCollector>,
+    spawn_manager: DynamicSpawnManager,
+}
+
+/// Parameters for spawning a child process.
+struct SpawnParams {
+    parent_pid: u32,
+    name: String,
+    command: Vec<String>,
+    env: Vec<String>,
+    ttl: Option<u64>,
+    provider: Option<String>,
+    goal: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,13 +80,23 @@ impl Supervisor {
         let cron_manager = CronManager::new();
         cron_manager.sync_from_config(&config)?;
 
-        let daemon = Daemon::from_config(config, detach_children)?;
+        let daemon = Daemon::from_config(config.clone(), detach_children)?;
         let config_arc = daemon.config();
         let metrics_settings = config_arc
             .metrics
             .to_settings(config_arc.project_dir.as_deref().map(Path::new));
         let metrics_store = metrics::shared_store(metrics_settings)?;
         let status_cache = StatusCache::new(StatusSnapshot::empty());
+
+        let spawn_manager = DynamicSpawnManager::new();
+        for (service_name, service_config) in &config.services {
+            if let Some(SpawnMode::Dynamic) = service_config.spawn_mode
+                && let Some(ref spawn_limits) = service_config.spawn_limits
+            {
+                spawn_manager.register_service(service_name.clone(), spawn_limits)?;
+            }
+        }
+
         Ok(Self {
             config_path,
             daemon,
@@ -84,6 +107,7 @@ impl Supervisor {
             status_refresher: None,
             metrics_store,
             metrics_collector: None,
+            spawn_manager,
         })
     }
 
@@ -686,6 +710,29 @@ impl Supervisor {
                     samples: metrics_samples,
                 })))
             }
+            ControlCommand::Spawn {
+                parent_pid,
+                name,
+                command,
+                env,
+                ttl,
+                provider,
+                goal,
+            } => {
+                let params = SpawnParams {
+                    parent_pid,
+                    name,
+                    command,
+                    env,
+                    ttl,
+                    provider,
+                    goal,
+                };
+                match self.handle_spawn(params) {
+                    Ok(pid) => Ok(ControlResponse::Spawned { pid }),
+                    Err(err) => Ok(ControlResponse::Error(err.to_string())),
+                }
+            }
             ControlCommand::Shutdown => {
                 self.daemon.stop_services()?;
                 self.refresh_status_cache();
@@ -696,6 +743,75 @@ impl Supervisor {
                 Ok(ControlResponse::Status(self.status_cache.snapshot()))
             }
         }
+    }
+
+    fn handle_spawn(&mut self, mut params: SpawnParams) -> Result<u32, SupervisorError> {
+        let depth = self
+            .spawn_manager
+            .authorize_spawn(params.parent_pid, &params.name)?;
+
+        if let Some(ref provider) = params.provider
+            && params.command.is_empty()
+        {
+            params.command = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!(
+                    "echo 'Agent {} starting with provider {}'",
+                    params.name, provider
+                ),
+            ];
+        }
+
+        let mut cmd = std::process::Command::new(&params.command[0]);
+        if params.command.len() > 1 {
+            cmd.args(&params.command[1..]);
+        }
+
+        for env_var in &params.env {
+            if let Some((key, value)) = env_var.split_once('=') {
+                cmd.env(key, value);
+            }
+        }
+
+        if let Some(ref provider) = params.provider {
+            cmd.env("LLM_PROVIDER", provider);
+        }
+        if let Some(ref goal) = params.goal {
+            cmd.env("AGENT_GOAL", goal);
+        }
+
+        cmd.env("SPAWN_DEPTH", depth.to_string());
+        cmd.env("SPAWN_PARENT_PID", params.parent_pid.to_string());
+
+        let child = cmd.spawn()?;
+        let child_pid = child.id();
+
+        let spawned_child = SpawnedChild {
+            name: params.name.clone(),
+            pid: child_pid,
+            parent_pid: params.parent_pid,
+            command: params.command.join(" "),
+            spawned_at: std::time::Instant::now(),
+            ttl: params.ttl.map(Duration::from_secs),
+            depth,
+            provider: params.provider,
+            goal: params.goal,
+        };
+
+        self.spawn_manager
+            .record_spawn(params.parent_pid, spawned_child)?;
+
+        if let Ok(mut pid_file) = self.daemon.pid_file_handle().lock() {
+            let _ = pid_file.record_spawn(params.parent_pid, child_pid, depth);
+        }
+
+        info!(
+            "Spawned child '{}' (PID: {}) from parent {}",
+            params.name, child_pid, params.parent_pid
+        );
+
+        Ok(child_pid)
     }
 
     fn reload_config(&mut self, path: &Path) -> Result<(), SupervisorError> {
