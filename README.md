@@ -333,11 +333,11 @@ $ sysg spawn --name worker_1 -- python worker.py
 # Spawn with time-to-live for automatic cleanup
 $ sysg spawn --name temp_worker --ttl 3600 -- ./process.sh
 
-# Spawn with environment variables
-$ sysg spawn --name worker --env KEY=value --env PORT=8080 -- node app.js
+# Spawn with environment variables (pass them directly)
+$ KEY=value PORT=8080 sysg spawn --name worker -- node app.js
 
-# Spawn an autonomous agent with LLM provider
-$ sysg spawn --name optimizer --provider claude --goal "Optimize database queries"
+# Spawn an autonomous agent (pass env vars for provider/goal)
+$ LLM_PROVIDER=claude AGENT_GOAL="Optimize database queries" sysg spawn --name optimizer -- python3 agent.py
 ```
 
 **Log Level** - Override logging verbosity:

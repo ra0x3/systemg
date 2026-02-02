@@ -57,10 +57,7 @@ struct SpawnParams {
     parent_pid: u32,
     name: String,
     command: Vec<String>,
-    env: Vec<String>,
     ttl: Option<u64>,
-    provider: Option<String>,
-    goal: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -718,19 +715,13 @@ impl Supervisor {
                 parent_pid,
                 name,
                 command,
-                env,
                 ttl,
-                provider,
-                goal,
             } => {
                 let params = SpawnParams {
                     parent_pid,
                     name,
                     command,
-                    env,
                     ttl,
-                    provider,
-                    goal,
                 };
                 match self.handle_spawn(params) {
                     Ok(pid) => Ok(ControlResponse::Spawned { pid }),
@@ -749,40 +740,14 @@ impl Supervisor {
         }
     }
 
-    fn handle_spawn(&mut self, mut params: SpawnParams) -> Result<u32, SupervisorError> {
+    fn handle_spawn(&mut self, params: SpawnParams) -> Result<u32, SupervisorError> {
         let depth = self
             .spawn_manager
             .authorize_spawn(params.parent_pid, &params.name)?;
 
-        if let Some(ref provider) = params.provider
-            && params.command.is_empty()
-        {
-            params.command = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!(
-                    "echo 'Agent {} starting with provider {}'",
-                    params.name, provider
-                ),
-            ];
-        }
-
         let mut cmd = std::process::Command::new(&params.command[0]);
         if params.command.len() > 1 {
             cmd.args(&params.command[1..]);
-        }
-
-        for env_var in &params.env {
-            if let Some((key, value)) = env_var.split_once('=') {
-                cmd.env(key, value);
-            }
-        }
-
-        if let Some(ref provider) = params.provider {
-            cmd.env("LLM_PROVIDER", provider);
-        }
-        if let Some(ref goal) = params.goal {
-            cmd.env("AGENT_GOAL", goal);
         }
 
         cmd.env("SPAWN_DEPTH", depth.to_string());
@@ -799,8 +764,6 @@ impl Supervisor {
             spawned_at: std::time::Instant::now(),
             ttl: params.ttl.map(Duration::from_secs),
             depth,
-            provider: params.provider,
-            goal: params.goal,
         };
 
         self.spawn_manager

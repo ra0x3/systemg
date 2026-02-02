@@ -333,17 +333,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Spawn {
             name,
             ttl,
-            env,
-            provider,
-            goal,
             parent_pid,
             command,
         } => {
-            if command.is_empty() && provider.is_none() {
-                error!("Either --provider or a command must be specified");
-                std::process::exit(1);
-            }
-
             // Use the provided parent PID or fall back to the caller's parent PID
             let parent_pid = parent_pid.unwrap_or_else(|| unsafe { getppid() } as u32);
 
@@ -351,10 +343,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 parent_pid,
                 name: name.clone(),
                 command,
-                env,
                 ttl,
-                provider,
-                goal,
             };
 
             match ipc::send_command(&spawn_cmd) {

@@ -106,10 +106,6 @@ pub struct SpawnedChild {
     pub ttl: Option<Duration>,
     /// Spawn depth in the tree (0 = root service).
     pub depth: usize,
-    /// LLM provider for agent processes.
-    pub provider: Option<String>,
-    /// Goal for autonomous agent processes.
-    pub goal: Option<String>,
 }
 
 /// Manages dynamic spawning for all services.

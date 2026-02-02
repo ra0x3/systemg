@@ -213,24 +213,12 @@ pub enum Commands {
         #[arg(long)]
         ttl: Option<u64>,
 
-        /// Environment variables (can be specified multiple times).
-        #[arg(long, value_delimiter = ',')]
-        env: Vec<String>,
-
-        /// LLM provider for autonomous agents (e.g., claude, openai).
-        #[arg(long)]
-        provider: Option<String>,
-
-        /// Goal for autonomous agent execution.
-        #[arg(long)]
-        goal: Option<String>,
-
         /// Parent process ID (defaults to caller's parent PID if not specified).
         #[arg(long)]
         parent_pid: Option<u32>,
 
-        /// Command and arguments to execute (required unless --provider is specified).
-        #[arg(trailing_var_arg = true)]
+        /// Command and arguments to execute.
+        #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
 }

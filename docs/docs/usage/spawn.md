@@ -28,18 +28,18 @@ $ sysg spawn --name temp_worker --ttl 3600 -- ./process.sh
 
 ### Spawn with Environment Variables
 
-Pass environment variables to the spawned child:
+Pass environment variables directly to the spawned child:
 
 ```sh
-$ sysg spawn --name worker --env KEY=value --env PORT=8080 -- node app.js
+$ KEY=value PORT=8080 sysg spawn --name worker -- node app.js
 ```
 
 ### Spawn an Autonomous Agent
 
-Spawn an LLM-powered agent with a goal:
+Spawn an LLM-powered agent with provider and goal via environment variables:
 
 ```sh
-$ sysg spawn --name optimizer --provider claude --goal "Optimize database queries"
+$ LLM_PROVIDER=claude AGENT_GOAL="Optimize database queries" sysg spawn --name optimizer -- python3 agent.py
 ```
 
 ## Command Options
@@ -48,10 +48,8 @@ $ sysg spawn --name optimizer --provider claude --goal "Optimize database querie
 | --- | --- |
 | `--name` | Name for the spawned child process (required) |
 | `--ttl` | Time-to-live in seconds before automatic termination |
-| `--env` | Environment variables in KEY=VALUE format (can be repeated) |
-| `--provider` | LLM provider for autonomous agents (e.g., claude, openai) |
-| `--goal` | Goal or objective for autonomous agent execution |
-| `command...` | Command and arguments to execute (required unless --provider is specified) |
+| `--parent-pid` | Parent process ID (defaults to caller's parent PID) |
+| `command...` | Command and arguments to execute (required) |
 
 ## How It Works
 
@@ -96,12 +94,10 @@ services:
 
 2. **Environment Setup**:
    - Inherits parent's environment variables
-   - Adds custom environment variables from `--env` flags
+   - Inherits any environment variables passed directly (e.g., `KEY=value command`)
    - Sets special variables:
      - `SPAWN_DEPTH`: Current depth in the spawn tree
      - `SPAWN_PARENT_PID`: PID of the immediate parent
-     - `LLM_PROVIDER`: Provider name for agents
-     - `AGENT_GOAL`: Goal for autonomous agents
 
 3. **Process Registration**:
    - Records parent-child relationship in PID file
@@ -141,7 +137,7 @@ orchestrator (PID: 1000, depth: 0)
 
 ### LLM Provider Integration
 
-When spawning with `--provider`, the child process receives:
+When spawning agents, pass provider and goal via environment variables:
 - `LLM_PROVIDER` environment variable with the provider name
 - `AGENT_GOAL` environment variable with the specified goal
 - The agent process decides how to use these hints
@@ -150,16 +146,16 @@ When spawning with `--provider`, the child process receives:
 
 ```sh
 # Claude-powered optimization agent
-$ sysg spawn --name optimizer --provider claude \
-    --goal "Analyze and optimize slow database queries"
+$ LLM_PROVIDER=claude AGENT_GOAL="Analyze and optimize slow database queries" \
+    sysg spawn --name optimizer -- python3 agent.py
 
 # OpenAI code generation agent
-$ sysg spawn --name coder --provider openai \
-    --goal "Generate unit tests for the API module"
+$ LLM_PROVIDER=openai AGENT_GOAL="Generate unit tests for the API module" \
+    sysg spawn --name coder -- python3 agent.py
 
 # Custom provider with specific command
-$ sysg spawn --name analyzer --provider custom \
-    --goal "Security audit" -- python custom_agent.py
+$ LLM_PROVIDER=custom AGENT_GOAL="Security audit" \
+    sysg spawn --name analyzer -- python3 custom_agent.py
 ```
 
 ### Heterogeneous Agent Trees
@@ -168,12 +164,12 @@ Agents can spawn sub-agents with different providers:
 
 ```sh
 # Parent spawns a Claude agent
-$ sysg spawn --name researcher --provider claude \
-    --goal "Research optimization strategies"
+$ LLM_PROVIDER=claude AGENT_GOAL="Research optimization strategies" \
+    sysg spawn --name researcher -- python3 agent.py
 
 # Claude agent spawns an OpenAI sub-agent (from within its code)
-$ sysg spawn --name implementer --provider openai \
-    --goal "Implement the optimization"
+$ LLM_PROVIDER=openai AGENT_GOAL="Implement the optimization" \
+    sysg spawn --name implementer -- python3 agent.py
 ```
 
 ## Safety Mechanisms

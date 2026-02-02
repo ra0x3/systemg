@@ -773,8 +773,8 @@ To spawn children from a dynamic service, use the `sysg spawn` command:
 # Spawn a traditional worker
 sysg spawn --name worker_42 --ttl 3600 -- python worker.py
 
-# Spawn an autonomous agent
-sysg spawn --name optimizer --provider claude --goal "Optimize database queries"
+# Spawn an autonomous agent with environment variables
+LLM_PROVIDER=claude AGENT_GOAL="Optimize database queries" sysg spawn --name optimizer -- python3 agent.py
 ```
 
 See the [Spawn Command](/docs/usage/spawn) documentation for detailed usage.

@@ -1,9 +1,9 @@
 ---
 sidebar_position: 30
-title: Multi-Service Playground
+title: Multi-Service
 ---
 
-# Multi-Service Playground
+# Multi-Service
 
 This walkthrough wires three cooperative services together to highlight `systemg`'s cron scheduling, restart supervision, and lifecycle hooks. Clone the repo, `cd examples/multi-service`, and run:
 
@@ -26,29 +26,46 @@ sysg start --log-level debug --config systemg.yaml
 The `systemg.yaml` configuration file defines three services:
 
 ```yaml
+# Use the v1 config schema
 version: "1"
+
+# Define the supervised services for the example
 services:
   py_size:
+    # Execute the Python watcher that inspects file sizes
     command: "python3 py_size.py"
+    # Run the script from the example directory
     working_dir: "."
+    # Always restart so we can exercise the restart hook
     restart_policy: "always"
+    # Wait five seconds between restart attempts
     backoff: "5s"
     hooks:
       on_restart:
         error:
+          # Notify an external endpoint whenever a restart happens
           command: "curl -s -X POST https://jsonplaceholder.typicode.com/posts -H 'Content-Type: application/json' -d '{\"message\":\"I goof\\'d\"}'"
+          # Limit the webhook invocation to ten seconds
           timeout: "10s"
   count_number:
+    # Append a number every ten seconds via shell script
     command: "sh count_number.sh"
+    # Run from the same working directory as the other services
     working_dir: "."
     cron:
+      # Trigger the cron job every ten seconds
       expression: "*/10 * * * * *"
+    # Do not restart once the cron job exits
     restart_policy: "never"
   echo_lines:
+    # Tail the latest line produced by count_number
     command: "sh echo_lines.sh"
+    # Run from the example directory to share files
     working_dir: "."
+    # Exit after the monitoring window completes
     restart_policy: "never"
     depends_on:
+      # Ensure count_number runs before this worker starts
       - "count_number"
 ```
 

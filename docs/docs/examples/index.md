@@ -5,7 +5,9 @@ title: Examples
 
 # Examples
 
-This section contains real-world examples demonstrating how to use `systemg` for various use cases. Each example showcases different features and capabilities of `systemg`.
+This section contains real-world examples demonstrating how to use `systemg`
+for various use cases. Each example showcases different features and
+capabilities of `systemg`.
 
 ## Hello World
 
@@ -21,7 +23,8 @@ A simple introduction to `systemg` showing the basics of service management.
 
 ## CRUD Application
 
-A realistic example of a Node.js CRUD web application with database backups and testing.
+A realistic example of a Node.js CRUD web application with database backups and
+testing.
 
 **Features demonstrated:**
 - Managing a web server as a service
@@ -33,9 +36,11 @@ A realistic example of a Node.js CRUD web application with database backups and 
 
 [View CRUD Example →](/docs/examples/crud)
 
-## Multi-Service Playground
+## Multi-Service
 
-A trio of collaborating shell and Python services that demonstrates cron scheduling, file hand-offs, deliberate failure recovery, and webhook hooks — all using the scripts in `examples/multi-service`.
+A trio of collaborating shell and Python services that demonstrates cron
+scheduling, file hand-offs, deliberate failure recovery, and webhook hooks — all
+using the scripts in `examples/multi-service`.
 
 **Features demonstrated:**
 - Restart supervision with `restart_policy` and lifecycle hooks
@@ -44,3 +49,17 @@ A trio of collaborating shell and Python services that demonstrates cron schedul
 - Cooperative file sharing between services with graceful shutdowns
 
 [View Multi-Service Example →](/docs/examples/multi-service)
+
+## Meta-Agents
+
+Recursive Claude agents that all read the same instruction file, spawn the next
+role with `sysg`, and propagate results back up the chain through shared files
+in `/tmp/meta_agents`.
+
+**Features demonstrated:**
+- Dynamic spawning with depth and descendant limits
+- Name-based behavior driven by a single `INSTRUCTIONS.md`
+- File hand-offs coordinated between supervised agents
+- Observability via `sysg status`, `sysg logs`, and filesystem artifacts
+
+[View Meta-Agents Example →](/docs/examples/meta-agents)

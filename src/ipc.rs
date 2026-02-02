@@ -74,14 +74,8 @@ pub enum ControlCommand {
         name: String,
         /// Command and arguments to execute.
         command: Vec<String>,
-        /// Environment variables.
-        env: Vec<String>,
         /// Time-to-live in seconds.
         ttl: Option<u64>,
-        /// LLM provider for agents.
-        provider: Option<String>,
-        /// Goal for autonomous agents.
-        goal: Option<String>,
     },
 }
 

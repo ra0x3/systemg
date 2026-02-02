@@ -174,7 +174,7 @@ sysg spawn --name temp_worker --ttl 3600 -- ./process.sh
 Spawn an autonomous agent:
 
 ```sh
-sysg spawn --name optimizer --provider claude --goal "Optimize database queries"
+LLM_PROVIDER=claude AGENT_GOAL="Optimize database queries" sysg spawn --name optimizer -- python3 agent.py
 ```
 
 Spawned processes:
