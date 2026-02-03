@@ -110,6 +110,24 @@ pub enum ProcessManagerError {
         /// List of services that were expected to be running but were not.
         services: Vec<String>,
     },
+
+    /// Error when spawn limits are exceeded.
+    #[error("Spawn limit exceeded: {0}")]
+    SpawnLimitExceeded(String),
+
+    /// Error when spawn authorization fails.
+    #[error("Spawn authorization failed: {0}")]
+    SpawnAuthorizationFailed(String),
+
+    /// Error when spawning a child process.
+    #[error("Failed to spawn child '{name}': {source}")]
+    ChildSpawnError {
+        /// The child process name.
+        name: String,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Implement the `From` trait to convert a `std::sync::PoisonError` into a `ProcessManagerError`.

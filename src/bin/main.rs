@@ -12,7 +12,7 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
-use libc::{SIGKILL, SIGTERM, getpgrp, killpg};
+use libc::{SIGKILL, SIGTERM, getpgrp, getppid, killpg};
 use nix::{
     sys::signal,
     unistd::{Pid, Uid},
@@ -28,9 +28,10 @@ use systemg::{
     logs::{LogManager, resolve_log_path},
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
+    spawn::SpawnedChild,
     status::{
-        CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, StatusSnapshot,
-        UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
+        CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, SpawnedProcessNode,
+        StatusSnapshot, UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
         collect_disk_snapshot, compute_overall_health,
     },
     supervisor::Supervisor,
@@ -329,6 +330,40 @@ fn main() -> Result<(), Box<dyn Error>> {
             purge_all_state()?;
             println!("All systemg state has been purged");
         }
+        Commands::Spawn {
+            name,
+            ttl,
+            parent_pid,
+            command,
+        } => {
+            // Use the provided parent PID or fall back to the caller's parent PID
+            let parent_pid = parent_pid.unwrap_or_else(|| unsafe { getppid() } as u32);
+
+            let spawn_cmd = ControlCommand::Spawn {
+                parent_pid,
+                name: name.clone(),
+                command,
+                ttl,
+            };
+
+            match ipc::send_command(&spawn_cmd) {
+                Ok(ControlResponse::Spawned { pid }) => {
+                    println!("{}", pid);
+                }
+                Ok(ControlResponse::Error(msg)) => {
+                    error!("Failed to spawn child: {}", msg);
+                    std::process::exit(1);
+                }
+                Ok(_) => {
+                    error!("Unexpected response from supervisor");
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    error!("Failed to communicate with supervisor: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -361,6 +396,7 @@ const CYAN_BOLD: &str = "\x1b[1;36m";
 const YELLOW: &str = "\x1b[33m";
 const ORANGE: &str = "\x1b[38;5;208m";
 const GRAY: &str = "\x1b[90m";
+const MAGENTA: &str = "\x1b[35m";
 const RESET: &str = "\x1b[0m";
 
 #[derive(Clone, Copy)]
@@ -437,12 +473,19 @@ fn render_status(
         .format("%Y-%m-%d %H:%M:%S %Z");
 
     // Calculate the maximum widths for each column based on actual data
-    let max_unit_name_len = units
+    let mut max_unit_name_len = units
         .iter()
         .map(|unit| visible_length(&unit.name))
         .max()
         .unwrap_or(4)  // Minimum width of "UNIT" header
         .max(4); // Ensure at least as wide as "UNIT" header
+
+    let spawn_tree_width = units
+        .iter()
+        .map(|unit| max_spawn_label_width(&unit.spawned_children))
+        .max()
+        .unwrap_or(0);
+    max_unit_name_len = max_unit_name_len.max(spawn_tree_width);
 
     // Calculate maximum width for STATE column
     let max_state_len = units
@@ -513,8 +556,7 @@ fn render_status(
     ];
 
     let columns = &columns_array;
-    let full_header_border = make_full_border(columns, '=');
-    println!("{}", full_header_border);
+    println!("{}", make_top_border(columns));
     println!(
         "{}",
         format_banner(
@@ -546,16 +588,20 @@ fn render_status(
         format_breakdown_banner(&state_counts, &health_counts, columns, opts.no_color)
     );
 
-    println!("{}", make_border(columns, '='));
+    println!("{}", make_separator_border(columns));
     println!("{}", format_header_row(columns));
-    println!("{}", make_border(columns, '-'));
+    println!("{}", make_separator_border(columns));
 
     for unit in &units {
         println!("{}", format_unit_row(unit, columns, opts.no_color));
+        // Print spawned children in tree format
+        if !unit.spawned_children.is_empty() {
+            render_spawn_rows(&unit.spawned_children, columns, opts.no_color);
+        }
     }
 
-    println!("{}", make_border(columns, '='));
-    println!("{}", full_header_border);
+    println!("{}", make_separator_border(columns));
+    println!("{}", make_bottom_border(columns));
 
     io::stdout().flush()?;
     Ok(health)
@@ -706,6 +752,28 @@ fn format_uptime_column(uptime: Option<&UptimeInfo>) -> String {
     }
 }
 
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s", seconds)
+    } else if seconds < 3600 {
+        let minutes = seconds / 60;
+        let secs = seconds % 60;
+        if secs > 0 {
+            format!("{}m {}s", minutes, secs)
+        } else {
+            format!("{}m", minutes)
+        }
+    } else {
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        if minutes > 0 {
+            format!("{}h {}m", hours, minutes)
+        } else {
+            format!("{}h", hours)
+        }
+    }
+}
+
 fn format_relative_time(from: DateTime<Utc>) -> String {
     let now = Utc::now();
     let duration = now.signed_duration_since(from);
@@ -795,24 +863,32 @@ fn total_inner_width(columns: &[Column]) -> usize {
     base + columns.len().saturating_sub(1)
 }
 
-fn make_full_border(columns: &[Column], fill_char: char) -> String {
+fn make_top_border(columns: &[Column]) -> String {
     let inner_width = total_inner_width(columns);
-    format!("+{}+", fill_char.to_string().repeat(inner_width))
+    format!("╭{}╮", "─".repeat(inner_width))
 }
 
-fn make_border(columns: &[Column], fill_char: char) -> String {
-    let mut line = String::from("+");
-    for column in columns {
-        line.push_str(&fill_char.to_string().repeat(column.width + 2));
-        line.push('+');
+fn make_bottom_border(columns: &[Column]) -> String {
+    let inner_width = total_inner_width(columns);
+    format!("╰{}╯", "─".repeat(inner_width))
+}
+
+fn make_separator_border(columns: &[Column]) -> String {
+    let mut line = String::from("├");
+    for (i, column) in columns.iter().enumerate() {
+        line.push_str(&"─".repeat(column.width + 2));
+        if i < columns.len() - 1 {
+            line.push('┼');
+        }
     }
+    line.push('┤');
     line
 }
 
 fn format_banner(text: &str, columns: &[Column]) -> String {
     let inner_width = total_inner_width(columns);
     let content = ansi_pad(text, inner_width, Alignment::Center);
-    format!("|{}|", content)
+    format!("│{}│", content)
 }
 
 fn count_states_and_health(
@@ -906,12 +982,12 @@ fn format_breakdown_banner(
 }
 
 fn format_header_row(columns: &[Column]) -> String {
-    let mut row = String::from("|");
+    let mut row = String::from('│');
     for column in columns {
         row.push(' ');
         row.push_str(&ansi_pad(column.title, column.width, Alignment::Center));
         row.push(' ');
-        row.push('|');
+        row.push('│');
     }
     row
 }
@@ -972,13 +1048,104 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     format_row(&values, columns)
 }
 
+fn render_spawn_rows(nodes: &[SpawnedProcessNode], columns: &[Column], no_color: bool) {
+    visit_spawn_tree(nodes, "", &mut |child, prefix, _| {
+        println!(
+            "{}",
+            format_spawned_child_row(child, columns, no_color, prefix)
+        );
+    });
+}
+
+fn max_spawn_label_width(nodes: &[SpawnedProcessNode]) -> usize {
+    let mut max_len = 0;
+    visit_spawn_tree(nodes, "", &mut |child, prefix, _| {
+        let candidate = format!("{}{}", prefix, child.name);
+        let len = visible_length(&candidate);
+        if len > max_len {
+            max_len = len;
+        }
+    });
+    max_len
+}
+
+fn count_spawn_nodes(nodes: &[SpawnedProcessNode]) -> usize {
+    let mut total = 0;
+    visit_spawn_tree(nodes, "", &mut |_, _, _| total += 1);
+    total
+}
+
+fn visit_spawn_tree<F>(nodes: &[SpawnedProcessNode], prefix: &str, f: &mut F)
+where
+    F: FnMut(&SpawnedChild, &str, bool),
+{
+    for (idx, node) in nodes.iter().enumerate() {
+        let is_last = idx == nodes.len() - 1;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        let display_prefix = format!("{}{}", prefix, connector);
+        f(&node.child, &display_prefix, is_last);
+        let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
+        visit_spawn_tree(&node.children, &child_prefix, f);
+    }
+}
+
+fn format_spawned_child_row(
+    child: &SpawnedChild,
+    columns: &[Column],
+    no_color: bool,
+    prefix: &str,
+) -> String {
+    let child_name = format!("{}{}", prefix, child.name);
+    let state = colorize("Running", BRIGHT_GREEN, no_color);
+    let pid = child.pid.to_string();
+    let cpu_col = "-".to_string();
+    let rss_col = "-".to_string();
+
+    let uptime = {
+        let elapsed = child.spawned_at.elapsed();
+        format_duration(elapsed.as_secs())
+    };
+
+    let last_exit = "-".to_string();
+    let health_label = colorize("healthy", GREEN_BOLD, no_color);
+
+    let display_name = child_name;
+
+    let name_width = columns
+        .first()
+        .map(|col| col.width)
+        .unwrap_or_else(|| display_name.len());
+
+    let display_name_final = if visible_length(&display_name) > name_width {
+        ellipsize(&display_name, name_width)
+    } else {
+        display_name
+    };
+
+    let kind_label = colorize("spawn", MAGENTA, no_color);
+
+    let values = [
+        display_name_final,
+        kind_label,
+        state,
+        pid,
+        cpu_col,
+        rss_col,
+        uptime,
+        last_exit,
+        health_label,
+    ];
+
+    format_row(&values, columns)
+}
+
 fn format_row(values: &[String; 9], columns: &[Column]) -> String {
-    let mut row = String::from("|");
+    let mut row = String::from('│');
     for (value, column) in values.iter().zip(columns.iter()) {
         row.push(' ');
         row.push_str(&ansi_pad(value, column.width, column.align));
         row.push(' ');
-        row.push('|');
+        row.push('│');
     }
     row
 }
@@ -1183,6 +1350,26 @@ fn render_inspect(
 
     if let Some(command) = &unit.command {
         println!("Command: {}", command);
+    }
+
+    if !unit.spawned_children.is_empty() {
+        println!();
+        let total_children = count_spawn_nodes(&unit.spawned_children);
+        println!("Spawned Processes ({} total):", total_children);
+        println!("{:-<60}", "");
+        visit_spawn_tree(&unit.spawned_children, "", &mut |child, prefix, _| {
+            let uptime = format_duration(child.spawned_at.elapsed().as_secs());
+            let depth_info = if child.depth > 0 {
+                format!(", depth: {}", child.depth)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {}{} [PID: {}, Uptime: {}{}]",
+                prefix, child.name, child.pid, uptime, depth_info
+            );
+        });
+        println!("{:-<60}", "");
     }
 
     if let Some(metrics) = unit.metrics.as_ref() {
@@ -1677,6 +1864,10 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
         Ok(ControlResponse::Ok) => Ok(()),
         Ok(ControlResponse::Status(_)) => Ok(()),
         Ok(ControlResponse::Inspect(_)) => Ok(()),
+        Ok(ControlResponse::Spawned { pid }) => {
+            println!("Spawned process with PID: {}", pid);
+            Ok(())
+        }
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Err(ControlError::NotAvailable) => {
             warn!("No running systemg supervisor found; skipping command");

@@ -66,6 +66,17 @@ pub enum ControlCommand {
         /// Maximum number of samples to return.
         samples: u32,
     },
+    /// Spawn a dynamic child process.
+    Spawn {
+        /// Parent process PID (from Unix socket peer credentials).
+        parent_pid: u32,
+        /// Name for the spawned child.
+        name: String,
+        /// Command and arguments to execute.
+        command: Vec<String>,
+        /// Time-to-live in seconds.
+        ttl: Option<u64>,
+    },
 }
 
 /// Response sent by the supervisor.
@@ -81,6 +92,11 @@ pub enum ControlResponse {
     Status(StatusSnapshot),
     /// Inspect payload including recent samples.
     Inspect(Box<InspectPayload>),
+    /// Spawn response with child PID.
+    Spawned {
+        /// PID of the spawned child process.
+        pid: u32,
+    },
 }
 
 /// Inspect response payload.

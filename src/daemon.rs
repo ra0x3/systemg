@@ -100,6 +100,15 @@ fn collect_service_env(
 pub struct PidFile {
     /// Service name -> PID map.
     services: HashMap<String, u32>,
+    /// Child PID -> Parent PID mapping for spawned processes.
+    #[serde(default)]
+    parent_map: HashMap<u32, u32>,
+    /// Parent PID -> list of Child PIDs for reverse lookup.
+    #[serde(default)]
+    children_map: HashMap<u32, Vec<u32>>,
+    /// PID -> spawn depth in the tree (0 = root service).
+    #[serde(default)]
+    spawn_depth: HashMap<u32, usize>,
 }
 
 impl PidFile {
@@ -216,6 +225,97 @@ impl PidFile {
     /// Gets the PID for a service.
     pub fn get(&self, service: &str) -> Option<u32> {
         self.services.get(service).copied()
+    }
+
+    /// Atomically records a spawned child process.
+    pub fn record_spawn(
+        &mut self,
+        parent_pid: u32,
+        child_pid: u32,
+        depth: usize,
+    ) -> Result<(), PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
+        // Reload from disk to ensure we have the latest state
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path)?;
+            *self = serde_json::from_str::<Self>(&contents)?;
+        }
+
+        // Record parent-child relationship
+        self.parent_map.insert(child_pid, parent_pid);
+        self.children_map
+            .entry(parent_pid)
+            .or_default()
+            .push(child_pid);
+        self.spawn_depth.insert(child_pid, depth);
+
+        // Save back to disk
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    /// Atomically removes a spawned child process.
+    pub fn remove_spawn(&mut self, child_pid: u32) -> Result<(), PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
+        // Reload from disk to ensure we have the latest state
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path)?;
+            *self = serde_json::from_str::<Self>(&contents)?;
+        }
+
+        // Remove child from parent's children list
+        if let Some(parent_pid) = self.parent_map.remove(&child_pid)
+            && let Some(children) = self.children_map.get_mut(&parent_pid)
+        {
+            children.retain(|&pid| pid != child_pid);
+            if children.is_empty() {
+                self.children_map.remove(&parent_pid);
+            }
+        }
+        self.spawn_depth.remove(&child_pid);
+
+        // Save back to disk
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    /// Gets the parent PID for a child process.
+    pub fn get_parent(&self, child_pid: u32) -> Option<u32> {
+        self.parent_map.get(&child_pid).copied()
+    }
+
+    /// Gets all children of a parent process.
+    pub fn get_children(&self, parent_pid: u32) -> Vec<u32> {
+        self.children_map
+            .get(&parent_pid)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Gets the spawn depth for a process.
+    pub fn get_depth(&self, pid: u32) -> Option<usize> {
+        self.spawn_depth.get(&pid).copied()
+    }
+
+    /// Gets all descendants of a process recursively.
+    pub fn get_descendants(&self, pid: u32) -> Vec<u32> {
+        let mut descendants = Vec::new();
+        let mut to_process = vec![pid];
+
+        while let Some(current) = to_process.pop() {
+            if let Some(children) = self.children_map.get(&current) {
+                descendants.extend(children);
+                to_process.extend(children);
+            }
+        }
+
+        descendants
     }
 }
 
@@ -3249,6 +3349,7 @@ mod tests {
             hooks: None,
             cron: None,
             skip: None,
+            spawn: None,
         }
     }
 

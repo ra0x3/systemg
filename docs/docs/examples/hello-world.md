@@ -39,16 +39,25 @@ done
 The `systemg` configuration file that defines how to run the service:
 
 ```yaml
+# Use the v1 config schema
 version: "1"
+
+# Declare the managed services table
 services:
   sh__hello_world:
+    # Run the shell script using the system shell
     command: "sh hello-world.sh"
     env:
+      # Load environment variables from a .env file if present
       file: ".env"
       vars:
+        # Inline environment variable override for the service
         FOO: "foo"
+    # Restart only when the process exits with a failure code
     restart_policy: "on_failure"
+    # Attempt up to five restarts before giving up
     retries: "5"
+    # Wait five seconds between restart attempts
     backoff: "5s"
 ```
 

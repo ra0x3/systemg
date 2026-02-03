@@ -33,9 +33,12 @@ The complete `systemg` configuration is in `crud.sysg.yaml`:
 ### Environment Configuration
 
 ```yaml
+# Use the v1 config schema
 version: "1"
 
+# Load shared environment variables for every service and cron job
 env:
+  # Read variables from the example .env file
   file: ".env.example"
 ```
 
@@ -46,17 +49,27 @@ env:
 ### Web Server Service
 
 ```yaml
+# Define the web server managed by systemg
 services:
   node__web_server:
+    # Start the Node.js API entry point
     command: "node server.js"
+    # Roll traffic to the new process before stopping the old one
     deployment_strategy: "rolling_start"
     env:
+      # Pass through deployment-specific variables
       vars:
+        # Application environment (development/staging/production)
         NODE_ENV: "${NODE_ENV}"
+        # HTTP port exposed by the server
         PORT: "${PORT}"
+        # PostgreSQL connection string for the app
         DATABASE_URL: "${DATABASE_URL}"
+    # Automatically restart on non-zero exit codes
     restart_policy: "on_failure"
+    # Allow up to ten restart attempts
     retries: "10"
+    # Wait ten seconds between retries
     backoff: "10s"
 ```
 
@@ -80,11 +93,14 @@ services:
 ### Deployment Webhooks
 
 ```yaml
+    # Notify Slack about deployment outcomes
     webhooks:
       on_success:
+        # Webhook endpoint for successful rollouts
         url: "${SLACK_WEBHOOK_SUCCESS_URL}"
         method: "POST"
         headers:
+          # Send JSON payloads to Slack
           Content-Type: "application/json"
         body: |
           {
@@ -92,9 +108,11 @@ services:
             ...
           }
       on_error:
+        # Webhook endpoint for failed rollouts
         url: "${SLACK_WEBHOOK_ERROR_URL}"
         method: "POST"
         headers:
+          # Slack expects JSON content here as well
           Content-Type: "application/json"
         body: |
           {
@@ -117,13 +135,19 @@ services:
 ### Automated Test Suite (Cron Job)
 
 ```yaml
+# Schedule recurring jobs alongside services
 cron:
   test_suite:
+    # Run the test suite at the top of every hour
     schedule: "0 * * * *"
+    # Execute the package.json test script
     command: "npm test"
     env:
+      # Override environment for the cron context
       vars:
+        # Point to the isolated test database
         DATABASE_URL: "${TEST_DATABASE_URL}"
+        # Force Node into test mode
         NODE_ENV: "test"
 ```
 
@@ -144,14 +168,22 @@ The test suite also includes `on_success` and `on_error` webhooks to notify the 
 
 ```yaml
   database_backup:
+    # Take a snapshot every six hours
     schedule: "0 */6 * * *"
+    # Run the backup script that dumps and uploads the database
     command: "bash scripts/backup-database.sh"
     env:
+      # Provide credentials scoped to the backup job
       vars:
+        # Production database connection string
         DATABASE_URL: "${DATABASE_URL}"
+        # Target S3 bucket for dump files
         BACKUP_S3_BUCKET: "${BACKUP_S3_BUCKET}"
+        # AWS key used for uploading backups
         AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
+        # AWS secret paired with the access key
         AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
+        # Number of days to retain historical backups
         BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS}"
 ```
 

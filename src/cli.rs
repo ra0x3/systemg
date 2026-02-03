@@ -202,6 +202,25 @@ pub enum Commands {
 
     /// Purge all systemg state and runtime files.
     Purge,
+
+    /// Spawn a dynamic child process from a parent service.
+    Spawn {
+        /// Name for the spawned child process.
+        #[arg(long)]
+        name: String,
+
+        /// Time-to-live in seconds (optional).
+        #[arg(long)]
+        ttl: Option<u64>,
+
+        /// Parent process ID (defaults to caller's parent PID if not specified).
+        #[arg(long)]
+        parent_pid: Option<u32>,
+
+        /// Command and arguments to execute.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 /// Parses command-line arguments and returns a `Cli` struct.

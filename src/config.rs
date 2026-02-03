@@ -117,6 +117,52 @@ pub enum SkipConfig {
     Command(String),
 }
 
+/// Spawn mode configuration for dynamic child process creation.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SpawnMode {
+    /// Static mode - no dynamic spawning allowed (default).
+    Static,
+    /// Dynamic mode - allows runtime spawning of child processes.
+    Dynamic,
+}
+
+/// Configuration for dynamic process spawning.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct SpawnConfig {
+    /// Spawn mode (static or dynamic).
+    pub mode: Option<SpawnMode>,
+    /// Resource and safety limits for dynamically spawned children.
+    pub limits: Option<SpawnLimitsConfig>,
+}
+
+/// Resource limits and policies for dynamically spawned children.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+pub struct SpawnLimitsConfig {
+    /// Maximum number of direct children allowed.
+    pub children: Option<u32>,
+    /// Maximum depth of the spawn tree (levels of recursion).
+    pub depth: Option<u32>,
+    /// Maximum total descendants across all levels.
+    pub descendants: Option<u32>,
+    /// Total memory limit shared by entire spawn tree.
+    pub total_memory: Option<String>,
+    /// Policy for handling process tree termination.
+    pub termination_policy: Option<TerminationPolicy>,
+}
+
+/// Policy for handling process termination in spawn trees.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminationPolicy {
+    /// Cascade - terminate all descendants when parent dies.
+    Cascade,
+    /// Orphan - leave children running when parent dies.
+    Orphan,
+    /// Reparent - reassign children to init process.
+    Reparent,
+}
+
 /// Configuration for an individual service.
 #[derive(Debug, Default, Deserialize, Clone, serde::Serialize)]
 pub struct ServiceConfig {
@@ -153,6 +199,8 @@ pub struct ServiceConfig {
     pub cron: Option<CronConfig>,
     /// Optional skip configuration that determines if the service should be skipped.
     pub skip: Option<SkipConfig>,
+    /// Dynamic process spawning configuration.
+    pub spawn: Option<SpawnConfig>,
 }
 
 /// Resource limit overrides configured per service.
@@ -837,6 +885,7 @@ services:
             hooks: None,
             cron: None,
             skip: None,
+            spawn: None,
         }
     }
 
@@ -1118,6 +1167,7 @@ services:
                 timezone: Some("UTC".to_string()),
             }),
             skip: None,
+            spawn: None,
         };
 
         let config2 = ServiceConfig {
@@ -1140,6 +1190,7 @@ services:
                 timezone: Some("UTC".to_string()),
             }),
             skip: None,
+            spawn: None,
         };
 
         let hash1 = config1.compute_hash();
@@ -1171,6 +1222,7 @@ services:
             hooks: None,
             cron: None,
             skip: None,
+            spawn: None,
         };
 
         let modified_command = ServiceConfig {
@@ -1226,6 +1278,7 @@ services:
                 timezone: Some("UTC".to_string()),
             }),
             skip: None,
+            spawn: None,
         };
 
         // The same config used with different service names should have the same hash
