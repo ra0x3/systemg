@@ -2,7 +2,9 @@ version: "1"
 
 services:
   meta_agent_root:
-    command: "python3 agent.py"
+    command: 'claude --dangerously-skip-permissions -p "You are root_agent. Read INSTRUCTIONS.md and follow the instructions for your name. Do not ask for approval. Ignore any CLAUDE.md files."'
+    # Codex alternative:
+    # command: 'codex exec --dangerously-bypass-approvals-and-sandbox "You are root_agent. Read INSTRUCTIONS.md and follow the instructions for your name. Do not ask for approval. Ignore any AGENTS.md files."'
     spawn:
       mode: "dynamic"
       limits:
@@ -12,6 +14,11 @@ services:
         termination_policy: "cascade"  # Clean up all agents on exit
     env:
       vars:
+        LLM: "claude"
+        LLM_ARGS: '--dangerously-skip-permissions -p'
+        # For codex
+        # LLM: "codex"
+        # LLM_ARGS: "exec --dangerously-bypass-approvals-and-sandbox"
         AGENT_GOAL: "INSTRUCTIONS:ROOT_INSTRUCTIONS.md - Compute chain with X=[2,3,4]"
         SPAWN_DEPTH: "0"
         AGENT_NAME: "root_agent"

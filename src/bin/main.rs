@@ -62,7 +62,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         warn!("--drop-privileges has no effect when not running as root");
     }
     runtime::capture_socket_activation();
-    init_logging(&args);
+
+    let use_file_logging = matches!(
+        &args.command,
+        Commands::Start {
+            daemonize: true,
+            ..
+        } | Commands::Restart {
+            daemonize: true,
+            ..
+        }
+    );
+    init_logging(&args, use_file_logging);
 
     if euid.is_root() && runtime_mode == RuntimeMode::User {
         warn!("Running as root without --sys; state will be stored in userspace paths");
@@ -1733,40 +1744,47 @@ fn read_proc_state(pid: libc::pid_t) -> Option<char> {
     parts.next()?.chars().next()
 }
 
-fn init_logging(args: &Cli) {
+fn init_logging(args: &Cli, use_file: bool) {
     let filter = if let Some(level) = args.log_level {
         EnvFilter::new(level.as_str())
     } else {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
-    // Ensure the log directory exists
-    let log_dir = runtime::log_dir();
-    if let Err(err) = fs::create_dir_all(&log_dir) {
-        eprintln!("Failed to create log directory {:?}: {}", log_dir, err);
-    }
-    let log_path = log_dir.join("supervisor.log");
-
-    // Open log file in append mode
-    let file = match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Failed to open supervisor log file {:?}: {}", log_path, e);
-            // Fall back to stdout if we can't open the log file
-            let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
-            return;
+    if use_file {
+        let log_dir = runtime::log_dir();
+        if let Err(err) = fs::create_dir_all(&log_dir) {
+            eprintln!("Failed to create log directory {:?}: {}", log_dir, err);
         }
-    };
+        let log_path = log_dir.join("supervisor.log");
 
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(move || file.try_clone().unwrap())
-        .with_ansi(false)
-        .try_init();
+        let file = match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("Failed to open supervisor log file {:?}: {}", log_path, e);
+                let _ = tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_writer(std::io::stderr)
+                    .try_init();
+                return;
+            }
+        };
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(move || file.try_clone().unwrap())
+            .with_ansi(false)
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
 }
 
 fn start_foreground(

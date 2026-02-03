@@ -16,11 +16,11 @@ From the repository root:
 ```bash
 cd examples/meta-agents
 
-export LLM_BIN="<your-llm-cli>"
+export LLM="<your-llm-cli>"
 export LLM_ARGS="<non-interactive-flags-including-prompt-flag>"
 
 # Example values
-# export LLM_BIN="claude"
+# export LLM="claude"
 # export LLM_ARGS="--dangerously-skip-permissions -p"
 
 sysg start
@@ -31,7 +31,7 @@ prompt tells the model which CLI is driving it, reminds it to follow
 `INSTRUCTIONS.md`, and to ignore the alternate instruction files.
 
 ```bash
-"$LLM_BIN" $LLM_ARGS "You are root_agent running under the Claude CLI. Read \
+"$LLM" $LLM_ARGS "You are root_agent running under the Claude CLI. Read \
 INSTRUCTIONS.md and follow the instructions for your name. Do not ask for \
 approval. Ignore any CLAUDE.md files. Ignore any AGENTS.md files."
 ```
@@ -39,10 +39,10 @@ approval. Ignore any CLAUDE.md files. Ignore any AGENTS.md files."
 Changing LLMs is as simple as swapping the exports. For Codex:
 
 ```bash
-export LLM_BIN="codex"
+export LLM="codex"
 export LLM_ARGS="exec --dangerously-bypass-approvals-and-sandbox"
 
-"$LLM_BIN" $LLM_ARGS "You are root_agent running under the Codex CLI. Read \
+"$LLM" $LLM_ARGS "You are root_agent running under the Codex CLI. Read \
 INSTRUCTIONS.md and follow the instructions for your name. Do not ask for \
 approval. Ignore any CLAUDE.md files. Ignore any AGENTS.md files."
 ```
