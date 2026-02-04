@@ -136,7 +136,13 @@ pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, Control
         return Err(ControlError::NotAvailable);
     }
 
-    let mut stream = UnixStream::connect(path)?;
+    let mut stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+            return Err(ControlError::NotAvailable);
+        }
+        Err(e) => return Err(e.into()),
+    };
     let payload = serde_json::to_vec(command)?;
     stream.write_all(&payload)?;
     stream.write_all(b"\n")?;

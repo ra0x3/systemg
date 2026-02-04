@@ -11,6 +11,22 @@ matching instructions, and hands its result back up the chain using
 - An LLM CLI (defaults to `claude`, but any compatible tool works)
 
 ## Run the Example
+
+### Using Local Build (for testing)
+```bash
+cd examples/meta-agents
+
+# Option 1: Use the test script
+./test_local.sh start
+./test_local.sh watch  # In another terminal
+
+# Option 2: Source the alias
+source use_local_sysg.sh
+sysg start
+sysg status --watch 1
+```
+
+### Using System Installation
 From the repository root:
 
 ```bash
@@ -48,7 +64,9 @@ approval. Ignore any CLAUDE.md files. Ignore any AGENTS.md files."
 ```
 
 `sysg` will manage the root agent and any dynamically spawned children until the
-instruction chain completes.
+instruction chain completes. Every spawned agent appends `sleep 5` to its launch
+command so the process tree stays visible in `sysg status --watch 1` before it
+exits.
 
 ## What Happens
 1. `root_agent` logs the start of the multiplication chain and spawns `agent_1`.

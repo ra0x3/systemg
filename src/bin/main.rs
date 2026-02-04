@@ -28,11 +28,11 @@ use systemg::{
     logs::{LogManager, resolve_log_path},
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
-    spawn::SpawnedChild,
+    spawn::{SpawnedChild, SpawnedExit},
     status::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, SpawnedProcessNode,
         StatusSnapshot, UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
-        collect_disk_snapshot, compute_overall_health,
+        collect_disk_snapshot, compute_overall_health, format_elapsed,
     },
     supervisor::Supervisor,
 };
@@ -213,8 +213,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             if let Some(interval) = watch {
                 let sleep_interval = Duration::from_secs(interval.max(1));
                 loop {
-                    let snapshot = fetch_status_snapshot(&effective_config)?;
-                    render_status(&snapshot, &render_opts, true)?;
+                    match fetch_status_snapshot(&effective_config) {
+                        Ok(snapshot) => {
+                            if let Err(e) = render_status(&snapshot, &render_opts, true) {
+                                eprintln!("Error rendering status: {}", e);
+                                thread::sleep(sleep_interval);
+                                continue;
+                            }
+                        }
+                        Err(_) => {
+                            print!("\x1B[2J\x1B[H");
+                            println!(
+                                "{}Warn: Supervisor has been shut down{}",
+                                YELLOW, RESET
+                            );
+                            println!("\nWaiting for supervisor to restart...");
+                            println!("Press Ctrl+C to exit watch mode.");
+                        }
+                    }
                     thread::sleep(sleep_interval);
                 }
             } else {
@@ -403,7 +419,6 @@ const YELLOW_BOLD: &str = "\x1b[1;33m";
 const RED_BOLD: &str = "\x1b[1;31m";
 const RED: &str = "\x1b[31m";
 const CYAN: &str = "\x1b[36m";
-const CYAN_BOLD: &str = "\x1b[1;36m";
 const YELLOW: &str = "\x1b[33m";
 const ORANGE: &str = "\x1b[38;5;208m";
 const GRAY: &str = "\x1b[90m";
@@ -476,6 +491,7 @@ fn render_status(
 
     if watch_mode {
         print!("\x1B[2J\x1B[H");
+        let _ = io::stdout().flush();
     }
 
     let timestamp = snapshot
@@ -578,11 +594,12 @@ fn render_status(
             columns,
         )
     );
+    println!("{}", format_banner("", columns));
     println!(
         "{}",
         format_banner(
             &format!(
-                "Overall health {}",
+                "Overall health: {}",
                 colorize(
                     overall_health_label(health),
                     overall_health_color(health),
@@ -594,10 +611,12 @@ fn render_status(
     );
 
     let (state_counts, health_counts) = count_states_and_health(&units);
+    println!("{}", format_banner("", columns));
     println!(
         "{}",
         format_breakdown_banner(&state_counts, &health_counts, columns, opts.no_color)
     );
+    println!("{}", format_banner("", columns));
 
     println!("{}", make_separator_border(columns));
     println!("{}", format_header_row(columns));
@@ -614,7 +633,7 @@ fn render_status(
     println!("{}", make_separator_border(columns));
     println!("{}", make_bottom_border(columns));
 
-    io::stdout().flush()?;
+    let _ = io::stdout().flush();
     Ok(health)
 }
 
@@ -957,10 +976,10 @@ fn format_breakdown_banner(
                 "Stopped" | "Skipped" | "Idle" => GRAY,
                 _ => "",
             };
-            format!("{}: {}", colorize(state, color, no_color), count)
+            format!("• {}: {}", colorize(state, color, no_color), count)
         })
         .collect::<Vec<_>>()
-        .join(", ");
+        .join("  ");
 
     let mut healths: Vec<_> = health_counts.iter().collect();
     healths.sort_by_key(|(k, _)| k.as_str());
@@ -980,15 +999,18 @@ fn format_breakdown_banner(
             } else {
                 GRAY
             };
-            format!("{}: {}", colorize(health, color, no_color), count)
+            format!("• {}: {}", colorize(health, color, no_color), count)
         })
         .collect::<Vec<_>>()
-        .join(", ");
+        .join("  ");
 
-    let breakdown = format!(
-        "{}[States]{} {} | {}[Health]{} {}",
-        CYAN_BOLD, RESET, state_str, CYAN_BOLD, RESET, health_str
-    );
+    let breakdown = if !state_str.is_empty() && !health_str.is_empty() {
+        format!("{}  {}  {}", state_str, "|", health_str)
+    } else if !state_str.is_empty() {
+        state_str
+    } else {
+        health_str
+    };
     format_banner(&breakdown, columns)
 }
 
@@ -1107,18 +1129,56 @@ fn format_spawned_child_row(
     prefix: &str,
 ) -> String {
     let child_name = format!("{}{}", prefix, child.name);
-    let state = colorize("Running", BRIGHT_GREEN, no_color);
     let pid = child.pid.to_string();
-    let cpu_col = "-".to_string();
-    let rss_col = "-".to_string();
+    let cpu_col = child
+        .cpu_percent
+        .map(|cpu| format!("{cpu:.1}%"))
+        .unwrap_or_else(|| "-".to_string());
+    let rss_col = child
+        .rss_bytes
+        .map(format_bytes)
+        .unwrap_or_else(|| "-".to_string());
 
-    let uptime = {
-        let elapsed = child.spawned_at.elapsed();
-        format_duration(elapsed.as_secs())
+    let (state, health_label) = if let Some(exit) = &child.last_exit {
+        let succeeded = exit.exit_code.map(|code| code == 0).unwrap_or(false)
+            && exit.signal.is_none();
+
+        let state_label = if succeeded {
+            colorize("Exited", YELLOW_BOLD, no_color)
+        } else {
+            colorize("Exited", RED_BOLD, no_color)
+        };
+
+        let health = if succeeded {
+            colorize("healthy", GREEN_BOLD, no_color)
+        } else {
+            colorize("failing", RED_BOLD, no_color)
+        };
+
+        (state_label, health)
+    } else {
+        (
+            colorize("Running", BRIGHT_GREEN, no_color),
+            colorize("healthy", GREEN_BOLD, no_color),
+        )
     };
 
-    let last_exit = "-".to_string();
-    let health_label = colorize("healthy", GREEN_BOLD, no_color);
+    let uptime = if let Some(exit) = &child.last_exit
+        && let Some(finished_at) = exit.finished_at
+    {
+        let exit_elapsed = finished_at
+            .elapsed()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+        format_elapsed(exit_elapsed.as_secs())
+    } else {
+        let elapsed = child
+            .started_at
+            .elapsed()
+            .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+        format_elapsed(elapsed.as_secs())
+    };
+
+    let last_exit = format_spawn_exit(child.last_exit.as_ref());
 
     let display_name = child_name;
 
@@ -1148,6 +1208,31 @@ fn format_spawned_child_row(
     ];
 
     format_row(&values, columns)
+}
+
+fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
+    match exit {
+        Some(exit) => {
+            let mut parts = Vec::new();
+            if let Some(code) = exit.exit_code {
+                parts.push(format!("code {code}"));
+            }
+            if let Some(signal) = exit.signal {
+                parts.push(format!("signal {signal}"));
+            }
+            if let Some(timestamp) = exit.finished_at {
+                let ts: DateTime<Utc> = DateTime::<Utc>::from(timestamp);
+                parts.push(ts.format("%Y-%m-%d %H:%M:%S").to_string());
+            }
+
+            if parts.is_empty() {
+                "-".to_string()
+            } else {
+                format!("exit {}", parts.join(", "))
+            }
+        }
+        None => "-".to_string(),
+    }
 }
 
 fn format_row(values: &[String; 9], columns: &[Column]) -> String {
@@ -1369,7 +1454,11 @@ fn render_inspect(
         println!("Spawned Processes ({} total):", total_children);
         println!("{:-<60}", "");
         visit_spawn_tree(&unit.spawned_children, "", &mut |child, prefix, _| {
-            let uptime = format_duration(child.spawned_at.elapsed().as_secs());
+            let uptime = child
+                .started_at
+                .elapsed()
+                .map(|d| format_duration(d.as_secs()))
+                .unwrap_or_else(|_| "0s".to_string());
             let depth_info = if child.depth > 0 {
                 format!(", depth: {}", child.depth)
             } else {

@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use fs2::FileExt;
@@ -39,6 +39,7 @@ use crate::{
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_log_writer},
     runtime,
+    spawn::SpawnedExit,
 };
 
 /// Builds env map for service (inline vars override file entries).
@@ -109,6 +110,30 @@ pub struct PidFile {
     /// PID -> spawn depth in the tree (0 = root service).
     #[serde(default)]
     spawn_depth: HashMap<u32, usize>,
+    /// Additional metadata for spawned children.
+    #[serde(default)]
+    spawn_metadata: HashMap<u32, PersistedSpawnChild>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedSpawnChild {
+    pub(crate) pid: u32,
+    pub(crate) name: String,
+    pub(crate) command: String,
+    #[serde(default = "SystemTime::now")]
+    pub(crate) started_at: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ttl_secs: Option<u64>,
+    pub(crate) depth: usize,
+    pub(crate) parent_pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) service_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cpu_percent: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rss_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_exit: Option<SpawnedExit>,
 }
 
 impl PidFile {
@@ -228,11 +253,9 @@ impl PidFile {
     }
 
     /// Atomically records a spawned child process.
-    pub fn record_spawn(
+    pub(crate) fn record_spawn(
         &mut self,
-        parent_pid: u32,
-        child_pid: u32,
-        depth: usize,
+        metadata: PersistedSpawnChild,
     ) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
@@ -243,6 +266,10 @@ impl PidFile {
             *self = serde_json::from_str::<Self>(&contents)?;
         }
 
+        let child_pid = metadata.pid;
+        let parent_pid = metadata.parent_pid;
+        let depth = metadata.depth;
+
         // Record parent-child relationship
         self.parent_map.insert(child_pid, parent_pid);
         self.children_map
@@ -250,8 +277,31 @@ impl PidFile {
             .or_default()
             .push(child_pid);
         self.spawn_depth.insert(child_pid, depth);
+        self.spawn_metadata.insert(child_pid, metadata);
 
         // Save back to disk
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_spawn_exit(
+        &mut self,
+        child_pid: u32,
+        exit: SpawnedExit,
+    ) -> Result<(), PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path)?;
+            *self = serde_json::from_str::<Self>(&contents)?;
+        }
+
+        if let Some(metadata) = self.spawn_metadata.get_mut(&child_pid) {
+            metadata.last_exit = Some(exit.clone());
+        }
+
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
@@ -278,6 +328,7 @@ impl PidFile {
             }
         }
         self.spawn_depth.remove(&child_pid);
+        self.spawn_metadata.remove(&child_pid);
 
         // Save back to disk
         fs::create_dir_all(path.parent().unwrap())?;
@@ -296,6 +347,27 @@ impl PidFile {
             .get(&parent_pid)
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn get_spawn_metadata(&self, pid: u32) -> Option<&PersistedSpawnChild> {
+        self.spawn_metadata.get(&pid)
+    }
+
+    pub(crate) fn spawn_roots_for_service(
+        &self,
+        service_hash: &str,
+    ) -> Vec<&PersistedSpawnChild> {
+        self.spawn_metadata
+            .values()
+            .filter(|meta| meta.service_hash.as_deref() == Some(service_hash))
+            .filter(|meta| {
+                self.spawn_metadata
+                    .get(&meta.parent_pid)
+                    .and_then(|parent| parent.service_hash.as_deref())
+                    .map(|hash| hash != service_hash)
+                    .unwrap_or(true)
+            })
+            .collect()
     }
 
     /// Gets the spawn depth for a process.

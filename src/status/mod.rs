@@ -21,7 +21,7 @@ use chrono_tz::Tz;
 use nix::sys::signal;
 use nix::unistd::{Pid, getpgid};
 use serde::{Deserialize, Serialize};
-use sysinfo::{ProcessesToUpdate, System};
+use sysinfo::{Pid as SysPid, ProcessesToUpdate, System};
 use thiserror::Error;
 use tracing::{debug, error};
 
@@ -151,15 +151,124 @@ impl SpawnedProcessNode {
 fn build_spawn_tree(
     manager: &DynamicSpawnManager,
     parent_pid: u32,
+    system: Option<&System>,
 ) -> Vec<SpawnedProcessNode> {
     manager
         .get_children(parent_pid)
         .into_iter()
-        .map(|child| {
-            let descendants = build_spawn_tree(manager, child.pid);
+        .map(|mut child| {
+            let (cpu_percent, rss_bytes) = sample_process_metrics(system, child.pid);
+            if cpu_percent.is_some() || rss_bytes.is_some() {
+                manager.update_child_metrics(child.pid, cpu_percent, rss_bytes);
+            }
+            child.cpu_percent = cpu_percent;
+            child.rss_bytes = rss_bytes;
+
+            let descendants = build_spawn_tree(manager, child.pid, system);
             SpawnedProcessNode::new(child, descendants)
         })
         .collect()
+}
+
+fn build_spawn_tree_from_pidfile(
+    pid_file: &PidFile,
+    parent_pid: u32,
+    service_hash: Option<&str>,
+    is_root: bool,
+    system: Option<&System>,
+) -> Vec<SpawnedProcessNode> {
+    let mut nodes = Vec::new();
+
+    let child_pids = pid_file.get_children(parent_pid);
+    if !child_pids.is_empty() {
+        for child_pid in child_pids {
+            if let Some(metadata) = pid_file.get_spawn_metadata(child_pid) {
+                if let Some(hash) = service_hash
+                    && metadata.service_hash.as_deref() != Some(hash)
+                {
+                    continue;
+                }
+
+                let mut child = SpawnedChild {
+                    name: metadata.name.clone(),
+                    pid: child_pid,
+                    parent_pid: metadata.parent_pid,
+                    command: metadata.command.clone(),
+                    started_at: metadata.started_at,
+                    ttl: metadata.ttl_secs.map(Duration::from_secs),
+                    depth: metadata.depth,
+                    cpu_percent: metadata.cpu_percent,
+                    rss_bytes: metadata.rss_bytes,
+                    last_exit: metadata.last_exit.clone(),
+                };
+
+                let (cpu, rss) = sample_process_metrics(system, child_pid);
+                if cpu.is_some() || rss.is_some() {
+                    child.cpu_percent = cpu;
+                    child.rss_bytes = rss;
+                }
+
+                let descendants = build_spawn_tree_from_pidfile(
+                    pid_file,
+                    child_pid,
+                    service_hash,
+                    false,
+                    system,
+                );
+                nodes.push(SpawnedProcessNode::new(child, descendants));
+            }
+        }
+        return nodes;
+    }
+
+    if is_root && let Some(hash) = service_hash {
+        for metadata in pid_file.spawn_roots_for_service(hash) {
+            let mut child = SpawnedChild {
+                name: metadata.name.clone(),
+                pid: metadata.pid,
+                parent_pid: metadata.parent_pid,
+                command: metadata.command.clone(),
+                started_at: metadata.started_at,
+                ttl: metadata.ttl_secs.map(Duration::from_secs),
+                depth: metadata.depth,
+                cpu_percent: metadata.cpu_percent,
+                rss_bytes: metadata.rss_bytes,
+                last_exit: metadata.last_exit.clone(),
+            };
+
+            let (cpu, rss) = sample_process_metrics(system, metadata.pid);
+            if cpu.is_some() || rss.is_some() {
+                child.cpu_percent = cpu;
+                child.rss_bytes = rss;
+            }
+
+            let descendants = build_spawn_tree_from_pidfile(
+                pid_file,
+                metadata.pid,
+                Some(hash),
+                false,
+                system,
+            );
+            nodes.push(SpawnedProcessNode::new(child, descendants));
+        }
+    }
+
+    nodes
+}
+
+fn sample_process_metrics(
+    system: Option<&System>,
+    pid: u32,
+) -> (Option<f32>, Option<u64>) {
+    if let Some(system) = system
+        && let Some(process) = system.process(SysPid::from_u32(pid))
+    {
+        let cpu = Some(process.cpu_usage());
+        let rss = Some(process.memory() * 1024);
+        (cpu, rss)
+    } else {
+        (None, None)
+    }
 }
 
 /// Status entry for a managed service or cron unit.
@@ -427,6 +536,12 @@ fn build_snapshot(
 
     let mut units = Vec::new();
 
+    let process_system = {
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        Some(sys)
+    };
+
     for hash in unit_hashes {
         let actual_name = hash_to_name.get(&hash).cloned();
         let display_name = actual_name
@@ -525,10 +640,31 @@ fn build_snapshot(
             .map(|service_config| service_config.command.clone());
 
         // Get spawned children for this process if we have a PID
-        let spawned_children = if let Some(runtime) = &process_runtime
-            && let Some(manager) = spawn_manager
+        let service_hash_for_spawn = if matches!(kind, UnitKind::Service | UnitKind::Cron)
         {
-            build_spawn_tree(manager, runtime.pid)
+            Some(hash.as_str())
+        } else {
+            None
+        };
+
+        let spawned_children = if let Some(runtime) = &process_runtime {
+            let mut nodes = if let Some(manager) = spawn_manager {
+                build_spawn_tree(manager, runtime.pid, process_system.as_ref())
+            } else {
+                Vec::new()
+            };
+
+            if nodes.is_empty() {
+                nodes = build_spawn_tree_from_pidfile(
+                    pid_file,
+                    runtime.pid,
+                    service_hash_for_spawn,
+                    true,
+                    process_system.as_ref(),
+                );
+            }
+
+            nodes
         } else {
             Vec::new()
         };
@@ -574,11 +710,21 @@ fn build_snapshot(
             .and_then(|store| store.summarize_unit(service_name))
             .map(UnitMetricsSummary::from);
 
-        let spawned_children = if let Some(manager) = spawn_manager {
-            build_spawn_tree(manager, pid_value)
+        let mut spawned_children = if let Some(manager) = spawn_manager {
+            build_spawn_tree(manager, pid_value, process_system.as_ref())
         } else {
             Vec::new()
         };
+
+        if spawned_children.is_empty() {
+            spawned_children = build_spawn_tree_from_pidfile(
+                pid_file,
+                pid_value,
+                None,
+                true,
+                process_system.as_ref(),
+            );
+        }
 
         units.push(UnitStatus {
             name: service_name.clone(),
@@ -784,7 +930,7 @@ fn parse_elapsed_seconds(uptime_str: &str) -> Option<u64> {
     Some(total_seconds)
 }
 
-fn format_elapsed(total_seconds: u64) -> String {
+pub fn format_elapsed(total_seconds: u64) -> String {
     match total_seconds {
         0..=59 => format!("{} secs ago", total_seconds),
         60..=3_599 => format!("{} mins ago", total_seconds / 60),
@@ -1462,9 +1608,11 @@ mod tests {
         time::SystemTime,
     };
 
+    use serde_json::json;
     use tempfile::tempdir_in;
 
     use super::*;
+    use crate::{daemon::PersistedSpawnChild, spawn::SpawnedExit};
 
     #[test]
     fn format_cron_status_success_includes_green_exit_code() {
@@ -1495,6 +1643,47 @@ mod tests {
         assert!(formatted.contains("exit 2"));
         assert!(formatted.contains("boom"));
         assert!(formatted.contains(RED_BOLD));
+    }
+
+    #[test]
+    fn build_spawn_tree_from_pidfile_carries_metrics_and_exit() {
+        let parent_pid = 100;
+        let child_pid = 200;
+
+        let metadata = PersistedSpawnChild {
+            pid: child_pid,
+            name: "child".into(),
+            command: "echo hi".into(),
+            started_at: SystemTime::now(),
+            ttl_secs: None,
+            depth: 1,
+            parent_pid,
+            service_hash: None,
+            cpu_percent: Some(12.5),
+            rss_bytes: Some(2048),
+            last_exit: Some(SpawnedExit {
+                exit_code: Some(0),
+                signal: None,
+                finished_at: Some(SystemTime::now()),
+            }),
+        };
+
+        let pid_file: PidFile = serde_json::from_value(json!({
+            "services": {},
+            "parent_map": { child_pid.to_string(): parent_pid },
+            "children_map": { parent_pid.to_string(): [child_pid] },
+            "spawn_depth": { child_pid.to_string(): 1 },
+            "spawn_metadata": { child_pid.to_string(): metadata },
+        }))
+        .expect("deserialize pid file");
+
+        let nodes =
+            build_spawn_tree_from_pidfile(&pid_file, parent_pid, None, true, None);
+        assert_eq!(nodes.len(), 1);
+        let child = &nodes[0].child;
+        assert_eq!(child.cpu_percent, Some(12.5));
+        assert_eq!(child.rss_bytes, Some(2048));
+        assert!(child.last_exit.is_some());
     }
 
     #[test]
@@ -1548,6 +1737,95 @@ mod tests {
             assert_eq!(entry.status, ServiceLifecycleStatus::ExitedWithError);
             assert!(entry.pid.is_none());
         }
+
+        unsafe {
+            if let Some(home) = original_home {
+                env::set_var("HOME", home);
+            } else {
+                env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn disk_snapshot_includes_spawn_children_from_pidfile() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base directory");
+        let temp = tempdir_in(&base).expect("create temp home");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home directory");
+
+        let original_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        let config_path = home.join("systemg.yaml");
+        fs::write(
+            &config_path,
+            r#"version: "1"
+services:
+  demo:
+    command: "/bin/true"
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 5
+        depth: 3
+"#,
+        )
+        .expect("write config");
+
+        let config =
+            crate::config::load_config(Some(config_path.to_string_lossy().as_ref()))
+                .expect("load config");
+        let service = config.services.get("demo").expect("demo service");
+        let hash = service.compute_hash();
+
+        let mut pid_file = PidFile::load().expect("load pid file");
+        pid_file.insert("demo", 42).expect("insert service pid");
+        let persisted = PersistedSpawnChild {
+            pid: 4242,
+            name: "agent_child".into(),
+            command: "echo hi".into(),
+            started_at: SystemTime::now(),
+            ttl_secs: Some(5),
+            depth: 1,
+            parent_pid: 42,
+            service_hash: Some(hash.to_string()),
+            cpu_percent: Some(0.0),
+            rss_bytes: Some(0),
+            last_exit: None,
+        };
+        pid_file
+            .record_spawn(persisted)
+            .expect("record spawn metadata");
+
+        let mut state = ServiceStateFile::load().expect("load state");
+        state
+            .set(&hash, ServiceLifecycleStatus::Running, Some(42), None, None)
+            .expect("persist running state");
+
+        let snapshot = collect_disk_snapshot(Some(config)).expect("collect snapshot");
+        let unit = snapshot
+            .units
+            .iter()
+            .find(|unit| unit.name == "demo")
+            .expect("demo unit present");
+
+        assert_eq!(unit.spawned_children.len(), 1);
+        let child = &unit.spawned_children[0].child;
+        assert_eq!(child.name, "agent_child");
+        assert_eq!(child.pid, 4242);
+        assert_eq!(child.parent_pid, 42);
 
         unsafe {
             if let Some(home) = original_home {

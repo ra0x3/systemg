@@ -1,10 +1,12 @@
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::{
     fs, io,
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     sync::Arc,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use thiserror::Error;
@@ -13,11 +15,14 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{SkipConfig, SpawnMode, load_config},
     cron::{CronExecutionStatus, CronManager},
-    daemon::{Daemon, ServiceLifecycleStatus, ServiceReadyState, ServiceStateFile},
+    daemon::{
+        Daemon, PersistedSpawnChild, ServiceLifecycleStatus, ServiceReadyState,
+        ServiceStateFile,
+    },
     error::ProcessManagerError,
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
     metrics::{self, MetricsCollector, MetricsHandle},
-    spawn::{DynamicSpawnManager, SpawnedChild},
+    spawn::{DynamicSpawnManager, SpawnedChild, SpawnedExit},
     status::{StatusCache, StatusRefresher, StatusSnapshot, collect_runtime_snapshot},
 };
 
@@ -203,6 +208,15 @@ impl Supervisor {
 
                 // Only start services that are not cron jobs
                 self.daemon.start_service(service_name, service_config)?;
+
+                if let Some(ref spawn) = service_config.spawn
+                    && let Some(SpawnMode::Dynamic) = spawn.mode
+                    && let Ok(pid_file) = self.daemon.pid_file_handle().lock()
+                    && let Some(&pid) = pid_file.services().get(service_name)
+                {
+                    self.spawn_manager
+                        .register_service_pid(service_name.clone(), pid);
+                }
             }
         }
 
@@ -638,6 +652,16 @@ impl Supervisor {
                     let config = self.daemon.config();
                     if let Some(service_config) = config.services.get(&service_name) {
                         self.daemon.start_service(&service_name, service_config)?;
+
+                        if let Some(ref spawn) = service_config.spawn
+                            && let Some(SpawnMode::Dynamic) = spawn.mode
+                            && let Ok(pid_file) = self.daemon.pid_file_handle().lock()
+                            && let Some(&pid) = pid_file.services().get(&service_name)
+                        {
+                            self.spawn_manager
+                                .register_service_pid(service_name.clone(), pid);
+                        }
+
                         self.refresh_status_cache();
                         Ok(ControlResponse::Message(format!(
                             "Service '{service_name}' started"
@@ -741,9 +765,10 @@ impl Supervisor {
     }
 
     fn handle_spawn(&mut self, params: SpawnParams) -> Result<u32, SupervisorError> {
-        let depth = self
+        let spawn_auth = self
             .spawn_manager
             .authorize_spawn(params.parent_pid, &params.name)?;
+        let depth = spawn_auth.depth;
 
         let mut cmd = std::process::Command::new(&params.command[0]);
         if params.command.len() > 1 {
@@ -753,29 +778,80 @@ impl Supervisor {
         cmd.env("SPAWN_DEPTH", depth.to_string());
         cmd.env("SPAWN_PARENT_PID", params.parent_pid.to_string());
 
-        let child = cmd.spawn()?;
+        let mut child = cmd.spawn()?;
         let child_pid = child.id();
+        let command_string = params.command.join(" ");
+        let child_name = params.name.clone();
+        let started_at = SystemTime::now();
 
         let spawned_child = SpawnedChild {
-            name: params.name.clone(),
+            name: child_name.clone(),
             pid: child_pid,
             parent_pid: params.parent_pid,
-            command: params.command.join(" "),
-            spawned_at: std::time::Instant::now(),
+            command: command_string.clone(),
+            started_at,
             ttl: params.ttl.map(Duration::from_secs),
             depth,
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
         };
 
-        self.spawn_manager
-            .record_spawn(params.parent_pid, spawned_child)?;
+        let root_service = self.spawn_manager.record_spawn(
+            params.parent_pid,
+            spawned_child,
+            spawn_auth.root_service.clone(),
+        )?;
+        let effective_root = root_service.or(spawn_auth.root_service);
 
-        if let Ok(mut pid_file) = self.daemon.pid_file_handle().lock() {
-            let _ = pid_file.record_spawn(params.parent_pid, child_pid, depth);
+        let pid_file_handle = self.daemon.pid_file_handle();
+        if let Ok(mut pid_file) = pid_file_handle.lock() {
+            let service_hash = effective_root
+                .as_deref()
+                .and_then(|name| self.daemon.get_service_hash(name));
+            let persisted = PersistedSpawnChild {
+                pid: child_pid,
+                name: child_name.clone(),
+                command: command_string.clone(),
+                started_at,
+                ttl_secs: params.ttl,
+                depth,
+                parent_pid: params.parent_pid,
+                service_hash,
+                cpu_percent: None,
+                rss_bytes: None,
+                last_exit: None,
+            };
+            let _ = pid_file.record_spawn(persisted);
         }
+
+        let spawn_manager_for_exit = self.spawn_manager.clone();
+        let pid_file_for_exit = Arc::clone(&pid_file_handle);
+        thread::spawn(move || match child.wait() {
+            Ok(status) => {
+                let exit = SpawnedExit {
+                    exit_code: status.code(),
+                    #[cfg(unix)]
+                    signal: status.signal(),
+                    #[cfg(not(unix))]
+                    signal: None,
+                    finished_at: Some(SystemTime::now()),
+                };
+
+                spawn_manager_for_exit.record_spawn_exit(child_pid, exit.clone());
+
+                if let Ok(mut pid_file) = pid_file_for_exit.lock() {
+                    let _ = pid_file.record_spawn_exit(child_pid, exit);
+                }
+            }
+            Err(err) => {
+                error!("Failed to wait for spawned child {child_pid}: {err}");
+            }
+        });
 
         info!(
             "Spawned child '{}' (PID: {}) from parent {}",
-            params.name, child_pid, params.parent_pid
+            child_name, child_pid, params.parent_pid
         );
 
         Ok(child_pid)
