@@ -189,6 +189,15 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
 }
 
 /// Spawns a thread to capture and log output from dynamically spawned child processes.
+///
+/// # Arguments
+///
+/// * `root_service` - Optional parent service name for log organization
+/// * `child_name` - Name of the child process being logged
+/// * `pid` - Process ID of the child
+/// * `reader` - Reader for the child's output stream
+/// * `kind` - Type of stream (e.g., "stdout" or "stderr")
+/// * `echo_to_console` - Whether to echo output to console in addition to file
 pub fn spawn_dynamic_child_log_writer(
     root_service: Option<&str>,
     child_name: &str,
