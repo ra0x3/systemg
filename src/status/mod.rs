@@ -3,7 +3,7 @@
 #[cfg(target_os = "linux")]
 use std::time::UNIX_EPOCH;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     process::Command,
     sync::{
         Arc, Mutex, RwLock,
@@ -467,11 +467,19 @@ pub fn collect_runtime_snapshot(
     metrics: Option<&MetricsHandle>,
     spawn_manager: Option<&DynamicSpawnManager>,
 ) -> Result<StatusSnapshot, StatusError> {
+    let mut cron_state = CronStateFile::load()?;
+    let valid_cron_hashes: HashSet<String> = config
+        .services
+        .iter()
+        .filter(|(_, svc)| svc.cron.is_some())
+        .map(|(_, svc)| svc.compute_hash())
+        .collect();
+    prune_orphaned_cron_jobs(&mut cron_state, &valid_cron_hashes)?;
+
     let pid_guard = pid_file.lock().map_err(|_| StatusError::PidFilePoisoned)?;
     let mut state_guard = service_state
         .lock()
         .map_err(|_| StatusError::ServiceStatePoisoned)?;
-    let cron_state = CronStateFile::load()?;
     let metrics_guard = match metrics {
         Some(handle) => Some(handle.read().map_err(|_| StatusError::MetricsPoisoned)?),
         None => None,
@@ -481,7 +489,7 @@ pub fn collect_runtime_snapshot(
         Some(config.as_ref()),
         &pid_guard,
         &mut state_guard,
-        &cron_state,
+        &mut cron_state,
         metrics_guard.as_deref(),
         spawn_manager,
     ))
@@ -493,24 +501,49 @@ pub fn collect_disk_snapshot(
 ) -> Result<StatusSnapshot, StatusError> {
     let pid_file = PidFile::load()?;
     let mut service_state = ServiceStateFile::load()?;
-    let cron_state = CronStateFile::load()?;
+    let mut cron_state = CronStateFile::load()?;
     let config_ref = config.as_ref();
+
+    if let Some(cfg) = config_ref {
+        let valid_cron_hashes: HashSet<String> = cfg
+            .services
+            .iter()
+            .filter(|(_, svc)| svc.cron.is_some())
+            .map(|(_, svc)| svc.compute_hash())
+            .collect();
+        prune_orphaned_cron_jobs(&mut cron_state, &valid_cron_hashes)?;
+    }
 
     Ok(build_snapshot(
         config_ref,
         &pid_file,
         &mut service_state,
-        &cron_state,
+        &mut cron_state,
         None,
         None,
     ))
+}
+
+fn prune_orphaned_cron_jobs(
+    cron_state: &mut CronStateFile,
+    valid_hashes: &HashSet<String>,
+) -> Result<(), StatusError> {
+    if cron_state.jobs().is_empty() {
+        return Ok(());
+    }
+
+    if cron_state.prune_jobs_not_in(valid_hashes) {
+        cron_state.save().map_err(StatusError::CronState)?;
+    }
+
+    Ok(())
 }
 
 fn build_snapshot(
     config: Option<&Config>,
     pid_file: &PidFile,
     service_state: &mut ServiceStateFile,
-    cron_state: &CronStateFile,
+    cron_state: &mut CronStateFile,
     metrics_store: Option<&MetricsStore>,
     spawn_manager: Option<&DynamicSpawnManager>,
 ) -> StatusSnapshot {
@@ -558,6 +591,10 @@ fn build_snapshot(
                 UnitKind::Orphaned
             }
         });
+
+        if kind == UnitKind::Cron && actual_name.is_none() {
+            continue;
+        }
 
         let mut state_entry = service_state.get(&hash).cloned();
         let mut lifecycle = state_entry.as_ref().map(|entry| entry.status);
@@ -1836,6 +1873,56 @@ services:
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn build_snapshot_omits_orphaned_cron_units() {
+        let services = std::collections::HashMap::new();
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+            env: None,
+            metrics: crate::config::MetricsConfig::default(),
+        };
+
+        let pid_file = PidFile::default();
+        let mut service_state = ServiceStateFile::default();
+
+        let cron_state_json = json!({
+            "jobs": {
+                "deadbeefdeadbeef": {
+                    "last_execution": null,
+                    "execution_history": [],
+                    "timezone_label": "UTC",
+                    "timezone": "UTC"
+                }
+            }
+        });
+        let mut cron_state: CronStateFile =
+            serde_json::from_value(cron_state_json).expect("deserialize cron state");
+
+        let snapshot = build_snapshot(
+            Some(&config),
+            &pid_file,
+            &mut service_state,
+            &mut cron_state,
+            None,
+            None,
+        );
+
+        let orphan_cron_units: Vec<_> = snapshot
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.kind == UnitKind::Cron && unit.name.starts_with("[orphaned]")
+            })
+            .collect();
+
+        assert!(
+            orphan_cron_units.is_empty(),
+            "orphaned cron entries should be pruned from status"
+        );
     }
 
     #[test]

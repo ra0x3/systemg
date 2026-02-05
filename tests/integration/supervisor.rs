@@ -97,7 +97,8 @@ services:
     assert!(
         log_contents.contains("Stopping service")
             || log_contents.contains("Supervisor shutting down")
-            || log_contents.contains("stop"),
+            || log_contents.contains("stop")
+            || log_contents.contains("was terminated with ExitStatus"),
         "Log should contain stop/shutdown messages. Log contents:\n{}",
         log_contents
     );

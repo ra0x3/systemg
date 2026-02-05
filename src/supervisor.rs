@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{SkipConfig, SpawnMode, load_config},
+    config::{SkipConfig, SpawnMode, TerminationPolicy, load_config},
     cron::{CronExecutionStatus, CronManager},
     daemon::{
         Daemon, PersistedSpawnChild, ServiceLifecycleStatus, ServiceReadyState,
@@ -21,6 +21,7 @@ use crate::{
     },
     error::ProcessManagerError,
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
+    logs::spawn_dynamic_child_log_writer,
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedExit},
     status::{StatusCache, StatusRefresher, StatusSnapshot, collect_runtime_snapshot},
@@ -777,6 +778,8 @@ impl Supervisor {
 
         cmd.env("SPAWN_DEPTH", depth.to_string());
         cmd.env("SPAWN_PARENT_PID", params.parent_pid.to_string());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
         let mut child = cmd.spawn()?;
         let child_pid = child.id();
@@ -804,6 +807,29 @@ impl Supervisor {
         )?;
         let effective_root = root_service.or(spawn_auth.root_service);
 
+        let echo_to_console = !self.detach_children;
+        if let Some(stdout) = child.stdout.take() {
+            spawn_dynamic_child_log_writer(
+                effective_root.as_deref(),
+                &child_name,
+                child_pid,
+                stdout,
+                "stdout",
+                echo_to_console,
+            );
+        }
+
+        if let Some(stderr) = child.stderr.take() {
+            spawn_dynamic_child_log_writer(
+                effective_root.as_deref(),
+                &child_name,
+                child_pid,
+                stderr,
+                "stderr",
+                echo_to_console,
+            );
+        }
+
         let pid_file_handle = self.daemon.pid_file_handle();
         if let Ok(mut pid_file) = pid_file_handle.lock() {
             let service_hash = effective_root
@@ -827,6 +853,7 @@ impl Supervisor {
 
         let spawn_manager_for_exit = self.spawn_manager.clone();
         let pid_file_for_exit = Arc::clone(&pid_file_handle);
+        let child_name_for_exit = child_name.clone();
         thread::spawn(move || match child.wait() {
             Ok(status) => {
                 let exit = SpawnedExit {
@@ -840,8 +867,41 @@ impl Supervisor {
 
                 spawn_manager_for_exit.record_spawn_exit(child_pid, exit.clone());
 
-                if let Ok(mut pid_file) = pid_file_for_exit.lock() {
-                    let _ = pid_file.record_spawn_exit(child_pid, exit);
+                let termination_policy = spawn_manager_for_exit
+                    .termination_policy_for(child_pid)
+                    .unwrap_or(TerminationPolicy::Cascade);
+
+                if matches!(termination_policy, TerminationPolicy::Cascade) {
+                    let removed = spawn_manager_for_exit.remove_subtree(child_pid);
+
+                    if let Ok(mut pid_file) = pid_file_for_exit.lock()
+                        && let Err(err) = pid_file.remove_spawn_subtree(child_pid)
+                    {
+                        warn!(
+                            "Failed to remove spawn subtree rooted at {} from pid file: {}",
+                            child_pid, err
+                        );
+                    }
+
+                    for descendant in removed.iter().filter(|c| c.parent_pid == child_pid)
+                    {
+                        if let Err(err) = Daemon::terminate_process_tree(
+                            &descendant.name,
+                            descendant.pid,
+                        ) {
+                            warn!(
+                                "Failed to terminate descendant {} (pid {}) of '{}' after cascade: {}",
+                                descendant.name, descendant.pid, child_name_for_exit, err
+                            );
+                        }
+                    }
+                } else if let Ok(mut pid_file) = pid_file_for_exit.lock()
+                    && let Err(err) = pid_file.record_spawn_exit(child_pid, exit.clone())
+                {
+                    warn!(
+                        "Failed to record spawn exit for {} in pid file: {}",
+                        child_pid, err
+                    );
                 }
             }
             Err(err) => {

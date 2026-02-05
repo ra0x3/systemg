@@ -188,6 +188,85 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
     });
 }
 
+/// Spawns a thread to capture and log output from dynamically spawned child processes.
+///
+/// # Arguments
+///
+/// * `root_service` - Optional parent service name for log organization
+/// * `child_name` - Name of the child process being logged
+/// * `pid` - Process ID of the child
+/// * `reader` - Reader for the child's output stream
+/// * `kind` - Type of stream (e.g., "stdout" or "stderr")
+/// * `echo_to_console` - Whether to echo output to console in addition to file
+pub fn spawn_dynamic_child_log_writer(
+    root_service: Option<&str>,
+    child_name: &str,
+    pid: u32,
+    reader: impl Read + Send + 'static,
+    kind: &str,
+    echo_to_console: bool,
+) {
+    let owner_component = root_service
+        .map(normalize)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "dynamic".to_string());
+    let child_component = normalize(child_name);
+    let child_component = if child_component.is_empty() {
+        "child".to_string()
+    } else {
+        child_component
+    };
+
+    let mut path = runtime::log_dir();
+    path.push("spawn");
+    let file_name = format!(
+        "{}_{}_{}_{}.log",
+        owner_component, child_component, pid, kind
+    );
+    path.push(file_name);
+
+    let owner_label = root_service.map(str::to_string);
+    let child_label = child_name.to_string();
+    let kind_label = kind.to_string();
+
+    thread::spawn(move || {
+        if let Some(parent) = path.parent()
+            && let Err(err) = fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "Warning: Unable to create spawn log directory {:?}: {}",
+                parent, err
+            );
+            return;
+        }
+
+        let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => f,
+            Err(err) => {
+                eprintln!("Warning: Unable to open spawn log file {:?}: {}", path, err);
+                return;
+            }
+        };
+
+        let reader = BufReader::new(reader);
+        for line in reader.lines().map_while(Result::ok) {
+            if echo_to_console {
+                let owner = owner_label.as_deref().unwrap_or("spawn");
+                if kind_label == "stderr" {
+                    eprintln!("[{}:{}:{}] {}", owner, child_label, kind_label, line);
+                } else {
+                    println!("[{}:{}:{}] {}", owner, child_label, kind_label, line);
+                }
+            }
+
+            if let Err(err) = writeln!(file, "{line}") {
+                eprintln!("Warning: Failed to write spawn log {:?}: {}", path, err);
+                break;
+            }
+        }
+    });
+}
+
 /// Initializes logging for a service by spawning threads to write stdout and stderr to log files.
 pub struct LogManager {
     /// The PID file containing service names and their respective PIDs.
@@ -456,7 +535,10 @@ impl LogManager {
 mod tests {
     use std::{
         fs::{self, File},
+        io::Cursor,
         path::Path,
+        thread,
+        time::Duration,
     };
 
     use tempfile::tempdir_in;
@@ -491,6 +573,54 @@ mod tests {
 
         let resolved = resolve_log_path("arb_rs", "stdout");
         assert_eq!(resolved, target);
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn spawn_dynamic_child_log_writer_persists_output() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        let reader = Cursor::new(b"hello\nworld\n".to_vec());
+        super::spawn_dynamic_child_log_writer(
+            Some("alpha"),
+            "beta",
+            123,
+            reader,
+            "stdout",
+            false,
+        );
+
+        thread::sleep(Duration::from_millis(100));
+
+        let log_path = crate::runtime::log_dir()
+            .join("spawn")
+            .join("alpha_beta_123_stdout.log");
+        let contents =
+            fs::read_to_string(&log_path).expect("spawn log should be written");
+        assert!(contents.contains("hello"));
+        assert!(contents.contains("world"));
 
         unsafe {
             if let Some(home) = original_home {

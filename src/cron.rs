@@ -476,7 +476,7 @@ impl CronStateFile {
     }
 
     /// Saves the cron state to disk.
-    fn save(&self) -> Result<(), std::io::Error> {
+    pub(crate) fn save(&self) -> Result<(), std::io::Error> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -507,6 +507,12 @@ impl CronStateFile {
     /// Keys are service configuration hashes (not service names).
     pub fn jobs(&self) -> &std::collections::BTreeMap<String, PersistedCronJobState> {
         &self.jobs
+    }
+
+    pub(crate) fn prune_jobs_not_in(&mut self, valid_hashes: &HashSet<String>) -> bool {
+        let original_len = self.jobs.len();
+        self.jobs.retain(|hash, _| valid_hashes.contains(hash));
+        original_len != self.jobs.len()
     }
 }
 

@@ -350,6 +350,63 @@ impl DynamicSpawnManager {
             .ok()
     }
 
+    /// Resolves the termination policy associated with the tree that owns `pid`.
+    pub fn termination_policy_for(&self, pid: u32) -> Option<TerminationPolicy> {
+        let trees = self.spawn_trees.lock().unwrap();
+        let children = self.children_by_pid.lock().unwrap();
+        self.find_spawn_tree(pid, &trees, &children)
+            .map(|(_, tree)| tree.termination_policy.clone())
+            .ok()
+    }
+
+    /// Removes the subtree rooted at `root_pid`, returning all removed children.
+    pub fn remove_subtree(&self, root_pid: u32) -> Vec<SpawnedChild> {
+        let mut removed = Vec::new();
+
+        let mut pid_guard = self.children_by_pid.lock().unwrap();
+        let mut parent_guard = self.children_by_parent.lock().unwrap();
+
+        let Some(root_child) = pid_guard.get(&root_pid).cloned() else {
+            return removed;
+        };
+
+        let mut stack = vec![root_child.clone()];
+        let ancestor_parent = root_child.parent_pid;
+
+        while let Some(node) = stack.pop() {
+            let pid = node.pid;
+
+            if let Some(children) = parent_guard.remove(&pid) {
+                for child in children.into_iter().rev() {
+                    stack.push(child.clone());
+                }
+            }
+
+            if let Some(child) = pid_guard.remove(&pid) {
+                removed.push(child);
+            }
+        }
+
+        if let Some(siblings) = parent_guard.get_mut(&ancestor_parent) {
+            siblings.retain(|s| s.pid != root_pid);
+            if siblings.is_empty() {
+                parent_guard.remove(&ancestor_parent);
+            }
+        }
+
+        drop(parent_guard);
+        drop(pid_guard);
+
+        if !removed.is_empty() {
+            let mut timestamps = self.spawn_timestamps.lock().unwrap();
+            for child in &removed {
+                timestamps.remove(&child.pid);
+            }
+        }
+
+        removed
+    }
+
     /// Checks rate limiting for spawn requests.
     fn check_rate_limit(&self, parent_pid: u32) -> Result<(), ProcessManagerError> {
         let mut timestamps = self.spawn_timestamps.lock().unwrap();
@@ -493,6 +550,8 @@ impl Default for DynamicSpawnManager {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -663,5 +722,107 @@ mod tests {
         let children = manager.get_children(1);
         assert_eq!(children[0].cpu_percent, Some(42.0));
         assert_eq!(children[0].rss_bytes, Some(1024));
+    }
+
+    #[test]
+    fn termination_policy_for_returns_configured_policy() {
+        let manager = DynamicSpawnManager::new();
+        let limits = SpawnLimitsConfig {
+            children: Some(10),
+            depth: Some(6),
+            descendants: Some(50),
+            total_memory: None,
+            termination_policy: Some(TerminationPolicy::Orphan),
+        };
+
+        manager
+            .register_service("svc".to_string(), &limits)
+            .unwrap();
+        manager.register_service_pid("svc".to_string(), 1);
+
+        let child = SpawnedChild {
+            name: "child".to_string(),
+            pid: 2,
+            parent_pid: 1,
+            command: "cmd".to_string(),
+            started_at: SystemTime::now(),
+            ttl: None,
+            depth: 1,
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+        };
+
+        manager
+            .record_spawn(1, child, Some("svc".to_string()))
+            .expect("record_spawn should succeed");
+
+        let policy = manager
+            .termination_policy_for(2)
+            .expect("termination policy should be resolvable");
+        assert_eq!(policy, TerminationPolicy::Orphan);
+    }
+
+    #[test]
+    fn remove_subtree_removes_all_descendants() {
+        let manager = DynamicSpawnManager::new();
+        let limits = SpawnLimitsConfig {
+            children: Some(10),
+            depth: Some(6),
+            descendants: Some(50),
+            total_memory: None,
+            termination_policy: Some(TerminationPolicy::Cascade),
+        };
+
+        manager
+            .register_service("svc".to_string(), &limits)
+            .unwrap();
+        manager.register_service_pid("svc".to_string(), 1);
+
+        let child = SpawnedChild {
+            name: "child".to_string(),
+            pid: 2,
+            parent_pid: 1,
+            command: "cmd".to_string(),
+            started_at: SystemTime::now(),
+            ttl: None,
+            depth: 1,
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+        };
+
+        let grandchild = SpawnedChild {
+            name: "grandchild".to_string(),
+            pid: 3,
+            parent_pid: 2,
+            command: "cmd".to_string(),
+            started_at: SystemTime::now(),
+            ttl: None,
+            depth: 2,
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+        };
+
+        manager
+            .record_spawn(1, child, Some("svc".to_string()))
+            .expect("record_spawn should succeed");
+        manager
+            .record_spawn(2, grandchild, Some("svc".to_string()))
+            .expect("record_spawn should succeed");
+
+        let removed = manager.remove_subtree(2);
+        let removed_pids: HashSet<_> = removed.into_iter().map(|c| c.pid).collect();
+        assert_eq!(removed_pids, HashSet::from([2, 3]));
+
+        assert!(
+            manager.get_children(1).is_empty(),
+            "parent should have no children"
+        );
+        assert!(
+            manager.get_children(2).is_empty(),
+            "removed child should have no tracked descendants"
+        );
     }
 }

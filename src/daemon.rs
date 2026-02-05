@@ -336,6 +336,71 @@ impl PidFile {
         Ok(())
     }
 
+    pub(crate) fn remove_spawn_subtree(
+        &mut self,
+        root_pid: u32,
+    ) -> Result<Vec<u32>, PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path)?;
+            *self = serde_json::from_str::<Self>(&contents)?;
+        }
+
+        let removed = self.remove_spawn_subtree_in_memory(root_pid);
+
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+
+        Ok(removed)
+    }
+
+    /// Removes a subtree rooted at `root_pid` from the in-memory tracking maps.
+    pub(crate) fn remove_spawn_subtree_in_memory(&mut self, _root_pid: u32) -> Vec<u32> {
+        let root_pid = _root_pid;
+        if !self.parent_map.contains_key(&root_pid)
+            && !self.children_map.contains_key(&root_pid)
+            && !self.spawn_metadata.contains_key(&root_pid)
+        {
+            return Vec::new();
+        }
+
+        let root_parent = self.parent_map.get(&root_pid).copied();
+
+        let mut removed = Vec::new();
+        let mut stack = vec![root_pid];
+
+        while let Some(pid) = stack.pop() {
+            if let Some(children) = self.children_map.remove(&pid) {
+                for child_pid in children.into_iter().rev() {
+                    stack.push(child_pid);
+                }
+            }
+
+            self.parent_map.remove(&pid);
+            self.spawn_depth.remove(&pid);
+            self.spawn_metadata.remove(&pid);
+            removed.push(pid);
+        }
+
+        if let Some(parent_pid) = root_parent {
+            let remove_parent_entry =
+                if let Some(children) = self.children_map.get_mut(&parent_pid) {
+                    children.retain(|child| *child != root_pid);
+                    children.is_empty()
+                } else {
+                    false
+                };
+
+            if remove_parent_entry {
+                self.children_map.remove(&parent_pid);
+            }
+        }
+
+        removed
+    }
+
     /// Gets the parent PID for a child process.
     pub fn get_parent(&self, child_pid: u32) -> Option<u32> {
         self.parent_map.get(&child_pid).copied()
@@ -388,6 +453,76 @@ impl PidFile {
         }
 
         descendants
+    }
+}
+
+#[cfg(test)]
+mod pidfile_tests {
+    use std::{collections::HashMap, time::SystemTime};
+
+    use super::*;
+
+    #[test]
+    fn remove_spawn_subtree_in_memory_prunes_all_descendants() {
+        let mut pid_file = PidFile {
+            services: HashMap::new(),
+            parent_map: HashMap::from([(2, 1), (3, 2)]),
+            children_map: HashMap::from([(1, vec![2]), (2, vec![3])]),
+            spawn_depth: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+            spawn_metadata: HashMap::from([
+                (
+                    2,
+                    PersistedSpawnChild {
+                        pid: 2,
+                        name: "child".into(),
+                        command: "cmd".into(),
+                        started_at: SystemTime::now(),
+                        ttl_secs: None,
+                        depth: 1,
+                        parent_pid: 1,
+                        service_hash: None,
+                        cpu_percent: None,
+                        rss_bytes: None,
+                        last_exit: None,
+                    },
+                ),
+                (
+                    3,
+                    PersistedSpawnChild {
+                        pid: 3,
+                        name: "grandchild".into(),
+                        command: "cmd".into(),
+                        started_at: SystemTime::now(),
+                        ttl_secs: None,
+                        depth: 2,
+                        parent_pid: 2,
+                        service_hash: None,
+                        cpu_percent: None,
+                        rss_bytes: None,
+                        last_exit: None,
+                    },
+                ),
+            ]),
+        };
+
+        let removed = pid_file.remove_spawn_subtree_in_memory(2);
+        assert_eq!(
+            removed,
+            vec![2, 3],
+            "subtree removal should return root and descendants"
+        );
+        assert!(!pid_file.parent_map.contains_key(&2));
+        assert!(!pid_file.parent_map.contains_key(&3));
+        assert!(!pid_file.children_map.contains_key(&2));
+        assert!(
+            pid_file
+                .children_map
+                .get(&1)
+                .map(|children| children.is_empty())
+                .unwrap_or(true)
+        );
+        assert!(!pid_file.spawn_metadata.contains_key(&2));
+        assert!(!pid_file.spawn_metadata.contains_key(&3));
     }
 }
 
@@ -974,7 +1109,7 @@ impl Daemon {
     /// Terminates a process and all its descendants using escalating signals. First sends SIGTERM
     /// to the entire process tree and waits for graceful shutdown. If processes don't exit within
     /// the timeout, escalates to SIGKILL. Returns an error if any processes survive after SIGKILL.
-    fn terminate_process_tree(
+    pub(crate) fn terminate_process_tree(
         service_name: &str,
         root_pid: u32,
     ) -> Result<(), ProcessManagerError> {
