@@ -396,6 +396,94 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use std::time::SystemTime;
+
+    use systemg::{spawn::SpawnedChild, status::SpawnedProcessNode};
+
+    use super::*;
+
+    #[test]
+    fn visit_spawn_tree_renders_nested_children() {
+        let nodes = vec![SpawnedProcessNode::new(
+            SpawnedChild {
+                name: "team_lead".into(),
+                pid: 200,
+                parent_pid: 100,
+                command: "team lead".into(),
+                started_at: SystemTime::now(),
+                ttl: None,
+                depth: 1,
+                cpu_percent: None,
+                rss_bytes: None,
+                last_exit: None,
+            },
+            vec![
+                SpawnedProcessNode::new(
+                    SpawnedChild {
+                        name: "core_infra_dev".into(),
+                        pid: 300,
+                        parent_pid: 200,
+                        command: "core".into(),
+                        started_at: SystemTime::now(),
+                        ttl: None,
+                        depth: 2,
+                        cpu_percent: None,
+                        rss_bytes: None,
+                        last_exit: None,
+                    },
+                    vec![SpawnedProcessNode::new(
+                        SpawnedChild {
+                            name: "infra_helper".into(),
+                            pid: 400,
+                            parent_pid: 300,
+                            command: "infra helper".into(),
+                            started_at: SystemTime::now(),
+                            ttl: None,
+                            depth: 3,
+                            cpu_percent: None,
+                            rss_bytes: None,
+                            last_exit: None,
+                        },
+                        Vec::new(),
+                    )],
+                ),
+                SpawnedProcessNode::new(
+                    SpawnedChild {
+                        name: "ui_dev".into(),
+                        pid: 301,
+                        parent_pid: 200,
+                        command: "ui".into(),
+                        started_at: SystemTime::now(),
+                        ttl: None,
+                        depth: 2,
+                        cpu_percent: None,
+                        rss_bytes: None,
+                        last_exit: None,
+                    },
+                    Vec::new(),
+                ),
+            ],
+        )];
+
+        let mut rendered = Vec::new();
+        visit_spawn_tree(&nodes, "", &mut |child, prefix, _| {
+            rendered.push(format!("{}{}", prefix, child.name));
+        });
+
+        assert_eq!(
+            rendered,
+            vec![
+                "└─ team_lead".to_string(),
+                "   ├─ core_infra_dev".to_string(),
+                "   │  └─ infra_helper".to_string(),
+                "   └─ ui_dev".to_string(),
+            ],
+        );
+    }
+}
+
 struct StatusRenderOptions<'a> {
     json: bool,
     no_color: bool,

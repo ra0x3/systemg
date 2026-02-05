@@ -68,6 +68,11 @@ instruction chain completes. Every spawned agent appends `sleep 5` to its launch
 command so the process tree stays visible in `sysg status --watch 1` before it
 exits.
 
+> **Important:** When an agent spawns another from inside systemg, include
+> `--parent "${SPAWN_PARENT_PID}"` in the `sysg spawn` command. This keeps the
+> process tree connected so descendants terminate automatically when their
+> owner exits.
+
 ## What Happens
 1. `root_agent` logs the start of the multiplication chain and spawns `agent_1`.
 2. `agent_1` spawns `agent_2` and waits for its output.

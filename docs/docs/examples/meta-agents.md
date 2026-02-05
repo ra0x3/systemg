@@ -26,7 +26,10 @@ CLAUDE.md files."
 ```
 
 `sysg` keeps the root process under supervision, enforces spawn limits, and
-tracks every descendant agent until the instruction chain finishes.
+tracks every descendant agent until the instruction chain finishes. When a
+running agent spawns another, always include `--parent "${SPAWN_PARENT_PID}"` in
+the `sysg spawn` command so the cascade relationship is preserved and children
+terminate with their owner.
 
 ## Services
 

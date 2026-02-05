@@ -418,6 +418,16 @@ impl PidFile {
         self.spawn_metadata.get(&pid)
     }
 
+    pub(crate) fn spawn_children_for_parent(
+        &self,
+        parent_pid: u32,
+    ) -> Vec<&PersistedSpawnChild> {
+        self.spawn_metadata
+            .values()
+            .filter(|meta| meta.parent_pid == parent_pid)
+            .collect()
+    }
+
     pub(crate) fn spawn_roots_for_service(
         &self,
         service_hash: &str,

@@ -784,6 +784,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", home);
         }
+        crate::runtime::init_with_test_home(home);
+        crate::runtime::set_drop_privileges(false);
 
         let manager = CronManager::new();
 

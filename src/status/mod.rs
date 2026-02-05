@@ -179,45 +179,62 @@ fn build_spawn_tree_from_pidfile(
 ) -> Vec<SpawnedProcessNode> {
     let mut nodes = Vec::new();
 
+    let mut child_metadata = Vec::new();
+
     let child_pids = pid_file.get_children(parent_pid);
     if !child_pids.is_empty() {
         for child_pid in child_pids {
             if let Some(metadata) = pid_file.get_spawn_metadata(child_pid) {
-                if let Some(hash) = service_hash
-                    && metadata.service_hash.as_deref() != Some(hash)
-                {
-                    continue;
-                }
-
-                let mut child = SpawnedChild {
-                    name: metadata.name.clone(),
-                    pid: child_pid,
-                    parent_pid: metadata.parent_pid,
-                    command: metadata.command.clone(),
-                    started_at: metadata.started_at,
-                    ttl: metadata.ttl_secs.map(Duration::from_secs),
-                    depth: metadata.depth,
-                    cpu_percent: metadata.cpu_percent,
-                    rss_bytes: metadata.rss_bytes,
-                    last_exit: metadata.last_exit.clone(),
-                };
-
-                let (cpu, rss) = sample_process_metrics(system, child_pid);
-                if cpu.is_some() || rss.is_some() {
-                    child.cpu_percent = cpu;
-                    child.rss_bytes = rss;
-                }
-
-                let descendants = build_spawn_tree_from_pidfile(
-                    pid_file,
-                    child_pid,
-                    service_hash,
-                    false,
-                    system,
-                );
-                nodes.push(SpawnedProcessNode::new(child, descendants));
+                child_metadata.push(metadata.clone());
             }
         }
+    } else {
+        child_metadata.extend(
+            pid_file
+                .spawn_children_for_parent(parent_pid)
+                .into_iter()
+                .cloned(),
+        );
+    }
+
+    for metadata in child_metadata {
+        if let Some(hash) = service_hash
+            && metadata.service_hash.as_deref() != Some(hash)
+        {
+            continue;
+        }
+
+        let child_pid = metadata.pid;
+        let mut child = SpawnedChild {
+            name: metadata.name.clone(),
+            pid: child_pid,
+            parent_pid: metadata.parent_pid,
+            command: metadata.command.clone(),
+            started_at: metadata.started_at,
+            ttl: metadata.ttl_secs.map(Duration::from_secs),
+            depth: metadata.depth,
+            cpu_percent: metadata.cpu_percent,
+            rss_bytes: metadata.rss_bytes,
+            last_exit: metadata.last_exit.clone(),
+        };
+
+        let (cpu, rss) = sample_process_metrics(system, child_pid);
+        if cpu.is_some() || rss.is_some() {
+            child.cpu_percent = cpu;
+            child.rss_bytes = rss;
+        }
+
+        let descendants = build_spawn_tree_from_pidfile(
+            pid_file,
+            child_pid,
+            service_hash,
+            false,
+            system,
+        );
+        nodes.push(SpawnedProcessNode::new(child, descendants));
+    }
+
+    if !nodes.is_empty() {
         return nodes;
     }
 
@@ -1645,7 +1662,7 @@ mod tests {
         time::SystemTime,
     };
 
-    use serde_json::json;
+    use serde_json::{Map, Value, json};
     use tempfile::tempdir_in;
 
     use super::*;
@@ -1721,6 +1738,106 @@ mod tests {
         assert_eq!(child.cpu_percent, Some(12.5));
         assert_eq!(child.rss_bytes, Some(2048));
         assert!(child.last_exit.is_some());
+    }
+
+    #[test]
+    fn build_spawn_tree_from_pidfile_recovers_nested_metadata() {
+        let owner_pid = 5000;
+        let team_lead_pid = 5001;
+        let core_pid = 5002;
+        let ui_pid = 5003;
+        let service_hash = "demo-hash";
+
+        let team_lead = PersistedSpawnChild {
+            pid: team_lead_pid,
+            name: "team_lead".into(),
+            command: "team lead".into(),
+            started_at: SystemTime::now(),
+            ttl_secs: None,
+            depth: 1,
+            parent_pid: owner_pid,
+            service_hash: Some(service_hash.to_string()),
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+        };
+
+        let core_infra = PersistedSpawnChild {
+            pid: core_pid,
+            name: "core_infra_dev".into(),
+            command: "core".into(),
+            started_at: SystemTime::now(),
+            ttl_secs: None,
+            depth: 2,
+            parent_pid: team_lead_pid,
+            service_hash: Some(service_hash.to_string()),
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+        };
+
+        let ui_dev = PersistedSpawnChild {
+            pid: ui_pid,
+            name: "ui_dev".into(),
+            command: "ui".into(),
+            started_at: SystemTime::now(),
+            ttl_secs: None,
+            depth: 2,
+            parent_pid: team_lead_pid,
+            service_hash: Some(service_hash.to_string()),
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+        };
+
+        let mut spawn_metadata = Map::new();
+        spawn_metadata.insert(
+            team_lead_pid.to_string(),
+            serde_json::to_value(&team_lead).expect("serialize team lead"),
+        );
+        spawn_metadata.insert(
+            core_pid.to_string(),
+            serde_json::to_value(&core_infra).expect("serialize core"),
+        );
+        spawn_metadata.insert(
+            ui_pid.to_string(),
+            serde_json::to_value(&ui_dev).expect("serialize ui"),
+        );
+
+        let mut spawn_depth = Map::new();
+        spawn_depth.insert(team_lead_pid.to_string(), json!(1));
+        spawn_depth.insert(core_pid.to_string(), json!(2));
+        spawn_depth.insert(ui_pid.to_string(), json!(2));
+
+        let mut root = Map::new();
+        root.insert("services".to_string(), json!({}));
+        root.insert("parent_map".to_string(), json!({}));
+        root.insert("children_map".to_string(), json!({}));
+        root.insert("spawn_depth".to_string(), Value::Object(spawn_depth));
+        root.insert("spawn_metadata".to_string(), Value::Object(spawn_metadata));
+
+        let pid_file: PidFile =
+            serde_json::from_value(Value::Object(root)).expect("deserialize pid file");
+
+        let nodes = build_spawn_tree_from_pidfile(
+            &pid_file,
+            owner_pid,
+            Some(service_hash),
+            true,
+            None,
+        );
+
+        assert_eq!(nodes.len(), 1);
+        let team = &nodes[0];
+        assert_eq!(team.child.name, "team_lead");
+        assert_eq!(team.child.parent_pid, owner_pid);
+        let mut child_names: Vec<_> = team
+            .children
+            .iter()
+            .map(|node| node.child.name.as_str())
+            .collect();
+        child_names.sort();
+        assert_eq!(child_names, vec!["core_infra_dev", "ui_dev"]);
     }
 
     #[test]
