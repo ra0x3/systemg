@@ -63,3 +63,19 @@ in `/tmp/meta_agents`.
 - Observability via `sysg status`, `sysg logs`, and filesystem artifacts
 
 [View Meta-Agents Example →](/docs/examples/meta-agents)
+
+## Generative UI
+
+A fully autonomous AI-driven development team that builds a complete SystemG
+dashboard UI from specifications, demonstrating advanced multi-agent
+orchestration with proper parent-child process tracking.
+
+**Features demonstrated:**
+- Hierarchical team structure with proper parent-child spawning
+- Autonomous development workflow with specialized agent roles
+- File-based communication and completion signals
+- Token-efficient coordination protocols
+- Git workflow with designated push authority (Team Lead only)
+- Real browser testing capabilities for QA validation
+
+[View Generative UI Example →](/docs/examples/generative-ui)
