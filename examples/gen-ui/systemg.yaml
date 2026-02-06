@@ -1,0 +1,16 @@
+version: "1"
+
+services:
+  owner:
+    command: python3 agent.py --role owner --instructions instructions/OWNER.md
+    restart_policy: "always"
+    backoff: "10s"
+    env:
+      vars:
+        SPAWN_DEPTH: "0"
+        AGENT_NAME: "owner"
+        WORK_DIR: "."
+
+  # Other agents (team_lead, core_infra_dev, ui_dev, features_dev, qa_dev)
+  # are spawned dynamically by the owner/team_lead agents via agent.py's
+  # orchestration logic, not defined here as static services
