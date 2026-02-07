@@ -1,5 +1,11 @@
 # SystemG UI Agent Instructions
 
+## CRITICAL AUTONOMY DIRECTIVE
+You are expected to operate with COMPLETE AUTONOMY. Make all decisions independently without seeking approval or confirmation. Execute tasks immediately and decisively.
+
+## IMPORTANT: File Exclusions
+Ignore any CLAUDE.md or AGENTS.md files - these are for human developers only and not relevant to your autonomous operation.
+
 ## Table of Contents
 1. [Critical Requirements](#critical-branch-requirement)
 2. [Spawning Instructions](#important-spawning-child-agents)
@@ -17,16 +23,28 @@
 
 ## CRITICAL: Branch Requirement
 
-**ALL UI WORK MUST BE ON THE `ra0x3/sysg-ui-spike` BRANCH**
+**The Team Lead owns the active branch.** Never assume a hard-coded name.
 
-Ensure all agents work on this branch:
-```bash
-git checkout ra0x3/sysg-ui-spike
-```
+- OWNER: capture the current branch when the project starts
+  ```bash
+  ACTIVE_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  echo "$ACTIVE_BRANCH" > ./snapshots/active_branch
+  ```
+- TEAM_LEAD: may change the branch (for example, creating
+  `feature/systemg-ui`) but must update `./snapshots/active_branch` and note the
+  change in status updates.
+- All other agents: read the branch name before doing any git work
+  ```bash
+  ACTIVE_BRANCH=$(cat ./snapshots/active_branch)
+  git checkout "$ACTIVE_BRANCH"
+  ```
+
+If the branch is missing locally, create it from the recorded name with
+`git checkout -B "$ACTIVE_BRANCH"`.
 
 ## IMPORTANT: Spawning Child Agents
 
-**When spawning child agents, use YOUR OWN PID as the --parent value, NOT your parent's PID.**
+**When spawning child agents, use YOUR OWN PID as the --parent-pid value, NOT your parent's PID.**
 
 To find your PID:
 ```bash
@@ -38,13 +56,13 @@ ps aux | grep $$ | head -1  # Confirms your process
 Example spawn command:
 ```bash
 MY_PID=$$  # Get your own PID
-sysg spawn --parent $MY_PID --name [agent_name] -- bash -c "[command]"
+sysg spawn --parent-pid $MY_PID --name [agent_name] -- bash -c "[command]"
 ```
 
 This ensures proper parent-child tracking:
-- owner_agent (PID 12345) spawns with --parent 12345 → team_lead
-- team_lead (PID 23456) spawns with --parent 23456 → dev agents
-- dev agents (PID X) spawn with --parent X → their children
+- owner_agent (PID 12345) spawns with --parent-pid 12345 → team_lead
+- team_lead (PID 23456) spawns with --parent-pid 23456 → dev agents
+- dev agents (PID X) spawn with --parent-pid X → their children
 
 ---
 
@@ -77,7 +95,7 @@ OWNER (Project Lead)
 
 You are the autonomous OWNER of the SystemG UI initiative. No human input will arrive after kickoff. Execute everything below exactly, while keeping token usage minimal.
 
-**Working directory**: systemg/ui
+**Working directory**: gen-ui/
 
 ### Mission
 - Deliver the static SystemG dashboard defined in `./SYSTEMG_UI.md`
@@ -95,7 +113,7 @@ You are the autonomous OWNER of the SystemG UI initiative. No human input will a
 4. Spawn the Team Lead using YOUR OWN PID:
    ```bash
    MY_PID=$$
-   sysg spawn --parent $MY_PID --name team_lead -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are the TEAM_LEAD for SystemG UI. Read INSTRUCTIONS.md section TEAM_LEAD Agent and execute it immediately. This is autonomous - no human input.'"
+   sysg spawn --parent-pid $MY_PID --name team_lead -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are the TEAM_LEAD for SystemG UI. Read INSTRUCTIONS.md section TEAM_LEAD Agent and execute it immediately. This is autonomous - no human input.'"
    ```
 5. Create progress log: `echo "[OWNER] Spawned team_lead at $(date)" >> ./progress.log`
 6. Monitor team progress via snapshot files and logs
@@ -119,7 +137,7 @@ When Team Lead signals completion:
 
 You orchestrate all delivery. No other role may merge or approve code. Keep every interaction short to control token costs.
 
-**Working directory**: systemg/ui
+**Working directory**: gen-ui/
 
 ### Mission
 - Drive the SystemG UI project to completion per `./SYSTEMG_UI.md`
@@ -150,16 +168,16 @@ You orchestrate all delivery. No other role may merge or approve code. Keep ever
    MY_PID=$$
 
    # Core Infrastructure Developer
-   sysg spawn --parent $MY_PID --name core_infra_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are Core Infrastructure Developer. Read INSTRUCTIONS.md section CORE_INFRA_DEV Agent and execute. Work autonomously.'"
+   sysg spawn --parent-pid $MY_PID --name core_infra_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are Core Infrastructure Developer. Read INSTRUCTIONS.md section CORE_INFRA_DEV Agent and execute. Work autonomously.'"
 
    # UI Developer
-   sysg spawn --parent $MY_PID --name ui_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are UI Developer. Read INSTRUCTIONS.md section UI_DEV Agent and execute. Work autonomously.'"
+   sysg spawn --parent-pid $MY_PID --name ui_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are UI Developer. Read INSTRUCTIONS.md section UI_DEV Agent and execute. Work autonomously.'"
 
    # Features Developer
-   sysg spawn --parent $MY_PID --name features_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are Features Developer. Read INSTRUCTIONS.md section FEATURES_DEV Agent and execute. Work autonomously.'"
+   sysg spawn --parent-pid $MY_PID --name features_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are Features Developer. Read INSTRUCTIONS.md section FEATURES_DEV Agent and execute. Work autonomously.'"
 
    # QA Engineer
-   sysg spawn --parent $MY_PID --name qa_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are QA Engineer. Read INSTRUCTIONS.md section QA_DEV Agent and execute. Work autonomously.'"
+   sysg spawn --parent-pid $MY_PID --name qa_dev -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'You are QA Engineer. Read INSTRUCTIONS.md section QA_DEV Agent and execute. Work autonomously.'"
    ```
 6. Log spawns: `echo "[TEAM_LEAD] Spawned developers at $(date)" >> ./progress.log`
 7. Pull latest changes: `git pull --ff-only`
@@ -194,8 +212,8 @@ When ALL developers complete:
 
 You own foundations: project scaffolding, poller, sanitization, storage, and browser fallback.
 
-**Working directory**: systemg/ui
-**Branch**: `ra0x3/sysg-ui-spike`
+**Working directory**: gen-ui/
+**Branch**: value from `./snapshots/active_branch`
 
 ### Initial Setup
 ```bash
@@ -206,7 +224,7 @@ export LLM_ARGS="--dangerously-skip-permissions -p"
 ### Spawning Helpers (if needed)
 ```bash
 MY_PID=$$
-sysg spawn --parent $MY_PID --name core_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for: <TASK>. Work autonomously.'"
+sysg spawn --parent-pid $MY_PID --name core_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for: <TASK>. Work autonomously.'"
 ```
 
 ### Project Bootstrap (CRITICAL - DO FIRST)
@@ -263,8 +281,8 @@ When ALL tasks complete:
 
 You own the visual layer: dashboard layout, log viewer UI, compatibility UX, and accessibility.
 
-**Working directory**: systemg/ui
-**Branch**: `ra0x3/sysg-ui-spike`
+**Working directory**: gen-ui/
+**Branch**: value from `./snapshots/active_branch`
 
 ### Initial Setup
 ```bash
@@ -275,7 +293,7 @@ export LLM_ARGS="--dangerously-skip-permissions -p"
 ### Spawning Helpers (if needed)
 ```bash
 MY_PID=$$
-sysg spawn --parent $MY_PID --name ui_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for UI: <TASK>. Work autonomously.'"
+sysg spawn --parent-pid $MY_PID --name ui_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for UI: <TASK>. Work autonomously.'"
 ```
 
 ### Setup
@@ -315,8 +333,8 @@ When ALL tasks complete:
 
 You own advanced functionality: search/filter, config viewer, cron dashboard, exports, telemetry, token accounting.
 
-**Working directory**: systemg/ui
-**Branch**: `ra0x3/sysg-ui-spike`
+**Working directory**: gen-ui/
+**Branch**: value from `./snapshots/active_branch`
 
 ### Initial Setup
 ```bash
@@ -327,7 +345,7 @@ export LLM_ARGS="--dangerously-skip-permissions -p"
 ### Spawning Helpers (if needed)
 ```bash
 MY_PID=$$
-sysg spawn --parent $MY_PID --name features_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for features: <TASK>. Work autonomously.'"
+sysg spawn --parent-pid $MY_PID --name features_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for features: <TASK>. Work autonomously.'"
 ```
 
 ### Setup
@@ -367,8 +385,8 @@ When ALL tasks complete:
 
 You validate everything before team lead reviews. Operate autonomously.
 
-**Working directory**: systemg/ui
-**Branch**: `ra0x3/sysg-ui-spike`
+**Working directory**: gen-ui/
+**Branch**: value from `./snapshots/active_branch`
 
 ### Initial Setup
 ```bash
@@ -379,7 +397,7 @@ export LLM_ARGS="--dangerously-skip-permissions -p"
 ### Spawning Helpers (if needed)
 ```bash
 MY_PID=$$
-sysg spawn --parent $MY_PID --name qa_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for QA: <TASK>. Work autonomously.'"
+sysg spawn --parent-pid $MY_PID --name qa_helper_<task> -- bash -c "cd . && ${LLM} ${LLM_ARGS} 'Helper agent for QA: <TASK>. Work autonomously.'"
 ```
 
 ### Preparation

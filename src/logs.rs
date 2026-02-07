@@ -11,7 +11,7 @@ use std::{
     thread,
 };
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError, runtime};
 
@@ -168,6 +168,8 @@ fn resolve_tail_targets(
 /// Creates the log directory if it doesn't exist.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
     let path = get_log_path(service, kind);
+    let service_label = service.to_string();
+    let kind_label = kind.to_string();
     thread::spawn(move || {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).ok();
@@ -183,6 +185,10 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
 
         let reader = BufReader::new(reader);
         for line in reader.lines().map_while(Result::ok) {
+            match kind_label.as_str() {
+                "stderr" => warn!("[{service_label} {kind_label}] {line}"),
+                _ => debug!("[{service_label} {kind_label}] {line}"),
+            }
             let _ = writeln!(file, "{line}");
         }
     });

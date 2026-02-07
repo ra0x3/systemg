@@ -31,13 +31,13 @@ Each agent spawns children using its **own PID** as the parent, not its parent's
 ```bash
 # Correct spawning pattern
 MY_PID=$$  # Get agent's own PID
-sysg spawn --parent $MY_PID --name child_agent -- command
+sysg spawn --parent-pid $MY_PID --name child_agent -- command
 ```
 
 This ensures proper process tree tracking:
-- owner_agent (PID 12345) spawns with `--parent 12345` → team_lead
-- team_lead (PID 23456) spawns with `--parent 23456` → dev agents
-- dev agents (PID X) spawn with `--parent X` → their helpers
+- owner_agent (PID 12345) spawns with `--parent-pid 12345` → team_lead
+- team_lead (PID 23456) spawns with `--parent-pid 23456` → dev agents
+- dev agents (PID X) spawn with `--parent-pid X` → their helpers
 
 ## Features Demonstrated
 

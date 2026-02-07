@@ -2,6 +2,12 @@
 mod common;
 
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::{
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use assert_cmd::Command;
 use common::HomeEnvGuard;
@@ -10,6 +16,10 @@ use common::wait_for_pid_removed;
 use serde_json::Value;
 #[cfg(target_os = "linux")]
 use systemg::daemon::{Daemon, PidFile};
+#[cfg(target_os = "linux")]
+use systemg::{
+    config::SpawnMode, spawn::DynamicSpawnManager, status::collect_runtime_snapshot,
+};
 use systemg::{
     config::load_config,
     daemon::{ServiceLifecycleStatus, ServiceStateFile},
@@ -124,6 +134,163 @@ services:
     assert!(payload["samples"].as_array().unwrap().is_empty());
 
     drop(home_guard);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn status_reports_untracked_descendants() {
+    let temp = tempdir().expect("create tempdir");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("create home dir");
+    let _home_guard = HomeEnvGuard::set(&home);
+
+    let script_path = temp.path().join("spawn_children.py");
+    fs::write(
+        &script_path,
+        r#"#!/usr/bin/env python3
+import signal
+import subprocess
+import sys
+import time
+
+running = True
+
+
+def handle_stop(signum, frame):
+    global running
+    running = False
+
+
+signal.signal(signal.SIGTERM, handle_stop)
+signal.signal(signal.SIGINT, handle_stop)
+
+inner = "import subprocess,time\nproc = subprocess.Popen(['sleep','30'])\ntry:\n    time.sleep(30)\nfinally:\n    if proc.poll() is None:\n        proc.terminate()\n        try:\n            proc.wait(timeout=5)\n        except subprocess.TimeoutExpired:\n            proc.kill()\n"
+
+child = subprocess.Popen([sys.executable, "-c", inner])
+
+try:
+    while running:
+        time.sleep(0.25)
+finally:
+    if child.poll() is None:
+        child.terminate()
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+"#,
+    )
+    .expect("write spawn script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&script_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod script");
+    }
+
+    let config_path = temp.path().join("systemg.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  root:
+    command: "python3 {}"
+    restart_policy: "never"
+    spawn:
+      mode: "dynamic"
+      limits:
+        children: 5
+        depth: 3
+        descendants: 10
+"#,
+            script_path.display()
+        ),
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let service_config = config.services.get("root").expect("root service");
+
+    let daemon = Daemon::from_config(config.clone(), false).expect("daemon from config");
+
+    let spawn_manager = DynamicSpawnManager::new();
+    if let Some(spawn) = service_config.spawn.as_ref()
+        && matches!(spawn.mode, Some(SpawnMode::Dynamic))
+        && let Some(limits) = spawn.limits.as_ref()
+    {
+        spawn_manager
+            .register_service("root".to_string(), limits)
+            .expect("register service limits");
+    }
+
+    daemon.start_services().expect("start services");
+    let root_pid = common::wait_for_pid("root");
+    spawn_manager.register_service_pid("root".to_string(), root_pid);
+
+    let config_arc = daemon.config();
+    let pid_handle = daemon.pid_file_handle();
+    let state_handle = daemon.service_state_handle();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut found_python = false;
+    let mut found_sleep = false;
+
+    while Instant::now() < deadline {
+        let snapshot = collect_runtime_snapshot(
+            Arc::clone(&config_arc),
+            &pid_handle,
+            &state_handle,
+            None,
+            Some(&spawn_manager),
+        )
+        .expect("collect snapshot");
+
+        if let Some(unit) = snapshot.units.iter().find(|unit| unit.name == "root") {
+            found_python = false;
+            found_sleep = false;
+
+            fn walk(
+                node: &systemg::status::SpawnedProcessNode,
+                python: &mut bool,
+                sleep: &mut bool,
+            ) {
+                let command = node.child.command.as_str();
+                if command.contains("python") {
+                    *python = true;
+                }
+                if command.contains("sleep") {
+                    *sleep = true;
+                }
+                for child in &node.children {
+                    walk(child, python, sleep);
+                }
+            }
+
+            for child in &unit.spawned_children {
+                walk(child, &mut found_python, &mut found_sleep);
+            }
+
+            if found_python && found_sleep {
+                break;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    assert!(
+        found_python,
+        "expected python supervisor child to be visible in status"
+    );
+    assert!(
+        found_sleep,
+        "expected nested sleep grandchild to be visible in status"
+    );
+
+    daemon.stop_services().ok();
+    daemon.shutdown_monitor();
 }
 
 #[cfg(target_os = "linux")]

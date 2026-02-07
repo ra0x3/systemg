@@ -1801,7 +1801,16 @@ impl Daemon {
                         return Ok(ServiceReadyState::CompletedSuccess);
                     }
 
-                    let message = match status.code() {
+                    #[cfg(unix)]
+                    let signal = status.signal();
+                    #[cfg(not(unix))]
+                    let signal: Option<i32> = None;
+                    let exit_code = status.code();
+                    warn!(
+                        "Service '{service_name}' exited during startup (exit_code={exit_code:?}, signal={signal:?}). For details run: sysg logs {service_name}"
+                    );
+
+                    let message = match exit_code {
                         Some(code) => format!("process exited with status {code}"),
                         None => format!("process terminated unexpectedly: {status:?}"),
                     };
@@ -2503,7 +2512,7 @@ impl Daemon {
             }
         })?;
 
-        debug!("Service thread for '{name}' completed");
+        debug!("Service launch thread for '{name}' completed");
 
         match launch_result {
             Ok(pid) => {

@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 #[cfg(target_os = "linux")]
 use std::{fs, path::Path};
@@ -148,6 +148,41 @@ impl SpawnedProcessNode {
     }
 }
 
+fn collect_tracked_pids(nodes: &[SpawnedProcessNode], seen: &mut HashSet<u32>) {
+    for node in nodes {
+        if seen.insert(node.child.pid) {
+            collect_tracked_pids(&node.children, seen);
+        }
+    }
+}
+
+fn retain_unique(node: &mut SpawnedProcessNode, seen: &mut HashSet<u32>) -> bool {
+    if !seen.insert(node.child.pid) {
+        return false;
+    }
+
+    let mut filtered = Vec::new();
+    for mut child in node.children.drain(..) {
+        if retain_unique(&mut child, seen) {
+            filtered.push(child);
+        }
+    }
+    node.children = filtered;
+    true
+}
+
+fn append_unique_nodes(
+    target: &mut Vec<SpawnedProcessNode>,
+    mut nodes: Vec<SpawnedProcessNode>,
+    seen: &mut HashSet<u32>,
+) {
+    for mut node in nodes.drain(..) {
+        if retain_unique(&mut node, seen) {
+            target.push(node);
+        }
+    }
+}
+
 fn build_spawn_tree(
     manager: &DynamicSpawnManager,
     parent_pid: u32,
@@ -271,6 +306,66 @@ fn build_spawn_tree_from_pidfile(
     }
 
     nodes
+}
+
+fn build_spawn_tree_from_system(
+    system: Option<&System>,
+    parent_pid: u32,
+    depth: usize,
+    seen: &mut HashSet<u32>,
+) -> Vec<SpawnedProcessNode> {
+    let mut nodes = Vec::new();
+    let Some(system) = system else {
+        return nodes;
+    };
+
+    for (proc_pid, process) in system.processes() {
+        if let Some(parent) = process.parent()
+            && parent.as_u32() == parent_pid
+        {
+            let child_pid = proc_pid.as_u32();
+            if !seen.insert(child_pid) {
+                continue;
+            }
+
+            let (cpu_percent, rss_bytes) =
+                sample_process_metrics(Some(system), child_pid);
+            let command = StatusManager::get_process_cmdline(child_pid);
+            let mut display_name = command
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if display_name.is_empty() {
+                display_name = format!("pid-{child_pid}");
+            }
+            let started_at = process_started_at(system, process);
+
+            let child = SpawnedChild {
+                name: display_name,
+                pid: child_pid,
+                parent_pid,
+                command,
+                started_at,
+                ttl: None,
+                depth,
+                cpu_percent,
+                rss_bytes,
+                last_exit: None,
+            };
+
+            let descendants =
+                build_spawn_tree_from_system(Some(system), child_pid, depth + 1, seen);
+
+            nodes.push(SpawnedProcessNode::new(child, descendants));
+        }
+    }
+
+    nodes
+}
+
+fn process_started_at(_system: &System, _process: &sysinfo::Process) -> SystemTime {
+    SystemTime::now()
 }
 
 fn sample_process_metrics(
@@ -702,21 +797,34 @@ fn build_snapshot(
         };
 
         let spawned_children = if let Some(runtime) = &process_runtime {
-            let mut nodes = if let Some(manager) = spawn_manager {
-                build_spawn_tree(manager, runtime.pid, process_system.as_ref())
-            } else {
-                Vec::new()
-            };
+            let mut seen = HashSet::new();
+            seen.insert(runtime.pid);
 
-            if nodes.is_empty() {
-                nodes = build_spawn_tree_from_pidfile(
-                    pid_file,
-                    runtime.pid,
-                    service_hash_for_spawn,
-                    true,
-                    process_system.as_ref(),
-                );
+            let mut nodes = Vec::new();
+
+            if let Some(manager) = spawn_manager {
+                let managed =
+                    build_spawn_tree(manager, runtime.pid, process_system.as_ref());
+                collect_tracked_pids(&managed, &mut seen);
+                nodes.extend(managed);
             }
+
+            let pidfile_nodes = build_spawn_tree_from_pidfile(
+                pid_file,
+                runtime.pid,
+                service_hash_for_spawn,
+                true,
+                process_system.as_ref(),
+            );
+            append_unique_nodes(&mut nodes, pidfile_nodes, &mut seen);
+
+            let system_nodes = build_spawn_tree_from_system(
+                process_system.as_ref(),
+                runtime.pid,
+                1,
+                &mut seen,
+            );
+            append_unique_nodes(&mut nodes, system_nodes, &mut seen);
 
             nodes
         } else {

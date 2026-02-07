@@ -69,8 +69,8 @@ command so the process tree stays visible in `sysg status --watch 1` before it
 exits.
 
 > **Important:** When an agent spawns another from inside systemg, include
-> `--parent "${SPAWN_PARENT_PID}"` in the `sysg spawn` command. This keeps the
-> process tree connected so descendants terminate automatically when their
+> `--parent-pid "${SPAWN_PARENT_PID}"` in the `sysg spawn` command. This keeps
+> the process tree connected so descendants terminate automatically when their
 > owner exits.
 
 ## What Happens

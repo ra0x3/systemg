@@ -10,22 +10,23 @@ Open `index.html`, point it at your `~/.systemg` directory, and watch your proce
 
 ## Important: Branch Requirement
 
-**ALL UI DEVELOPMENT WORK MUST BE DONE ON THE `ra0x3/sysg-ui-spike` BRANCH**
+**Branch ownership sits with the Team Lead.** The repo does not mandate a
+specific branch name.
 
-Do not use any other branch for UI-related changes. All developers working on the SystemG UI must:
-1. Check out the `ra0x3/sysg-ui-spike` branch before starting any work
-2. Create feature branches from `ra0x3/sysg-ui-spike` (not from main)
-3. Submit PRs targeting `ra0x3/sysg-ui-spike` (not main)
+- At kickoff, the Owner records the current branch under
+  `./snapshots/active_branch`.
+- The Team Lead updates that file whenever they change the base branch,
+  communicating the change in status updates.
+- All other agents read the file and check out the recorded branch before
+  working:
+  ```bash
+  ACTIVE_BRANCH=$(cat ./snapshots/active_branch)
+  git checkout "$ACTIVE_BRANCH"
+  ```
 
-```bash
-# Switch to the required branch
-git checkout ra0x3/sysg-ui-spike
-
-# Create your feature branch from it
-git checkout -b feature/your-feature-name
-
-# When pushing, ensure your PR targets ra0x3/sysg-ui-spike
-```
+Feature branches (`feature/<area>-<slug>`) should be cut from the recorded
+branch and merged back into it. If the branch does not exist locally, create it
+with `git checkout -B "$ACTIVE_BRANCH"`.
 
 ---
 

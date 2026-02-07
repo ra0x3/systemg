@@ -1,131 +1,67 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-echo "Starting UI cleanup..."
+echo "[cleanup] Resetting gen-ui example workspace..."
 
-if [ -d "snapshots" ]; then
-    echo "Removing snapshots directory..."
-    rm -rf snapshots
-fi
+DIRS_TO_REMOVE=(
+  "snapshots"
+  "gen-ui"
+  "dist"
+  "src"
+  "build"
+  "node_modules"
+  "coverage"
+  ".next"
+  ".cache"
+  ".turbo"
+  ".parcel-cache"
+)
 
-if [ -d "dist" ]; then
-    echo "Removing dist directory..."
-    rm -rf dist
-fi
+for dir in "${DIRS_TO_REMOVE[@]}"; do
+  if [ -d "$dir" ]; then
+    echo "[cleanup] Removing directory: $dir"
+    rm -rf "$dir"
+  fi
+done
 
-if [ -d "build" ]; then
-    echo "Removing build directory..."
-    rm -rf build
-fi
+FILES_TO_REMOVE=(
+  "progress.log"
+  "package.json"
+  "package-lock.json"
+  "yarn.lock"
+  "pnpm-lock.yaml"
+  "tsconfig.json"
+  "tsconfig.node.json"
+  "vite.config.ts"
+  "vitest.config.ts"
+  ".eslintrc.json"
+  "eslint.config.js"
+  "eslint.config.mjs"
+  "eslint.config.cjs"
+  ".prettierrc"
+  ".prettierrc.json"
+  ".prettierrc.yml"
+  ".prettierrc.yaml"
+  ".prettierrc.js"
+  "index.html"
+  "test-browser.js"
+)
 
-echo "Cleaning temporary files..."
+for file in "${FILES_TO_REMOVE[@]}"; do
+  if [ -e "$file" ]; then
+    echo "[cleanup] Removing file: $file"
+    rm -f "$file"
+  fi
+done
 
-set -e
+find "$SCRIPT_DIR" -maxdepth 1 -type f \
+  \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.jsx' -o -name '*.tsx' \) \
+  -print -delete 2>/dev/null || true
 
-echo "Starting COMPLETE UI cleanup..."
-echo "⚠️  WARNING: This will remove ALL source code and build artifacts!"
-echo ""
+mkdir -p snapshots
 
-echo "Removing all source code..."
-rm -rf src/ 2>/dev/null || true
-rm -rf tests/ 2>/dev/null || true
-rm -rf public/ 2>/dev/null || true
-
-echo "Removing build artifacts and dependencies..."
-rm -rf dist/ 2>/dev/null || true
-rm -rf build/ 2>/dev/null || true
-rm -rf node_modules/ 2>/dev/null || true
-rm -rf coverage/ 2>/dev/null || true
-
-echo "Removing configuration files..."
-rm -f package.json 2>/dev/null || true
-rm -f package-lock.json 2>/dev/null || true
-rm -f yarn.lock 2>/dev/null || true
-rm -f pnpm-lock.yaml 2>/dev/null || true
-rm -f tsconfig.json 2>/dev/null || true
-rm -f tsconfig.node.json 2>/dev/null || true
-rm -f vite.config.ts 2>/dev/null || true
-rm -f vitest.config.ts 2>/dev/null || true
-rm -f .eslintrc.json 2>/dev/null || true
-rm -f eslint.config.js 2>/dev/null || true
-rm -f eslint.config.mjs 2>/dev/null || true
-rm -f eslint.config.cjs 2>/dev/null || true
-rm -f .prettierrc 2>/dev/null || true
-rm -f index.html 2>/dev/null || true
-rm -f test-browser.js 2>/dev/null || true
-
-echo "Removing temporary files and caches..."
-echo "Removing all JavaScript files..."
-rm -f *.js 2>/dev/null || true
-rm -f *.mjs 2>/dev/null || true
-rm -f *.cjs 2>/dev/null || true
-rm -f **/*.js 2>/dev/null || true
-rm -f **/*.mjs 2>/dev/null || true
-rm -f **/*.cjs 2>/dev/null || true
-
-echo "Removing temporary files and caches..."
-rm -rf .next 2>/dev/null || true
-rm -rf .cache 2>/dev/null || true
-rm -rf .turbo 2>/dev/null || true
-rm -rf .parcel-cache 2>/dev/null || true
-rm -rf coverage 2>/dev/null || true
-
-if [ -d "logs" ]; then
-    echo "Cleaning log files..."
-    find logs -type f -name "*.log" -delete 2>/dev/null || true
-fi
-
-rm -f *.log 2>/dev/null || true
-rm -f *.pid 2>/dev/null || true
-rm -f .DS_Store 2>/dev/null || true
-rm -rf **/.DS_Store 2>/dev/null || true
-
-echo "Cleanup complete!"
-echo ""
-echo "Preserved:"
-echo "  - INSTRUCTIONS.md"
-echo "  - SYSTEMG_UI.md"
-echo "  - .env files"
-echo "  - source code"
-echo "  - package.json"
-echo ""
-echo "Ready for agent restart, Master!"
-
-echo "Removing all log files..."
-rm -f *.log 2>/dev/null || true
-rm -f *.pid 2>/dev/null || true
-rm -rf logs/ 2>/dev/null || true
-
-rm -f .DS_Store 2>/dev/null || true
-rm -rf **/.DS_Store 2>/dev/null || true
-
-echo "Resetting snapshots..."
-if [ -d "snapshots" ]; then
-    rm -rf snapshots/*
-    rm -rf snapshots/.*[!.] 2>/dev/null || true
-
-else
-    mkdir -p snapshots
-fi
-
-echo ""
-echo "✅ Complete cleanup finished!"
-echo ""
-echo "Removed:"
-echo "  - ALL source code (src/, tests/, public/)"
-echo "  - ALL build artifacts (dist/, node_modules/)"
-echo "  - ALL configuration files (except .env)"
-echo "  - ALL ESLint configuration files"
-echo "  - ALL JavaScript files (*.js, *.mjs, *.cjs)"
-echo "  - ALL logs and temporary files"
-echo ""
-echo "Reset:"
-echo "  - snapshots/ (empty files maintained for structure)"
-echo ""
-echo "Preserved:"
-echo "  - .claude/"
-echo "  - .env"
-echo "  - cleanup.sh (this script)"
-echo "  - snapshots/"
-echo ""
+echo "[cleanup] Done. Preserved INSTRUCTIONS.md, SYSTEMG_UI.md, cleanup.sh."
+echo "[cleanup] Workspace reset complete."

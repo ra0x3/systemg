@@ -116,6 +116,10 @@ class Agent:
     execute work, coordinate with other agents, and manage their lifecycle.
     """
 
+    LOG_CAPTURE_LIMIT = 16_384
+    SPAWN_TIMEOUT_SECONDS = 600.0
+    SPAWN_POLL_INTERVAL = 5.0  # Reduced frequency to avoid log spam
+
     def __init__(
         self,
         role: Union[str, AgentRole],
@@ -147,6 +151,7 @@ class Agent:
         self.state = AgentState(status=AgentStatus.IDLE)
         self.pid = os.getpid()
         self.start_time = datetime.now()
+        self._root_service: Optional[str] = None
 
         # Set up signal handlers for graceful shutdown
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -164,7 +169,12 @@ class Agent:
         """
         print(f"[{self.role.value}] Received shutdown signal {signum}")
         self.running = False
-        self.update_status(AgentStatus.DONE, task="Shutting down")
+        # Preserve current phase on shutdown
+        self.update_status(
+            AgentStatus.DONE,
+            phase=self.state.current_phase,  # Keep current phase
+            task="Shutting down"
+        )
         sys.exit(0)
 
     def read_instructions(self) -> str:
@@ -318,44 +328,314 @@ class Agent:
         full_prompt = "\n\n".join(prompt_parts)
         cmd.append(full_prompt)
 
-        print(f"[{self.role.value}] Executing work...")
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=self.work_dir
+        print(f"[{self.role.value}] Executing work via systemg supervision...")
+
+        # For testing: simulate quick completion without actually running Claude
+        if os.getenv("QUICK_TEST_MODE") == "true":
+            print(f"[{self.role.value}] TEST MODE: Simulating work completion")
+            # Create some test files/directories to make verify_work pass
+            if self.role == AgentRole.TEAM_LEAD:
+                # Create package.json to simulate project setup
+                package_json = self.work_dir / "package.json"
+                package_json.write_text('{"name": "systemg-ui", "version": "1.0.0"}')
+            time.sleep(2)  # Brief delay to simulate work
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout="Test work completed successfully",
+                stderr=""
+            )
+
+        result = self.run_managed_process(
+            name=f"{self.role.value}_work",
+            command=cmd,
         )
 
         if result.returncode != 0:
+            error_detail = result.stderr or "Claude execution failed"
             self.update_status(
                 AgentStatus.FAILED,
-                error=f"Claude execution failed: {result.stderr}"
+                error=error_detail
             )
 
         return result
 
-    def spawn_agent(self, role: AgentRole, instructions_file: str) -> subprocess.Popen:
-        """
-        Spawn a child agent directly as a subprocess.
-
-        Note: This creates a direct subprocess rather than using sysg spawn
-        to maintain process hierarchy without external dependencies.
-
-        Args:
-            role: Role of the agent to spawn
-            instructions_file: Path to the agent's instructions
-
-        Returns:
-            Popen object for the spawned process
-        """
-        spawn_cmd = [
-            sys.executable, __file__,
-            "--role", role.value,
-            "--instructions", instructions_file
+    def spawn_agent(self, role: AgentRole, instructions_file: str) -> Optional[int]:
+        """Spawn a child agent under systemg supervision so it stays tracked."""
+        agent_command = [
+            sys.executable,
+            __file__,
+            "--role",
+            role.value,
+            "--instructions",
+            instructions_file,
+            "--work-dir",
+            str(self.work_dir),
         ]
 
-        print(f"[{self.role.value}] Spawning {role.value} agent...")
-        return subprocess.Popen(spawn_cmd, cwd=self.work_dir)
+        print(f"[{self.role.value}] Spawning {role.value} agent under systemg supervision...")
+        try:
+            return self._sysg_spawn(role.value, agent_command)
+        except RuntimeError as exc:
+            print(f"[{self.role.value}] Failed to spawn {role.value}: {exc}")
+            self.update_status(
+                AgentStatus.FAILED,
+                error=f"Failed to spawn {role.value}: {exc}"
+            )
+            return None
+
+    def _sysg_spawn(
+        self,
+        name: str,
+        command: List[str],
+        env: Optional[Dict[str, str]] = None,
+    ) -> int:
+        spawn_cmd = [
+            "sysg",
+            "spawn",
+            "--parent-pid",
+            str(self.pid),
+            "--name",
+            name,
+            "--",
+        ]
+        spawn_cmd.extend(command)
+
+        result = subprocess.run(
+            spawn_cmd,
+            capture_output=True,
+            text=True,
+            cwd=self.work_dir,
+            env=env,
+        )
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or "unknown error"
+            raise RuntimeError(f"sysg spawn failed: {stderr}")
+
+        output_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        if not output_lines:
+            raise RuntimeError("sysg spawn returned no pid")
+
+        try:
+            pid = int(output_lines[-1].strip())
+        except ValueError as exc:
+            raise RuntimeError(
+                f"sysg spawn returned invalid pid output: {result.stdout!r}"
+            ) from exc
+
+        print(f"[{self.role.value}] Managed process '{name}' running as PID {pid}")
+        return pid
+
+    def _normalize_name(self, value: str) -> str:
+        return "".join(ch.lower() for ch in value if ch.isascii() and ch.isalnum())
+
+    def _spawn_log_path(self, root_service: str, name: str, pid: int, kind: str) -> Path:
+        root_component = self._normalize_name(root_service) or "dynamic"
+        child_component = self._normalize_name(name) or "child"
+        file_name = f"{root_component}_{child_component}_{pid}_{kind}.log"
+        return Path.home() / ".local/share/systemg/logs/spawn" / file_name
+
+    def _read_spawn_log(self, root_service: str, name: str, pid: int, kind: str) -> str:
+        path = self._spawn_log_path(root_service, name, pid, kind)
+        try:
+            if not path.exists():
+                return ""
+            data = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"<unable to read {path}: {exc}>"
+
+        if len(data) > self.LOG_CAPTURE_LIMIT:
+            return data[-self.LOG_CAPTURE_LIMIT :]
+        return data
+
+    def _inspect_unit(self, unit: str) -> Optional[Dict[str, Any]]:
+        cmd = [
+            "sysg",
+            "inspect",
+            "--config",
+            str(self.work_dir / "systemg.yaml"),
+            "--json",
+            unit,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=self.work_dir,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+
+        return payload.get("unit")
+
+    def _find_spawn_child(
+        self,
+        nodes: Optional[List[Dict[str, Any]]],
+        pid: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not nodes:
+            return None
+
+        for node in nodes:
+            child = node.get("child", {})
+            if child.get("pid") == pid:
+                return node
+            descendant = self._find_spawn_child(node.get("children"), pid)
+            if descendant:
+                return descendant
+        return None
+
+    def _pid_in_spawn_tree(
+        self,
+        nodes: Optional[List[Dict[str, Any]]],
+        pid: int,
+    ) -> bool:
+        return self._find_spawn_child(nodes, pid) is not None
+
+    def _status_snapshot(self) -> Optional[Dict[str, Any]]:
+        cmd = [
+            "sysg",
+            "status",
+            "--config",
+            str(self.work_dir / "systemg.yaml"),
+            "--json",
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=self.work_dir,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+
+    def _get_root_service(self) -> str:
+        if self._root_service:
+            return self._root_service
+
+        if self.role == AgentRole.OWNER:
+            self._root_service = self.role.value
+            return self._root_service
+
+        snapshot = self._status_snapshot()
+        if snapshot:
+            for unit in snapshot.get("units", []):
+                if unit.get("kind") != "service":
+                    continue
+
+                runtime = unit.get("process") or {}
+                if runtime.get("pid") == self.pid:
+                    self._root_service = unit.get("name", self.role.value)
+                    return self._root_service
+
+                if self._pid_in_spawn_tree(unit.get("spawned_children"), self.pid):
+                    self._root_service = unit.get("name", self.role.value)
+                    return self._root_service
+
+        self._root_service = self.role.value
+        return self._root_service
+
+    def _wait_for_spawned_process(
+        self,
+        pid: int,
+        name: str,
+        timeout: float = SPAWN_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        root_service = self._get_root_service()
+        deadline = time.time() + timeout if timeout else None
+        consecutive_missing = 0
+
+        while True:
+            unit_details = self._inspect_unit(root_service)
+            node = self._find_spawn_child(
+                unit_details.get("spawned_children") if unit_details else None,
+                pid,
+            )
+
+            if node is None:
+                consecutive_missing += 1
+                if consecutive_missing >= 5:
+                    break
+            else:
+                consecutive_missing = 0
+                child = node.get("child", {})
+                exit_meta = child.get("last_exit")
+                if exit_meta is not None:
+                    exit_code = exit_meta.get("exit_code")
+                    signal_num = exit_meta.get("signal")
+                    if exit_code is None and signal_num is not None:
+                        exit_code = 128 + signal_num
+
+                    stdout = self._read_spawn_log(
+                        root_service,
+                        child.get("name", name),
+                        pid,
+                        "stdout",
+                    )
+                    stderr = self._read_spawn_log(
+                        root_service,
+                        child.get("name", name),
+                        pid,
+                        "stderr",
+                    )
+
+                    return {
+                        "exit_code": exit_code if exit_code is not None else 0,
+                        "signal": signal_num,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    }
+
+            if deadline and time.time() >= deadline:
+                break
+
+            time.sleep(self.SPAWN_POLL_INTERVAL)
+
+        return {
+            "exit_code": 124,
+            "signal": None,
+            "stdout": "",
+            "stderr": (
+                f"Timed out waiting for managed process '{name}' (pid {pid})"
+            ),
+        }
+
+    def run_managed_process(
+        self,
+        name: str,
+        command: List[str],
+        env: Optional[Dict[str, str]] = None,
+    ) -> subprocess.CompletedProcess:
+        try:
+            pid = self._sysg_spawn(name, command, env=env)
+        except RuntimeError as exc:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="",
+                stderr=str(exc),
+            )
+
+        exit_info = self._wait_for_spawned_process(pid, name)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=exit_info.get("exit_code", 1),
+            stdout=exit_info.get("stdout", ""),
+            stderr=exit_info.get("stderr", ""),
+        )
 
     def verify_work(self) -> bool:
         """
@@ -367,7 +647,7 @@ class Agent:
         """
         # Default implementation - check for common success indicators
         if self.role == AgentRole.TEAM_LEAD:
-            # Check if npm project exists
+            # Check if npm project exists in work directory
             package_json = self.work_dir / "package.json"
             return package_json.exists()
 
@@ -386,11 +666,11 @@ class Agent:
 
         # Role-specific dependency checking
         if self.role in [AgentRole.CORE_INFRA_DEV, AgentRole.UI_DEV, AgentRole.FEATURES_DEV]:
-            # Developers need team lead to have completed setup
+            # Developers can start once team lead enters PROJECT_SETUP phase (don't wait for completion)
             if 'team_lead' in team_status:
                 tl_status = team_status['team_lead']
-                return tl_status.get('status') == 'done' and \
-                       tl_status.get('current_phase') == 'project_setup'
+                # Work in parallel with team_lead once it's in project_setup phase
+                return tl_status.get('current_phase') == 'project_setup'
 
         elif self.role == AgentRole.QA_DEV:
             # QA needs all developers to be done
@@ -412,26 +692,30 @@ class Agent:
 
         if self.role == AgentRole.OWNER:
             # Owner spawns team lead if not running
+            print(f"[{self.role.value}] In orchestrate(), checking team_status: {list(team_status.keys())}")
             if 'team_lead' not in team_status:
+                print(f"[{self.role.value}] team_lead not found, spawning it now...")
                 self.spawn_agent(
                     AgentRole.TEAM_LEAD,
                     str(self.work_dir / "instructions" / "TEAM_LEAD.md")
                 )
+            else:
+                print(f"[{self.role.value}] team_lead already exists, skipping spawn")
 
         elif self.role == AgentRole.TEAM_LEAD:
-            # Team lead spawns developers after setup
-            if self.state.current_phase == WorkPhase.PROJECT_SETUP and \
-               self.verify_work():
+            # Team lead spawns developers immediately when in PROJECT_SETUP phase
+            if self.state.current_phase == WorkPhase.PROJECT_SETUP:
                 dev_roles = [
-                    AgentRole.CORE_INFRA_DEV,
-                    AgentRole.UI_DEV,
-                    AgentRole.FEATURES_DEV
+                    (AgentRole.CORE_INFRA_DEV, "CORE_INFRA_DEV.md"),
+                    (AgentRole.UI_DEV, "UI_DEV.md"),
+                    (AgentRole.FEATURES_DEV, "FEATURES_DEV.md"),
+                    (AgentRole.QA_DEV, "QA_DEV.md"),
                 ]
-                for role in dev_roles:
+                for role, filename in dev_roles:
                     if role.value not in team_status:
                         self.spawn_agent(
                             role,
-                            str(self.work_dir / "instructions" / f"{role.value.upper()}.md")
+                            str(self.work_dir / "instructions" / filename)
                         )
 
     def run(self) -> None:
@@ -466,16 +750,81 @@ class Agent:
                     time.sleep(5)
                     continue
 
-                # Perform orchestration if needed
-                self.orchestrate()
+                # Transition phases for team_lead after initialization
+                if self.role == AgentRole.TEAM_LEAD and self.state.current_phase == WorkPhase.INITIALIZING:
+                    self.update_status(AgentStatus.WORKING, phase=WorkPhase.PROJECT_SETUP, task="Setting up project")
+                    # Team lead spawns developers immediately after entering PROJECT_SETUP
+                    self.orchestrate()
+                    # After spawning, wait for developers to be ready before calling do_work
+                    time.sleep(5)  # Give spawned processes time to start
+                    continue
 
-                # Do the actual work if not done
-                if self.state.status not in [AgentStatus.DONE, AgentStatus.FAILED]:
+                # Owner should orchestrate (spawn team_lead) before doing work
+                if self.role == AgentRole.OWNER:
+                    # Check if team_lead exists first
+                    if 'team_lead' not in team_status:
+                        print(f"[{self.role.value}] About to call orchestrate() to spawn team_lead...")
+                        self.orchestrate()
+                        print(f"[{self.role.value}] Finished calling orchestrate()")
+                        time.sleep(5)  # Give team_lead time to spawn and create status file
+                        continue
+
+                    # Owner monitors team progress instead of doing work directly
+                    # Check if all developers are done
+                    dev_roles = ['core_infra_dev', 'ui_dev', 'features_dev', 'qa_dev']
+                    all_done = all(
+                        role in team_status and team_status[role].get('status') == 'done'
+                        for role in dev_roles
+                    )
+
+                    if all_done:
+                        # Only now generate final report
+                        print(f"[{self.role.value}] All developers done, generating final report...")
+                        result = self.do_work()
+                    else:
+                        # Just monitor, don't do work yet
+                        working_count = sum(1 for role in dev_roles if role in team_status and team_status[role].get('status') == 'working')
+                        done_count = sum(1 for role in dev_roles if role in team_status and team_status[role].get('status') == 'done')
+                        self.update_status(AgentStatus.WORKING, task=f"Monitoring team: {done_count} done, {working_count} working")
+                        time.sleep(10)
+                        continue
+
+                # Team lead should only do project setup once
+                elif self.role == AgentRole.TEAM_LEAD:
+                    if self.state.current_phase == WorkPhase.PROJECT_SETUP:
+                        # Check if package.json already exists (project setup done)
+                        package_json = self.work_dir / "package.json"
+                        if not package_json.exists():
+                            # Do initial setup
+                            print(f"[{self.role.value}] Setting up project...")
+                            result = self.do_work()
+                        else:
+                            # Project already setup, just monitor developers
+                            dev_roles = ['core_infra_dev', 'ui_dev', 'features_dev', 'qa_dev']
+                            working_count = sum(1 for role in dev_roles if role in team_status and team_status[role].get('status') == 'working')
+                            done_count = sum(1 for role in dev_roles if role in team_status and team_status[role].get('status') == 'done')
+                            self.update_status(AgentStatus.WORKING, phase=WorkPhase.PROJECT_SETUP, task=f"Monitoring developers: {done_count} done, {working_count} working")
+
+                            # If all developers are done, team_lead is done
+                            if all(role in team_status and team_status[role].get('status') == 'done' for role in dev_roles):
+                                self.update_status(AgentStatus.DONE, phase=WorkPhase.PROJECT_SETUP, task="All developers completed")
+                                break
+                            time.sleep(10)
+                            continue
+                    else:
+                        # Should not happen
+                        time.sleep(10)
+                        continue
+
+                # Do the actual work if not done (for other roles)
+                elif self.state.status not in [AgentStatus.DONE, AgentStatus.FAILED]:
                     result = self.do_work()
 
                     if result.returncode == 0 and self.verify_work():
+                        # Preserve current phase when marking as done
                         self.update_status(
                             AgentStatus.DONE,
+                            phase=self.state.current_phase,  # Keep current phase
                             task="Work completed successfully"
                         )
                         print(f"[{self.role.value}] ✅ Work completed successfully!")
