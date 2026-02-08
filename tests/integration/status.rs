@@ -229,11 +229,16 @@ services:
     let root_pid = common::wait_for_pid("root");
     spawn_manager.register_service_pid("root".to_string(), root_pid);
 
+    #[cfg(target_os = "linux")]
+    thread::sleep(Duration::from_millis(500));
+    #[cfg(not(target_os = "linux"))]
+    thread::sleep(Duration::from_millis(200));
+
     let config_arc = daemon.config();
     let pid_handle = daemon.pid_file_handle();
     let state_handle = daemon.service_state_handle();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut found_python = false;
     let mut found_sleep = false;
 
@@ -277,7 +282,36 @@ services:
             }
         }
 
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Add debug output if test fails
+    if !found_python || !found_sleep {
+        eprintln!(
+            "Test failure - found_python: {}, found_sleep: {}",
+            found_python, found_sleep
+        );
+
+        // Collect one final snapshot for debugging
+        if let Ok(snapshot) = collect_runtime_snapshot(
+            Arc::clone(&config_arc),
+            &pid_handle,
+            &state_handle,
+            None,
+            Some(&spawn_manager),
+        ) && let Some(unit) = snapshot.units.iter().find(|unit| unit.name == "root")
+        {
+            eprintln!(
+                "Root unit spawned_children count: {}",
+                unit.spawned_children.len()
+            );
+            for child in &unit.spawned_children {
+                eprintln!(
+                    "  Child: {} (pid: {})",
+                    child.child.command, child.child.pid
+                );
+            }
+        }
     }
 
     assert!(

@@ -414,13 +414,11 @@ impl LogManager {
             "─".repeat(67)
         );
 
-        // Show supervisor logs first if no service specified and kind is not specified or is "supervisor"
         if matches!(kind, None | Some("supervisor")) {
             let _ = self.show_supervisor_log(20).map_err(|err| {
                 eprintln!("Failed to show supervisor logs: {}", err);
             });
 
-            // If kind is "supervisor", only show supervisor logs
             if kind == Some("supervisor") {
                 return Ok(());
             }
@@ -434,7 +432,6 @@ impl LogManager {
         let cron_state =
             CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
 
-        // Build hash-to-name mapping from config
         let hash_to_name: std::collections::HashMap<String, String> =
             crate::config::load_config(config_path)
                 .ok()
@@ -449,15 +446,12 @@ impl LogManager {
                 })
                 .unwrap_or_default();
 
-        // Collect service names (from PID file) and hashes (from cron state)
         let mut service_names: BTreeSet<String> = pid_snapshot.keys().cloned().collect();
 
-        // Map cron job hashes to service names
         for hash in cron_state.jobs().keys() {
             if let Some(name) = hash_to_name.get(hash) {
                 service_names.insert(name.clone());
             } else {
-                // Fallback: use hash if name not found (orphaned service)
                 service_names.insert(hash.clone());
             }
         }
@@ -480,7 +474,6 @@ impl LogManager {
                 continue;
             }
 
-            // Check if this is a cron service by looking up its hash
             if let Ok(config) = crate::config::load_config(config_path)
                 && let Some(service_config) = config.services.get(&service_name)
             {
@@ -512,7 +505,7 @@ impl LogManager {
         let supervisor_log = runtime::log_dir().join("supervisor.log");
 
         if !supervisor_log.exists() {
-            return Ok(()); // Silently skip if supervisor log doesn't exist yet
+            return Ok(());
         }
 
         println!(

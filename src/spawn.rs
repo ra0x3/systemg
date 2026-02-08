@@ -193,28 +193,21 @@ impl DynamicSpawnManager {
         parent_pid: u32,
         _child_name: &str,
     ) -> Result<SpawnAuthorization, ProcessManagerError> {
-        // Check rate limiting (max 10 spawns per second)
         self.check_rate_limit(parent_pid)?;
 
-        // Find the parent's spawn tree
         let trees = self.spawn_trees.lock().unwrap();
         let children = self.children_by_pid.lock().unwrap();
 
-        // Determine spawn depth
         let depth = if let Some(parent_info) = children.get(&parent_pid) {
             parent_info.depth + 1
         } else {
-            // Direct child of a root service
             1
         };
 
-        // Find the appropriate spawn tree
         let (root_service, tree) = self.find_spawn_tree(parent_pid, &trees, &children)?;
 
-        // Check if spawn is allowed
         tree.can_spawn(depth)?;
 
-        // Check direct children limit for this parent
         let parent_children = self.children_by_parent.lock().unwrap();
         if let Some(siblings) = parent_children.get(&parent_pid)
             && siblings.len() >= tree.max_children
@@ -413,10 +406,8 @@ impl DynamicSpawnManager {
         let now = Instant::now();
 
         if let Some(recent_spawns) = timestamps.get_mut(&parent_pid) {
-            // Remove timestamps older than 1 second
             recent_spawns.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
 
-            // Check if we've hit the limit (10 per second)
             if recent_spawns.len() >= 10 {
                 return Err(ProcessManagerError::SpawnLimitExceeded(
                     "Spawn rate limit exceeded (max 10/sec)".into(),
@@ -436,14 +427,12 @@ impl DynamicSpawnManager {
     ) -> Result<(String, &'a SpawnTree), ProcessManagerError> {
         let service_pids = self.service_pids.lock().unwrap();
 
-        // First check if this PID is a registered service
         if let Some(service_name) = service_pids.get(&pid)
             && let Some(tree) = trees.get(service_name)
         {
             return Ok((service_name.clone(), tree));
         }
 
-        // Walk up the parent chain to find the root service
         let mut current_pid = pid;
         while let Some(child_info) = children.get(&current_pid) {
             if let Some(parent_service) = service_pids.get(&child_info.parent_pid)
@@ -452,7 +441,6 @@ impl DynamicSpawnManager {
                 return Ok((parent_service.clone(), tree));
             }
 
-            // Keep walking up the chain
             current_pid = child_info.parent_pid;
         }
 
@@ -462,7 +450,6 @@ impl DynamicSpawnManager {
             return Ok((service_name.clone(), tree));
         }
 
-        // Fallback: if there's only one tree, use it (for backward compatibility)
         if trees.len() == 1
             && let Some((name, tree)) = trees.iter().next()
         {

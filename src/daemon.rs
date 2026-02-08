@@ -209,17 +209,14 @@ impl PidFile {
     pub fn insert(&mut self, service: &str, pid: u32) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
-        // Reload from disk to ensure we have the latest state
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
             *self = serde_json::from_str::<Self>(&contents)?;
         }
 
-        // Insert the new service
         self.services.insert(service.to_string(), pid);
 
-        // Save back to disk
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
@@ -229,19 +226,15 @@ impl PidFile {
     pub fn remove(&mut self, service: &str) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
-        // Reload from disk to ensure we have the latest state
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
             *self = serde_json::from_str::<Self>(&contents)?;
         }
 
-        // Remove the service
         if self.services.remove(service).is_none() {
             return Err(PidFileError::ServiceNotFound);
         }
-
-        // Save back to disk
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
@@ -259,7 +252,6 @@ impl PidFile {
     ) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
-        // Reload from disk to ensure we have the latest state
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
@@ -270,7 +262,6 @@ impl PidFile {
         let parent_pid = metadata.parent_pid;
         let depth = metadata.depth;
 
-        // Record parent-child relationship
         self.parent_map.insert(child_pid, parent_pid);
         self.children_map
             .entry(parent_pid)
@@ -279,7 +270,6 @@ impl PidFile {
         self.spawn_depth.insert(child_pid, depth);
         self.spawn_metadata.insert(child_pid, metadata);
 
-        // Save back to disk
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
@@ -311,14 +301,12 @@ impl PidFile {
     pub fn remove_spawn(&mut self, child_pid: u32) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
-        // Reload from disk to ensure we have the latest state
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
             *self = serde_json::from_str::<Self>(&contents)?;
         }
 
-        // Remove child from parent's children list
         if let Some(parent_pid) = self.parent_map.remove(&child_pid)
             && let Some(children) = self.children_map.get_mut(&parent_pid)
         {
@@ -330,7 +318,6 @@ impl PidFile {
         self.spawn_depth.remove(&child_pid);
         self.spawn_metadata.remove(&child_pid);
 
-        // Save back to disk
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
@@ -781,7 +768,6 @@ struct DetachedService {
     pid: u32,
 }
 
-// Thread-local storage for tracking currently held locks to enforce ordering.
 thread_local! {
     static HELD_LOCKS: std::cell::RefCell<HashSet<DaemonLock>> = std::cell::RefCell::new(HashSet::new());
 }
@@ -819,7 +805,6 @@ fn acquire_lock<'a, T>(
     mutex: &'a Arc<Mutex<T>>,
     lock_type: DaemonLock,
 ) -> Result<OrderedLockGuard<'a, T>, ProcessManagerError> {
-    // Check if we can acquire this lock given what we're already holding
     HELD_LOCKS.with(|held| {
         let held_locks = held.borrow();
         for existing_lock in held_locks.iter() {
@@ -834,10 +819,8 @@ fn acquire_lock<'a, T>(
         }
     });
 
-    // Acquire the lock
     let guard = mutex.lock()?;
 
-    // Track that we're holding this lock
     HELD_LOCKS.with(|held| {
         held.borrow_mut().insert(lock_type);
     });
@@ -926,7 +909,6 @@ impl DaemonContext {
     #[cfg(target_os = "linux")]
     fn create_cancellation_token(&self, service_name: &str) -> Arc<AtomicBool> {
         let token = Arc::new(AtomicBool::new(false));
-        // Note: thread_cancellation_tokens doesn't need ordering enforcement as it's Linux-specific
         let mut tokens = self.thread_cancellation_tokens.lock().unwrap();
         tokens.insert(service_name.to_string(), Arc::clone(&token));
         token
@@ -1058,8 +1040,8 @@ impl Daemon {
         let stat_path = Path::new(&stat_path_str);
         let contents = fs::read_to_string(stat_path).ok()?;
         let mut parts = contents.split_whitespace();
-        parts.next()?; // pid
-        let mut name_part = parts.next()?; // (comm)
+        parts.next()?;
+        let mut name_part = parts.next()?;
         if !name_part.ends_with(')') {
             for part in parts.by_ref() {
                 name_part = part;
@@ -1449,23 +1431,17 @@ impl Daemon {
         unsafe {
             cmd.pre_exec(move || {
                 if detach_children {
-                    // Legacy mode: allow services to continue if systemg exits abruptly.
                     if libc::setsid() < 0 {
                         let err = std::io::Error::last_os_error();
                         eprintln!("systemg pre_exec: setsid failed: {:?}", err);
                         return Err(err);
                     }
-                } else {
-                    // Place each service in its own process group so we can signal the entire
-                    // tree without touching the supervisor's group.
-                    if libc::setpgid(0, 0) < 0 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!("systemg pre_exec: setpgid(0, 0) failed: {:?}", err);
-                        return Err(err);
-                    }
+                } else if libc::setpgid(0, 0) < 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("systemg pre_exec: setpgid(0, 0) failed: {:?}", err);
+                    return Err(err);
                 }
 
-                // Ensure service gets killed on parent death (Linux only)
                 #[cfg(target_os = "linux")]
                 {
                     use libc::{PR_SET_PDEATHSIG, SIGTERM, prctl};
@@ -1530,13 +1506,11 @@ impl Daemon {
     ) -> Result<Option<ServiceReadyState>, ProcessManagerError> {
         info!("Starting service: {name}");
 
-        // Remove from restart suppressed list
         {
             let mut suppressed = self.restart_suppressed.lock()?;
             suppressed.remove(name);
         }
 
-        // Check skip flag
         if let Some(skip_config) = &service.skip {
             match skip_config {
                 SkipConfig::Flag(true) => {
@@ -1569,7 +1543,6 @@ impl Daemon {
             }
         }
 
-        // Run pre-start command if configured
         if let Some(pre_start) = service
             .deployment
             .as_ref()
@@ -2116,7 +2089,6 @@ impl Daemon {
 
         let service_name_owned = service_name.to_string();
 
-        // Stream stdout in a separate thread
         let stdout_handle = child.stdout.take().map(|stdout| {
             let service_name = service_name_owned.clone();
             thread::spawn(move || {
@@ -2127,7 +2099,6 @@ impl Daemon {
             })
         });
 
-        // Stream stderr in a separate thread
         let stderr_handle = child.stderr.take().map(|stderr| {
             let service_name = service_name_owned.clone();
             thread::spawn(move || {
@@ -2138,7 +2109,6 @@ impl Daemon {
             })
         });
 
-        // Wait for the process to complete
         let status =
             child
                 .wait()
@@ -2147,7 +2117,6 @@ impl Daemon {
                     source,
                 })?;
 
-        // Wait for output threads to finish
         if let Some(handle) = stdout_handle {
             let _ = handle.join();
         }
