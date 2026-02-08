@@ -183,6 +183,18 @@ fn append_unique_nodes(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn read_proc_task_children(pid: u32) -> Option<Vec<u32>> {
+    let path = format!("/proc/{pid}/task/{pid}/children");
+    let contents = fs::read_to_string(path).ok()?;
+    let child_pids = contents
+        .split_whitespace()
+        .filter_map(|token| token.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+
+    Some(child_pids)
+}
+
 fn build_spawn_tree(
     manager: &DynamicSpawnManager,
     parent_pid: u32,
@@ -315,49 +327,95 @@ fn build_spawn_tree_from_system(
     seen: &mut HashSet<u32>,
 ) -> Vec<SpawnedProcessNode> {
     let mut nodes = Vec::new();
-    let Some(system) = system else {
-        return nodes;
-    };
+    if let Some(system_ref) = system {
+        for (proc_pid, process) in system_ref.processes() {
+            if let Some(parent) = process.parent()
+                && parent.as_u32() == parent_pid
+            {
+                let child_pid = proc_pid.as_u32();
+                if seen.contains(&child_pid) {
+                    continue;
+                }
 
-    for (proc_pid, process) in system.processes() {
-        if let Some(parent) = process.parent()
-            && parent.as_u32() == parent_pid
-        {
-            let child_pid = proc_pid.as_u32();
-            if !seen.insert(child_pid) {
-                continue;
+                let (cpu_percent, rss_bytes) =
+                    sample_process_metrics(Some(system_ref), child_pid);
+                let command = StatusManager::get_process_cmdline(child_pid);
+                let mut display_name = command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                if display_name.is_empty() {
+                    display_name = format!("pid-{child_pid}");
+                }
+                let started_at = process_started_at(system_ref, process);
+
+                let child = SpawnedChild {
+                    name: display_name,
+                    pid: child_pid,
+                    parent_pid,
+                    command,
+                    started_at,
+                    ttl: None,
+                    depth,
+                    cpu_percent,
+                    rss_bytes,
+                    last_exit: None,
+                };
+
+                let descendants =
+                    build_spawn_tree_from_system(system, child_pid, depth + 1, seen);
+
+                nodes.push(SpawnedProcessNode::new(child, descendants));
             }
+        }
+    }
 
-            let (cpu_percent, rss_bytes) =
-                sample_process_metrics(Some(system), child_pid);
-            let command = StatusManager::get_process_cmdline(child_pid);
-            let mut display_name = command
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string();
-            if display_name.is_empty() {
-                display_name = format!("pid-{child_pid}");
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(child_pids) = read_proc_task_children(parent_pid) {
+            for child_pid in child_pids {
+                if seen.contains(&child_pid) {
+                    continue;
+                }
+
+                let (cpu_percent, rss_bytes) = sample_process_metrics(system, child_pid);
+                let command = StatusManager::get_process_cmdline(child_pid);
+                let mut display_name = command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                if display_name.is_empty() {
+                    display_name = format!("pid-{child_pid}");
+                }
+
+                let started_at = if let Some(system_ref) = system
+                    && let Some(process) = system_ref.process(SysPid::from_u32(child_pid))
+                {
+                    process_started_at(system_ref, process)
+                } else {
+                    SystemTime::now()
+                };
+
+                let child = SpawnedChild {
+                    name: display_name,
+                    pid: child_pid,
+                    parent_pid,
+                    command,
+                    started_at,
+                    ttl: None,
+                    depth,
+                    cpu_percent,
+                    rss_bytes,
+                    last_exit: None,
+                };
+
+                let descendants =
+                    build_spawn_tree_from_system(system, child_pid, depth + 1, seen);
+
+                nodes.push(SpawnedProcessNode::new(child, descendants));
             }
-            let started_at = process_started_at(system, process);
-
-            let child = SpawnedChild {
-                name: display_name,
-                pid: child_pid,
-                parent_pid,
-                command,
-                started_at,
-                ttl: None,
-                depth,
-                cpu_percent,
-                rss_bytes,
-                last_exit: None,
-            };
-
-            let descendants =
-                build_spawn_tree_from_system(Some(system), child_pid, depth + 1, seen);
-
-            nodes.push(SpawnedProcessNode::new(child, descendants));
         }
     }
 
@@ -818,8 +876,16 @@ fn build_snapshot(
             );
             append_unique_nodes(&mut nodes, pidfile_nodes, &mut seen);
 
+            let fresh_system = if process_system.is_some() {
+                let mut sys = System::new();
+                sys.refresh_processes(ProcessesToUpdate::All, true);
+                Some(sys)
+            } else {
+                None
+            };
+
             let system_nodes = build_spawn_tree_from_system(
-                process_system.as_ref(),
+                fresh_system.as_ref(),
                 runtime.pid,
                 1,
                 &mut seen,

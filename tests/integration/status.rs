@@ -227,22 +227,43 @@ services:
 
     daemon.start_services().expect("start services");
     let root_pid = common::wait_for_pid("root");
+    eprintln!("Root service started with PID: {}", root_pid);
     spawn_manager.register_service_pid("root".to_string(), root_pid);
 
     #[cfg(target_os = "linux")]
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_secs(2)); // Give ample time for child processes on Linux
     #[cfg(not(target_os = "linux"))]
     thread::sleep(Duration::from_millis(200));
+
+    // Check if Python actually spawned children
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let output = Command::new("pgrep")
+            .arg("-P")
+            .arg(root_pid.to_string())
+            .output();
+        if let Ok(output) = output {
+            let children = String::from_utf8_lossy(&output.stdout);
+            eprintln!(
+                "Direct children of root PID {}: {}",
+                root_pid,
+                children.trim()
+            );
+        }
+    }
 
     let config_arc = daemon.config();
     let pid_handle = daemon.pid_file_handle();
     let state_handle = daemon.service_state_handle();
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(20); // Extended timeout for Linux
     let mut found_python = false;
     let mut found_sleep = false;
+    let mut iteration = 0;
 
     while Instant::now() < deadline {
+        iteration += 1;
         let snapshot = collect_runtime_snapshot(
             Arc::clone(&config_arc),
             &pid_handle,
@@ -253,6 +274,13 @@ services:
         .expect("collect snapshot");
 
         if let Some(unit) = snapshot.units.iter().find(|unit| unit.name == "root") {
+            if iteration == 1 || iteration % 10 == 0 {
+                eprintln!(
+                    "Iteration {}: Root unit found, spawned_children count: {}",
+                    iteration,
+                    unit.spawned_children.len()
+                );
+            }
             found_python = false;
             found_sleep = false;
 

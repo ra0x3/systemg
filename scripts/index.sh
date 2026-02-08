@@ -43,12 +43,25 @@ done
 ARCH=$(uname -m)
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
+# Try ~/.local/bin first, fallback to ~/.sysg/bin
+LOCAL_BIN_DIR="$HOME/.local/bin"
 SYSG_ROOT="$HOME/.sysg"
-SYSG_BIN_DIR="$SYSG_ROOT/bin"
+SYSG_FALLBACK_BIN_DIR="$SYSG_ROOT/bin"
+
+# Determine which bin directory to use
+if [ -d "$LOCAL_BIN_DIR" ] || mkdir -p "$LOCAL_BIN_DIR" 2>/dev/null; then
+  SYSG_BIN_DIR="$LOCAL_BIN_DIR"
+  echo "Installing to ~/.local/bin..."
+else
+  SYSG_BIN_DIR="$SYSG_FALLBACK_BIN_DIR"
+  echo "Installing to ~/.sysg/bin (unable to use ~/.local/bin)..."
+  mkdir -p "$SYSG_BIN_DIR"
+fi
+
 SYSG_VERSIONS_DIR="$SYSG_ROOT/versions"
 SYSG_ACTIVE_VERSION_FILE="$SYSG_ROOT/active-version"
 
-mkdir -p "$SYSG_BIN_DIR" "$SYSG_VERSIONS_DIR"
+mkdir -p "$SYSG_VERSIONS_DIR"
 
 if [ "$OS" = "linux" ]; then
   if [ "$ARCH" = "x86_64" ]; then
@@ -208,7 +221,15 @@ echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
 cd "$ORIGINAL_DIR"
 rm -rf "$TEMP_DIR"
 
-PATH_LINE='export PATH="$HOME/.sysg/bin:$PATH"'
+# Set up PATH based on installation location
+if [ "$SYSG_BIN_DIR" = "$LOCAL_BIN_DIR" ]; then
+  PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+  PATH_PATTERN=".local/bin"
+else
+  PATH_LINE='export PATH="$HOME/.sysg/bin:$PATH"'
+  PATH_PATTERN=".sysg/bin"
+fi
+
 SHELL_RC=""
 
 if [ -n "${BASH_VERSION:-}" ]; then
@@ -224,7 +245,8 @@ fi
 if [ -n "$SHELL_RC" ]; then
   mkdir -p "$(dirname "$SHELL_RC")"
   touch "$SHELL_RC"
-  if ! grep -q ".sysg/bin" "$SHELL_RC"; then
+  # Check if the path pattern is already in the shell config
+  if ! grep -q "$PATH_PATTERN" "$SHELL_RC"; then
     {
       echo ""
       echo "# Added by sysg installer"
@@ -233,7 +255,7 @@ if [ -n "$SHELL_RC" ]; then
   fi
 fi
 
-export PATH="$HOME/.sysg/bin:$PATH"
+export PATH="$SYSG_BIN_DIR:$PATH"
 
 # ---- UI ----
 if [ -t 1 ]; then
@@ -336,21 +358,21 @@ fi
 
 PATH_NEEDS_UPDATE=0
 case ":$PATH:" in
-  *":$HOME/.sysg/bin:"*) ;;
+  *":$SYSG_BIN_DIR:"*) ;;
   *) PATH_NEEDS_UPDATE=1 ;;
 esac
 
 if [ $PATH_NEEDS_UPDATE -eq 1 ]; then
   echo ""
   echo "⚠ Setup notes:"
-  if [ -n "$SHELL_RC" ] && grep -q ".sysg/bin" "$SHELL_RC"; then
+  if [ -n "$SHELL_RC" ] && grep -q "$PATH_PATTERN" "$SHELL_RC"; then
     echo "  • Path configuration added to $SHELL_RC but not yet loaded. Run:"
     echo ""
     echo "    . \"$SHELL_RC\""
   else
-    echo "  • ~/.sysg/bin is not in your PATH. Run:"
+    echo "  • $SYSG_BIN_DIR is not in your PATH. Run:"
     echo ""
-    echo "    echo 'export PATH=\"\$HOME/.sysg/bin:\$PATH\"' >> ~/.bashrc && . ~/.bashrc"
+    echo "    echo '$PATH_LINE' >> ~/.bashrc && . ~/.bashrc"
   fi
   echo ""
 fi

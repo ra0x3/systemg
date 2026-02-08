@@ -241,6 +241,7 @@ mod tests {
             env::set_var("HOME", home);
         }
 
+        set_drop_privileges(false); // Reset to clean state
         init(RuntimeMode::User);
         set_drop_privileges(true);
 
@@ -263,6 +264,7 @@ mod tests {
     #[test]
     fn system_mode_uses_var_directories() {
         let _guard = env_lock();
+        set_drop_privileges(false); // Reset to clean state
         init(RuntimeMode::System);
 
         assert_eq!(state_dir(), PathBuf::from("/var/lib/systemg"));
