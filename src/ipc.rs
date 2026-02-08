@@ -76,6 +76,8 @@ pub enum ControlCommand {
         command: Vec<String>,
         /// Time-to-live in seconds.
         ttl: Option<u64>,
+        /// Optional log level for the spawned process.
+        log_level: Option<String>,
     },
 }
 

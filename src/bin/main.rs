@@ -361,9 +361,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             name,
             ttl,
             parent_pid,
+            log_level,
             command,
         } => {
-            // Use the provided parent PID or fall back to the caller's parent PID
             let parent_pid = parent_pid.unwrap_or_else(|| unsafe { getppid() } as u32);
 
             let spawn_cmd = ControlCommand::Spawn {
@@ -371,6 +371,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 name: name.clone(),
                 command,
                 ttl,
+                log_level: log_level.map(|l| l.as_str().to_string()),
             };
 
             match ipc::send_command(&spawn_cmd) {

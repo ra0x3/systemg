@@ -64,6 +64,7 @@ struct SpawnParams {
     name: String,
     command: Vec<String>,
     ttl: Option<u64>,
+    log_level: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -741,12 +742,14 @@ impl Supervisor {
                 name,
                 command,
                 ttl,
+                log_level,
             } => {
                 let params = SpawnParams {
                     parent_pid,
                     name,
                     command,
                     ttl,
+                    log_level,
                 };
                 match self.handle_spawn(params) {
                     Ok(pid) => Ok(ControlResponse::Spawned { pid }),
@@ -778,6 +781,11 @@ impl Supervisor {
 
         cmd.env("SPAWN_DEPTH", depth.to_string());
         cmd.env("SPAWN_PARENT_PID", params.parent_pid.to_string());
+
+        if let Some(log_level) = params.log_level {
+            cmd.env("RUST_LOG", log_level);
+        }
+
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 

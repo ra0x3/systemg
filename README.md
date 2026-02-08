@@ -333,6 +333,9 @@ $ sysg spawn --name worker_1 -- python worker.py
 # Spawn with time-to-live for automatic cleanup
 $ sysg spawn --name temp_worker --ttl 3600 -- ./process.sh
 
+# Spawn with custom log level for debugging
+$ sysg spawn --name debug_worker --log-level debug -- python worker.py
+
 # Spawn with environment variables (pass them directly)
 $ KEY=value PORT=8080 sysg spawn --name worker -- node app.js
 

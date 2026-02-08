@@ -34,6 +34,15 @@ Pass environment variables directly to the spawned child:
 $ KEY=value PORT=8080 sysg spawn --name worker -- node app.js
 ```
 
+### Spawn with Custom Log Level
+
+Set the logging verbosity for a specific spawned process:
+
+```sh
+$ sysg spawn --name debug_worker --log-level debug -- python worker.py
+$ sysg spawn --name quiet_worker --log-level error -- ./process.sh
+```
+
 ### Spawn an Autonomous Agent
 
 Spawn an LLM-powered agent with provider and goal via environment variables:
@@ -49,6 +58,7 @@ $ LLM_PROVIDER=claude AGENT_GOAL="Optimize database queries" sysg spawn --name o
 | `--name` | Name for the spawned child process (required) |
 | `--ttl` | Time-to-live in seconds before automatic termination |
 | `--parent-pid` | Parent process ID (defaults to caller's parent PID) |
+| `--log-level` | Override logging verbosity for the spawned process (off, error, warn, info, debug, trace or 0-5) |
 | `command...` | Command and arguments to execute (required) |
 
 ## How It Works

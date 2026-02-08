@@ -217,6 +217,10 @@ pub enum Commands {
         #[arg(long)]
         parent_pid: Option<u32>,
 
+        /// Override the logging verbosity for the spawned process.
+        #[arg(long, value_name = "LEVEL")]
+        log_level: Option<LogLevelArg>,
+
         /// Command and arguments to execute.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
