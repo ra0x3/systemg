@@ -4,5 +4,5 @@
 **/node_modules/
 AGENTS.md
 CLAUDE.md
-.env
+.pytest_cache
 test-output/

@@ -1,0 +1,21 @@
+version: "1"
+
+services:
+  orchestrator:
+    command: >-
+      ./.venv/bin/python3
+      agent.py
+      --role orchestrator
+      --instructions INSTRUCTIONS.md
+      --redis-url redis://127.0.0.1:6379
+      --log-level INFO
+    restart_policy: always
+    backoff: "5s"
+    work_dir: "."
+    spawn:
+      mode: dynamic
+      limits:
+        children: 20
+        depth: 5
+        descendants: 100
+        termination_policy: cascade

@@ -64,18 +64,18 @@ in `/tmp/meta_agents`.
 
 [View Meta-Agents Example →](/docs/examples/meta-agents)
 
-## Generative UI
+## Orchestrator
 
-A fully autonomous AI-driven development team that builds a complete SystemG
-dashboard UI from specifications, demonstrating advanced multi-agent
-orchestration with proper parent-child process tracking.
+A sophisticated multi-agent orchestration system that demonstrates LLM-driven
+task decomposition, distributed coordination through Redis, and hierarchical
+agent management using systemg's process supervision capabilities.
 
 **Features demonstrated:**
-- Hierarchical team structure with proper parent-child spawning
-- Autonomous development workflow with specialized agent roles
-- File-based communication and completion signals
-- Token-efficient coordination protocols
-- Git workflow with designated push authority (Team Lead only)
-- Real browser testing capabilities for QA validation
+- LLM-driven DAG generation for task decomposition
+- Redis-backed distributed task queue and state management
+- Lease-based locking with TTL for fault tolerance
+- Heartbeat-based agent control via markdown directives
+- Memory snapshots for crash recovery
+- Multi-agent coordination with priority-based scheduling
 
-[View Generative UI Example →](/docs/examples/generative-ui)
+[View Orchestrator Example →](/docs/examples/orchestrator)

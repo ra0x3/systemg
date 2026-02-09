@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: orchestrator
+Version: 0.1.0
+Summary: Example agent/orchestrator runtime for systemg
+Requires-Python: >=3.10
+Requires-Dist: redis>=5.0
+Requires-Dist: fakeredis>=2.22
+Requires-Dist: pydantic>=2.8
+Requires-Dist: pyyaml>=6.0
