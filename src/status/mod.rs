@@ -96,7 +96,7 @@ pub enum UnitHealth {
     Healthy,
     Degraded,
     Failing,
-    Inactive, // Service is stopped/not running - health is not applicable
+    Inactive,
 }
 
 /// Machine-readable snapshot of supervisor state, cached by the resident daemon.
@@ -263,6 +263,7 @@ fn build_spawn_tree_from_pidfile(
             cpu_percent: metadata.cpu_percent,
             rss_bytes: metadata.rss_bytes,
             last_exit: metadata.last_exit.clone(),
+            user: Some(StatusManager::get_process_user(child_pid)),
         };
 
         let (cpu, rss) = sample_process_metrics(system, child_pid);
@@ -298,6 +299,7 @@ fn build_spawn_tree_from_pidfile(
                 cpu_percent: metadata.cpu_percent,
                 rss_bytes: metadata.rss_bytes,
                 last_exit: metadata.last_exit.clone(),
+                user: Some(StatusManager::get_process_user(metadata.pid)),
             };
 
             let (cpu, rss) = sample_process_metrics(system, metadata.pid);
@@ -361,6 +363,7 @@ fn build_spawn_tree_from_system(
                     cpu_percent,
                     rss_bytes,
                     last_exit: None,
+                    user: Some(StatusManager::get_process_user(child_pid)),
                 };
 
                 let descendants =
@@ -409,6 +412,7 @@ fn build_spawn_tree_from_system(
                     cpu_percent,
                     rss_bytes,
                     last_exit: None,
+                    user: Some(StatusManager::get_process_user(child_pid)),
                 };
 
                 let descendants =
@@ -493,6 +497,8 @@ impl From<MetricsSummary> for UnitMetricsSummary {
 pub struct ProcessRuntime {
     pub pid: u32,
     pub state: ProcessState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// Captures how long a process has been active.
@@ -779,6 +785,7 @@ fn build_snapshot(
         let process_runtime = pid.map(|pid| ProcessRuntime {
             pid,
             state: StatusManager::process_state(pid),
+            user: Some(StatusManager::get_process_user(pid)),
         });
 
         if let Some(runtime) = process_runtime.as_ref()
@@ -841,12 +848,9 @@ fn build_snapshot(
             .and_then(|store| store.summarize_unit(&hash))
             .map(UnitMetricsSummary::from);
 
-        // Get the command from the service config if available
         let command = config
             .and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")))
             .map(|service_config| service_config.command.clone());
-
-        // Get spawned children for this process if we have a PID
         let service_hash_for_spawn = if matches!(kind, UnitKind::Service | UnitKind::Cron)
         {
             Some(hash.as_str())
@@ -913,7 +917,6 @@ fn build_snapshot(
         });
     }
 
-    // Include any PID entries that have no associated hash/config data.
     for (service_name, &pid_value) in pid_file.services() {
         if hash_to_name.values().any(|name| name == service_name) {
             continue;
@@ -922,6 +925,7 @@ fn build_snapshot(
         let runtime = ProcessRuntime {
             pid: pid_value,
             state: StatusManager::process_state(pid_value),
+            user: Some(StatusManager::get_process_user(pid_value)),
         };
         let uptime = if matches!(runtime.state, ProcessState::Running) {
             compute_uptime(runtime.pid)
@@ -1008,23 +1012,17 @@ fn derive_unit_health(
                     CronExecutionStatus::Success => UnitHealth::Healthy,
                     CronExecutionStatus::OverlapError => UnitHealth::Failing,
                     CronExecutionStatus::Failed(reason) => {
-                        // Special case: "Failed to get PID" means systemg couldn't track the process
-                        // This is not a health issue with the cron job itself
                         if reason.starts_with("Failed to get PID") {
                             UnitHealth::Healthy
                         } else if last_run.exit_code.is_some()
                             || last_run.completed_at.is_some()
                         {
-                            // If the cron job has completed (has exit code or completion time),
-                            // it's not failing - it just had a non-zero exit in its last run
-                            // Exit code 0 is healthy, non-zero is degraded
                             match last_run.exit_code {
                                 Some(0) => UnitHealth::Healthy,
                                 Some(_) => UnitHealth::Degraded,
-                                None => UnitHealth::Healthy, // Completed without exit code info
+                                None => UnitHealth::Healthy,
                             }
                         } else {
-                            // Still running and failing
                             UnitHealth::Failing
                         }
                     }
@@ -1068,7 +1066,6 @@ pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
         return OverallHealth::Degraded;
     }
 
-    // Note: Inactive units don't affect overall health since they're intentionally stopped
     OverallHealth::Healthy
 }
 
@@ -1292,10 +1289,8 @@ impl StatusManager {
         let stat_path = Path::new(&stat_path_str);
         let contents = fs::read_to_string(stat_path).ok()?;
         let mut parts = contents.split_whitespace();
-        parts.next()?; // pid
-        let mut name_part = parts.next()?; // (comm)
-        // The state follows the command, but command may contain spaces. The stat format ensures
-        // the executable name is wrapped in parentheses, so consume until the closing ')'.
+        parts.next()?;
+        let mut name_part = parts.next()?;
         if !name_part.ends_with(')') {
             for part in parts.by_ref() {
                 name_part = part;
@@ -1339,7 +1334,6 @@ impl StatusManager {
             if let Some(parent) = process.parent()
                 && parent.as_u32() == pid
             {
-                //let proc_name = process.name().to_string_lossy().to_string();
                 let proc_name = Self::get_process_cmdline(proc_pid.as_u32());
                 let formatted = format!(
                     "{} ├─{} {}",
@@ -1349,7 +1343,6 @@ impl StatusManager {
                 );
                 children.push(formatted);
 
-                // Recursively add grandchildren, increasing indentation
                 let grand_children =
                     Self::get_child_processes(proc_pid.as_u32(), indent + 4);
                 children.extend(grand_children);
@@ -1366,7 +1359,6 @@ impl StatusManager {
         service_hash: &str,
         is_cron: bool,
     ) {
-        // Determine the health color based on service state
         let health_color = self.get_service_health_color(service_hash, is_cron);
 
         let display_name = if is_cron {
@@ -1387,7 +1379,6 @@ impl StatusManager {
         service_hash: &str,
         is_cron: bool,
     ) -> &'static str {
-        // Check the service state
         let state_entry = {
             let guard = self
                 .state_file
@@ -1406,13 +1397,11 @@ impl StatusManager {
                     return RED_BOLD;
                 }
                 ServiceLifecycleStatus::Stopped | ServiceLifecycleStatus::Skipped => {
-                    // No color for stopped/skipped services
                     return "";
                 }
             }
         }
 
-        // For cron jobs, also check the last execution status
         if is_cron {
             let cron_state =
                 CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
@@ -1425,12 +1414,11 @@ impl StatusManager {
                     | Some(CronExecutionStatus::OverlapError) => {
                         return RED_BOLD;
                     }
-                    None => {} // Still running, no color
+                    None => {}
                 }
             }
         }
 
-        // Default: no color if we can't determine the state
         ""
     }
 
@@ -1440,7 +1428,6 @@ impl StatusManager {
         is_cron: bool,
         config_path: Option<&str>,
     ) {
-        // Try to load config to get the service hash
         if let Ok(config) = crate::config::load_config(config_path)
             && let Some(service_config) = config.services.get(service_name)
         {
@@ -1448,7 +1435,6 @@ impl StatusManager {
             self.show_status_with_cron_info_by_hash(service_name, &service_hash, is_cron);
             return;
         }
-        // Fallback: service not in config
         println!("● {} - Not found in configuration", service_name);
     }
 
@@ -1577,7 +1563,6 @@ impl StatusManager {
 
     /// Shows the status of **all services** (including orphaned state).
     pub fn show_statuses_all(&self) {
-        // Try to load config to map hashes to names
         let config = crate::config::load_config(None).ok();
         let hash_to_name: std::collections::HashMap<String, String> = config
             .as_ref()
@@ -1674,7 +1659,6 @@ impl StatusManager {
             println!("    - {ts} | {status_str}");
         }
 
-        // Visually separate cron details from subsequent services.
         println!();
     }
 
@@ -1812,6 +1796,20 @@ impl StatusManager {
         getpgid(Some(Pid::from_raw(pid as i32)))
             .map(|pgid| pgid.to_string())
             .unwrap_or_else(|_| "Unknown".to_string())
+    }
+
+    /// Gets the **process owner username**.
+    fn get_process_user(pid: u32) -> String {
+        Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("user=")
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "Unknown".to_string())
     }
 
     /// Gets the **command line** of a process.

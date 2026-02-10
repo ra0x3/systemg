@@ -806,6 +806,7 @@ impl Supervisor {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         let root_service = self.spawn_manager.record_spawn(

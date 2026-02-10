@@ -115,6 +115,9 @@ pub struct SpawnedChild {
     /// Exit metadata captured when the child terminates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<SpawnedExit>,
+    /// Process owner username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// Exit metadata recorded for a spawned child.
@@ -568,6 +571,7 @@ mod tests {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -612,6 +616,7 @@ mod tests {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         let root = manager
@@ -648,6 +653,7 @@ mod tests {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         manager
@@ -698,6 +704,7 @@ mod tests {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         manager
@@ -738,6 +745,7 @@ mod tests {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         manager
@@ -777,6 +785,7 @@ mod tests {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         let grandchild = SpawnedChild {
@@ -790,6 +799,7 @@ mod tests {
             cpu_percent: None,
             rss_bytes: None,
             last_exit: None,
+            user: None,
         };
 
         manager

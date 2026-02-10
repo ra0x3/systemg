@@ -419,6 +419,7 @@ mod tests {
                 cpu_percent: None,
                 rss_bytes: None,
                 last_exit: None,
+                user: None,
             },
             vec![
                 SpawnedProcessNode::new(
@@ -433,6 +434,7 @@ mod tests {
                         cpu_percent: None,
                         rss_bytes: None,
                         last_exit: None,
+                        user: None,
                     },
                     vec![SpawnedProcessNode::new(
                         SpawnedChild {
@@ -446,6 +448,7 @@ mod tests {
                             cpu_percent: None,
                             rss_bytes: None,
                             last_exit: None,
+                            user: None,
                         },
                         Vec::new(),
                     )],
@@ -462,6 +465,7 @@ mod tests {
                         cpu_percent: None,
                         rss_bytes: None,
                         last_exit: None,
+                        user: None,
                     },
                     Vec::new(),
                 ),
@@ -622,6 +626,19 @@ fn render_status(
         .unwrap_or(9)  // Minimum width of "LAST_EXIT" header
         .max(9);
 
+    // Calculate maximum width for USER column
+    let max_user_len = units
+        .iter()
+        .map(|unit| {
+            unit.process.as_ref()
+                .and_then(|p| p.user.as_ref())
+                .map(|u| visible_length(u))
+                .unwrap_or(1)
+        })
+        .max()
+        .unwrap_or(4)  // Minimum width of "USER" header
+        .max(4);
+
     // Create dynamic columns with adjusted widths
     let columns_array = [
         Column {
@@ -637,6 +654,11 @@ fn render_status(
         Column {
             title: "STATE",
             width: max_state_len,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "USER",
+            width: max_user_len,
             align: Alignment::Left,
         },
         Column {
@@ -1128,6 +1150,12 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     };
 
     let state = unit_state_label(unit, no_color);
+    let user = unit
+        .process
+        .as_ref()
+        .and_then(|runtime| runtime.user.as_ref())
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "-".to_string());
     let pid = unit
         .process
         .as_ref()
@@ -1159,6 +1187,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         display_name,
         colored_kind_label,
         state,
+        user,
         pid,
         cpu_col,
         rss_col,
@@ -1218,6 +1247,11 @@ fn format_spawned_child_row(
     prefix: &str,
 ) -> String {
     let child_name = format!("{}{}", prefix, child.name);
+    let user = child
+        .user
+        .as_ref()
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "-".to_string());
     let pid = child.pid.to_string();
     let cpu_col = child
         .cpu_percent
@@ -1288,6 +1322,7 @@ fn format_spawned_child_row(
         display_name_final,
         kind_label,
         state,
+        user,
         pid,
         cpu_col,
         rss_col,
@@ -1324,7 +1359,7 @@ fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
     }
 }
 
-fn format_row(values: &[String; 9], columns: &[Column]) -> String {
+fn format_row(values: &[String; 10], columns: &[Column]) -> String {
     let mut row = String::from('│');
     for (value, column) in values.iter().zip(columns.iter()) {
         row.push(' ');
