@@ -5,77 +5,32 @@ title: Examples
 
 # Examples
 
-This section contains real-world examples demonstrating how to use `systemg`
-for various use cases. Each example showcases different features and
-capabilities of `systemg`.
-
 ## Hello World
 
-A simple introduction to `systemg` showing the basics of service management.
+Basic service management with restart policies.
 
-**Features demonstrated:**
-- Basic service configuration with the `command` directive
-- Environment variable management using both `file` and `vars`
-- Restart policies with `restart_policy`, `retries`, and `backoff` settings
-- Running a simple shell script as a managed service
-
-[View Hello World Example →](/docs/examples/hello-world)
+[→ Hello World](/docs/examples/hello-world)
 
 ## CRUD Application
 
-A realistic example of a Node.js CRUD web application with database backups and
-testing.
+Node.js app with database backups and cron tasks.
 
-**Features demonstrated:**
-- Managing a web server as a service
-- Scheduling periodic tasks using cron syntax
-- Database backup automation
-- Rolling deployments with `rolling_start`
-- Webhook notifications for deployment events (success/failure)
-- Environment variable management for sensitive configuration
-
-[View CRUD Example →](/docs/examples/crud)
+[→ CRUD](/docs/examples/crud)
 
 ## Multi-Service
 
-A trio of collaborating shell and Python services that demonstrates cron
-scheduling, file hand-offs, deliberate failure recovery, and webhook hooks — all
-using the scripts in `examples/multi-service`.
+Shell/Python services with cron, file sharing, and webhooks.
 
-**Features demonstrated:**
-- Restart supervision with `restart_policy` and lifecycle hooks
-- Cron-driven batch jobs feeding data to other services
-- Long-lived process restarts with HTTP notifications on failure
-- Cooperative file sharing between services with graceful shutdowns
-
-[View Multi-Service Example →](/docs/examples/multi-service)
+[→ Multi-Service](/docs/examples/multi-service)
 
 ## Meta-Agents
 
-Recursive Claude agents that all read the same instruction file, spawn the next
-role with `sysg`, and propagate results back up the chain through shared files
-in `/tmp/meta_agents`.
+Recursive Claude agents spawning each other with depth limits.
 
-**Features demonstrated:**
-- Dynamic spawning with depth and descendant limits
-- Name-based behavior driven by a single `INSTRUCTIONS.md`
-- File hand-offs coordinated between supervised agents
-- Observability via `sysg status`, `sysg logs`, and filesystem artifacts
-
-[View Meta-Agents Example →](/docs/examples/meta-agents)
+[→ Meta-Agents](/docs/examples/meta-agents)
 
 ## Orchestrator
 
-A sophisticated multi-agent orchestration system that demonstrates LLM-driven
-task decomposition, distributed coordination through Redis, and hierarchical
-agent management using systemg's process supervision capabilities.
+Multi-agent task execution with Redis cache and DAG scheduling.
 
-**Features demonstrated:**
-- LLM-driven DAG generation for task decomposition
-- Redis-backed distributed task queue and state management
-- Lease-based locking with TTL for fault tolerance
-- Heartbeat-based agent control via markdown directives
-- Memory snapshots for crash recovery
-- Multi-agent coordination with priority-based scheduling
-
-[View Orchestrator Example →](/docs/examples/orchestrator)
+[→ Orchestrator](/docs/examples/orchestrator)

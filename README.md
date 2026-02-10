@@ -30,73 +30,52 @@
 
 ---
 
-# systemg - A General-Purpose Program Composer
+# systemg - Process Supervisor
 
-systemg is a **general-purpose program composer** that transforms arbitrary programs into coherent systems with explicit lifecycles, dependencies, and health monitoring. Instead of managing individual daemons or containers, it focuses on **composition over mechanics**—turning a collection of processes into a system you can reason about, evolve, and deploy cleanly.
-
-Built on top of existing OS primitives like systemd and cgroups, systemg inherits their stability while adding higher-level intent: how programs relate, start, roll, and recover together.
+Process supervisor with dependencies, health checks, and rolling deployments. Built on systemd/cgroups.
 
 ---
 
 ## Getting Started
 
-### How It Works
-
-Curious about the architecture? Read [How Systemg Works](docs/docs/how-it-works.md) for a deep dive into userspace vs. kernel-space behavior, socket activation, and runtime helpers.
-
 ### Installation
 
-Install the system binary:
-
 ```sh
-$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+# Install script
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+
+# Or via cargo
+cargo install sysg
 ```
 
-Install systemg using cargo:
+System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/systemg`, `/var/lib/systemg`. See [security guide](docs/docs/security.md).
+
+### Usage
 
 ```sh
-$ cargo install sysg
+sysg start                     # Default config (systemg.yaml)
+sysg start --config my.yaml    # Custom config
+sysg start --daemonize         # Background supervisor
 ```
 
-Or download the pre-built binary from the releases page.
-
-For system deployments, `scripts/install-systemg.sh` installs `/usr/bin/sysg`, provisions `/etc/systemg`, `/var/lib/systemg`, `/var/log/systemg`, and drops sample logrotate + systemd assets for socket activation. Review and adapt it to match your distribution policies before running. Pair it with `examples/system-mode.yaml` and check the new `docs/docs/security.md` guide for hardening best practices.
-
-### Running a Basic Start Command
-
-Start the process manager with the default configuration:
-
-```sh
-# Start with default configuration file (systemg.yaml)
-$ sysg start
-
-# Start with a specific configuration file
-$ sysg start --config systemg.yaml
-
-# Start the long-lived supervisor (persists after you log out)
-$ sysg start --config systemg.yaml --daemonize
-```
-
-When the supervisor is running it remains active in the background, holding service processes in the same process group so commands like `sysg stop`, `sysg restart`, `sysg status`, and `sysg logs` can coordinate them even after you disconnect from the shell that started them.
+Commands: `sysg stop`, `sysg restart`, `sysg status`, `sysg logs`
 
 ---
 
 ## Why systemg
 
-Traditional service managers focus on the mechanics of keeping processes alive. systemg takes a different approach: it's about **composing programs into systems**. While tools like systemd manage individual units with complex dependency chains, systemg lets you declare how programs work together as a coherent whole—with explicit lifecycles, health checks, and deployment strategies that make the system's behavior predictable and evolvable.
+Compose programs into systems with explicit dependencies and health checks.
 
 ### Features
 
-- **Program Composition** - Declare how programs relate and work together, not just individual service configs.
-- **Explicit Lifecycles** - Define startup sequences, health checks, and recovery behaviors as first-class concepts.
-- **Dependency Orchestration** - Programs start in topological order with health-aware cascading on failures.
-- **Rolling Deployments** - Built-in blue-green swaps with health validation—no external deployment tools needed.
-- **Environment Inheritance** - Consistent environment propagation from `.env` files across all composed programs.
-- **Lifecycle Webhooks** - Integrate with external systems through event-driven notifications. See [Webhooks documentation](docs/docs/webhooks.md).
-- **Cron Scheduling** - Short-lived tasks run alongside services with proper overlap detection.
-- **Dynamic Process Spawning** - Parent services can spawn tracked child processes with resource limits and hierarchical monitoring.
-- **OS Primitive Integration** - Leverages systemd/cgroups when available while maintaining userspace simplicity.
-- **Single Static Binary** - No runtime dependencies, instant startup, predictable memory usage.
+- **Dependencies** - Topological startup order with health-aware cascading
+- **Rolling Deployments** - Blue-green swaps with health validation
+- **Environment** - `.env` file propagation
+- **Webhooks** - Event notifications ([docs](docs/docs/webhooks.md))
+- **Cron** - Scheduled tasks with overlap detection
+- **Spawning** - Dynamic child process tracking
+- **OS Integration** - systemd/cgroups when available
+- **Single Binary** - No runtime dependencies
 
 ### Privileged Mode (Optional)
 

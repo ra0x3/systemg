@@ -3,23 +3,15 @@ sidebar_position: 4
 title: Configuration
 ---
 
-## Overview
+## Structure
 
-Systemg uses a YAML-based configuration file to define services, their dependencies, restart policies, and deployment strategies. The configuration file is typically named `systemg.yaml` or `sysg.yaml` and should be placed in your project root.
+```yaml
+version: "1"
+env: {}        # Optional global environment
+services: {}   # Service definitions
+```
 
-## Configuration Structure
-
-### Top-Level Configuration
-
-The configuration file has the following top-level sections:
-
-- **`version`** – Configuration file version (currently `"1"`)
-- **`env`** – Optional environment configuration shared by all services (see [Root-Level Environment Variables](#root-level-environment-variables))
-- **`services`** – Map of service names to their configurations
-
-### Complete Example
-
-Below is a comprehensive example showing all available configuration options:
+## Full Example
 
 ```yaml
 # Configuration file version
