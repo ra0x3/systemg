@@ -95,7 +95,7 @@ redis-server
 sysg start
 
 # Monitor
-sysg logs orchestrator -f
+sysg logs --service orchestrator
 redis-cli KEYS "*"
 
 # Control

@@ -37,6 +37,7 @@ fn logs_streams_when_pid_has_no_fds() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     cmd.env("SYSTEMG_TAIL_MODE", "oneshot")
         .arg("logs")
+        .arg("--service")
         .arg("arb_rs")
         .arg("--lines")
         .arg("1")

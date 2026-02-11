@@ -82,7 +82,7 @@ sysg status
 View logs for the web server:
 
 ```bash
-sysg logs node__web_server
+sysg logs --service node__web_server
 ```
 
 ### Stop Services

@@ -16,6 +16,7 @@ sysg logs
 | Option | Description |
 |--------|------------|
 | `--config` | Path to configuration file |
+| `--service` | The name of the service whose logs should be displayed (optional) |
 | `--lines` | Number of lines to show (default: 50) |
 | `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stdout) |
 | `--sys` | Opt into privileged system mode. Requires running as root |
@@ -33,13 +34,13 @@ sysg logs
 ### View logs from specific service
 
 ```sh
-sysg logs api
+sysg logs --service api
 ```
 
 ### View stderr logs
 
 ```sh
-sysg logs --kind stderr api
+sysg logs --service api --kind stderr
 ```
 
 ### View supervisor logs
@@ -51,7 +52,7 @@ sysg logs --kind supervisor
 ### Show more history
 
 ```sh
-sysg logs --lines 200 api
+sysg logs --service api --lines 200
 ```
 
 ## Log files

@@ -197,7 +197,7 @@ log_test "Scenario 3: System monitoring and troubleshooting"
 
 # Test log streaming
 log_info "Testing real-time log streaming..."
-timeout 5 sysg logs app_worker &
+timeout 5 sysg logs --service app_worker &
 LOGS_PID=$!
 sleep 2
 if kill -0 $LOGS_PID 2>/dev/null; then
@@ -221,7 +221,7 @@ fi
 
 # Test specific service logs
 log_info "Testing service-specific log retrieval..."
-if sysg logs nginx --lines 10 2>/dev/null | grep -q nginx; then
+if sysg logs --service nginx --lines 10 2>/dev/null | grep -q nginx; then
     log_success "Service-specific logs accessible"
 else
     log_info "Nginx logs may not be available yet"

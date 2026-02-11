@@ -326,7 +326,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             &service,
                             process_pid,
                             lines,
-                            kind.as_deref(),
+                            Some(kind.as_str()),
                         )?;
                     } else {
                         let cron_state = CronStateFile::load().unwrap_or_default();
@@ -340,7 +340,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             manager.show_inactive_log(
                                 &service,
                                 lines,
-                                kind.as_deref(),
+                                Some(kind.as_str()),
                             )?;
                         } else {
                             warn!("Service '{service}' is not currently running");
@@ -349,7 +349,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
                 None => {
                     info!("Fetching logs for all services");
-                    manager.show_logs(lines, kind.as_deref(), Some(&effective_config))?;
+                    manager.show_logs(
+                        lines,
+                        Some(kind.as_str()),
+                        Some(&effective_config),
+                    )?;
                 }
             }
         }

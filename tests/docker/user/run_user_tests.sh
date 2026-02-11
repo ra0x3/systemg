@@ -333,7 +333,7 @@ fi
 
 # Test service-specific debugging
 log_info "Debugging specific service..."
-timeout 5 sysg logs --config systemg.yaml worker &
+timeout 5 sysg logs --config systemg.yaml --service worker &
 LOG_PID=$!
 sleep 2
 kill $LOG_PID 2>/dev/null

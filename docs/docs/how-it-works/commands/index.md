@@ -45,7 +45,7 @@ Most commands accept a service name:
 
 ```sh
 sysg restart --service api
-sysg logs worker
+sysg logs --service worker
 sysg stop --service redis
 ```
 

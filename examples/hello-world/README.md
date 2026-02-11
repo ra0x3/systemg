@@ -60,7 +60,7 @@ sysg status
 
 ### View logs:
 ```bash
-sysg logs sh__hello_world
+sysg logs --service sh__hello_world
 ```
 
 ### Expected log output:

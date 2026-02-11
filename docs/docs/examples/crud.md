@@ -154,7 +154,7 @@ sysg restart node__web_server
 ### View logs
 
 ```bash
-sysg logs node__web_server --follow
+sysg logs --service node__web_server
 ```
 
 ### Manual backup
@@ -183,10 +183,10 @@ sysg cron list
 ## Monitoring
 
 ```bash
-sysg status                           # Service health
-sysg cron status                      # Cron job history
-sysg logs automated_testing           # Test results
-sysg logs database_backup             # Backup logs
+sysg status                                    # Service health
+sysg cron status                               # Cron job history
+sysg logs --service automated_testing          # Test results
+sysg logs --service database_backup            # Backup logs
 ```
 
 ## See also

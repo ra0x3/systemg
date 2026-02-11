@@ -32,7 +32,7 @@ done
 
 ```bash
 sysg start
-sysg logs counter
+sysg logs --service counter
 sysg stop
 ```
 

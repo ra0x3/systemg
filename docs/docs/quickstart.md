@@ -46,7 +46,7 @@ hello    running  42309  3s
 ## View logs
 
 ```bash
-sysg logs hello
+sysg logs --service hello
 ```
 
 ## Stop everything

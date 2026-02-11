@@ -293,13 +293,13 @@ $ sysg inspect myservice --no-color
 $ sysg logs
 
 # View logs for a specific service
-$ sysg logs api-service
+$ sysg logs --service api-service
 
 # View a custom number of log lines
-$ sysg logs database --lines 100
+$ sysg logs --service database --lines 100
 
 # View specific log type (stdout, stderr, or supervisor)
-$ sysg logs myservice --kind stderr
+$ sysg logs --service myservice --kind stderr
 ```
 
 **Spawn** - Dynamically spawn child processes from parent services:

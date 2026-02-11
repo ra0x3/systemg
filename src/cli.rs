@@ -1,5 +1,5 @@
 //! Command-line interface for Systemg.
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use clap::{Parser, Subcommand};
 use tracing::level_filters::LevelFilter;
@@ -63,6 +63,51 @@ impl FromStr for LogLevelArg {
         .ok_or_else(|| format!("invalid log level '{trimmed}'"))?;
 
         Ok(LogLevelArg(level))
+    }
+}
+
+/// Type of logs to display.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LogKind {
+    /// Standard output logs
+    #[default]
+    Stdout,
+    /// Standard error logs
+    Stderr,
+    /// Supervisor logs
+    Supervisor,
+}
+
+impl LogKind {
+    /// String representation for file paths and display.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LogKind::Stdout => "stdout",
+            LogKind::Stderr => "stderr",
+            LogKind::Supervisor => "supervisor",
+        }
+    }
+}
+
+impl fmt::Display for LogKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for LogKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "stdout" => Ok(LogKind::Stdout),
+            "stderr" => Ok(LogKind::Stderr),
+            "supervisor" => Ok(LogKind::Supervisor),
+            _ => Err(format!(
+                "invalid log kind '{}', must be one of: stdout, stderr, supervisor",
+                s
+            )),
+        }
     }
 }
 
@@ -189,6 +234,7 @@ pub enum Commands {
         config: String,
 
         /// The name of the service whose logs should be displayed (optional).
+        #[arg(short, long)]
         service: Option<String>,
 
         /// Number of lines to show (default: 50).
@@ -196,8 +242,8 @@ pub enum Commands {
         lines: usize,
 
         /// Kind of logs to show: stdout, stderr, or supervisor (default: stdout).
-        #[arg(short = 'k', long, default_value = "stdout")]
-        kind: Option<String>,
+        #[arg(short = 'k', long, default_value_t = LogKind::default())]
+        kind: LogKind,
     },
 
     /// Purge all systemg state and runtime files.
