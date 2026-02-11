@@ -29,6 +29,22 @@ Name of a specific service to stop. If not specified, all services are stopped. 
 sysg stop --service api
 ```
 
+### `--sys`
+
+Opt into privileged system mode. Requires running as root.
+
+```sh
+sudo sysg stop --sys
+```
+
+### `--drop-privileges`
+
+Drop privileges after performing privileged setup.
+
+```sh
+sudo sysg stop --sys --drop-privileges
+```
+
 ### `--log-level`
 
 Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).

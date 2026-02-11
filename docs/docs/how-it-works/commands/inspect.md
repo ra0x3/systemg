@@ -15,8 +15,12 @@ sysg inspect myservice
 
 | Option | Description |
 |--------|------------|
-| `--window` | Time window (`5m`, `30m`, `1h`, `24h`) |
+| `--window` | Time window to display (e.g., "5s" for live, "12h" for historical). Short durations (<=60s) enable live mode with auto-refresh (default: 5s) |
 | `--config` | Path to configuration file |
+| `--json` | Emit machine-readable JSON output instead of a report |
+| `--sys` | Opt into privileged system mode. Requires running as root |
+| `--drop-privileges` | Drop privileges after performing privileged setup |
+| `--no-color` | Disable ANSI colors in output |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples

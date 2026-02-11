@@ -15,8 +15,11 @@ sysg logs
 
 | Option | Description |
 |--------|------------|
+| `--config` | Path to configuration file |
 | `--lines` | Number of lines to show (default: 50) |
-| `--follow` | Stream new logs in real-time |
+| `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stdout) |
+| `--sys` | Opt into privileged system mode. Requires running as root |
+| `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples
@@ -33,13 +36,17 @@ sysg logs
 sysg logs api
 ```
 
-### Follow logs in real-time
+### View stderr logs
 
 ```sh
-sysg logs --follow
+sysg logs --kind stderr api
 ```
 
-Press `Ctrl+C` to stop following.
+### View supervisor logs
+
+```sh
+sysg logs --kind supervisor
+```
 
 ### Show more history
 

@@ -21,12 +21,36 @@ Path to the configuration file. If not specified, systemg looks for `systemg.yam
 sysg start --config /etc/myapp/services.yaml
 ```
 
+### `--service`
+
+Optionally start only the named service instead of all services.
+
+```sh
+sysg start --service api
+```
+
 ### `--daemonize`
 
 Run the supervisor as a background daemon. The supervisor continues running after you close your terminal, and subsequent commands communicate with it via Unix socket.
 
 ```sh
 sysg start --daemonize
+```
+
+### `--sys`
+
+Opt into privileged system mode. Requires running as root.
+
+```sh
+sudo sysg start --sys
+```
+
+### `--drop-privileges`
+
+Drop privileges after performing privileged setup.
+
+```sh
+sudo sysg start --sys --drop-privileges
 ```
 
 ### `--log-level`

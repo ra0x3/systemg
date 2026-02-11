@@ -15,10 +15,12 @@ sysg spawn --name worker_1 -- python worker.py
 
 | Option | Description |
 |--------|------------|
-| `--name` | Unique identifier for spawned process |
-| `--ttl` | Time-to-live in seconds |
-| `--env` | Environment variables (`KEY=value`) |
-| `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| `--name` | Required. Unique identifier for spawned process |
+| `--ttl` | Time-to-live in seconds (optional) |
+| `--parent-pid` | Parent process ID (defaults to caller's parent PID if not specified) |
+| `--sys` | Opt into privileged system mode. Requires running as root |
+| `--drop-privileges` | Drop privileges after performing privileged setup |
+| `--log-level` | Override the logging verbosity for the spawned process |
 
 ## Examples
 
@@ -39,11 +41,11 @@ sysg spawn --name temp_worker \
   -- ./process.sh
 ```
 
-### Spawn with environment
+### Spawn with parent PID tracking
 
 ```sh
 sysg spawn --name api_worker \
-  --env API_KEY=secret \
+  --parent-pid 12345 \
   -- node worker.js
 ```
 

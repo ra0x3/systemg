@@ -95,9 +95,12 @@ The scheduler reads from queue and spawns workers:
 
 ```python
 # scheduler.py
+import os
 import subprocess
+
 while job := queue.pop():
     subprocess.run(["sysg", "spawn", "--name", f"job_{job.id}",
+                    "--parent-pid", str(os.getpid()),
                     "--ttl", "3600", "--", "python", "worker.py", job.id])
 ```
 

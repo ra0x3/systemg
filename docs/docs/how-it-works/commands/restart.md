@@ -29,6 +29,30 @@ Name of a specific service to restart. If not specified, all services are restar
 sysg restart --service api
 ```
 
+### `--daemonize`
+
+Start the supervisor before restarting if it isn't already running.
+
+```sh
+sysg restart --daemonize
+```
+
+### `--sys`
+
+Opt into privileged system mode. Requires running as root.
+
+```sh
+sudo sysg restart --sys
+```
+
+### `--drop-privileges`
+
+Drop privileges after performing privileged setup.
+
+```sh
+sudo sysg restart --sys --drop-privileges
+```
+
 ### `--log-level`
 
 Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
