@@ -1,4 +1,8 @@
 //! Module for managing and displaying logs of system services.
+//!
+//! This module treats stderr as the primary log stream. Service output to stderr is logged
+//! at debug level while stdout is logged at warn level to ensure stderr messages have priority
+//! in the supervisor's log output.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::process::Command;
 use std::{
@@ -166,6 +170,9 @@ fn resolve_tail_targets(
 }
 
 /// Creates the log directory if it doesn't exist.
+///
+/// Note: stderr is treated as the primary log stream and will be logged at debug level,
+/// while stdout is logged at warn level to ensure stderr messages have priority.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
     let path = get_log_path(service, kind);
     let service_label = service.to_string();
@@ -186,8 +193,8 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
         let reader = BufReader::new(reader);
         for line in reader.lines().map_while(Result::ok) {
             match kind_label.as_str() {
-                "stderr" => warn!("[{service_label} {kind_label}] {line}"),
-                _ => debug!("[{service_label} {kind_label}] {line}"),
+                "stderr" => debug!("[{service_label} {kind_label}] {line}"),
+                _ => warn!("[{service_label} {kind_label}] {line}"),
             }
             let _ = writeln!(file, "{line}");
         }
@@ -204,6 +211,10 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
 /// * `reader` - Reader for the child's output stream
 /// * `kind` - Type of stream (e.g., "stdout" or "stderr")
 /// * `echo_to_console` - Whether to echo output to console in addition to file
+///
+/// # Note
+/// stderr is treated as the primary output stream and is echoed to stdout,
+/// while stdout is echoed to stderr, prioritizing stderr messages.
 pub fn spawn_dynamic_child_log_writer(
     root_service: Option<&str>,
     child_name: &str,
@@ -259,9 +270,9 @@ pub fn spawn_dynamic_child_log_writer(
             if echo_to_console {
                 let owner = owner_label.as_deref().unwrap_or("spawn");
                 if kind_label == "stderr" {
-                    eprintln!("[{}:{}:{}] {}", owner, child_label, kind_label, line);
-                } else {
                     println!("[{}:{}:{}] {}", owner, child_label, kind_label, line);
+                } else {
+                    eprintln!("[{}:{}:{}] {}", owner, child_label, kind_label, line);
                 }
             }
 

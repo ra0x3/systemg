@@ -51,7 +51,9 @@ sysg logs --lines 200 api
 
 Logs are stored in `~/.local/share/systemg/logs/`:
 - `{service}_stdout.log` - Standard output
-- `{service}_stderr.log` - Standard error
+- `{service}_stderr.log` - Standard error (primary log stream)
+
+> **Note:** systemg treats stderr as the primary log stream. Service logs written to stderr are given priority in the supervisor's log output.
 
 ## See also
 
