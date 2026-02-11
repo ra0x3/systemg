@@ -17,13 +17,6 @@ function HomepageHeader() {
           {siteConfig.title}
         </Heading>
         <p className="hero__subtitle">{siteConfig.tagline}</p>
-        <p
-          className="hero__subtitle"
-          style={{ fontSize: "0.9rem", opacity: 0.8, marginTop: "0.5rem" }}
-        >
-          <code>systemg</code> transforms arbitrary programs into{" "}
-          <em>coherent systems</em> with explicit lifecycles and dependencies
-        </p>
       </div>
     </header>
   );

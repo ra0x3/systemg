@@ -46,15 +46,26 @@ instructions/*.md  # Per-agent instructions
 heartbeat/*.md     # Control files
 ```
 
-## Config
+## Configuration
 
+**systemg.yaml:**
 ```yaml
-# systemg.yaml
+version: "1"
 services:
+  redis:
+    command: "redis-server"
   orchestrator:
-    command: ./.venv/bin/python3 agent.py --role orchestrator
+    command: >
+      ./.venv/bin/python3 agent.py
+      --role orchestrator
+    depends_on: ["redis"]
+    spawn:
+      mode: dynamic
+      limit: 10
+```
 
-# INSTRUCTIONS.md
+**INSTRUCTIONS.md:**
+```markdown
 ## Agents
 ### research_agent
 - Goal: goal-001
@@ -99,5 +110,5 @@ uv run pytest examples/orchestrator/tests -v
 
 ## Links
 
-- [Configuration](/docs/configuration)
+- [Configuration](/docs/how-it-works/configuration)
 - [How It Works](/docs/how-it-works)

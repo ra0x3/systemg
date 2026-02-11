@@ -1,36 +1,39 @@
 ---
-sidebar_position: 10
+sidebar_position: 4
 title: Examples
 ---
 
 # Examples
 
-## Hello World
+Working examples demonstrating systemg features.
 
-Basic service management with restart policies.
+## [Hello World](hello-world)
 
-[→ Hello World](/docs/examples/hello-world)
+Minimal service configuration.
 
-## CRUD Application
+## [CRUD Application](crud)
 
-Node.js app with database backups and cron tasks.
+Production Node.js API with database backups and automated testing.
 
-[→ CRUD](/docs/examples/crud)
+## [Orchestrator](orchestrator)
 
-## Multi-Service
+Multi-agent task execution with Redis coordination and DAG scheduling.
 
-Shell/Python services with cron, file sharing, and webhooks.
+## Running examples
 
-[→ Multi-Service](/docs/examples/multi-service)
+```bash
+git clone https://github.com/systemg/systemg
+cd systemg/examples/<example-name>
+sysg start
+```
 
-## Meta-Agents
+Each example includes:
+- Complete configuration file
+- Working application code
+- Setup instructions
+- Expected behavior
 
-Recursive Claude agents spawning each other with depth limits.
+## See also
 
-[→ Meta-Agents](/docs/examples/meta-agents)
-
-## Orchestrator
-
-Multi-agent task execution with Redis cache and DAG scheduling.
-
-[→ Orchestrator](/docs/examples/orchestrator)
+- [Quickstart](../quickstart) - Quick introduction
+- [Configuration](../how-it-works/configuration) - Full reference

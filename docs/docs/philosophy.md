@@ -1,27 +1,34 @@
 ---
-sidebar_position: 99
+sidebar_position: 5
 title: Philosophy
 ---
 
 # Philosophy
 
-## Design
+systemg makes multi-service applications easy to run.
 
-systemg composes programs into systems with dependencies and health checks. Unlike systemd (complex unit files) or supervisord (isolated processes), systemg uses simple YAML to declare relationships.
+## Design principles
 
-## Architecture
+**Simple configuration** - YAML, not complex unit files
+**Dependency aware** - Services start in the right order
+**Single binary** - No runtime dependencies
+**Dev to prod** - Same config works everywhere
+**Least privilege** - Drop permissions by default
 
-- Single static binary (Rust)
-- Persistent state in `~/.local/share/systemg/`
-- Leverages OS primitives when available (systemd, cgroups)
-- Privileged mode optional (`--sys` flag)
-- Least-privilege by default
+## Sweet spot
 
-## Use Cases
-
-Best for 5-50 interdependent programs:
-- Microservices in monorepos
+systemg works best for 5-50 interdependent services:
+- Microservice applications
 - Data pipelines
-- Web apps with workers and scheduled jobs
+- Web apps with workers and cron jobs
 
-Same config works dev to prod. No separate deployment tools needed.
+## Not a fit for
+
+- Single service apps (use systemd directly)
+- 100+ services (use Kubernetes)
+- Windows environments
+
+## See also
+
+- [Introduction](intro) - What systemg does
+- [Configuration](how-it-works/configuration) - Define your system

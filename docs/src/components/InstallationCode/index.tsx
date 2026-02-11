@@ -15,19 +15,9 @@ export default function InstallationCode(): ReactNode {
 
   const installCommands = [
     {
-      title: "Install latest version",
+      title: "Install systemg",
       command: "curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh",
       description: "Downloads and installs the latest release"
-    },
-    {
-      title: "Install specific version",
-      command: "curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.15.6",
-      description: "Downloads and installs version 0.15.6"
-    },
-    {
-      title: "Switch to existing version",
-      command: "curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.15.5",
-      description: "Switches to 0.15.5 if already installed, or downloads it"
     }
   ];
 

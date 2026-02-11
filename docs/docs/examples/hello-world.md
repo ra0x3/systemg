@@ -5,50 +5,52 @@ title: Hello World
 
 # Hello World
 
-Basic service with restart policy.
+Minimal systemg service.
 
-## Files
+## Configuration
 
-**`hello-world.sh`**:
+```yaml
+version: "1"
+services:
+  counter:
+    command: "sh counter.sh"
+```
+
+## Script
+
 ```bash
 #!/bin/sh
 i=1
 while true; do
-    echo "Line number: $i"
+    echo "Count: $i"
     i=$((i + 1))
-    sleep 2
+    sleep 1
 done
 ```
 
-**`hello-world.sysg.yaml`**:
-```yaml
-version: "1"
-services:
-  sh__hello_world:
-    command: "sh hello-world.sh"
-    env:
-      file: ".env"
-      vars:
-        FOO: "foo"
-    restart_policy: "on_failure"
-    retries: "5"
-    backoff: "5s"
-```
-
-## Usage
+## Run it
 
 ```bash
-cd examples/hello-world
 sysg start
-sysg status
-sysg logs sh__hello_world
+sysg logs counter
 sysg stop
 ```
 
-Output:
+You'll see:
 ```
-Line number: 1
-Line number: 2
-Line number: 3
-...
+Count: 1
+Count: 2
+Count: 3
+```
+
+## Next steps
+
+Add a restart policy to handle crashes:
+
+```yaml
+version: "1"
+services:
+  counter:
+    command: "sh counter.sh"
+    restart_policy: "always"
 ```

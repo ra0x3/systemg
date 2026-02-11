@@ -1,9 +1,9 @@
 ---
-sidebar_position: 5
-title: Cron Scheduling
+sidebar_position: 1
+title: Cron
 ---
 
-# Cron Scheduling
+# Cron
 
 Schedule recurring tasks with cron expressions.
 
