@@ -4,7 +4,7 @@ services:
   orchestrator:
     command: >-
       ./.venv/bin/python3
-      agent.py
+      main.py
       --role orchestrator
       --instructions INSTRUCTIONS.md
       --redis-url redis://127.0.0.1:6379

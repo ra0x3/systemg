@@ -1,7 +1,7 @@
 # Systemg Agent Orchestration Spec
 
 ## Background
-- `agent.py` currently sketches an agent runtime that never fully executes because decorators short-circuit, subprocesses misuse `sysg` spawns, and no orchestrator supervises agents.
+- `main.py` currently sketches an agent runtime that never fully executes because decorators short-circuit, subprocesses misuse `sysg` spawns, and no orchestrator supervises agents.
 - The target architecture promotes an always-on orchestrator that spawns agents via `sysg spawn`, keeps authoritative state in Redis, and coordinates LLM-driven work decomposition.
 - Markdown (`INSTRUCTIONS.md`, `heartbeat.md`) remains the human-facing control plane, mirroring practices in other agent platforms such as OpenClaw.
 
@@ -55,11 +55,11 @@
 - All writes pass through Lua/transaction helpers to keep node+state consistent and to enforce DAG invariants.
 
 ## Spawn Taxonomy
-- `sysg spawn --daemon`: launches long-lived processes (orchestrator-managed agents). Orchestrator passes `--role agent` plus agent-specific flags and records the returned PID.
-- `sysg spawn --oneshot`: runs short-lived commands (LLM tools, auxiliary scripts) synchronously; stdout is captured via `handle.stdout_text()` after `.wait()` completes.
+- `sysg spawn`: launches processes with systemg supervision. For long-lived agents, orchestrator passes `--name agent-<name>` plus agent-specific flags and records the returned PID.
+- Short-lived commands (LLM tools, auxiliary scripts) can be run with `sysg spawn --ttl <seconds>` for automatic cleanup, or directly via subprocess for immediate execution with stdout capture.
 - Every spawn includes `--parent-pid <orchestrator_pid>` to anchor the process tree.
 - Handles expose `.pid`, `.wait(timeout=...)`, `.stdout_text()`, and `.stderr_text()` so the orchestrator can gather results or enforce timeouts.
-- Agents use the oneshot form sparingly—primarily for tool commands—while LLM calls go through an in-process client.
+- Agents use subprocess sparingly—primarily for tool commands—while LLM calls go through an in-process client.
 
 ## LLM Interaction Pipeline
 1. **Goal decomposition (orchestrator)**
@@ -83,13 +83,13 @@
 - The orchestrator and other agents treat Redis task state as the source of truth; they never depend on another agent's memory snapshot.
 
 ## LLM Invocation Strategy
-- Agents and orchestrator call the local `claude` CLI (optionally via `sysg spawn --oneshot`), capturing stdout and enforcing JSON schemas for DAG generation, task selection, and execution summaries.
+- Agents and orchestrator call the local `claude` CLI (optionally via `sysg spawn --ttl`), capturing stdout and enforcing JSON schemas for DAG generation, task selection, and execution summaries.
 - The CLI client surfaces non-zero exit codes and rejects malformed JSON payloads so orchestrator/agents can escalate.
 - Operators configure the CLI path with `--claude-cli` (default `claude`) and may supply extra arguments or `--claude-use-sysg` to delegate process management to systemg.
-- Tool executions that manipulate the filesystem or external services continue to use `sysg spawn --oneshot`.
+- Tool executions that manipulate the filesystem or external services can use `sysg spawn --ttl` for managed execution with automatic cleanup.
 
 ## Agent Lifecycle & Discovery
-- Orchestrator issues `sysg spawn --daemon` for each agent declaration and expects registration within `REGISTRATION_TIMEOUT` seconds.
+- Orchestrator issues `sysg spawn` for each agent declaration and expects registration within `REGISTRATION_TIMEOUT` seconds.
 - Agent boot sequence:
   - Hydrate memory from Redis.
   - Write `agent:<name>:registered` hash (`pid`, `capabilities`, `timestamp`).
@@ -116,7 +116,7 @@
 - Error records include agent name, task id, correlation id, and timestamp for post-mortem analysis.
 
 ## CLI & Logging
-- Shared entry point `python agent.py --role {orchestrator,agent}`.
+- Shared entry point `python main.py --role {orchestrator,agent}`.
 - Common flags: `--instructions`, `--heartbeat`, `--redis-url`, `--log-level`, `--agent-name`, `--goal-id`.
 - Claude configuration flags: `--claude-cli`, `--claude-extra-arg` (repeatable), `--claude-use-sysg` (invoke through systemg).
 - Logging via `logging.basicConfig(level=...)` with structured context (agent, task, lease id).

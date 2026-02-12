@@ -53,7 +53,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--claude-use-sysg",
         action="store_true",
-        help="Invoke Claude through `sysg spawn --oneshot` to capture stdout/stderr",
+        help="Invoke Claude through `sysg spawn --ttl` to capture stdout/stderr",
     )
     return parser
 
