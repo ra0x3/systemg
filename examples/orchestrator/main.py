@@ -24,6 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build CLI argument parser."""
     parser = argparse.ArgumentParser(description="Systemg agent/orchestrator entrypoint")
     parser.add_argument(
         "--role", required=True, choices=["agent", "orchestrator"], help="Process role"
@@ -34,6 +35,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--redis-url", default="fakeredis://", help="Redis connection URL")
     parser.add_argument("--log-level", default="INFO", help="Python logging level")
     parser.add_argument("--agent-name", help="Agent identifier when running in agent mode")
+    parser.add_argument("--agent-role", help="Agent role identifier when running in agent mode")
     parser.add_argument("--goal-id", help="Goal identifier for the active DAG")
     parser.add_argument("--heartbeat", type=Path, help="Heartbeat file path for agent role")
     parser.add_argument(
@@ -59,6 +61,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _redis_client_from_url(url: str):
+    """Construct Redis client from connection URL."""
     if url.startswith("fakeredis://"):
         if not fakeredis:
             raise RuntimeError("fakeredis is not installed")
@@ -67,6 +70,7 @@ def _redis_client_from_url(url: str):
 
 
 def _configure_logging(level: str) -> None:
+    """Configure root logging format and level."""
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -74,6 +78,7 @@ def _configure_logging(level: str) -> None:
 
 
 def run_cli(argv: list[str] | None = None) -> int:
+    """Execute CLI entrypoint logic and return process exit code."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args.log_level)
@@ -92,6 +97,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             parser.error("Agent role requires --agent-name, --goal-id, and --heartbeat")
         runtime = AgentRuntime(
             agent_name=args.agent_name,
+            agent_role=args.agent_role or args.agent_name,
             goal_id=args.goal_id,
             instructions_path=args.instructions,
             heartbeat_path=args.heartbeat,

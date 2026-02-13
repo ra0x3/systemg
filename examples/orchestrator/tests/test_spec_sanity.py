@@ -6,6 +6,7 @@ ASSETS_DIR = EXAMPLE_ROOT / "tests" / "assets"
 
 
 def test_spec_includes_required_sections():
+    """Spec document should include required section headings."""
     spec_text = SPEC_PATH.read_text(encoding="utf-8")
     expected_headings = [
         "## Naming Conventions",
@@ -20,8 +21,9 @@ def test_spec_includes_required_sections():
 
 
 def test_asset_files_exist_and_match_format():
+    """Fixture asset files should exist and follow basic format rules."""
     instructions_path = ASSETS_DIR / "INSTRUCTIONS.md"
-    heartbeat_path = ASSETS_DIR / "heartbeat" / "agent-research.md"
+    heartbeat_path = ASSETS_DIR / "instructions" / "heartbeat" / "agent-research.md"
 
     assert instructions_path.exists(), "Fixture instructions file missing"
     assert heartbeat_path.exists(), "Fixture heartbeat file missing"

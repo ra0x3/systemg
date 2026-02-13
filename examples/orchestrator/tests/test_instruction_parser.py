@@ -23,14 +23,14 @@ This is some markdown text explaining the agents.
 agents:
   - name: test-agent-1
     goal: test-goal
-    heartbeat: heartbeat/TEST1.md
+    heartbeat: instructions/heartbeat/TEST1.md
     instructions: instructions/TEST1.md
     log-level: DEBUG
     cadence: 10s
 
   - name: test-agent-2
     goal: test-goal-2
-    heartbeat: heartbeat/TEST2.md
+    heartbeat: instructions/heartbeat/TEST2.md
     instructions: instructions/TEST2.md
     log-level: INFO
     cadence: 5s
@@ -39,11 +39,11 @@ agents:
 Additional markdown content here.
 """)
     # Create the referenced directories
-    (tmp_path / "heartbeat").mkdir()
-    (tmp_path / "instructions").mkdir()
+    (tmp_path / "instructions" / "heartbeat").mkdir(parents=True)
+    (tmp_path / "instructions").mkdir(exist_ok=True)
     # Create the referenced files
-    (tmp_path / "heartbeat" / "TEST1.md").write_text("heartbeat 1")
-    (tmp_path / "heartbeat" / "TEST2.md").write_text("heartbeat 2")
+    (tmp_path / "instructions" / "heartbeat" / "TEST1.md").write_text("heartbeat 1")
+    (tmp_path / "instructions" / "heartbeat" / "TEST2.md").write_text("heartbeat 2")
     (tmp_path / "instructions" / "TEST1.md").write_text("instructions 1")
     (tmp_path / "instructions" / "TEST2.md").write_text("instructions 2")
     return instructions_path
@@ -56,16 +56,16 @@ def pure_yaml_instructions(tmp_path: Path) -> Path:
     instructions_path.write_text("""agents:
   - name: yaml-agent
     goal: yaml-goal
-    heartbeat: heartbeat/YAML.md
+    heartbeat: instructions/heartbeat/YAML.md
     instructions: instructions/YAML.md
     log-level: WARN
     cadence: 15s
 """)
     # Create the referenced directories
-    (tmp_path / "heartbeat").mkdir()
-    (tmp_path / "instructions").mkdir()
+    (tmp_path / "instructions" / "heartbeat").mkdir(parents=True)
+    (tmp_path / "instructions").mkdir(exist_ok=True)
     # Create the referenced files
-    (tmp_path / "heartbeat" / "YAML.md").write_text("yaml heartbeat")
+    (tmp_path / "instructions" / "heartbeat" / "YAML.md").write_text("yaml heartbeat")
     (tmp_path / "instructions" / "YAML.md").write_text("yaml instructions")
     return instructions_path
 
@@ -152,7 +152,7 @@ agents:
 agents:
   - name: first-block-agent
     goal: first-goal
-    heartbeat: heartbeat/FIRST.md
+    heartbeat: instructions/heartbeat/FIRST.md
     instructions: instructions/FIRST.md
 ```
 
@@ -162,14 +162,14 @@ Some other content
 agents:
   - name: second-block-agent
     goal: second-goal
-    heartbeat: heartbeat/SECOND.md
+    heartbeat: instructions/heartbeat/SECOND.md
     instructions: instructions/SECOND.md
 ```
 """)
         # Create required files
-        (tmp_path / "heartbeat").mkdir()
-        (tmp_path / "instructions").mkdir()
-        (tmp_path / "heartbeat" / "FIRST.md").write_text("first")
+        (tmp_path / "instructions" / "heartbeat").mkdir(parents=True)
+        (tmp_path / "instructions").mkdir(exist_ok=True)
+        (tmp_path / "instructions" / "heartbeat" / "FIRST.md").write_text("first")
         (tmp_path / "instructions" / "FIRST.md").write_text("first")
 
         parser = InstructionParser(instructions_path)

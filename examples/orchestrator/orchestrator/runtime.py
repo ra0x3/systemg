@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .cache import RedisStore
+from .constants import AGENT_LOOP_INTERVAL, INSTRUCTION_REFRESH_INTERVAL
 from .heartbeat import HeartbeatController, HeartbeatDirective
 from .llm import LLMClient, TaskExecutionResult
 from .memory import Memory
@@ -23,17 +24,20 @@ class AgentRuntime(BaseLogger):
         self,
         *,
         agent_name: str,
+        agent_role: str | None = None,
         goal_id: str,
         instructions_path: Path,
         heartbeat_path: Path,
         redis_store: RedisStore,
         llm_client: LLMClient | None = None,
-        loop_interval: float = 1.0,
+        loop_interval: float = AGENT_LOOP_INTERVAL,
         lease_ttl: timedelta = DEFAULT_LEASE_TTL,
-        instructions_refresh_interval: timedelta = timedelta(seconds=10),
+        instructions_refresh_interval: timedelta = INSTRUCTION_REFRESH_INTERVAL,
     ) -> None:
+        """Initialize agent runtime and restore persisted memory."""
         super().__init__(f"{self.__class__.__name__}[{agent_name}]")
         self.agent_name = agent_name
+        self.agent_role = agent_role or agent_name
         self.goal_id = goal_id
         self.instructions_path = instructions_path
         self.heartbeat_controller = HeartbeatController(heartbeat_path)
@@ -56,12 +60,14 @@ class AgentRuntime(BaseLogger):
         self._hydrate_memory()
 
     def _hydrate_memory(self) -> None:
+        """Restore memory snapshot from Redis if present."""
         snapshot = self.redis_store.load_memory_snapshot(self.agent_name)
         if snapshot:
             self.logger.debug("Hydrating memory with %d entries", len(snapshot))
             self.memory.hydrate(snapshot)
 
     def reload_instructions(self) -> None:
+        """Reload and version instructions from disk."""
         if self.instructions_path.exists():
             file_instructions = self.instructions_path.read_text(encoding="utf-8")
 
@@ -93,12 +99,13 @@ class AgentRuntime(BaseLogger):
         self._last_reload = datetime.now(timezone.utc)
 
     def poll_heartbeat(self) -> list[HeartbeatDirective]:
+        """Read current heartbeat directives."""
+        self.logger.info("Reading heartbeat at %s", self.heartbeat_controller.heartbeat_path)
         directives = self.heartbeat_controller.consume()
-        for directive in directives:
-            self.logger.info("Received heartbeat directive: %s", directive)
         return directives
 
     def apply_directives(self, directives: Iterable[HeartbeatDirective]) -> None:
+        """Apply heartbeat directives to local runtime state."""
         for directive in directives:
             if directive.command == "PAUSE":
                 self._paused = True
@@ -115,6 +122,7 @@ class AgentRuntime(BaseLogger):
                 self.redis_store.store_memory_snapshot(self.agent_name, [])
 
     def _drop_task(self, task_id: str) -> None:
+        """Requeue a task and release any held lock."""
         self.logger.info("Dropping task %s on operator request", task_id)
         state = self.redis_store.get_task_state(task_id)
         if not state:
@@ -125,6 +133,7 @@ class AgentRuntime(BaseLogger):
         self.redis_store.release_lock(task_id, self.agent_name)
 
     def _elevate_task(self, task_id: str, priority: str) -> None:
+        """Adjust task priority in DAG metadata."""
         dag = self.redis_store.read_dag(self.goal_id)
         if not dag:
             return
@@ -138,14 +147,18 @@ class AgentRuntime(BaseLogger):
         self.redis_store.write_dag(dag)
 
     def heartbeat(self) -> None:
+        """Publish agent heartbeat to Redis."""
         self.redis_store.heartbeat_agent(self.agent_name, ttl=self.lease_ttl)
 
     def run(self, *, max_cycles: int | None = None) -> None:
+        """Run agent loop until stopped or cycle limit reached."""
         pid = os.getpid()
         self.logger.info(
             "[%s] Starting agent (PID=%d) for goal %s", self.agent_name, pid, self.goal_id
         )
-        self.redis_store.register_agent(self.agent_name, pid)
+        self.redis_store.register_agent(
+            self.agent_name, pid, capabilities={"role": self.agent_role}
+        )
         self.reload_instructions()
         cycles = 0
         self.logger.info(
@@ -181,9 +194,11 @@ class AgentRuntime(BaseLogger):
         self.logger.info("[%s] Agent shutdown complete", self.agent_name)
 
     def stop(self) -> None:
+        """Request runtime shutdown."""
         self._active = False
 
     def _run_cycle(self) -> None:
+        """Select, claim, execute, and summarize one task."""
         ready_task_ids = self.redis_store.list_ready_tasks(self.goal_id)
         if not ready_task_ids:
             self.logger.info("[%s] No ready tasks for goal %s", self.agent_name, self.goal_id)
@@ -198,11 +213,21 @@ class AgentRuntime(BaseLogger):
         ready_nodes = []
         for task_id in ready_task_ids:
             node = self.redis_store.get_task_node(self.goal_id, task_id)
-            if node:
+            if node and self._is_node_eligible(node):
                 ready_nodes.append(node)
                 self.logger.debug(
                     "[%s]   Ready task: %s (priority=%d)", self.agent_name, node.id, node.priority
                 )
+
+        if not ready_nodes:
+            self.logger.info(
+                "[%s] No eligible ready tasks for role %s (global_ready=%d) on goal %s",
+                self.agent_name,
+                self.agent_role,
+                len(ready_task_ids),
+                self.goal_id,
+            )
+            return
 
         self.logger.info(
             "[%s] Asking LLM to select from %d tasks", self.agent_name, len(ready_nodes)
@@ -234,6 +259,8 @@ class AgentRuntime(BaseLogger):
                 self.agent_name,
                 selection.selected_task_id,
             )
+            return
+        if not self._is_node_eligible(node):
             return
 
         if not self.redis_store.acquire_lock(node.id, self.agent_name, self.lease_ttl):
@@ -285,8 +312,7 @@ class AgentRuntime(BaseLogger):
                 memory=self.memory,
             )
             self.logger.info("[%s] Task %s summary: %s", self.agent_name, node.id, summary[:200])
-
-            self._record_success(node, execution, summary)
+            self._record_result(node, execution, summary)
         except Exception as exc:  # pragma: no cover - defensive guard
             self.logger.error("[%s] Task %s failed: %s", self.agent_name, node.id, exc)
             self.logger.exception("Full exception details:")
@@ -295,14 +321,71 @@ class AgentRuntime(BaseLogger):
             self.logger.info("[%s] Releasing lock for task %s", self.agent_name, node.id)
             self.redis_store.release_lock(node.id, self.agent_name)
 
-    def _record_success(self, node: TaskNode, execution: TaskExecutionResult, summary: str) -> None:
-        state = TaskState(status=TaskStatus.DONE, progress=summary, artifacts=execution.outputs)
+    def _record_result(self, node: TaskNode, execution: TaskExecutionResult, summary: str) -> None:
+        """Apply role-aware task transitions based on execution output."""
+        execution_status = execution.status.strip().lower()
+        phase = node.metadata.get("phase", "development")
+        if phase == "qa" and execution_status in {"failed", "qa_failed"}:
+            self._record_qa_failure(node, summary)
+            return
+        if execution_status in {"failed", "blocked"}:
+            self._record_failure(node, execution.notes or execution_status)
+            return
+        if phase == "development":
+            state = TaskState(
+                status=TaskStatus.DEV_DONE, progress=summary, artifacts=execution.outputs
+            )
+        elif phase == "qa":
+            state = TaskState(
+                status=TaskStatus.QA_PASSED, progress=summary, artifacts=execution.outputs
+            )
+        elif phase == "integration":
+            state = TaskState(status=TaskStatus.DONE, progress=summary, artifacts=execution.outputs)
+        else:
+            state = TaskState(status=TaskStatus.DONE, progress=summary, artifacts=execution.outputs)
         self.redis_store.update_task_state(node.id, state)
         self.memory.append(f"Completed {node.id}: {summary}")
         self.redis_store.store_memory_snapshot(self.agent_name, self.memory.snapshot())
 
     def _record_failure(self, node: TaskNode, error: str) -> None:
+        """Persist failure state and update memory snapshot."""
         state = TaskState(status=TaskStatus.FAILED, last_error=error)
         self.redis_store.update_task_state(node.id, state)
         self.memory.append(f"Failed {node.id}: {error}")
         self.redis_store.store_memory_snapshot(self.agent_name, self.memory.snapshot())
+
+    def _record_qa_failure(self, node: TaskNode, summary: str) -> None:
+        """Create remediation work and block QA until fixes are delivered."""
+        cycle = int(node.metadata.get("review_cycle", "0")) + 1
+        dev_role = node.metadata.get("dev_role") or self.agent_role
+        manager_role = node.metadata.get("manager_role")
+        if cycle > 3:
+            if manager_role:
+                dev_role = manager_role
+        node.metadata["review_cycle"] = str(cycle)
+        self.redis_store.update_task_node(self.goal_id, node)
+        self.redis_store.create_remediation_task(
+            goal_id=self.goal_id,
+            qa_task_id=node.id,
+            dev_role=dev_role,
+            review_cycle=cycle,
+            priority=max(0, node.priority + 1),
+        )
+        self.redis_store.update_task_state(
+            node.id,
+            TaskState(status=TaskStatus.BLOCKED, progress=summary, artifacts=[]),
+        )
+        self.memory.append(f"QA failed {node.id}: cycle {cycle}")
+        self.redis_store.store_memory_snapshot(self.agent_name, self.memory.snapshot())
+
+    def _is_node_eligible(self, node: TaskNode) -> bool:
+        """Return whether this agent may claim and run the node now."""
+        required_role = node.metadata.get("required_role")
+        if required_role and required_role != self.agent_role:
+            return False
+        state = self.redis_store.get_task_state(node.id)
+        if not state:
+            return False
+        if state.status in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.INTEGRATED}:
+            return False
+        return True

@@ -12,6 +12,7 @@ class HeartbeatDirective:
     args: list[str]
 
     def __str__(self) -> str:  # pragma: no cover - debugging helper
+        """Render directive as a single command line."""
         arg_str = " ".join(self.args)
         return f"{self.command} {arg_str}".strip()
 
@@ -21,6 +22,7 @@ class HeartbeatParser:
 
     @staticmethod
     def parse(text: str) -> list[HeartbeatDirective]:
+        """Parse directives from heartbeat file text."""
         directives: list[HeartbeatDirective] = []
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -33,6 +35,7 @@ class HeartbeatParser:
 
     @staticmethod
     def read(path: Path) -> list[HeartbeatDirective]:
+        """Read and parse directives from a heartbeat file path."""
         if not path.exists():
             return []
         return HeartbeatParser.parse(path.read_text(encoding="utf-8"))
@@ -42,9 +45,10 @@ class HeartbeatController:
     """Utility used by agents to react to directives."""
 
     def __init__(self, heartbeat_path: Path):
+        """Initialize controller with a heartbeat path."""
         self.heartbeat_path = heartbeat_path
 
     def consume(self) -> list[HeartbeatDirective]:
+        """Return current directives from heartbeat storage."""
         directives = HeartbeatParser.read(self.heartbeat_path)
-        # Do not truncate - heartbeat files contain persistent instructions
         return directives

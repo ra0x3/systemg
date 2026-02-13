@@ -7,6 +7,7 @@ from orchestrator.models import AgentDescriptor, DagModel, TaskEdge, TaskNode, T
 
 
 def test_dag_model_validates_edges():
+    """DagModel should accept valid edges and reject invalid ones."""
     node_a = TaskNode(id="task-a", title="A", priority=1)
     node_b = TaskNode(id="task-b", title="B", priority=0)
     dag = DagModel(
@@ -23,6 +24,7 @@ def test_dag_model_validates_edges():
 
 
 def test_task_state_transitions():
+    """TaskState helpers should produce expected statuses."""
     state = TaskState(status=TaskStatus.READY)
     running = state.as_running(owner="agent-1", lease_expires=datetime.now(timezone.utc))
     assert running.status is TaskStatus.RUNNING
@@ -33,6 +35,7 @@ def test_task_state_transitions():
 
 
 def test_agent_descriptor_cname():
+    """AgentDescriptor should expose canonical and effective roles."""
     descriptor = AgentDescriptor(
         name="test-agent",
         goal_id="goal-123",
@@ -40,6 +43,7 @@ def test_agent_descriptor_cname():
         heartbeat_path=Path("/tmp/heartbeat.txt"),
     )
     assert descriptor.cname() == "test-agent:goal-123"
+    assert descriptor.effective_role == "test-agent"
 
     descriptor2 = AgentDescriptor(
         name="agent-alpha",
@@ -49,3 +53,13 @@ def test_agent_descriptor_cname():
         log_level="DEBUG",
     )
     assert descriptor2.cname() == "agent-alpha:task-xyz"
+    assert descriptor2.effective_role == "agent-alpha"
+
+    descriptor3 = AgentDescriptor(
+        name="agent-beta",
+        role="qa-dev",
+        goal_id="task-xyz",
+        instructions_path=Path("/tmp/instructions.txt"),
+        heartbeat_path=Path("/tmp/heartbeat.txt"),
+    )
+    assert descriptor3.effective_role == "qa-dev"

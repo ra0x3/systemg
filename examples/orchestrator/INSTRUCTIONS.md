@@ -6,43 +6,43 @@
 agents:
   - name: owner
     goal: orchestrator-ui
-    heartbeat: heartbeat/OWNER.md
+    heartbeat: instructions/heartbeat/OWNER.md
     instructions: instructions/OWNER.md
     log-level: INFO
-    cadence: 5s
+    cadence: 30s
 
   - name: team-lead
     goal: orchestrator-ui
-    heartbeat: heartbeat/TEAM_LEAD.md
+    heartbeat: instructions/heartbeat/TEAM_LEAD.md
     instructions: instructions/TEAM_LEAD.md
     log-level: INFO
-    cadence: 5s
+    cadence: 30s
 
   - name: core-infra-dev
     goal: orchestrator-ui
-    heartbeat: heartbeat/CORE_INFRA_DEV.md
+    heartbeat: instructions/heartbeat/CORE_INFRA_DEV.md
     instructions: instructions/CORE_INFRA_DEV.md
     log-level: INFO
-    cadence: 5s
+    cadence: 30s
 
   - name: ui-dev
     goal: orchestrator-ui
-    heartbeat: heartbeat/UI_DEV.md
+    heartbeat: instructions/heartbeat/UI_DEV.md
     instructions: instructions/UI_DEV.md
     log-level: INFO
-    cadence: 5s
+    cadence: 30s
 
   - name: features-dev
     goal: orchestrator-ui
-    heartbeat: heartbeat/FEATURES_DEV.md
+    heartbeat: instructions/heartbeat/FEATURES_DEV.md
     instructions: instructions/FEATURES_DEV.md
     log-level: INFO
-    cadence: 5s
+    cadence: 30s
 
   - name: qa-dev
     goal: orchestrator-ui
-    heartbeat: heartbeat/QA_DEV.md
+    heartbeat: instructions/heartbeat/QA_DEV.md
     instructions: instructions/QA_DEV.md
     log-level: INFO
-    cadence: 5s
+    cadence: 30s
 ```

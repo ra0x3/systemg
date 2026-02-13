@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ except ImportError:  # pragma: no cover
 
 
 def _require_fakeredis() -> "fakeredis.FakeRedis":  # type: ignore
+    """Return fakeredis client or skip when unavailable."""
     if not fakeredis:
         pytest.skip("fakeredis not available")
     return fakeredis.FakeRedis(decode_responses=False)
@@ -25,12 +27,14 @@ def _require_fakeredis() -> "fakeredis.FakeRedis":  # type: ignore
 
 @pytest.fixture()
 def redis_store() -> RedisStore:
+    """Provide a RedisStore backed by fakeredis."""
     client = _require_fakeredis()
     return RedisStore(client)
 
 
 @pytest.fixture(scope="session")
 def claude_client() -> ClaudeCLIClient:
+    """Provide live Claude client when executable exists."""
     import shutil
 
     executable = shutil.which("claude")
@@ -41,8 +45,20 @@ def claude_client() -> ClaudeCLIClient:
 
 @pytest.fixture()
 def assets_dir() -> Path:
+    """Return path to static test assets."""
     return EXAMPLE_ROOT / "tests" / "assets"
 
 
 def pytest_configure(config):  # pragma: no cover - pytest hook
+    """Register custom pytest markers."""
     config.addinivalue_line("markers", "live_claude: marks tests that hit the real Claude API")
+
+
+def pytest_collection_modifyitems(config, items):  # pragma: no cover - pytest hook
+    """Skip live Claude tests unless explicitly enabled."""
+    if os.getenv("RUN_LIVE_CLAUDE") == "1":
+        return
+    skip_live = pytest.mark.skip(reason="set RUN_LIVE_CLAUDE=1 to run live Claude tests")
+    for item in items:
+        if "live_claude" in item.keywords:
+            item.add_marker(skip_live)

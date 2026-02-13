@@ -4,6 +4,7 @@ from orchestrator.models import DagModel, TaskEdge, TaskNode, TaskStatus
 
 
 def test_write_and_list_ready_tasks(redis_store):
+    """RedisStore should surface ready tasks by dependency status."""
     dag = DagModel(
         goal_id="goal-demo",
         nodes=[
@@ -23,6 +24,7 @@ def test_write_and_list_ready_tasks(redis_store):
 
 
 def test_lock_cycle(redis_store):
+    """RedisStore lock lifecycle should acquire, renew, and release."""
     dag = DagModel(goal_id="g", nodes=[TaskNode(id="t", title="T", priority=0)], edges=[])
     redis_store.write_dag(dag)
     assert redis_store.acquire_lock("t", "agent-a", timedelta(seconds=5)) is True

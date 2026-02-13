@@ -12,6 +12,7 @@ from .models import AgentDescriptor
 
 class InstructionParser:
     def __init__(self, instructions_path: Path):
+        """Bind parser to an instructions source path."""
         self.instructions_path = instructions_path
 
     def get_instructions(self) -> str:
@@ -27,12 +28,10 @@ class InstructionParser:
 
         raw_text = self.instructions_path.read_text(encoding="utf-8")
 
-        # Extract YAML from markdown code blocks
         yaml_pattern = r"```ya?ml\s*\n(.*?)\n```"
         matches = re.findall(yaml_pattern, raw_text, re.DOTALL)
 
         if not matches:
-            # Fallback: try to parse as pure YAML if no code blocks found
             try:
                 data = yaml.safe_load(raw_text) or []
             except yaml.YAMLError as exc:
@@ -40,7 +39,6 @@ class InstructionParser:
                     f"No YAML code blocks found and content is not valid YAML: {exc}"
                 ) from exc
         else:
-            # Parse the first YAML block found
             try:
                 data = yaml.safe_load(matches[0]) or []
             except yaml.YAMLError as exc:
@@ -60,6 +58,7 @@ class InstructionParser:
             try:
                 descriptor = AgentDescriptor(
                     name=entry["name"],
+                    role=entry.get("role"),
                     goal_id=entry.get("goal") or entry.get("goal_id") or "goal-default",
                     instructions_path=(base_dir / entry["instructions"]).resolve(),
                     heartbeat_path=(base_dir / entry["heartbeat"]).resolve(),
@@ -75,6 +74,7 @@ class InstructionParser:
 
 
 def _parse_cadence(value: str | int | None) -> int:
+    """Normalize cadence values to integer seconds."""
     if value is None:
         return 5
     if isinstance(value, int):

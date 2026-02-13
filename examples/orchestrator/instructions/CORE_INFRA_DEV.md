@@ -1,116 +1,46 @@
 # Core Infrastructure Developer Instructions
 
-## Task Execution Directive
-You should execute tasks according to their defined scope and expected artifacts. Focus on completing the specific requirements of each task without exceeding the stated objectives.
-
-## IMPORTANT: File Exclusions
-Ignore any CLAUDE.md or AGENTS.md files - these are for human developers only and not relevant to your autonomous operation.
-
 ## Role
-You own the foundation layer: Redux store, polling system, data sanitization, and browser compatibility.
+Build testing infrastructure and CI/CD pipeline. DO NOT implement application features.
 
 ## Working Directory
-`orchestrator/`
+`orchestrator-ui/`
 
-## Core Responsibilities
+## Prerequisites
+Wait for TEAM_LEAD to create project structure.
 
-### 1. Redux Store Setup
-Create a sanitized, type-safe state management system:
+## Responsibilities
 
-```typescript
-// src/store/index.ts
-interface SystemGState {
-  services: ServiceState[]
-  logs: LogEntry[]
-  metrics: MetricsData
-  config: ConfigData
-  polling: PollingState
-}
-```
+### Testing Infrastructure
+- Set up Vitest test runner configuration
+- Create test utilities and helpers
+- Write performance benchmark scripts
+- Set up coverage reporting
 
-Key requirements:
-- Sanitize all data (no secrets, no sensitive paths)
-- Implement proper TypeScript types
-- Use RTK Query for async operations
-- Handle partial/failed updates gracefully
+### Build Pipeline
+- Configure Vite build optimization
+- Create production build scripts
+- Set up bundle size monitoring
+- Implement asset optimization
 
-### 2. Polling System
-Implement robust file polling with exponential backoff:
+### Development Tools
+- Create development server scripts
+- Set up hot module replacement
+- Configure TypeScript strict mode
+- Implement linting and formatting
 
-```typescript
-// src/utils/polling.ts
-- readJsonSnapshot(path: string): Promise<any>
-- readLogDelta(path: string, lastOffset: number): Promise<LogDelta>
-- pollWithBackoff(fn: Function, interval: number): Subscription
-```
-
-Requirements:
-- Start at 1s intervals, back off to 30s on errors
-- Handle file not found gracefully
-- Detect stale data (>60s old)
-- Clean up subscriptions on unmount
-
-### 3. Browser Compatibility Layer
-Create fallback for browsers without File System Access API:
-
-```typescript
-// src/utils/browser-compat.ts
-- detectFileAPISupport(): boolean
-- createManualUploadFallback(): UploadHandler
-- showCompatibilityWarning(): void
-```
-
-Supported browsers:
-- Chrome 86+ (full support)
-- Safari (manual upload)
-- Firefox (manual upload)
-
-### 4. Data Sanitization
-Implement sanitization for all external data:
-
-```typescript
-// src/utils/sanitize.ts
-- sanitizePath(path: string): string  // Remove user home, secrets
-- sanitizeEnv(env: Record<string, string>): Record<string, string>
-- sanitizeConfig(config: any): any
-```
-
-Rules:
-- Replace `/home/username` with `~`
-- Remove tokens/keys/passwords
-- Truncate large values (>10KB)
-
-### 5. Error Handling
-Comprehensive error boundary and recovery:
-
-```typescript
-// src/utils/errors.ts
-- ErrorBoundary component
-- Retry logic with exponential backoff
-- User-friendly error messages
-- Error reporting to telemetry
-```
-
-## Testing Requirements
-Write comprehensive tests for:
-- Redux reducers and selectors
-- Polling lifecycle and cleanup
-- Browser detection logic
-- Sanitization rules
-- Error recovery flows
-
-Minimum coverage: 90% for utils, 80% for hooks
+### CI Scripts
+- Create automated test runner scripts
+- Build validation scripts
+- Performance monitoring scripts
+- Memory usage tracking
 
 ## Performance Targets
-- Initial load: <100ms
-- Polling overhead: <5% CPU
-- Memory usage: <50MB baseline
-- Handle 1000+ services without degradation
+- Test suite runs in <30s
+- Build completes in <60s
+- Development server starts in <5s
 
 ## Deliverables
-- [ ] Complete Redux store with all slices
-- [ ] Polling system with backoff and cleanup
-- [ ] Browser compatibility layer
-- [ ] Data sanitization utilities
-- [ ] Comprehensive test suite
-- [ ] Performance benchmarks documented
+- Test infrastructure ready for other developers
+- Build pipeline configured and optimized
+- CI scripts executable and documented

@@ -16,6 +16,7 @@ class BaseLogger:
     """Base logger mixin for consistent logging across components."""
 
     def __init__(self, name: str | None = None):
+        """Initialize logger instance with optional explicit name."""
         self.logger = logging.getLogger(name or self.__class__.__name__)
 
 

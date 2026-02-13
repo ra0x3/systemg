@@ -36,7 +36,7 @@
   - Orchestrator diff-detects changes and applies them without restarting.
 - Per-agent files:
   - `instructions/<agent_name>.md` – individual directives; agents reload when told via heartbeat.
-  - `heartbeat/<agent_name>.md` – live overrides (pause, re-plan, drop lease). Agents poll on short cadence.
+  - `instructions/heartbeat/<agent_name>.md` – live overrides (pause, re-plan, drop lease). Agents poll on short cadence.
 
 ## Goal Model
 - Each goal tracked by the orchestrator maps to exactly one DAG rooted at `goal:<goal_id>`.

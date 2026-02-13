@@ -21,6 +21,7 @@ LocalRedisClient = "redis.Redis"
 
 
 def _now_utc() -> datetime:
+    """Return the current UTC timestamp."""
     return datetime.now(timezone.utc)
 
 
@@ -28,38 +29,47 @@ class RedisStore(BaseLogger):
     """Serialization helpers on top of a Redis client."""
 
     def __init__(self, client: LocalRedisClient):
+        """Initialize the store with a Redis client."""
         super().__init__(f"{self.__class__.__name__}")
         self.client = client
 
     @staticmethod
     def _nodes_key(goal_id: str) -> str:
+        """Return the Redis hash key for DAG nodes."""
         return f"dag:{goal_id}:nodes"
 
     @staticmethod
     def _deps_key(goal_id: str) -> str:
+        """Return the Redis hash key for DAG dependency lists."""
         return f"dag:{goal_id}:deps"
 
     @staticmethod
     def _task_key(task_id: str) -> str:
+        """Return the Redis hash key for task state."""
         return f"task:{task_id}"
 
     @staticmethod
     def _lock_key(task_id: str) -> str:
+        """Return the Redis key used for task lease locks."""
         return f"task:{task_id}:lock"
 
     @staticmethod
     def _agent_registration_key(agent_name: str) -> str:
+        """Return the Redis hash key for agent registration data."""
         return f"agent:{agent_name}:registered"
 
     @staticmethod
     def _agent_heartbeat_key(agent_name: str) -> str:
+        """Return the Redis key for agent heartbeat timestamps."""
         return f"agent:{agent_name}:heartbeat"
 
     @staticmethod
     def _agent_memory_key(agent_name: str) -> str:
+        """Return the Redis key for agent memory snapshots."""
         return f"agent:{agent_name}:memory"
 
     def write_dag(self, dag: DagModel) -> None:
+        """Persist DAG structure and initialize task states."""
         self.logger.debug(
             "Writing DAG for goal %s to Redis (%d nodes, %d edges)",
             dag.goal_id,
@@ -82,6 +92,7 @@ class RedisStore(BaseLogger):
         pipeline.execute()
 
     def read_dag(self, goal_id: str) -> DagModel | None:
+        """Load DAG structure for a goal from Redis."""
         nodes_key = self._nodes_key(goal_id)
         deps_key = self._deps_key(goal_id)
         raw_nodes = self.client.hgetall(nodes_key)
@@ -97,12 +108,64 @@ class RedisStore(BaseLogger):
         return DagModel(goal_id=goal_id, nodes=nodes, edges=edges)
 
     def get_task_node(self, goal_id: str, task_id: str) -> TaskNode | None:
+        """Load a single task node definition from the DAG."""
         raw = self.client.hget(self._nodes_key(goal_id), task_id)
         if not raw:
             return None
         return TaskNode.model_validate_json(raw)
 
+    def update_task_node(self, goal_id: str, node: TaskNode) -> None:
+        """Persist updated node metadata for an existing task."""
+        self.client.hset(self._nodes_key(goal_id), node.id, node.model_dump_json())
+
+    def create_remediation_task(
+        self,
+        *,
+        goal_id: str,
+        qa_task_id: str,
+        dev_role: str,
+        review_cycle: int,
+        priority: int,
+    ) -> str:
+        """Append a remediation task that must complete before QA can retry."""
+        dag = self.read_dag(goal_id)
+        if not dag:
+            raise ValueError(f"DAG missing for goal {goal_id}")
+        remediation_id = f"{qa_task_id}__fix_{review_cycle}"
+        existing_ids = {node.id for node in dag.nodes}
+        suffix = 1
+        while remediation_id in existing_ids:
+            remediation_id = f"{qa_task_id}__fix_{review_cycle}_{suffix}"
+            suffix += 1
+        node = TaskNode(
+            id=remediation_id,
+            title=f"Address QA findings for {qa_task_id} (cycle {review_cycle})",
+            priority=priority,
+            expected_artifacts=["fix-report.md"],
+            metadata={
+                "phase": "development",
+                "required_role": dev_role,
+                "parent_task_id": qa_task_id,
+                "review_cycle": str(review_cycle),
+                "dev_role": dev_role,
+            },
+        )
+        nodes_key = self._nodes_key(goal_id)
+        deps_key = self._deps_key(goal_id)
+        self.client.hset(nodes_key, remediation_id, node.model_dump_json())
+        self.client.hset(deps_key, remediation_id, json.dumps([]))
+
+        qa_deps_raw = self.client.hget(deps_key, qa_task_id)
+        qa_deps = json.loads(qa_deps_raw) if qa_deps_raw else []
+        if remediation_id not in qa_deps:
+            qa_deps.append(remediation_id)
+            self.client.hset(deps_key, qa_task_id, json.dumps(qa_deps))
+
+        self.update_task_state(remediation_id, TaskState(status=TaskStatus.READY))
+        return remediation_id
+
     def get_task_state(self, task_id: str) -> TaskState | None:
+        """Load mutable execution state for a task."""
         raw = self.client.hgetall(self._task_key(task_id))
         if not raw:
             return None
@@ -114,9 +177,13 @@ class RedisStore(BaseLogger):
         return self._deserialize_state(normalized)
 
     def update_task_state(self, task_id: str, state: TaskState) -> None:
-        self.client.hset(self._task_key(task_id), mapping=self._serialize_state(state))
+        """Replace mutable execution state for a task."""
+        key = self._task_key(task_id)
+        self.client.delete(key)
+        self.client.hset(key, mapping=self._serialize_state(state))
 
     def list_ready_tasks(self, goal_id: str) -> list[str]:
+        """Return claimable tasks whose dependencies are satisfied."""
         dag = self.read_dag(goal_id)
         if not dag:
             self.logger.debug("No DAG found for goal %s", goal_id)
@@ -134,7 +201,12 @@ class RedisStore(BaseLogger):
             dependencies = dag.dependencies_for(node.id)
             if dependencies and not all(
                 (self.get_task_state(dep) or TaskState(status=TaskStatus.READY)).status
-                == TaskStatus.DONE
+                in {
+                    TaskStatus.DEV_DONE,
+                    TaskStatus.QA_PASSED,
+                    TaskStatus.INTEGRATED,
+                    TaskStatus.DONE,
+                }
                 for dep in dependencies
             ):
                 blocked_count += 1
@@ -156,6 +228,7 @@ class RedisStore(BaseLogger):
         return ready
 
     def acquire_lock(self, task_id: str, agent_name: str, ttl: timedelta) -> bool:
+        """Attempt to acquire an expiring lock for a task."""
         key = self._lock_key(task_id)
         acquired = bool(
             self.client.set(key, agent_name, nx=True, px=int(ttl.total_seconds() * 1000))
@@ -175,6 +248,7 @@ class RedisStore(BaseLogger):
         return acquired
 
     def renew_lock(self, task_id: str, agent_name: str, ttl: timedelta) -> bool:
+        """Renew a lock if it is still held by the same agent."""
         key = self._lock_key(task_id)
         value = self.client.get(key)
         owner = value.decode("utf-8") if isinstance(value, bytes) else value
@@ -183,6 +257,7 @@ class RedisStore(BaseLogger):
         return bool(self.client.pexpire(key, int(ttl.total_seconds() * 1000)))
 
     def release_lock(self, task_id: str, agent_name: str) -> None:
+        """Release a task lock if owned by the given agent."""
         key = self._lock_key(task_id)
         value = self.client.get(key)
         owner = value.decode("utf-8") if isinstance(value, bytes) else value
@@ -190,6 +265,7 @@ class RedisStore(BaseLogger):
             self.client.delete(key)
 
     def lock_owner(self, task_id: str) -> str | None:
+        """Return the current lock owner for a task, if any."""
         value = self.client.get(self._lock_key(task_id))
         if not value:
             return None
@@ -198,6 +274,7 @@ class RedisStore(BaseLogger):
     def register_agent(
         self, agent_name: str, pid: int, capabilities: dict[str, str] | None = None
     ) -> None:
+        """Record agent process registration metadata."""
         payload = {
             "pid": str(pid),
             "timestamp": _now_utc().isoformat(),
@@ -207,10 +284,12 @@ class RedisStore(BaseLogger):
         self.client.hset(self._agent_registration_key(agent_name), mapping=payload)
 
     def heartbeat_agent(self, agent_name: str, ttl: timedelta) -> None:
+        """Write and TTL-protect the latest agent heartbeat."""
         key = self._agent_heartbeat_key(agent_name)
         self.client.set(key, _now_utc().isoformat(), px=int(ttl.total_seconds() * 1000))
 
     def agent_last_heartbeat(self, agent_name: str) -> datetime | None:
+        """Return the last heartbeat timestamp for an agent."""
         value = self.client.get(self._agent_heartbeat_key(agent_name))
         if not value:
             return None
@@ -218,15 +297,18 @@ class RedisStore(BaseLogger):
         return datetime.fromisoformat(timestamp)
 
     def deregister_agent(self, agent_name: str) -> None:
+        """Remove registration and heartbeat records for an agent."""
         self.client.delete(self._agent_registration_key(agent_name))
         self.client.delete(self._agent_heartbeat_key(agent_name))
 
     def store_memory_snapshot(self, agent_name: str, entries: Iterable[str]) -> None:
+        """Persist an agent memory snapshot."""
         key = self._agent_memory_key(agent_name)
         serialized = json.dumps(list(entries))
         self.client.set(key, serialized)
 
     def load_memory_snapshot(self, agent_name: str) -> list[str]:
+        """Load an agent memory snapshot."""
         value = self.client.get(self._agent_memory_key(agent_name))
         if not value:
             return []
@@ -238,6 +320,7 @@ class RedisStore(BaseLogger):
 
     @staticmethod
     def _serialize_state(state: TaskState) -> dict[str, str]:
+        """Convert task state to a Redis hash mapping."""
         payload = state.model_dump(mode="json")
         return {
             key: json.dumps(value) if isinstance(value, (dict, list)) else (value or "")
@@ -247,6 +330,7 @@ class RedisStore(BaseLogger):
 
     @staticmethod
     def _deserialize_state(raw: dict[str, str]) -> TaskState:
+        """Parse Redis hash mapping into task state."""
         normalized: dict[str, object] = {}
         for key, value in raw.items():
             if key in {"artifacts"}:

@@ -16,6 +16,10 @@ class TaskStatus(str, Enum):
     CLAIMED = "claimed"
     RUNNING = "running"
     BLOCKED = "blocked"
+    DEV_DONE = "dev_done"
+    QA_FAILED = "qa_failed"
+    QA_PASSED = "qa_passed"
+    INTEGRATED = "integrated"
     DONE = "done"
     FAILED = "failed"
 
@@ -40,6 +44,7 @@ class DagModel(BaseModel):
 
     @model_validator(mode="after")
     def validate_nodes_for_edges(self):  # type: ignore[override]
+        """Ensure every edge references existing node IDs."""
         node_ids = {node.id for node in self.nodes}
         for edge in self.edges:
             if edge.source not in node_ids:
@@ -49,6 +54,7 @@ class DagModel(BaseModel):
         return self
 
     def dependencies_for(self, node_id: str) -> list[str]:
+        """Return upstream dependencies for a node."""
         return [edge.source for edge in self.edges if edge.target == node_id]
 
 
@@ -61,14 +67,17 @@ class TaskState(BaseModel):
     last_error: str | None = None
 
     def with_owner(self, owner: str, lease_expires: datetime) -> TaskState:
+        """Return a copy updated with ownership metadata."""
         return self.model_copy(update={"owner": owner, "lease_expires": lease_expires})
 
     def as_running(self, owner: str, lease_expires: datetime) -> TaskState:
+        """Return a copy marked as running for an owner."""
         return self.model_copy(
             update={"status": TaskStatus.RUNNING, "owner": owner, "lease_expires": lease_expires}
         )
 
     def as_done(self, progress: str, artifacts: Sequence[str] | None = None) -> TaskState:
+        """Return a copy marked as done with outputs."""
         return self.model_copy(
             update={
                 "status": TaskStatus.DONE,
@@ -80,6 +89,7 @@ class TaskState(BaseModel):
         )
 
     def as_failed(self, error: str) -> TaskState:
+        """Return a copy marked as failed with error text."""
         return self.model_copy(
             update={
                 "status": TaskStatus.FAILED,
@@ -99,6 +109,7 @@ class GoalDescriptor(BaseModel):
 
 class AgentDescriptor(BaseModel):
     name: str
+    role: str | None = None
     goal_id: str
     instructions_path: Path
     heartbeat_path: Path
@@ -107,17 +118,24 @@ class AgentDescriptor(BaseModel):
 
     @field_validator("instructions_path", "heartbeat_path", mode="before")
     def _coerce_path(cls, value):  # type: ignore[override]
+        """Coerce path-like values into `Path` instances."""
         return Path(value)
 
     def cname(self) -> str:
         """Return canonical name for this descriptor."""
         return f"{self.name}:{self.goal_id}"
 
+    @property
+    def effective_role(self) -> str:
+        """Return the declared role, defaulting to agent name."""
+        return self.role or self.name
+
 
 class InstructionSet(RootModel[list[str]]):
     """Simple wrapper for instruction lines."""
 
     def as_text(self) -> str:
+        """Join instruction lines into one text block."""
         return "\n".join(self.root)
 
 
@@ -126,12 +144,14 @@ class MemorySnapshot:
     entries: list[str] = field(default_factory=list)
 
     def append(self, entry: str, *, max_entries: int = 50) -> None:
+        """Append entry with bounded retention."""
         self.entries.append(entry)
         if len(self.entries) > max_entries:
             excess = len(self.entries) - max_entries
             del self.entries[0:excess]
 
     def merge(self, other: Iterable[str]) -> None:
+        """Append entries from another iterable snapshot."""
         for item in other:
             self.append(item)
 

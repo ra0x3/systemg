@@ -8,6 +8,7 @@ dependencies = [
     "fakeredis>=2.22",
     "pydantic>=2.8",
     "pyyaml>=6.0",
+    "tiktoken>=0.7",
 ]
 
 [tool.setuptools.packages.find]
