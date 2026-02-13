@@ -101,7 +101,7 @@
 - Plaintext, line-oriented directives processed in order on each poll.
 - Grammar: `DIRECTIVE [ARGS...]`; directives are case-insensitive, lines starting with `#` are ignored.
 - Supported directives: `PAUSE`, `RESUME`, `REPARSE`, `DROP-TASK <task_id>`, `ELEVATE <task_id> <priority>`, `FLUSH-MEMORY`.
-- After acting on directives the agent truncates or rewrites the heartbeat file with an acknowledgment marker to avoid reprocessing.
+- Heartbeat files contain persistent instructions that agents should follow repeatedly - they are never modified by agents.
 
 ## Concurrency & Recovery
 - Agents acquire locks with leases (`PX ttl`) and renew via heartbeat thread.

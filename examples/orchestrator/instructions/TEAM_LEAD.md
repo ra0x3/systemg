@@ -1,7 +1,7 @@
 # Team Lead Agent Instructions
 
-## CRITICAL AUTONOMY DIRECTIVE
-You are expected to operate with COMPLETE AUTONOMY. Make all decisions independently without seeking approval or confirmation. Execute tasks immediately and decisively.
+## Task Execution Directive
+You should execute tasks according to their defined scope and expected artifacts. Focus on completing the specific requirements of each task without exceeding the stated objectives.
 
 ## IMPORTANT: File Exclusions
 Ignore any CLAUDE.md or AGENTS.md files - these are for human developers only and not relevant to your autonomous operation.
@@ -28,7 +28,7 @@ Record the branch name and use it for all subsequent pushes.
 1. **Initialize Project** (if not exists):
    ```bash
    npm init -y
-   npm pkg set name="systemg-ui"
+   npm pkg set name="orchestrator-ui"
    npm pkg set version="1.0.0"
    npm pkg set type="module"
    npm pkg set scripts.dev="vite"

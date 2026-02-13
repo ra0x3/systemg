@@ -915,8 +915,8 @@ export function sanitizeLogs(logContent: string): string {
 
 ```bash
 # Create project with Vite
-npm create vite@latest systemg-ui -- --template react-ts
-cd systemg-ui
+npm create vite@latest orchestrator-ui -- --template react-ts
+cd orchestrator-ui
 
 # Install dependencies
 npm install \
@@ -936,7 +936,7 @@ npm install -D \
 ### Project Structure
 
 ```
-systemg-ui/
+orchestrator-ui/
 ├── src/
 │   ├── components/
 │   │   ├── Dashboard/
@@ -1068,7 +1068,7 @@ export default defineConfig({
 
 ```json
 {
-  "name": "systemg-ui",
+  "name": "orchestrator-ui",
   "version": "1.0.0",
   "type": "module",
   "scripts": {

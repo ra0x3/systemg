@@ -15,7 +15,7 @@ use std::{
     thread,
 };
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError, runtime};
 
@@ -169,14 +169,10 @@ fn resolve_tail_targets(
     Ok((stdout_path, stderr_path))
 }
 
-/// Creates the log directory if it doesn't exist.
-///
-/// Note: stderr is treated as the primary log stream and will be logged at debug level,
-/// while stdout is logged at warn level to ensure stderr messages have priority.
+/// Creates the log directory if it doesn't exist and spawns a thread to write logs to file.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
     let path = get_log_path(service, kind);
     let service_label = service.to_string();
-    let kind_label = kind.to_string();
     thread::spawn(move || {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).ok();
@@ -192,10 +188,7 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
 
         let reader = BufReader::new(reader);
         for line in reader.lines().map_while(Result::ok) {
-            match kind_label.as_str() {
-                "stderr" => debug!("[{service_label} {kind_label}] {line}"),
-                _ => warn!("[{service_label} {kind_label}] {line}"),
-            }
+            debug!("[{service_label}] {line}");
             let _ = writeln!(file, "{line}");
         }
     });
@@ -211,10 +204,6 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
 /// * `reader` - Reader for the child's output stream
 /// * `kind` - Type of stream (e.g., "stdout" or "stderr")
 /// * `echo_to_console` - Whether to echo output to console in addition to file
-///
-/// # Note
-/// stderr is treated as the primary output stream and is echoed to stdout,
-/// while stdout is echoed to stderr, prioritizing stderr messages.
 pub fn spawn_dynamic_child_log_writer(
     root_service: Option<&str>,
     child_name: &str,
@@ -244,7 +233,6 @@ pub fn spawn_dynamic_child_log_writer(
 
     let owner_label = root_service.map(str::to_string);
     let child_label = child_name.to_string();
-    let kind_label = kind.to_string();
 
     thread::spawn(move || {
         if let Some(parent) = path.parent()
@@ -269,11 +257,7 @@ pub fn spawn_dynamic_child_log_writer(
         for line in reader.lines().map_while(Result::ok) {
             if echo_to_console {
                 let owner = owner_label.as_deref().unwrap_or("spawn");
-                if kind_label == "stderr" {
-                    println!("[{}:{}:{}] {}", owner, child_label, kind_label, line);
-                } else {
-                    eprintln!("[{}:{}:{}] {}", owner, child_label, kind_label, line);
-                }
+                println!("[{}:{}] {}", owner, child_label, line);
             }
 
             if let Err(err) = writeln!(file, "{line}") {

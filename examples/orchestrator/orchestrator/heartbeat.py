@@ -37,10 +37,6 @@ class HeartbeatParser:
             return []
         return HeartbeatParser.parse(path.read_text(encoding="utf-8"))
 
-    @staticmethod
-    def truncate(path: Path) -> None:
-        path.write_text("# processed\n", encoding="utf-8")
-
 
 class HeartbeatController:
     """Utility used by agents to react to directives."""
@@ -50,6 +46,5 @@ class HeartbeatController:
 
     def consume(self) -> list[HeartbeatDirective]:
         directives = HeartbeatParser.read(self.heartbeat_path)
-        if directives:
-            HeartbeatParser.truncate(self.heartbeat_path)
+        # Do not truncate - heartbeat files contain persistent instructions
         return directives
