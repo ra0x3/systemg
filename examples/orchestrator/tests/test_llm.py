@@ -94,8 +94,8 @@ def test_prompt_falls_back_without_tiktoken(monkeypatch):
     assert prompt.tokenizer.startswith("fallback:")
 
 
-def test_execute_task_uses_300_second_timeout(monkeypatch):
-    """Execution prompt should use the longer timeout budget."""
+def test_execute_task_uses_900_second_timeout(monkeypatch):
+    """Execution prompt should use the 15-minute timeout budget."""
     client = ClaudeCLIClient(executable="claude")
     observed: list[tuple[int, str]] = []
 
@@ -112,4 +112,4 @@ def test_execute_task_uses_300_second_timeout(monkeypatch):
         memory=[],
     )
     assert observed
-    assert observed[0] == (300, "execute_task")
+    assert observed[0] == (900, "execute_task")

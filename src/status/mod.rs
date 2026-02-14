@@ -204,6 +204,7 @@ fn build_spawn_tree(
         .get_children(parent_pid)
         .into_iter()
         .map(|mut child| {
+            child.user = Some(StatusManager::get_process_user(child.pid));
             let (cpu_percent, rss_bytes) = sample_process_metrics(system, child.pid);
             if cpu_percent.is_some() || rss_bytes.is_some() {
                 manager.update_child_metrics(child.pid, cpu_percent, rss_bytes);

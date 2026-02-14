@@ -491,6 +491,101 @@ mod tests {
             ],
         );
     }
+
+    #[test]
+    fn status_rows_render_service_kind_and_spawn_user() {
+        let columns = vec![
+            Column {
+                title: "UNIT",
+                width: 24,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "KIND",
+                width: 6,
+                align: Alignment::Center,
+            },
+            Column {
+                title: "STATE",
+                width: 7,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "USER",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "PID",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "CPU",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "RSS",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "UPTIME",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "LAST_EXIT",
+                width: 10,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "HEALTH",
+                width: 8,
+                align: Alignment::Left,
+            },
+        ];
+
+        let unit = UnitStatus {
+            name: "orchestrator".to_string(),
+            hash: "abc123".to_string(),
+            kind: UnitKind::Service,
+            lifecycle: Some(ServiceLifecycleStatus::Running),
+            health: UnitHealth::Healthy,
+            process: Some(systemg::status::ProcessRuntime {
+                pid: 1234,
+                state: ProcessState::Running,
+                user: Some("rashad".to_string()),
+            }),
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: None,
+            spawned_children: vec![],
+        };
+        let unit_row = format_unit_row(&unit, &columns, true);
+        assert!(unit_row.contains("srvc"));
+        assert!(unit_row.contains("rashad"));
+
+        let child = SpawnedChild {
+            name: "agent-owner".to_string(),
+            pid: 2222,
+            parent_pid: 1234,
+            command: "python main.py".to_string(),
+            started_at: SystemTime::now(),
+            ttl: None,
+            depth: 1,
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+            user: Some("rashad".to_string()),
+        };
+        let child_row = format_spawned_child_row(&child, &columns, true, "└─ ");
+        assert!(child_row.contains("spwn"));
+        assert!(child_row.contains("rashad"));
+    }
 }
 
 struct StatusRenderOptions<'a> {
@@ -1142,7 +1237,7 @@ fn format_header_row(columns: &[Column]) -> String {
 
 fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> String {
     let kind_label = match unit.kind {
-        UnitKind::Service => "svc",
+        UnitKind::Service => "srvc",
         UnitKind::Cron => "cron",
         UnitKind::Orphaned => "orph",
     };
@@ -1320,7 +1415,7 @@ fn format_spawned_child_row(
         display_name
     };
 
-    let kind_label = colorize("spawn", MAGENTA, no_color);
+    let kind_label = colorize("spwn", MAGENTA, no_color);
 
     let values = [
         display_name_final,

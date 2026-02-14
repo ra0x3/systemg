@@ -7,9 +7,9 @@ import logging
 import os
 import subprocess
 import time
-from hashlib import sha256
 from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
 
 from .models import DagModel, TaskNode
 
@@ -115,7 +115,7 @@ class LLMClient:
 class ClaudeCLIClient(LLMClient):
     """Interact with the Claude CLI via subprocess calls."""
 
-    EXECUTION_TIMEOUT_SECONDS = 300
+    EXECUTION_TIMEOUT_SECONDS = 900
     PROGRESS_LOG_INTERVAL_SECONDS = 30
 
     def __init__(

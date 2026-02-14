@@ -85,9 +85,7 @@ agents:
     (tmp_path / "instructions" / "heartbeat" / "FEATURES_DEV.md").write_text(
         "RESUME\n", encoding="utf-8"
     )
-    (tmp_path / "instructions" / "heartbeat" / "QA_DEV.md").write_text(
-        "RESUME\n", encoding="utf-8"
-    )
+    (tmp_path / "instructions" / "heartbeat" / "QA_DEV.md").write_text("RESUME\n", encoding="utf-8")
     (tmp_path / "instructions" / "TEAM_LEAD.md").write_text(
         "Coordinate integration and final report", encoding="utf-8"
     )
