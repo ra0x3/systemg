@@ -46,9 +46,7 @@ services:
           command: "echo 'API started'"
       on_stop:
         error:
-          command: >
-            curl -X POST
-            https://alerts.example.com/api/crash
+          command: "curl --request POST https://alerts.example.com/api/crash"
   worker:
     command: >
       celery -A tasks worker
@@ -165,18 +163,12 @@ services:
     hooks:
       on_start:
         success:
-          command: >
-            curl -X POST
-            https://status.example.com/api/up
+          command: "curl --request POST https://status.example.com/api/up"
         error:
-          command: >
-            curl -X POST
-            https://status.example.com/api/down
+          command: "curl --request POST https://status.example.com/api/down"
       on_stop:
         error:
-          command: >
-            curl -X POST
-            https://alerts.example.com/crash
+          command: "curl --request POST https://alerts.example.com/crash"
 ```
 
 ### `health_check`
@@ -188,7 +180,7 @@ services:
   api:
     command: "python app.py"
     health_check:
-      command: "curl -f http://localhost:8000/health"
+      command: "curl --fail http://localhost:8000/health"
       interval: "10s"
       timeout: "5s"
       retries: 3

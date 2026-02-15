@@ -10,7 +10,7 @@ Get systemg running in 60 seconds.
 ## Install
 
 ```bash
-curl -fsSL https://github.com/systemg/systemg/releases/latest/download/install.sh | sh
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
 ## Create a configuration
@@ -27,7 +27,7 @@ Save as `systemg.yaml`.
 ## Start your service
 
 ```bash
-sysg start
+$ sysg start
 ```
 
 Your web server is now running at http://localhost:8080.
@@ -35,7 +35,7 @@ Your web server is now running at http://localhost:8080.
 ## Check status
 
 ```bash
-sysg status
+$ sysg status
 ```
 
 ```
@@ -46,13 +46,13 @@ hello    running  42309  3s
 ## View logs
 
 ```bash
-sysg logs --service hello
+$ sysg logs --service hello
 ```
 
 ## Stop everything
 
 ```bash
-sysg stop
+$ sysg stop
 ```
 
 ## What's next

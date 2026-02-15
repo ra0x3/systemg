@@ -9,21 +9,16 @@ title: Installation
 
 ### Linux / macOS
 
-```bash
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://sh.sysg.dev/ | sh
-```
-
-### From source
+![Installation](https://i.imgur.com/6d2aq0U.gif)
 
 ```bash
-cargo install sysg
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
 ## Verify
 
 ```bash
-sysg --version
+$ sysg --version
 ```
 
 ## Specific version
@@ -31,9 +26,7 @@ sysg --version
 Install a specific version:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://sh.sysg.dev/ | \
-  sh -s -- --version 0.15.6
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.15.6
 ```
 
 ## Switch versions
@@ -41,9 +34,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 Switch to an already installed version, or download it:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://sh.sysg.dev/ | \
-  sh -s -- -v 0.15.5
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.15.5
 ```
 
 ## Next steps

@@ -28,19 +28,13 @@ services:
     hooks:
       on_start:
         success:
-          command: >
-            curl -X POST
-            https://api.example.com/start
+          command: "curl --request POST https://api.example.com/start"
           timeout: "10s"
         error:
-          command: >
-            curl -X POST
-            https://api.example.com/failed
+          command: "curl --request POST https://api.example.com/failed"
       on_stop:
         error:
-          command: >
-            curl -X POST
-            https://api.example.com/crashed
+          command: "curl --request POST https://api.example.com/crashed"
 ```
 
 Hooks inherit service environment variables.

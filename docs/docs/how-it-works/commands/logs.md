@@ -8,7 +8,7 @@ title: logs
 View output from running services.
 
 ```sh
-sysg logs
+$ sysg logs
 ```
 
 ## Options
@@ -28,31 +28,31 @@ sysg logs
 ### View recent logs from all services
 
 ```sh
-sysg logs
+$ sysg logs
 ```
 
 ### View logs from specific service
 
 ```sh
-sysg logs --service api
+$ sysg logs --service api
 ```
 
 ### View stderr logs
 
 ```sh
-sysg logs --service api --kind stderr
+$ sysg logs --service api --kind stderr
 ```
 
 ### View supervisor logs
 
 ```sh
-sysg logs --kind supervisor
+$ sysg logs --kind supervisor
 ```
 
 ### Show more history
 
 ```sh
-sysg logs --service api --lines 200
+$ sysg logs --service api --lines 200
 ```
 
 ## Log files

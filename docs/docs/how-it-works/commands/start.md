@@ -8,7 +8,7 @@ title: start
 Launch services defined in your configuration.
 
 ```sh
-sysg start
+$ sysg start
 ```
 
 ## Options
@@ -18,7 +18,7 @@ sysg start
 Path to the configuration file. If not specified, systemg looks for `systemg.yaml` or `sysg.yaml` in the current directory.
 
 ```sh
-sysg start --config /etc/myapp/services.yaml
+$ sysg start --config /etc/myapp/services.yaml
 ```
 
 ### `--service`
@@ -26,7 +26,7 @@ sysg start --config /etc/myapp/services.yaml
 Optionally start only the named service instead of all services.
 
 ```sh
-sysg start --service api
+$ sysg start --service api
 ```
 
 ### `--daemonize`
@@ -34,7 +34,7 @@ sysg start --service api
 Run the supervisor as a background daemon. The supervisor continues running after you close your terminal, and subsequent commands communicate with it via Unix socket.
 
 ```sh
-sysg start --daemonize
+$ sysg start --daemonize
 ```
 
 ### `--sys`
@@ -42,7 +42,7 @@ sysg start --daemonize
 Opt into privileged system mode. Requires running as root.
 
 ```sh
-sudo sysg start --sys
+$ sudo sysg start --sys
 ```
 
 ### `--drop-privileges`
@@ -50,7 +50,7 @@ sudo sysg start --sys
 Drop privileges after performing privileged setup.
 
 ```sh
-sudo sysg start --sys --drop-privileges
+$ sudo sysg start --sys --drop-privileges
 ```
 
 ### `--log-level`
@@ -58,7 +58,7 @@ sudo sysg start --sys --drop-privileges
 Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
 
 ```sh
-sysg start --log-level debug
+$ sysg start --log-level debug
 ```
 
 ## Examples
@@ -66,7 +66,7 @@ sysg start --log-level debug
 ### Start with default configuration
 
 ```sh
-sysg start
+$ sysg start
 ```
 
 Looks for `systemg.yaml` or `sysg.yaml` in the current directory.
@@ -74,7 +74,7 @@ Looks for `systemg.yaml` or `sysg.yaml` in the current directory.
 ### Start with specific configuration
 
 ```sh
-sysg start --config /etc/myapp/services.yaml
+$ sysg start --config /etc/myapp/services.yaml
 ```
 
 ### Daemon mode
@@ -82,13 +82,13 @@ sysg start --config /etc/myapp/services.yaml
 Run the supervisor in the background. Subsequent commands communicate with this long-lived process.
 
 ```sh
-sysg start --daemonize
+$ sysg start --daemonize
 ```
 
 Check if the daemon is running:
 
 ```sh
-sysg status
+$ sysg status
 ```
 
 ### Debug mode
@@ -96,7 +96,7 @@ sysg status
 See detailed output during startup:
 
 ```sh
-sysg start --log-level debug
+$ sysg start --log-level debug
 ```
 
 ## What happens

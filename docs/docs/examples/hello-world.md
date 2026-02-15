@@ -20,20 +20,20 @@ services:
 
 ```bash
 #!/bin/sh
-i=1
-while true; do
-    echo "Count: $i"
-    i=$((i + 1))
-    sleep 1
-done
+$ i=1
+$ while true; do
+$     echo "Count: $i"
+$     i=$((i + 1))
+$     sleep 1
+$ done
 ```
 
 ## Run it
 
 ```bash
-sysg start
-sysg logs --service counter
-sysg stop
+$ sysg start
+$ sysg logs --service counter
+$ sysg stop
 ```
 
 You'll see:

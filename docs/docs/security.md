@@ -75,10 +75,10 @@ isolation:
 
 ```bash
 # User mode (default)
-sysg start
+$ sysg start
 
 # System mode (only when needed)
-sudo sysg --sys start
+$ sudo sysg --sys start
 ```
 
 ### Drop privileges immediately

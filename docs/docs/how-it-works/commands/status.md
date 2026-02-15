@@ -8,7 +8,7 @@ title: status
 Check the health of running services.
 
 ```sh
-sysg status
+$ sysg status
 ```
 
 ## Options
@@ -30,7 +30,7 @@ sysg status
 ### View all services
 
 ```sh
-sysg status
+$ sysg status
 ```
 
 ```
@@ -44,7 +44,7 @@ worker     running   14827   2h3m    0.3   3.1
 ### View specific service
 
 ```sh
-sysg status --service api
+$ sysg status --service api
 ```
 
 ```

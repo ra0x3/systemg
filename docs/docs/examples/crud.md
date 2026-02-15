@@ -75,7 +75,7 @@ cron:
 
 Create `.env.example`:
 
-```bash
+```dotenv
 NODE_ENV=production
 PORT=3000
 DATABASE_URL=postgres://user:pass@localhost/crud_db
@@ -133,9 +133,9 @@ app.listen(port, () => {
 ## Run it
 
 ```bash
-cd examples/crud
-npm install
-sysg start --config crud.sysg.yaml
+$ cd examples/crud
+$ npm install
+$ sysg start --config crud.sysg.yaml
 ```
 
 ## Operations
@@ -144,29 +144,29 @@ sysg start --config crud.sysg.yaml
 
 ```bash
 # Update code
-git pull
-npm install
+$ git pull
+$ npm install
 
 # Rolling restart - zero downtime
-sysg restart node__web_server
+$ sysg restart node__web_server
 ```
 
 ### View logs
 
 ```bash
-sysg logs --service node__web_server
+$ sysg logs --service node__web_server
 ```
 
 ### Manual backup
 
 ```bash
-sysg cron trigger database_backup
+$ sysg cron trigger database_backup
 ```
 
 ### Check cron schedules
 
 ```bash
-sysg cron list
+$ sysg cron list
 ```
 
 ## What happens
@@ -183,10 +183,10 @@ sysg cron list
 ## Monitoring
 
 ```bash
-sysg status                                    # Service health
-sysg cron status                               # Cron job history
-sysg logs --service automated_testing          # Test results
-sysg logs --service database_backup            # Backup logs
+$ sysg status                                    # Service health
+$ sysg cron status                               # Cron job history
+$ sysg logs --service automated_testing          # Test results
+$ sysg logs --service database_backup            # Backup logs
 ```
 
 ## See also

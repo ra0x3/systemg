@@ -8,7 +8,7 @@ title: restart
 Restart services with zero downtime.
 
 ```sh
-sysg restart
+$ sysg restart
 ```
 
 ## Options
@@ -18,7 +18,7 @@ sysg restart
 Path to the configuration file. When specified, reloads the configuration and restarts all services with the new settings.
 
 ```sh
-sysg restart --config production.yaml
+$ sysg restart --config production.yaml
 ```
 
 ### `--service`
@@ -26,7 +26,7 @@ sysg restart --config production.yaml
 Name of a specific service to restart. If not specified, all services are restarted.
 
 ```sh
-sysg restart --service api
+$ sysg restart --service api
 ```
 
 ### `--daemonize`
@@ -34,7 +34,7 @@ sysg restart --service api
 Start the supervisor before restarting if it isn't already running.
 
 ```sh
-sysg restart --daemonize
+$ sysg restart --daemonize
 ```
 
 ### `--sys`
@@ -42,7 +42,7 @@ sysg restart --daemonize
 Opt into privileged system mode. Requires running as root.
 
 ```sh
-sudo sysg restart --sys
+$ sudo sysg restart --sys
 ```
 
 ### `--drop-privileges`
@@ -50,7 +50,7 @@ sudo sysg restart --sys
 Drop privileges after performing privileged setup.
 
 ```sh
-sudo sysg restart --sys --drop-privileges
+$ sudo sysg restart --sys --drop-privileges
 ```
 
 ### `--log-level`
@@ -58,7 +58,7 @@ sudo sysg restart --sys --drop-privileges
 Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
 
 ```sh
-sysg restart --log-level debug
+$ sysg restart --log-level debug
 ```
 
 ## Examples
@@ -66,19 +66,19 @@ sysg restart --log-level debug
 ### Restart all services
 
 ```sh
-sysg restart
+$ sysg restart
 ```
 
 ### Restart specific service
 
 ```sh
-sysg restart --service api
+$ sysg restart --service api
 ```
 
 ### Restart with new configuration
 
 ```sh
-sysg restart --config production.yaml
+$ sysg restart --config production.yaml
 ```
 
 Reloads configuration and restarts all services.

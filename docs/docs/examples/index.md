@@ -22,9 +22,9 @@ Multi-agent task execution with Redis coordination and DAG scheduling.
 ## Running examples
 
 ```bash
-git clone https://github.com/systemg/systemg
-cd systemg/examples/<example-name>
-sysg start
+$ git clone https://github.com/systemg/systemg
+$ cd systemg/examples/<example-name>
+$ sysg start
 ```
 
 Each example includes:

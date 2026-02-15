@@ -8,7 +8,7 @@ title: stop
 Stop running services.
 
 ```sh
-sysg stop
+$ sysg stop
 ```
 
 ## Options
@@ -18,7 +18,7 @@ sysg stop
 Path to the configuration file. Used when no supervisor is running to locate services. When a supervisor is running, it uses the supervisor's configuration.
 
 ```sh
-sysg stop --config /etc/myapp/services.yaml
+$ sysg stop --config /etc/myapp/services.yaml
 ```
 
 ### `--service`
@@ -26,7 +26,7 @@ sysg stop --config /etc/myapp/services.yaml
 Name of a specific service to stop. If not specified, all services are stopped. Leaves other services running.
 
 ```sh
-sysg stop --service api
+$ sysg stop --service api
 ```
 
 ### `--sys`
@@ -34,7 +34,7 @@ sysg stop --service api
 Opt into privileged system mode. Requires running as root.
 
 ```sh
-sudo sysg stop --sys
+$ sudo sysg stop --sys
 ```
 
 ### `--drop-privileges`
@@ -42,7 +42,7 @@ sudo sysg stop --sys
 Drop privileges after performing privileged setup.
 
 ```sh
-sudo sysg stop --sys --drop-privileges
+$ sudo sysg stop --sys --drop-privileges
 ```
 
 ### `--log-level`
@@ -50,7 +50,7 @@ sudo sysg stop --sys --drop-privileges
 Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
 
 ```sh
-sysg stop --log-level debug
+$ sysg stop --log-level debug
 ```
 
 ## Examples
@@ -58,13 +58,13 @@ sysg stop --log-level debug
 ### Stop all services
 
 ```sh
-sysg stop
+$ sysg stop
 ```
 
 ### Stop a specific service
 
 ```sh
-sysg stop --service api
+$ sysg stop --service api
 ```
 
 Leaves other services running.

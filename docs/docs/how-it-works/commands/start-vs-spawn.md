@@ -33,7 +33,7 @@ services:
 Run with:
 
 ```sh
-sysg start
+$ sysg start
 ```
 
 Services run continuously, restart on failure, and stop together.
@@ -54,7 +54,7 @@ services:
 Parent creates children at runtime:
 
 ```sh
-sysg spawn --name worker_1 -- python job.py
+$ sysg spawn --name worker_1 -- python job.py
 ```
 
 Children terminate on completion or TTL expiry. No automatic restarts.

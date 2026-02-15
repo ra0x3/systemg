@@ -86,26 +86,26 @@ services:
 
 ```bash
 # Setup
-cd examples/orchestrator
-python3 -m venv .venv
-./.venv/bin/pip install -r requirements.txt
+$ cd examples/orchestrator
+$ python3 -m venv .venv
+$ ./.venv/bin/pip install -r requirements.txt
 
 # Run
-redis-server
-sysg start
+$ redis-server
+$ sysg start
 
 # Monitor
-sysg logs --service orchestrator
-redis-cli KEYS "*"
+$ sysg logs --service orchestrator
+$ redis-cli KEYS "*"
 
 # Control
-echo "PAUSE" >> ./heartbeat/research.md
+$ echo "PAUSE" >> ./heartbeat/research.md
 ```
 
 ## Testing
 
 ```bash
-uv run pytest examples/orchestrator/tests -v
+$ uv run pytest examples/orchestrator/tests -v
 ```
 
 ## Links

@@ -41,12 +41,10 @@ Process supervisor with dependencies, health checks, and rolling deployments. Bu
 
 ### Installation
 
-```sh
-# Install script
-curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+![Installation](https://i.imgur.com/6d2aq0U.gif)
 
-# Or via cargo
-cargo install sysg
+```sh
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
 System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/systemg`, `/var/lib/systemg`. See [security guide](docs/docs/security.md).
@@ -54,9 +52,9 @@ System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/
 ### Usage
 
 ```sh
-sysg start                     # Default config (systemg.yaml)
-sysg start --config my.yaml    # Custom config
-sysg start --daemonize         # Background supervisor
+$ sysg start                     # Default config (systemg.yaml)
+$ sysg start --config my.yaml    # Custom config
+$ sysg start --daemonize         # Background supervisor
 ```
 
 Commands: `sysg stop`, `sysg restart`, `sysg status`, `sysg logs`
@@ -308,7 +306,7 @@ $ sysg logs --service myservice --kind stderr
 ```sh
 # Spawn a worker process (parent must have spawn.mode: dynamic)
 $ sysg spawn --name worker_1 -- python worker.py
-12345  # Returns the child PID
+$ 12345  # Returns the child PID
 
 # Spawn with time-to-live for automatic cleanup
 $ sysg spawn --name temp_worker --ttl 3600 -- ./process.sh

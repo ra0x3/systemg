@@ -48,7 +48,7 @@ services:
 
   # Health check every 5 minutes
   health-check:
-    command: "curl -f http://myservice/health"
+    command: "curl --fail http://myservice/health"
     cron:
       expression: "0 */5 * * * *"
 ```

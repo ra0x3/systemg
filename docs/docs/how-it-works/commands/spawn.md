@@ -8,7 +8,7 @@ title: spawn
 Dynamically create child processes from parent services.
 
 ```sh
-sysg spawn --name worker_1 -- python worker.py
+$ sysg spawn --name worker_1 -- python worker.py
 ```
 
 ## Options
@@ -27,8 +27,8 @@ sysg spawn --name worker_1 -- python worker.py
 ### Spawn a worker process
 
 ```sh
-sysg spawn --name worker_1 -- python worker.py
-12345  # Returns PID
+$ sysg spawn --name worker_1 -- python worker.py
+$ 12345  # Returns PID
 ```
 
 ### Spawn with time limit
@@ -36,7 +36,7 @@ sysg spawn --name worker_1 -- python worker.py
 Process automatically terminates after 1 hour:
 
 ```sh
-sysg spawn --name temp_worker \
+$ sysg spawn --name temp_worker \
   --ttl 3600 \
   -- ./process.sh
 ```
@@ -44,7 +44,7 @@ sysg spawn --name temp_worker \
 ### Spawn with parent PID tracking
 
 ```sh
-sysg spawn --name api_worker \
+$ sysg spawn --name api_worker \
   --parent-pid 12345 \
   -- node worker.js
 ```

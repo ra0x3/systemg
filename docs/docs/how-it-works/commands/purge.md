@@ -8,7 +8,7 @@ title: purge
 Remove all systemg state and start fresh.
 
 ```sh
-sysg purge
+$ sysg purge
 ```
 
 **⚠️ Warning**: Permanently deletes all service history, logs, and runtime files.
@@ -40,8 +40,8 @@ sysg purge
 ## Example
 
 ```sh
-sysg purge
-All systemg state has been purged
+$ sysg purge
+$ All systemg state has been purged
 ```
 
 ## See also

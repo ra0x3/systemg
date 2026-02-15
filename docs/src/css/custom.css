@@ -28,3 +28,30 @@
   --ifm-color-primary-lightest: #a7c4f9;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
 }
+
+/* Remove trailing gap below site footer */
+.footer {
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.footer :last-child {
+  margin-bottom: 0;
+}
+
+.footer__copyright {
+  margin-bottom: 0;
+}
+
+/* Keep all docs code blocks non-wrapping with horizontal scroll */
+.theme-code-block,
+.theme-code-block pre,
+.markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.theme-code-block pre code,
+.markdown pre code {
+  white-space: pre;
+}

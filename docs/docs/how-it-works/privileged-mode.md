@@ -19,7 +19,7 @@ Enable privileged mode to:
 ## Start with privileges
 
 ```bash
-sudo sysg --sys start --daemonize
+$ sudo sysg --sys start --daemonize
 ```
 
 The `--sys` flag moves state to system directories:

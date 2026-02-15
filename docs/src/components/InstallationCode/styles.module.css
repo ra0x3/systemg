@@ -3,6 +3,14 @@
   align-items: center;
   padding: 1rem 0;
   width: 100%;
+  overflow-x: hidden;
+}
+
+.installationInner {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  box-sizing: border-box;
 }
 
 .codeBlock {
@@ -10,9 +18,19 @@
   border: 1px solid var(--ifm-color-emphasis-300);
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  max-width: 900px;
+  max-width: 100%;
+  width: 100%;
   margin: 0 auto;
   overflow: hidden;
+  box-sizing: border-box;
+}
+
+.installationGif {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0 0 1rem;
+  border-radius: 8px;
 }
 
 .codeHeader {
@@ -33,6 +51,8 @@
   padding: 1rem;
   background: var(--ifm-code-background);
   position: relative;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .codeText {
@@ -44,7 +64,9 @@
   padding: 0;
   margin: 0;
   flex: 1;
-  white-space: nowrap;
+  min-width: 0;
+  display: block;
+  white-space: pre;
   overflow-x: auto;
 }
 
@@ -86,4 +108,23 @@
 
 [data-theme="dark"] .codeTitle {
   color: var(--ifm-color-emphasis-600);
+}
+
+@media screen and (max-width: 996px) {
+  .codeContent {
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .codeText {
+    white-space: pre;
+    overflow-x: auto;
+    font-size: 0.9rem;
+  }
+
+  .copyButton {
+    opacity: 1;
+    margin-left: 0;
+    flex-shrink: 0;
+  }
 }

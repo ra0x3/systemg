@@ -23,13 +23,13 @@ systemg's internal operational logs, separate from service output.
 
 ```bash
 # Last 50 lines
-sysg logs --kind supervisor
+$ sysg logs --kind supervisor
 
 # Follow in real-time
-tail -f ~/.local/share/systemg/logs/supervisor.log
+$ tail -f ~/.local/share/systemg/logs/supervisor.log
 
 # Search for events
-grep "Starting service" ~/.local/share/systemg/logs/supervisor.log
+$ grep "Starting service" ~/.local/share/systemg/logs/supervisor.log
 ```
 
 ## Log levels
@@ -37,7 +37,7 @@ grep "Starting service" ~/.local/share/systemg/logs/supervisor.log
 Set verbosity when starting:
 
 ```bash
-sysg start --log-level debug
+$ sysg start --log-level debug
 ```
 
 Levels: `trace` (5), `debug` (4), `info` (3), `warn` (2), `error` (1), `off` (0)
@@ -92,7 +92,7 @@ Create `/etc/logrotate.d/systemg`:
 ### Manual rotation
 
 ```bash
-mv ~/.local/share/systemg/logs/supervisor.log ~/.local/share/systemg/logs/supervisor.log.old
+$ mv ~/.local/share/systemg/logs/supervisor.log ~/.local/share/systemg/logs/supervisor.log.old
 # systemg creates new file automatically
 ```
 
