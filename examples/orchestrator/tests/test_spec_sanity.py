@@ -1,7 +1,7 @@
 from pathlib import Path
 
 EXAMPLE_ROOT = Path(__file__).resolve().parents[1]
-SPEC_PATH = EXAMPLE_ROOT / "SPEC.md"
+SPEC_PATH = EXAMPLE_ROOT / "docs" / "ORCHESTRATOR_SPEC.md"
 ASSETS_DIR = EXAMPLE_ROOT / "tests" / "assets"
 
 

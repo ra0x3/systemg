@@ -11,13 +11,13 @@ from pydantic import ValidationError
 from .version import BaseLogger
 
 try:
-    import redis  # type: ignore # noqa: F401
-except ImportError as exc:  # pragma: no cover - redis installed via uv
+    import redis
+except ImportError as exc:
     raise RuntimeError("redis package is required for the agent runtime") from exc
 
 from .models import DagModel, TaskNode, TaskState, TaskStatus
 
-LocalRedisClient = "redis.Redis"
+LocalRedisClient = redis.Redis
 
 
 def _now_utc() -> datetime:
@@ -67,6 +67,11 @@ class RedisStore(BaseLogger):
     def _agent_memory_key(agent_name: str) -> str:
         """Return the Redis key for agent memory snapshots."""
         return f"agent:{agent_name}:memory"
+
+    @staticmethod
+    def _goal_spending_cap_key(goal_id: str) -> str:
+        """Return the Redis key tracking goal-wide spending-cap backoff."""
+        return f"goal:{goal_id}:spending_cap_until"
 
     def write_dag(self, dag: DagModel) -> None:
         """Persist DAG structure and initialize task states."""
@@ -164,6 +169,55 @@ class RedisStore(BaseLogger):
         self.update_task_state(remediation_id, TaskState(status=TaskStatus.READY))
         return remediation_id
 
+    def create_recovery_task(
+        self,
+        *,
+        goal_id: str,
+        blocked_task_id: str,
+        owner_role: str,
+        recovery_attempt: int,
+        priority: int,
+        title: str,
+    ) -> str:
+        """Append a recovery task and block the target task until it succeeds."""
+        dag = self.read_dag(goal_id)
+        if not dag:
+            raise ValueError(f"DAG missing for goal {goal_id}")
+
+        recovery_id = f"{blocked_task_id}__recover_{recovery_attempt}"
+        existing_ids = {node.id for node in dag.nodes}
+        suffix = 1
+        while recovery_id in existing_ids:
+            recovery_id = f"{blocked_task_id}__recover_{recovery_attempt}_{suffix}"
+            suffix += 1
+
+        node = TaskNode(
+            id=recovery_id,
+            title=title,
+            priority=priority,
+            expected_artifacts=["recovery-report.md"],
+            metadata={
+                "phase": "development",
+                "required_role": owner_role,
+                "parent_task_id": blocked_task_id,
+                "recovery_for": blocked_task_id,
+                "recovery_attempt": str(recovery_attempt),
+            },
+        )
+        nodes_key = self._nodes_key(goal_id)
+        deps_key = self._deps_key(goal_id)
+        self.client.hset(nodes_key, recovery_id, node.model_dump_json())
+        self.client.hset(deps_key, recovery_id, json.dumps([]))
+
+        blocked_deps_raw = self.client.hget(deps_key, blocked_task_id)
+        blocked_deps = json.loads(blocked_deps_raw) if blocked_deps_raw else []
+        if recovery_id not in blocked_deps:
+            blocked_deps.append(recovery_id)
+            self.client.hset(deps_key, blocked_task_id, json.dumps(blocked_deps))
+
+        self.update_task_state(recovery_id, TaskState(status=TaskStatus.READY))
+        return recovery_id
+
     def get_task_state(self, task_id: str) -> TaskState | None:
         """Load mutable execution state for a task."""
         raw = self.client.hgetall(self._task_key(task_id))
@@ -188,6 +242,14 @@ class RedisStore(BaseLogger):
         if not dag:
             self.logger.debug("No DAG found for goal %s", goal_id)
             return []
+        recovered = self.recover_stale_tasks(goal_id)
+        if recovered:
+            self.logger.info(
+                "Recovered %d stale running tasks for goal %s: %s",
+                len(recovered),
+                goal_id,
+                ", ".join(sorted(recovered)),
+            )
         ready: list[str] = []
         done_count = 0
         blocked_count = 0
@@ -226,6 +288,35 @@ class RedisStore(BaseLogger):
             len(dag.nodes),
         )
         return ready
+
+    def recover_stale_tasks(self, goal_id: str) -> list[str]:
+        """Reset stale running/claimed tasks whose lock or lease has expired."""
+        dag = self.read_dag(goal_id)
+        if not dag:
+            return []
+
+        recovered: list[str] = []
+        now = _now_utc()
+        for node in dag.nodes:
+            state = self.get_task_state(node.id)
+            if not state:
+                continue
+            if state.status not in {TaskStatus.RUNNING, TaskStatus.CLAIMED}:
+                continue
+
+            lock_owner = self.lock_owner(node.id)
+            lock_missing = lock_owner is None
+            lease_expired = bool(state.lease_expires and state.lease_expires <= now)
+            if not lock_missing and not lease_expired:
+                continue
+
+            recovered_state = state.model_copy(
+                update={"status": TaskStatus.READY, "owner": None, "lease_expires": None}
+            )
+            self.update_task_state(node.id, recovered_state)
+            recovered.append(node.id)
+
+        return recovered
 
     def acquire_lock(self, task_id: str, agent_name: str, ttl: timedelta) -> bool:
         """Attempt to acquire an expiring lock for a task."""
@@ -318,6 +409,48 @@ class RedisStore(BaseLogger):
         except json.JSONDecodeError:
             return []
 
+    def set_goal_spending_cap_until(self, goal_id: str, until: datetime) -> None:
+        """Persist goal-wide spending-cap backoff deadline."""
+        now = _now_utc()
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        else:
+            until = until.astimezone(timezone.utc)
+        if until <= now:
+            self.clear_goal_spending_cap(goal_id)
+            return
+
+        current_until = self.get_goal_spending_cap_until(goal_id)
+        if current_until and current_until >= until:
+            return
+
+        ttl_ms = int(max(1000, (until - now).total_seconds() * 1000))
+        self.client.set(self._goal_spending_cap_key(goal_id), until.isoformat(), px=ttl_ms)
+
+    def get_goal_spending_cap_until(self, goal_id: str) -> datetime | None:
+        """Return active goal-wide spending-cap deadline, if present."""
+        value = self.client.get(self._goal_spending_cap_key(goal_id))
+        if not value:
+            return None
+        raw = value.decode("utf-8") if isinstance(value, bytes) else str(value)
+        try:
+            until = datetime.fromisoformat(raw)
+        except ValueError:
+            self.clear_goal_spending_cap(goal_id)
+            return None
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        else:
+            until = until.astimezone(timezone.utc)
+        if until <= _now_utc():
+            self.clear_goal_spending_cap(goal_id)
+            return None
+        return until
+
+    def clear_goal_spending_cap(self, goal_id: str) -> None:
+        """Clear goal-wide spending-cap backoff state."""
+        self.client.delete(self._goal_spending_cap_key(goal_id))
+
     @staticmethod
     def _serialize_state(state: TaskState) -> dict[str, str]:
         """Convert task state to a Redis hash mapping."""
@@ -343,5 +476,5 @@ class RedisStore(BaseLogger):
                 normalized[key] = value or None
         try:
             return TaskState(**normalized)
-        except ValidationError as exc:  # pragma: no cover - guardrail
+        except ValidationError as exc:
             raise ValueError(f"Invalid task state payload: {raw}") from exc

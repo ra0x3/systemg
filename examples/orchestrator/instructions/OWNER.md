@@ -8,7 +8,7 @@ Strategic oversight and quality enforcement for SystemG UI.
 
 ## Responsibilities
 - Monitor team progress via status reports
-- Ensure project meets SYSTEMG_UI.md specifications
+- Ensure project meets docs/SYSTEMG_UI_SPEC.md specifications
 - Enforce quality gates and performance budgets
 - Review final deliverables
 

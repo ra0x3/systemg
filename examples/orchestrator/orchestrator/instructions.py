@@ -11,6 +11,8 @@ from .models import AgentDescriptor
 
 
 class InstructionParser:
+    """Parses orchestrator markdown/YAML instruction files into descriptors."""
+
     def __init__(self, instructions_path: Path):
         """Bind parser to an instructions source path."""
         self.instructions_path = instructions_path

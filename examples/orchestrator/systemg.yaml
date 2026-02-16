@@ -9,6 +9,9 @@ services:
       --instructions INSTRUCTIONS.md
       --redis-url redis://127.0.0.1:6379
       --log-level INFO
+      --heartbeat-interval 300
+      --instruction-interval 300
+      --llm-provider claude
     restart_policy: always
     backoff: "5s"
     work_dir: "."

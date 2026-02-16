@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .cache import RedisStore
-from .constants import AGENT_LOOP_INTERVAL, INSTRUCTION_REFRESH_INTERVAL
+from .constants import AGENT_LOOP_INTERVAL, HEARTBEAT_REFRESH_INTERVAL, INSTRUCTION_REFRESH_INTERVAL
 from .heartbeat import HeartbeatController, HeartbeatDirective
-from .llm import LLMClient, TaskExecutionResult
+from .llm import LLMClient, RecoveryDecision, TaskExecutionResult
 from .memory import Memory
 from .models import DEFAULT_LEASE_TTL, TaskNode, TaskState, TaskStatus
 from .version import BaseLogger, InstructionStore
@@ -19,6 +20,20 @@ from .version import BaseLogger, InstructionStore
 
 class AgentRuntime(BaseLogger):
     """Coordinates local memory, heartbeat control, and Redis state."""
+
+    MAX_RECOVERY_ATTEMPTS = 3
+    MIN_RECOVERY_CONFIDENCE = 0.75
+    _RECOVERABLE_ERROR_PATTERNS = (
+        re.compile(r"spending cap reached", re.IGNORECASE),
+        re.compile(r"rate limit", re.IGNORECASE),
+        re.compile(r"timed out", re.IGNORECASE),
+        re.compile(r"timeout", re.IGNORECASE),
+        re.compile(r"temporar(?:y|ily)", re.IGNORECASE),
+        re.compile(r"network", re.IGNORECASE),
+        re.compile(r"econnreset|enotfound|eai_again", re.IGNORECASE),
+        re.compile(r"command not found|not found", re.IGNORECASE),
+        re.compile(r"unsupported engine|requires node|node\\s+version", re.IGNORECASE),
+    )
 
     def __init__(
         self,
@@ -32,6 +47,7 @@ class AgentRuntime(BaseLogger):
         llm_client: LLMClient | None = None,
         loop_interval: float = AGENT_LOOP_INTERVAL,
         lease_ttl: timedelta = DEFAULT_LEASE_TTL,
+        heartbeat_refresh_interval: timedelta = HEARTBEAT_REFRESH_INTERVAL,
         instructions_refresh_interval: timedelta = INSTRUCTION_REFRESH_INTERVAL,
     ) -> None:
         """Initialize agent runtime and restore persisted memory."""
@@ -47,6 +63,7 @@ class AgentRuntime(BaseLogger):
         self.llm_client = llm_client
         self.loop_interval = loop_interval
         self.lease_ttl = lease_ttl
+        self.heartbeat_refresh_interval = heartbeat_refresh_interval
         self.instructions_refresh_interval = instructions_refresh_interval
 
         self.memory = Memory()
@@ -55,9 +72,12 @@ class AgentRuntime(BaseLogger):
         self.instruction_id: str | None = None
         self._active = True
         self._paused = False
+        self._in_spending_cap_backoff = False
         self._last_reload = datetime.fromtimestamp(0, tz=timezone.utc)
+        self._last_heartbeat_poll = datetime.fromtimestamp(0, tz=timezone.utc)
 
         self._hydrate_memory()
+        self.llm_client.set_spending_cap_callback(self._on_spending_cap)
 
     def _hydrate_memory(self) -> None:
         """Restore memory snapshot from Redis if present."""
@@ -150,6 +170,18 @@ class AgentRuntime(BaseLogger):
         """Publish agent heartbeat to Redis."""
         self.redis_store.heartbeat_agent(self.agent_name, ttl=self.lease_ttl)
 
+    def _on_spending_cap(self, wait_seconds: float) -> None:
+        """Publish goal-wide spending-cap backoff window."""
+        if wait_seconds <= 0:
+            return
+        until = datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
+        self.redis_store.set_goal_spending_cap_until(self.goal_id, until)
+        self.logger.warning(
+            "[%s] Published goal-wide spending-cap backoff until %s",
+            self.agent_name,
+            until.isoformat(timespec="seconds"),
+        )
+
     def run(self, *, max_cycles: int | None = None) -> None:
         """Run agent loop until stopped or cycle limit reached."""
         pid = os.getpid()
@@ -168,18 +200,41 @@ class AgentRuntime(BaseLogger):
         )
 
         while self._active and (max_cycles is None or cycles < max_cycles):
-            directives = self.poll_heartbeat()
-            self.apply_directives(directives)
+            now = datetime.now(timezone.utc)
+            if now - self._last_heartbeat_poll >= self.heartbeat_refresh_interval:
+                directives = self.poll_heartbeat()
+                self.apply_directives(directives)
+                self._last_heartbeat_poll = now
             self.heartbeat()
-            if not self._paused:
-                if (
-                    datetime.now(timezone.utc) - self._last_reload
-                    >= self.instructions_refresh_interval
-                ):
+
+            cap_until = self.redis_store.get_goal_spending_cap_until(self.goal_id)
+            in_cap_backoff = bool(cap_until and cap_until > now)
+            if in_cap_backoff and not self._in_spending_cap_backoff:
+                wait_seconds = (cap_until - now).total_seconds() if cap_until else 0
+                self.logger.warning(
+                    "[%s] Goal %s under spending-cap backoff for %.0fs (until %s); skipping work",
+                    self.agent_name,
+                    self.goal_id,
+                    max(0, wait_seconds),
+                    cap_until.isoformat(timespec="seconds") if cap_until else "unknown",
+                )
+            elif not in_cap_backoff and self._in_spending_cap_backoff:
+                self.logger.info(
+                    "[%s] Goal %s spending-cap backoff cleared; resuming work",
+                    self.agent_name,
+                    self.goal_id,
+                )
+            self._in_spending_cap_backoff = in_cap_backoff
+
+            if not self._paused and not in_cap_backoff:
+                if now - self._last_reload >= self.instructions_refresh_interval:
                     self.reload_instructions()
                 self._run_cycle()
             else:
-                self.logger.debug("[%s] Agent paused, skipping cycle %d", self.agent_name, cycles)
+                if self._paused:
+                    self.logger.debug(
+                        "[%s] Agent paused, skipping cycle %d", self.agent_name, cycles
+                    )
             cycles += 1
             if self.loop_interval > 0:
                 time.sleep(self.loop_interval)
@@ -313,10 +368,10 @@ class AgentRuntime(BaseLogger):
             )
             self.logger.info("[%s] Task %s summary: %s", self.agent_name, node.id, summary[:200])
             self._record_result(node, execution, summary)
-        except Exception as exc:  # pragma: no cover - defensive guard
+        except Exception as exc:
             self.logger.error("[%s] Task %s failed: %s", self.agent_name, node.id, exc)
             self.logger.exception("Full exception details:")
-            self._record_failure(node, str(exc))
+            self._record_failure_or_recovery(node, str(exc))
         finally:
             self.logger.info("[%s] Releasing lock for task %s", self.agent_name, node.id)
             self.redis_store.release_lock(node.id, self.agent_name)
@@ -329,7 +384,7 @@ class AgentRuntime(BaseLogger):
             self._record_qa_failure(node, summary)
             return
         if execution_status in {"failed", "blocked"}:
-            self._record_failure(node, execution.notes or execution_status)
+            self._record_failure_or_recovery(node, execution.notes or execution_status)
             return
         if phase == "development":
             state = TaskState(
@@ -353,6 +408,133 @@ class AgentRuntime(BaseLogger):
         self.redis_store.update_task_state(node.id, state)
         self.memory.append(f"Failed {node.id}: {error}")
         self.redis_store.store_memory_snapshot(self.agent_name, self.memory.snapshot())
+
+    def _record_failure_or_recovery(self, node: TaskNode, error: str) -> None:
+        """Create remediation task for recoverable errors; otherwise fail."""
+        attempts = int(node.metadata.get("recovery_attempts", "0"))
+        if attempts >= self.MAX_RECOVERY_ATTEMPTS:
+            self.logger.error(
+                "[%s] Recovery exhausted for task %s after %d attempts",
+                self.agent_name,
+                node.id,
+                attempts,
+            )
+            self._record_failure(node, error)
+            return
+
+        decision = self._build_recovery_decision(node, error)
+        if not decision.recoverable:
+            self._record_failure(node, error)
+            return
+
+        attempt = attempts + 1
+        node.metadata["recovery_attempts"] = str(attempt)
+        if decision.reason:
+            node.metadata["last_recovery_reason"] = decision.reason[:300]
+        self.redis_store.update_task_node(self.goal_id, node)
+
+        remediation_title = decision.remediation_title.strip()
+        if not remediation_title:
+            remediation_title = f"Recover blocked task {node.id}"
+        recovery_id = self.redis_store.create_recovery_task(
+            goal_id=self.goal_id,
+            blocked_task_id=node.id,
+            owner_role=node.metadata.get("required_role", self.agent_role),
+            recovery_attempt=attempt,
+            priority=max(0, node.priority + 2),
+            title=remediation_title,
+        )
+        progress = (
+            f"Recoverable failure on {node.id}; created remediation task {recovery_id} "
+            f"(attempt {attempt}/{self.MAX_RECOVERY_ATTEMPTS})."
+        )
+        self.redis_store.update_task_state(
+            node.id,
+            TaskState(
+                status=TaskStatus.BLOCKED,
+                progress=progress,
+                last_error=error[:600],
+            ),
+        )
+        self.memory.append(progress)
+        self.redis_store.store_memory_snapshot(self.agent_name, self.memory.snapshot())
+        self.logger.warning(
+            "[%s] Recoverable failure for %s. remediation=%s attempt=%d/%d reason=%s",
+            self.agent_name,
+            node.id,
+            recovery_id,
+            attempt,
+            self.MAX_RECOVERY_ATTEMPTS,
+            decision.reason or "unspecified",
+        )
+
+    def _build_recovery_decision(self, node: TaskNode, error: str) -> RecoveryDecision:
+        """Classify whether a task failure should produce remediation work."""
+        deterministic = self._deterministic_recovery_decision(error)
+        if deterministic:
+            self.logger.info(
+                "[%s] Deterministic recovery classification for %s: %s",
+                self.agent_name,
+                node.id,
+                deterministic.reason,
+            )
+            return deterministic
+
+        try:
+            llm_decision = self.llm_client.assess_recovery(
+                node,
+                error=error,
+                goal_id=self.goal_id,
+                instructions=self.instructions_text,
+                memory=self.memory,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "[%s] Recovery classification failed for %s: %s",
+                self.agent_name,
+                node.id,
+                exc,
+            )
+            return RecoveryDecision(
+                recoverable=False,
+                reason="Recovery classification unavailable",
+                remediation_title="",
+                remediation_steps=[],
+                confidence=0.0,
+            )
+
+        recoverable = llm_decision.recoverable and (
+            llm_decision.confidence >= self.MIN_RECOVERY_CONFIDENCE
+        )
+        reason = llm_decision.reason or (
+            f"LLM classified recoverable={llm_decision.recoverable} "
+            f"confidence={llm_decision.confidence:.2f}"
+        )
+        if not recoverable:
+            reason = (
+                f"{reason}; confidence {llm_decision.confidence:.2f} "
+                f"below threshold {self.MIN_RECOVERY_CONFIDENCE:.2f}"
+            )
+        return RecoveryDecision(
+            recoverable=recoverable,
+            reason=reason,
+            remediation_title=llm_decision.remediation_title,
+            remediation_steps=llm_decision.remediation_steps,
+            confidence=llm_decision.confidence,
+        )
+
+    def _deterministic_recovery_decision(self, error: str) -> RecoveryDecision | None:
+        """Return recovery decision for known transient/environment error patterns."""
+        for pattern in self._RECOVERABLE_ERROR_PATTERNS:
+            if pattern.search(error):
+                return RecoveryDecision(
+                    recoverable=True,
+                    reason=f"Matched recoverable error pattern: {pattern.pattern}",
+                    remediation_title="Repair environment/runtime prerequisites",
+                    remediation_steps=[],
+                    confidence=1.0,
+                )
+        return None
 
     def _record_qa_failure(self, node: TaskNode, summary: str) -> None:
         """Create remediation work and block QA until fixes are delivered."""

@@ -117,7 +117,7 @@
 
 ## CLI & Logging
 - Shared entry point `python main.py --role {orchestrator,agent}`.
-- Common flags: `--instructions`, `--heartbeat`, `--redis-url`, `--log-level`, `--agent-name`, `--goal-id`.
+- Common flags: `--instructions`, `--heartbeat`, `--redis-url`, `--log-level`, `--agent-name`, `--goal-id`, `--heartbeat-interval`, `--instruction-interval`.
 - Claude configuration flags: `--claude-cli`, `--claude-extra-arg` (repeatable), `--claude-use-sysg` (invoke through systemg).
 - Logging via `logging.basicConfig(level=...)` with structured context (agent, task, lease id).
 - `uv` used as the Python workspace orchestrator for dependency management and task automation (e.g., `uv pip install`, `uv run pytest`).

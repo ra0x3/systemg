@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, RootModel, field_validator, model_validat
 
 
 class TaskStatus(str, Enum):
+    """Enumerates task lifecycle states in the orchestrator DAG."""
+
     READY = "ready"
     CLAIMED = "claimed"
     RUNNING = "running"
@@ -25,6 +27,8 @@ class TaskStatus(str, Enum):
 
 
 class TaskNode(BaseModel):
+    """Defines one DAG node with priority, artifacts, and metadata."""
+
     id: str
     title: str
     priority: int = Field(ge=0)
@@ -33,17 +37,21 @@ class TaskNode(BaseModel):
 
 
 class TaskEdge(BaseModel):
+    """Defines one directed dependency edge between two tasks."""
+
     source: str
     target: str
 
 
 class DagModel(BaseModel):
+    """Represents the DAG for a single goal."""
+
     goal_id: str
     nodes: list[TaskNode]
     edges: list[TaskEdge]
 
     @model_validator(mode="after")
-    def validate_nodes_for_edges(self):  # type: ignore[override]
+    def validate_nodes_for_edges(self):
         """Ensure every edge references existing node IDs."""
         node_ids = {node.id for node in self.nodes}
         for edge in self.edges:
@@ -59,6 +67,8 @@ class DagModel(BaseModel):
 
 
 class TaskState(BaseModel):
+    """Stores mutable runtime state for a task."""
+
     status: TaskStatus
     owner: str | None = None
     lease_expires: datetime | None = None
@@ -101,6 +111,8 @@ class TaskState(BaseModel):
 
 
 class GoalDescriptor(BaseModel):
+    """Describes goal metadata tracked by orchestration code."""
+
     goal_id: str
     title: str
     priority: int = Field(ge=0, default=0)
@@ -108,6 +120,8 @@ class GoalDescriptor(BaseModel):
 
 
 class AgentDescriptor(BaseModel):
+    """Describes one agent declaration loaded from instructions."""
+
     name: str
     role: str | None = None
     goal_id: str
@@ -117,7 +131,7 @@ class AgentDescriptor(BaseModel):
     cadence_seconds: int = Field(default=5, ge=1)
 
     @field_validator("instructions_path", "heartbeat_path", mode="before")
-    def _coerce_path(cls, value):  # type: ignore[override]
+    def _coerce_path(cls, value):
         """Coerce path-like values into `Path` instances."""
         return Path(value)
 
@@ -141,6 +155,8 @@ class InstructionSet(RootModel[list[str]]):
 
 @dataclass
 class MemorySnapshot:
+    """Holds serialized memory entries for persistence or transfer."""
+
     entries: list[str] = field(default_factory=list)
 
     def append(self, entry: str, *, max_entries: int = 50) -> None:

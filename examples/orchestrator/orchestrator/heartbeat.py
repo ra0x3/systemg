@@ -8,10 +8,12 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class HeartbeatDirective:
+    """Represents one parsed heartbeat directive line."""
+
     command: str
     args: list[str]
 
-    def __str__(self) -> str:  # pragma: no cover - debugging helper
+    def __str__(self) -> str:
         """Render directive as a single command line."""
         arg_str = " ".join(self.args)
         return f"{self.command} {arg_str}".strip()

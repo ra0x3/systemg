@@ -5,24 +5,29 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from hashlib import sha256
 
+from .constants import PROMPT_TIMEOUT_SECONDS
 from .models import DagModel, TaskNode
 
 logger = logging.getLogger(__name__)
 
 try:
     import tiktoken
-except ImportError:  # pragma: no cover - optional dependency
-    tiktoken = None  # type: ignore[assignment]
+except ImportError:
+    tiktoken = None
 
 
 @dataclass
 class TaskSelection:
+    """Structured response for selecting the next task to execute."""
+
     selected_task_id: str | None
     justification: str
     confidence: float = 0.5
@@ -30,14 +35,29 @@ class TaskSelection:
 
 @dataclass
 class TaskExecutionResult:
+    """Structured response describing task execution outcomes."""
+
     status: str
     outputs: list[str]
     notes: str
     follow_ups: list[str]
 
 
+@dataclass
+class RecoveryDecision:
+    """Structured response indicating whether remediation should be created."""
+
+    recoverable: bool
+    reason: str
+    remediation_title: str
+    remediation_steps: list[str]
+    confidence: float = 0.0
+
+
 @dataclass(frozen=True)
 class Prompt:
+    """Metadata for prompt text used in logs and timeout errors."""
+
     id: str
     text: str
     char_count: int
@@ -59,21 +79,42 @@ class Prompt:
         )
 
 
+@dataclass(frozen=True)
+class LLMRuntimeConfig:
+    """CLI/runtime configuration for provider-backed LLM clients."""
+
+    provider: str = "claude"
+    executable: str = "claude"
+    extra_args: tuple[str, ...] = ()
+    use_sysg_spawn: bool = False
+
+    def cli_args(self) -> list[str]:
+        """Render this config to process CLI args."""
+        args = [
+            "--llm-provider",
+            self.provider,
+            "--llm-cli",
+            self.executable,
+        ]
+        for arg in self.extra_args:
+            args.extend(["--llm-extra-arg", arg])
+        if self.use_sysg_spawn:
+            args.append("--llm-use-sysg")
+        return args
+
+
 def _estimate_token_count(text: str) -> tuple[int, str]:
     """Estimate token count using tiktoken when available."""
     if tiktoken is not None:
         encoding = tiktoken.get_encoding("cl100k_base")
         return len(encoding.encode(text)), "tiktoken:cl100k_base"
-    # Simple fallback heuristic when tiktoken is unavailable.
     return max(1, len(text) // 4), "fallback:chars_div_4"
 
 
 class LLMClient:
     """Abstract interface for LLM interactions."""
 
-    def create_goal_dag(
-        self, instructions: str, *, goal_id: str
-    ) -> DagModel:  # pragma: no cover - abstract
+    def create_goal_dag(self, instructions: str, *, goal_id: str) -> DagModel:
         """Create a DAG model for the goal from instructions."""
         raise NotImplementedError
 
@@ -84,7 +125,7 @@ class LLMClient:
         memory: Iterable[str],
         goal_id: str,
         instructions: str,
-    ) -> TaskSelection:  # pragma: no cover - abstract
+    ) -> TaskSelection:
         """Select the next task from currently ready nodes."""
         raise NotImplementedError
 
@@ -95,7 +136,7 @@ class LLMClient:
         goal_id: str,
         instructions: str,
         memory: Iterable[str],
-    ) -> TaskExecutionResult:  # pragma: no cover - abstract
+    ) -> TaskExecutionResult:
         """Execute a task and return structured execution output."""
         raise NotImplementedError
 
@@ -107,16 +148,40 @@ class LLMClient:
         goal_id: str,
         instructions: str,
         memory: Iterable[str],
-    ) -> str:  # pragma: no cover - abstract
+    ) -> str:
         """Summarize task execution for progress tracking."""
         raise NotImplementedError
+
+    def assess_recovery(
+        self,
+        task: TaskNode,
+        *,
+        error: str,
+        goal_id: str,
+        instructions: str,
+        memory: Iterable[str],
+    ) -> RecoveryDecision:
+        """Assess if an execution error should produce remediation work."""
+        raise NotImplementedError
+
+    def set_spending_cap_callback(self, callback: Callable[[float], None] | None) -> None:
+        """Install optional callback for provider spending-cap backoff events."""
+        return None
 
 
 class ClaudeCLIClient(LLMClient):
     """Interact with the Claude CLI via subprocess calls."""
 
-    EXECUTION_TIMEOUT_SECONDS = 900
     PROGRESS_LOG_INTERVAL_SECONDS = 30
+    _SPENDING_CAP_PATTERN = re.compile(r"spending cap reached", re.IGNORECASE)
+    _AUTO_BYPASS_ARGS = {
+        "claude": "--dangerously-skip-permissions",
+        "codex": "--dangerously-bypass-approvals-and-sandbox",
+    }
+    _RESET_TIME_PATTERN = re.compile(
+        r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)\b",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -124,11 +189,17 @@ class ClaudeCLIClient(LLMClient):
         executable: str = "claude",
         extra_args: list[str] | None = None,
         use_sysg_spawn: bool = False,
+        on_spending_cap: Callable[[float], None] | None = None,
     ) -> None:
         """Configure Claude CLI invocation parameters."""
         self.executable = executable
         self.extra_args = extra_args or []
         self.use_sysg_spawn = use_sysg_spawn
+        self._on_spending_cap = on_spending_cap
+
+    def set_spending_cap_callback(self, callback: Callable[[float], None] | None) -> None:
+        """Install callback invoked before sleeping on spending-cap errors."""
+        self._on_spending_cap = callback
 
     def create_goal_dag(self, instructions: str, *, goal_id: str) -> DagModel:
         """Request a DAG from Claude and validate it."""
@@ -223,7 +294,7 @@ class ClaudeCLIClient(LLMClient):
             prompt,
             required_keys=set(schema.keys()),
             operation="execute_task",
-            invoke_timeout=self.EXECUTION_TIMEOUT_SECONDS,
+            invoke_timeout=PROMPT_TIMEOUT_SECONDS,
         )
         return TaskExecutionResult(
             status=payload.get("status", "done"),
@@ -264,6 +335,49 @@ class ClaudeCLIClient(LLMClient):
             raise ValueError("Claude CLI returned empty summary")
         return summary
 
+    def assess_recovery(
+        self,
+        task: TaskNode,
+        *,
+        error: str,
+        goal_id: str,
+        instructions: str,
+        memory: Iterable[str],
+    ) -> RecoveryDecision:
+        """Ask Claude whether an error is recoverable and how to remediate."""
+        schema = {
+            "recoverable": True,
+            "reason": "short reason",
+            "remediation_title": "short remediation task title",
+            "remediation_steps": ["step 1", "step 2"],
+            "confidence": 0.0,
+        }
+        prompt = self._render_prompt(
+            "Classify the task error as recoverable or terminal. "
+            "Prefer recoverable for environment/setup issues. "
+            "If recoverable, propose concise remediation steps.",
+            goal_id=goal_id,
+            instructions=instructions,
+            context={
+                "task": task.model_dump(),
+                "error": error[:1200],
+                "memory": list(memory),
+            },
+            schema=schema,
+        )
+        payload = self._invoke_json_with_retries(
+            prompt,
+            required_keys=set(schema.keys()),
+            operation="assess_recovery",
+        )
+        return RecoveryDecision(
+            recoverable=bool(payload.get("recoverable")),
+            reason=str(payload.get("reason", "")).strip(),
+            remediation_title=str(payload.get("remediation_title", "")).strip(),
+            remediation_steps=[str(step) for step in payload.get("remediation_steps", [])],
+            confidence=float(payload.get("confidence", 0.0)),
+        )
+
     def _render_prompt(
         self,
         task: str,
@@ -296,12 +410,20 @@ class ClaudeCLIClient(LLMClient):
             )
         return "\n\n".join(sections)
 
-    def _invoke(self, prompt: str, *, timeout: int = 180, operation: str = "llm_call") -> str:
+    def _invoke(
+        self,
+        prompt: str,
+        *,
+        timeout: int = PROMPT_TIMEOUT_SECONDS,
+        operation: str = "llm_call",
+    ) -> str:
         """Run CLI command and return stdout text."""
         prompt_meta = Prompt.from_text(prompt)
         cmd = [self.executable]
-        if self.executable == "claude" or self.executable.endswith("/claude"):
-            cmd.append("--dangerously-skip-permissions")
+        executable_name = os.path.basename(self.executable)
+        bypass_arg = self._AUTO_BYPASS_ARGS.get(executable_name)
+        if bypass_arg:
+            cmd.append(bypass_arg)
         cmd.extend(["-p", prompt])
         if self.extra_args:
             cmd.extend(self.extra_args)
@@ -319,8 +441,10 @@ class ClaudeCLIClient(LLMClient):
                 *cmd,
             ]
 
+        provider_name = self.executable
         logger.info(
-            "Invoking Claude for %s Prompt(%s): chars=%d tokens~=%d tokenizer=%s timeout=%ss",
+            "Invoking %s for %s Prompt(%s): chars=%d tokens~=%d tokenizer=%s timeout=%ss",
+            provider_name,
             operation,
             prompt_meta.id,
             prompt_meta.char_count,
@@ -330,62 +454,122 @@ class ClaudeCLIClient(LLMClient):
         )
         logger.debug("Executing command: %s", " ".join(cmd))
 
-        started = time.monotonic()
-        deadline = started + timeout
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
-        next_progress = started + self.PROGRESS_LOG_INTERVAL_SECONDS
-
-        while process.poll() is None:
-            now = time.monotonic()
-            if now >= deadline:
-                process.kill()
-                process.communicate()
-                raise RuntimeError(
-                    "Claude CLI timed out after "
-                    f"{timeout}s for {operation} Prompt({prompt_meta.id})"
-                )
-            if now >= next_progress:
-                remaining = int(max(0, deadline - now))
-                logger.info(
-                    "Waiting for LLM response for Prompt(%s): %ds left",
-                    prompt_meta.id,
-                    remaining,
-                )
-                next_progress = now + self.PROGRESS_LOG_INTERVAL_SECONDS
-            time.sleep(0.5)
-
-        stdout, stderr = process.communicate()
-        finished = time.monotonic()
-        elapsed_ms = int((finished - started) * 1000)
-        response_text = stdout.strip()
-        response_tokens, response_tokenizer = _estimate_token_count(response_text or " ")
-        logger.info(
-            "Claude response for %s Prompt(%s): chars=%d tokens~=%d tokenizer=%s duration_ms=%d "
-            "exit_code=%d",
-            operation,
-            prompt_meta.id,
-            len(response_text),
-            response_tokens,
-            response_tokenizer,
-            elapsed_ms,
-            process.returncode,
-        )
-
-        logger.debug("stderr: %s", (stderr or "")[:500])
-
-        if process.returncode != 0:
-            raise RuntimeError(
-                "Claude CLI failed for "
-                f"{operation} Prompt({prompt_meta.id}): "
-                f"{(stderr or '').strip() or response_text}"
+        while True:
+            started = time.monotonic()
+            deadline = started + timeout
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
             )
-        return response_text
+            next_progress = started + self.PROGRESS_LOG_INTERVAL_SECONDS
+
+            while process.poll() is None:
+                now = time.monotonic()
+                if now >= deadline:
+                    process.kill()
+                    process.communicate()
+                    raise RuntimeError(
+                        "Claude CLI timed out after "
+                        f"{timeout}s for {operation} Prompt({prompt_meta.id})"
+                    )
+                if now >= next_progress:
+                    remaining = int(max(0, deadline - now))
+                    logger.info(
+                        "Waiting for LLM response for Prompt(%s): %ds left",
+                        prompt_meta.id,
+                        remaining,
+                    )
+                    next_progress = now + self.PROGRESS_LOG_INTERVAL_SECONDS
+                time.sleep(0.5)
+
+            stdout, stderr = process.communicate()
+            finished = time.monotonic()
+            elapsed_ms = int((finished - started) * 1000)
+            response_text = stdout.strip()
+            response_tokens, response_tokenizer = _estimate_token_count(response_text or " ")
+            stderr_text = (stderr or "").strip()
+            logger.info(
+                "%s response for %s Prompt(%s): chars=%d tokens~=%d tokenizer=%s duration_ms=%d "
+                "exit_code=%d",
+                provider_name,
+                operation,
+                prompt_meta.id,
+                len(response_text),
+                response_tokens,
+                response_tokenizer,
+                elapsed_ms,
+                process.returncode,
+            )
+
+            logger.debug("stderr: %s", (stderr_text or "")[:500])
+
+            error_text = stderr_text or response_text
+            combined_error_text = "\n".join(
+                part for part in (stderr_text, response_text) if part
+            ).strip()
+            if process.returncode == 0:
+                return response_text
+            if self._is_spending_cap_error(combined_error_text or error_text):
+                wait_seconds = self._seconds_until_local_reset_from_message(
+                    combined_error_text or error_text
+                )
+                if wait_seconds is None:
+                    logger.error(
+                        "Spending cap reached but reset time could not be parsed: %s",
+                        combined_error_text or error_text,
+                    )
+                else:
+                    reset_at = datetime.now().astimezone() + timedelta(seconds=wait_seconds)
+                    logger.warning(
+                        "%s spending cap reached for %s Prompt(%s): %s. "
+                        "Sleeping %.0fs until local reset at %s before retry.",
+                        provider_name,
+                        operation,
+                        prompt_meta.id,
+                        combined_error_text or error_text,
+                        wait_seconds,
+                        reset_at.isoformat(timespec="seconds"),
+                    )
+                    if self._on_spending_cap is not None:
+                        self._on_spending_cap(wait_seconds)
+                    time.sleep(wait_seconds)
+                    continue
+            raise RuntimeError(
+                f"{provider_name} CLI failed for {operation} Prompt({prompt_meta.id}): {error_text}"
+            )
+
+    @classmethod
+    def _is_spending_cap_error(cls, text: str) -> bool:
+        """Return whether stderr/stdout indicates Claude spending cap exhaustion."""
+        return bool(cls._SPENDING_CAP_PATTERN.search(text))
+
+    @classmethod
+    def _seconds_until_local_reset_from_message(
+        cls, text: str, *, now: datetime | None = None
+    ) -> float | None:
+        """Parse a reset time from Claude message and return sleep seconds."""
+        match = cls._RESET_TIME_PATTERN.search(text)
+        if not match:
+            return None
+        hour_text, minute_text, period = match.groups()
+        hour = int(hour_text)
+        minute = int(minute_text) if minute_text is not None else 0
+        if hour < 1 or hour > 12 or minute < 0 or minute > 59:
+            return None
+
+        period_normalized = period.lower()
+        hour_24 = hour % 12
+        if period_normalized == "pm":
+            hour_24 += 12
+
+        local_now = (now or datetime.now().astimezone()).astimezone()
+        reset_at = local_now.replace(hour=hour_24, minute=minute, second=0, microsecond=0)
+        if reset_at <= local_now:
+            reset_at += timedelta(days=1)
+        return (reset_at - local_now).total_seconds()
 
     def _invoke_json_with_retries(
         self,
@@ -393,7 +577,7 @@ class ClaudeCLIClient(LLMClient):
         *,
         required_keys: set[str],
         operation: str,
-        invoke_timeout: int = 180,
+        invoke_timeout: int = PROMPT_TIMEOUT_SECONDS,
         max_attempts: int = 3,
     ) -> dict:
         """Invoke Claude and enforce strict JSON response shape with retries."""
@@ -553,3 +737,65 @@ class StubLLMClient(LLMClient):
         return (
             f"Task {task.id} completed with outputs {execution.outputs}. Notes: {execution.notes}"
         )
+
+    def assess_recovery(
+        self,
+        task: TaskNode,
+        *,
+        error: str,
+        goal_id: str,
+        instructions: str,
+        memory: Iterable[str],
+    ) -> RecoveryDecision:
+        """Return a deterministic non-recoverable decision for generic tests."""
+        return RecoveryDecision(
+            recoverable=False,
+            reason=f"No recovery policy for: {error[:120]}",
+            remediation_title="",
+            remediation_steps=[],
+            confidence=0.0,
+        )
+
+
+class CodexCLIClient(ClaudeCLIClient):
+    """Interact with the Codex CLI via subprocess calls."""
+
+    def __init__(
+        self,
+        *,
+        executable: str = "codex",
+        extra_args: list[str] | None = None,
+        use_sysg_spawn: bool = False,
+        on_spending_cap: Callable[[float], None] | None = None,
+    ) -> None:
+        """Configure Codex CLI invocation parameters."""
+        super().__init__(
+            executable=executable,
+            extra_args=extra_args,
+            use_sysg_spawn=use_sysg_spawn,
+            on_spending_cap=on_spending_cap,
+        )
+
+
+def create_llm_client(
+    config: LLMRuntimeConfig,
+    *,
+    on_spending_cap: Callable[[float], None] | None = None,
+) -> LLMClient:
+    """Construct a provider-specific LLM client from runtime config."""
+    provider = config.provider.strip().lower()
+    if provider == "claude":
+        return ClaudeCLIClient(
+            executable=config.executable,
+            extra_args=list(config.extra_args),
+            use_sysg_spawn=config.use_sysg_spawn,
+            on_spending_cap=on_spending_cap,
+        )
+    if provider == "codex":
+        return CodexCLIClient(
+            executable=config.executable,
+            extra_args=list(config.extra_args),
+            use_sysg_spawn=config.use_sysg_spawn,
+            on_spending_cap=on_spending_cap,
+        )
+    raise ValueError(f"Unsupported LLM provider: {config.provider}")

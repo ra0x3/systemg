@@ -6,3 +6,4 @@ venv
 snapshots
 systemg_orchestrator.egg-info
 orchestrator-ui
+reports/*.md

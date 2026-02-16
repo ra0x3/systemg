@@ -1,5 +1,10 @@
 # Orchestrator Instructions
 
+## Global Output Policy
+
+All report outputs must be written under the `reports/` directory in this
+orchestrator example.
+
 ## Agent Configuration
 
 ```yaml

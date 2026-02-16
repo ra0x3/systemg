@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -12,19 +13,23 @@ from pathlib import Path
 from .cache import RedisStore
 from .constants import DEFAULT_POLL_INTERVAL
 from .instructions import InstructionParser
-from .llm import LLMClient
+from .llm import LLMClient, LLMRuntimeConfig
 from .models import AgentDescriptor, DagModel
 from .version import BaseLogger, InstructionStore
 
 
 @dataclass
 class SpawnHandle:
+    """Tracks a spawned process PID and its command arguments."""
+
     pid: int
     command: list[str]
 
 
 @dataclass
 class PreparedAgent:
+    """Stores an agent descriptor plus parsed instruction context."""
+
     descriptor: AgentDescriptor
     instructions_text: str
     category: str
@@ -34,8 +39,16 @@ class SpawnAdapter:
     """Interface for spawning agents under systemg supervision."""
 
     def spawn_agent(
-        self, descriptor: AgentDescriptor, *, redis_url: str, log_level: str
-    ) -> SpawnHandle:  # pragma: no cover - interface
+        self,
+        descriptor: AgentDescriptor,
+        *,
+        parent_pid: int,
+        redis_url: str,
+        log_level: str,
+        heartbeat_interval: float,
+        instruction_interval: float,
+        llm_config: LLMRuntimeConfig,
+    ) -> SpawnHandle:
         """Spawn one agent process and return a handle."""
         raise NotImplementedError
 
@@ -48,7 +61,15 @@ class LoggingSpawnAdapter(SpawnAdapter, BaseLogger):
         BaseLogger.__init__(self, f"{self.__class__.__name__}")
 
     def spawn_agent(
-        self, descriptor: AgentDescriptor, *, redis_url: str, log_level: str
+        self,
+        descriptor: AgentDescriptor,
+        *,
+        parent_pid: int,
+        redis_url: str,
+        log_level: str,
+        heartbeat_interval: float,
+        instruction_interval: float,
+        llm_config: LLMRuntimeConfig,
     ) -> SpawnHandle:
         """Build an agent command and log it without executing."""
         command = [
@@ -57,7 +78,7 @@ class LoggingSpawnAdapter(SpawnAdapter, BaseLogger):
             "--name",
             f"agent-{descriptor.name}",
             "--parent-pid",
-            str(os.getpid()),
+            str(parent_pid),
             "--log-level",
             log_level,
             sys.executable,
@@ -80,6 +101,11 @@ class LoggingSpawnAdapter(SpawnAdapter, BaseLogger):
             log_level,
             "--loop-interval",
             str(float(descriptor.cadence_seconds)),
+            "--heartbeat-interval",
+            str(float(heartbeat_interval)),
+            "--instruction-interval",
+            str(float(instruction_interval)),
+            *llm_config.cli_args(),
         ]
         self.logger.info("(dry-run) would spawn agent: %s", " ".join(command))
         return SpawnHandle(pid=-1, command=command)
@@ -93,7 +119,15 @@ class RealSpawnAdapter(SpawnAdapter, BaseLogger):
         BaseLogger.__init__(self, f"{self.__class__.__name__}")
 
     def spawn_agent(
-        self, descriptor: AgentDescriptor, *, redis_url: str, log_level: str
+        self,
+        descriptor: AgentDescriptor,
+        *,
+        parent_pid: int,
+        redis_url: str,
+        log_level: str,
+        heartbeat_interval: float,
+        instruction_interval: float,
+        llm_config: LLMRuntimeConfig,
     ) -> SpawnHandle:
         """Spawn agent process via `sysg spawn` and return handle."""
         command = [
@@ -102,7 +136,7 @@ class RealSpawnAdapter(SpawnAdapter, BaseLogger):
             "--name",
             f"agent-{descriptor.name}",
             "--parent-pid",
-            str(os.getpid()),
+            str(parent_pid),
             "--log-level",
             log_level,
             sys.executable,
@@ -125,13 +159,45 @@ class RealSpawnAdapter(SpawnAdapter, BaseLogger):
             log_level,
             "--loop-interval",
             str(float(descriptor.cadence_seconds)),
+            "--heartbeat-interval",
+            str(float(heartbeat_interval)),
+            "--instruction-interval",
+            str(float(instruction_interval)),
+            *llm_config.cli_args(),
         ]
         self.logger.info("Spawning agent: %s", " ".join(command))
-        process = subprocess.Popen(command)
-        return SpawnHandle(pid=process.pid, command=command)
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        stdout = (completed.stdout or "").strip()
+        stderr = (completed.stderr or "").strip()
+        if completed.returncode != 0:
+            raise RuntimeError(f"sysg spawn failed ({completed.returncode}): {stderr or stdout}")
+        pid = self._extract_spawned_pid(stdout)
+        return SpawnHandle(pid=pid, command=command)
+
+    @staticmethod
+    def _extract_spawned_pid(stdout: str) -> int:
+        """Extract child PID from sysg spawn command output."""
+        text = stdout.strip()
+        if not text:
+            raise RuntimeError("Unable to parse spawned PID from empty sysg output")
+        if text.isdigit():
+            return int(text)
+        for line in reversed(text.splitlines()):
+            candidate = line.strip()
+            if candidate.isdigit():
+                return int(candidate)
+            match = re.search(r"Spawned process with PID:\s*(\d+)", candidate)
+            if match:
+                return int(match.group(1))
+        match = re.search(r"Spawned process with PID:\s*(\d+)", text)
+        if match:
+            return int(match.group(1))
+        raise RuntimeError(f"Unable to parse spawned PID from sysg output: {stdout}")
 
 
 class Orchestrator(BaseLogger):
+    """Runs the reconciliation loop for DAG state and agent processes."""
+
     def __init__(
         self,
         *,
@@ -139,8 +205,11 @@ class Orchestrator(BaseLogger):
         redis_store: RedisStore,
         redis_url: str,
         llm_client: LLMClient | None = None,
+        llm_config: LLMRuntimeConfig | None = None,
         spawn_adapter: SpawnAdapter | None = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        heartbeat_interval: float = 300.0,
+        instruction_interval: float = 300.0,
     ) -> None:
         """Initialize orchestrator dependencies and runtime state."""
         super().__init__(f"{self.__class__.__name__}")
@@ -150,12 +219,16 @@ class Orchestrator(BaseLogger):
         if llm_client is None:
             raise ValueError("Orchestrator requires an LLM client instance")
         self.llm_client = llm_client
+        self.llm_config = llm_config or LLMRuntimeConfig()
         self.spawn_adapter = spawn_adapter or LoggingSpawnAdapter()
         self.poll_interval = poll_interval
+        self.heartbeat_interval = heartbeat_interval
+        self.instruction_interval = instruction_interval
 
         self.parser = InstructionParser(instructions_path)
         self.instruction_store = InstructionStore(redis_store.client)
         self._spawned: dict[str, SpawnHandle] = {}
+        self._resume_reported_goals: set[str] = set()
         self._active = True
 
     def run(self, *, max_cycles: int | None = None) -> None:
@@ -191,9 +264,9 @@ class Orchestrator(BaseLogger):
             if planner is None:
                 planner = goal_agents[0]
             self._ensure_goal_state(planner, goal_agents)
+            self._report_resume_state(planner.descriptor.goal_id)
 
-        for agent in agents:
-            self._ensure_agent_spawn(agent.descriptor)
+        self._spawn_agents_hierarchy(agents)
 
         stale_agents = set(self._spawned.keys()) - {agent.descriptor.name for agent in agents}
         for agent_name in stale_agents:
@@ -376,15 +449,82 @@ class Orchestrator(BaseLogger):
             return "reviewer"
         return "builder"
 
-    def _ensure_agent_spawn(self, descriptor: AgentDescriptor) -> None:
+    def _spawn_agents_hierarchy(self, agents: list[PreparedAgent]) -> None:
+        """Spawn agents using owner->team-lead->worker parent chain."""
+        orchestrator_pid = os.getpid()
+        owner = next((agent for agent in agents if self._is_owner(agent.descriptor)), None)
+        team_lead = next(
+            (
+                agent
+                for agent in agents
+                if self._is_team_lead(agent.descriptor)
+                and (owner is None or agent.descriptor.name != owner.descriptor.name)
+            ),
+            None,
+        )
+
+        owner_pid = orchestrator_pid
+        if owner is not None:
+            owner_handle = self._ensure_agent_spawn(owner.descriptor, parent_pid=orchestrator_pid)
+            owner_pid = owner_handle.pid
+
+        team_lead_parent_pid = owner_pid if owner is not None else orchestrator_pid
+        team_lead_pid = team_lead_parent_pid
+        if team_lead is not None:
+            team_lead_handle = self._ensure_agent_spawn(
+                team_lead.descriptor, parent_pid=team_lead_parent_pid
+            )
+            team_lead_pid = team_lead_handle.pid
+
+        for agent in agents:
+            if owner is not None and agent.descriptor.name == owner.descriptor.name:
+                continue
+            if team_lead is not None and agent.descriptor.name == team_lead.descriptor.name:
+                continue
+            self._ensure_agent_spawn(agent.descriptor, parent_pid=team_lead_pid)
+
+    @staticmethod
+    def _is_owner(descriptor: AgentDescriptor) -> bool:
+        """Return whether descriptor maps to the owner role."""
+        role = (descriptor.role or "").strip().lower()
+        name = descriptor.name.strip().lower()
+        return role == "owner" or name == "owner"
+
+    @staticmethod
+    def _is_team_lead(descriptor: AgentDescriptor) -> bool:
+        """Return whether descriptor maps to the team-lead role."""
+        role = (descriptor.role or "").strip().lower()
+        name = descriptor.name.strip().lower().replace("_", "-")
+        return role in {"team-lead", "lead"} or name in {"team-lead", "teamlead", "lead"}
+
+    def _ensure_agent_spawn(self, descriptor: AgentDescriptor, *, parent_pid: int) -> SpawnHandle:
         """Ensure a declared agent has been spawned."""
         if descriptor.name in self._spawned:
-            return
+            return self._spawned[descriptor.name]
         handle = self.spawn_adapter.spawn_agent(
-            descriptor, redis_url=self.redis_url, log_level=descriptor.log_level
+            descriptor,
+            parent_pid=parent_pid,
+            redis_url=self.redis_url,
+            log_level=descriptor.log_level,
+            heartbeat_interval=self.heartbeat_interval,
+            instruction_interval=self.instruction_interval,
+            llm_config=self.llm_config,
         )
         self.logger.info("Spawned agent %s with pid %s", descriptor.name, handle.pid)
         self._spawned[descriptor.name] = handle
+        return handle
+
+    def _report_resume_state(self, goal_id: str) -> None:
+        """Recover stale tasks once per goal and emit a resume summary."""
+        if goal_id in self._resume_reported_goals:
+            return
+        recovered = self.redis_store.recover_stale_tasks(goal_id)
+        self.logger.info(
+            "Resume summary for goal %s: recovered %d stale task(s)",
+            goal_id,
+            len(recovered),
+        )
+        self._resume_reported_goals.add(goal_id)
 
     def _validate_dag(self, dag: DagModel) -> None:
         """Validate edge integrity and acyclic structure."""

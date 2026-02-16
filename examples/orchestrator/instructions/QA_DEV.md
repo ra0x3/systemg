@@ -47,7 +47,7 @@ When issues are found, report with:
 - Screenshots if UI-related
 
 ## Requirements Validation
-- Check against SYSTEMG_UI.md specifications
+- Check against docs/SYSTEMG_UI_SPEC.md specifications
 - Verify all features implemented
 - Confirm performance targets met
 - Validate security (no exposed secrets)
