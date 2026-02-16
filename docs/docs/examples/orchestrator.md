@@ -14,7 +14,7 @@ Orchestrator supervises agents that claim and execute tasks from a shared cache.
 ## Architecture
 
 ```
-Orchestrator → Reads INSTRUCTIONS.md → Spawns agents → Creates DAGs
+Orchestrator → Reads instructions/INSTRUCTIONS.md → Spawns agents → Creates DAGs
 Agent → Claims task → Executes → Updates cache
 ```
 
@@ -38,12 +38,11 @@ agent:<name>:*      # Registry
 ## Files
 
 ```
-agent.py            # Entry point
-orchestrator/*.py   # Core modules
-systemg.yaml       # Config
-INSTRUCTIONS.md    # Agent declarations
-instructions/*.md  # Per-agent instructions
-heartbeat/*.md     # Control files
+systemg.yaml                    # Orchestrator service config
+instructions/INSTRUCTIONS.md    # Agent declarations
+instructions/*.md               # Per-agent instructions
+instructions/heartbeat/*.md     # Control files
+docs/*.md                       # Example specs
 ```
 
 ## Configuration
@@ -56,20 +55,22 @@ services:
     command: "redis-server"
   orchestrator:
     command: >
-      ./.venv/bin/python3 agent.py
+      porki
       --role orchestrator
+      --instructions instructions/INSTRUCTIONS.md
+      --redis-url redis://127.0.0.1:6379
     depends_on: ["redis"]
     spawn:
       mode: dynamic
       limit: 10
 ```
 
-**INSTRUCTIONS.md:**
+**instructions/INSTRUCTIONS.md:**
 ```markdown
 ## Agents
 ### research_agent
 - Goal: goal-001
-- Heartbeat: ./heartbeat/research.md
+- Heartbeat: ./instructions/heartbeat/research.md
 ```
 
 ## DAG Format
@@ -87,8 +88,7 @@ services:
 ```bash
 # Setup
 $ cd examples/orchestrator
-$ python3 -m venv .venv
-$ ./.venv/bin/pip install -r requirements.txt
+$ pip install porki
 
 # Run
 $ redis-server
@@ -99,14 +99,13 @@ $ sysg logs --service orchestrator
 $ redis-cli KEYS "*"
 
 # Control
-$ echo "PAUSE" >> ./heartbeat/research.md
+$ echo "PAUSE" >> ./instructions/heartbeat/research.md
 ```
 
-## Testing
+## Validation
 
-```bash
-$ uv run pytest examples/orchestrator/tests -v
-```
+Use `sysg status`, `sysg logs --service orchestrator`, and Redis keys to validate
+runtime behavior. Package-level runtime tests execute in the `porki` repository.
 
 ## Links
 

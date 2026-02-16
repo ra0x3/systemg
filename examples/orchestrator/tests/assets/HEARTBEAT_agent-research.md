@@ -1,3 +1,0 @@
-# heartbeat directives
-RESUME
-REPARSE

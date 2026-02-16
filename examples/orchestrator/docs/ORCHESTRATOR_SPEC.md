@@ -1,13 +1,13 @@
 # Systemg Agent Orchestration Spec
 
 ## Background
-- `main.py` currently sketches an agent runtime that never fully executes because decorators short-circuit, subprocesses misuse `sysg` spawns, and no orchestrator supervises agents.
+- The orchestrator runtime is provided by the published `porki` package; this example focuses on instruction files, systemg wiring, and operational guidance.
 - The target architecture promotes an always-on orchestrator that spawns agents via `sysg spawn`, keeps authoritative state in Redis, and coordinates LLM-driven work decomposition.
-- Markdown (`INSTRUCTIONS.md`, `heartbeat.md`) remains the human-facing control plane, mirroring practices in other agent platforms such as OpenClaw.
+- Markdown (`instructions/INSTRUCTIONS.md`, heartbeat files) remains the human-facing control plane, mirroring practices in other agent platforms such as OpenClaw.
 
 ## Roles & Responsibilities
 - **Orchestrator (`--role orchestrator`)**
-  - Watches `examples/orchestrator/INSTRUCTIONS.md` for agent declarations and global directives.
+  - Watches `examples/orchestrator/instructions/INSTRUCTIONS.md` for agent declarations and global directives.
   - Validates/updates the goal DAG in Redis by prompting the LLM and enforcing schema invariants.
   - Spawns/retiring agents exclusively via `sysg spawn`, piping role-specific CLI arguments.
   - Serves as validator: rejects malformed graphs, resolves conflicts, and guards against cycles.
@@ -30,7 +30,7 @@
 - Heartbeat-triggered directives can short-circuit the loop (e.g., pause) but the process remains single-threaded for observability.
 
 ## Instruction & Heartbeat Files
-- `INSTRUCTIONS.md` (per master control):
+- `instructions/INSTRUCTIONS.md` (per master control):
   - Contains agent stanzas (name, specialization, heartbeat path, polling interval, log level).
   - Lists high-level goals and policy notes the orchestrator uses when prompting the LLM.
   - Orchestrator diff-detects changes and applies them without restarting.
@@ -116,11 +116,11 @@
 - Error records include agent name, task id, correlation id, and timestamp for post-mortem analysis.
 
 ## CLI & Logging
-- Shared entry point `python main.py --role {orchestrator,agent}`.
+- Shared entry point `porki --role {orchestrator,agent}`.
 - Common flags: `--instructions`, `--heartbeat`, `--redis-url`, `--log-level`, `--agent-name`, `--goal-id`, `--heartbeat-interval`, `--instruction-interval`.
 - Claude configuration flags: `--claude-cli`, `--claude-extra-arg` (repeatable), `--claude-use-sysg` (invoke through systemg).
 - Logging via `logging.basicConfig(level=...)` with structured context (agent, task, lease id).
-- `uv` used as the Python workspace orchestrator for dependency management and task automation (e.g., `uv pip install`, `uv run pytest`).
+- Runtime dependency management is handled by the installed `porki` package; operators install/update via PyPI and invoke it through systemg.
 
 ## Testing Strategy (Pytest)
 - **Unit tests** (use `fakeredis`):
@@ -134,10 +134,8 @@
   - Malformed LLM output rejected; orchestrator logs error and retries.
   - Lock loss mid-task forces agent to relinquish progress and requeue node.
   - Heartbeat directive `pause` halts agent loop; `resume` restarts.
-- **Assets** under `examples/orchestrator/tests/`:
-  - Sample `INSTRUCTIONS.md` / heartbeat files for fixtures.
-  - Mock LLM responses (JSON) for DAG creation and task execution.
-- Single command: `uv run pytest examples/orchestrator/tests -q` exercises happy/unhappy paths with mocks.
+- Runtime tests for orchestrator/agent behavior live in the `porki` project.
+- This example repository validates integration by running systemg against `examples/orchestrator/systemg.yaml` with installed `porki`.
 - Live Claude CLI tests run whenever the `claude` executable is available (and `sysg` when `--claude-use-sysg` is enabled).
 
 ## Implementation Phases

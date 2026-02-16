@@ -1,2 +1,0 @@
-# heartbeat directives
-RESUME

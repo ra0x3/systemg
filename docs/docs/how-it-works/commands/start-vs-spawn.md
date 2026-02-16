@@ -45,7 +45,7 @@ Parent service enables spawning:
 ```yaml
 services:
   orchestrator:
-    command: "python orchestrator.py"
+    command: "porki --role orchestrator --instructions instructions/INSTRUCTIONS.md"
     spawn:
       mode: dynamic
       limit: 10

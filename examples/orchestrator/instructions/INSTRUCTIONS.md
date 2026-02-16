@@ -1,5 +1,11 @@
 # Orchestrator Instructions
 
+## Runtime Prerequisites
+
+- `sysg` (systemg CLI) must be installed and available on PATH.
+- `porki` must be installed from PyPI and available on PATH.
+- Redis must be running and reachable at `redis://127.0.0.1:6379`.
+
 ## Global Output Policy
 
 All report outputs must be written under the `reports/` directory in this
