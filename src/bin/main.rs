@@ -28,7 +28,7 @@ use systemg::{
     logs::{LogManager, resolve_log_path},
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
-    spawn::{SpawnedChild, SpawnedExit},
+    spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, SpawnedProcessNode,
         StatusSnapshot, UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
@@ -426,6 +426,7 @@ mod tests {
                 rss_bytes: None,
                 last_exit: None,
                 user: None,
+                kind: SpawnedChildKind::Spawned,
             },
             vec![
                 SpawnedProcessNode::new(
@@ -441,6 +442,7 @@ mod tests {
                         rss_bytes: None,
                         last_exit: None,
                         user: None,
+                        kind: SpawnedChildKind::Spawned,
                     },
                     vec![SpawnedProcessNode::new(
                         SpawnedChild {
@@ -455,6 +457,7 @@ mod tests {
                             rss_bytes: None,
                             last_exit: None,
                             user: None,
+                            kind: SpawnedChildKind::Peripheral,
                         },
                         Vec::new(),
                     )],
@@ -472,6 +475,7 @@ mod tests {
                         rss_bytes: None,
                         last_exit: None,
                         user: None,
+                        kind: SpawnedChildKind::Spawned,
                     },
                     Vec::new(),
                 ),
@@ -499,7 +503,7 @@ mod tests {
         let columns = vec![
             Column {
                 title: "UNIT",
-                width: 24,
+                width: 48,
                 align: Alignment::Left,
             },
             Column {
@@ -539,7 +543,7 @@ mod tests {
             },
             Column {
                 title: "CMD",
-                width: 14,
+                width: 64,
                 align: Alignment::Left,
             },
             Column {
@@ -589,10 +593,181 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: Some("rashad".to_string()),
+            kind: SpawnedChildKind::Spawned,
         };
         let child_row = format_spawned_child_row(&child, &columns, true, "└─ ");
         assert!(child_row.contains("spwn"));
         assert!(child_row.contains("rashad"));
+    }
+
+    #[test]
+    fn peripheral_spawn_rows_render_selected_columns_in_gray() {
+        let columns = vec![
+            Column {
+                title: "UNIT",
+                width: 48,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "KIND",
+                width: 6,
+                align: Alignment::Center,
+            },
+            Column {
+                title: "STATE",
+                width: 7,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "USER",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "PID",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "CPU",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "RSS",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "UPTIME",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "CMD",
+                width: 64,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "LAST_EXIT",
+                width: 10,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "HEALTH",
+                width: 8,
+                align: Alignment::Left,
+            },
+        ];
+
+        let child = SpawnedChild {
+            name: "/opt/homebrew/bin/claude".to_string(),
+            pid: 62751,
+            parent_pid: 59769,
+            command: "/opt/homebrew/bin/claude --dangerously-skip-permissions"
+                .to_string(),
+            started_at: SystemTime::now(),
+            ttl: None,
+            depth: 4,
+            cpu_percent: Some(0.0),
+            rss_bytes: Some(123_456_789),
+            last_exit: None,
+            user: Some("rashad".to_string()),
+            kind: SpawnedChildKind::Peripheral,
+        };
+
+        let row = format_spawned_child_row(&child, &columns, false, "└─ ");
+        assert!(row.contains(&format!("{GRAY}└─ /opt/homebrew/bin/claude{RESET}")));
+        assert!(row.contains(&format!("{GRAY}rashad{RESET}")));
+        assert!(row.contains(&format!("{GRAY}62751{RESET}")));
+        assert!(row.contains(&format!("{GRAY}0.0%{RESET}")));
+        assert!(row.contains(&format!("{GRAY}117.7MB{RESET}")));
+        assert!(row.contains(&format!(
+            "{GRAY}/opt/homebrew/bin/claude --dangerously-skip-permissions{RESET}"
+        )));
+        assert!(row.contains(&format!("{GRAY}-{RESET}")));
+        assert!(row.contains(&format!("{ORANGE}peri{RESET}")));
+        assert!(row.contains(&format!("{BRIGHT_GREEN}Running{RESET}")));
+        assert!(row.contains(&format!("{GREEN_BOLD}healthy{RESET}")));
+    }
+
+    #[test]
+    fn peripheral_row_keeps_fixed_visible_width_when_cmd_is_truncated() {
+        let columns = vec![
+            Column {
+                title: "UNIT",
+                width: 24,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "KIND",
+                width: 6,
+                align: Alignment::Center,
+            },
+            Column {
+                title: "STATE",
+                width: 7,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "USER",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "PID",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "CPU",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "RSS",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "UPTIME",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "CMD",
+                width: 16,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "LAST_EXIT",
+                width: 10,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "HEALTH",
+                width: 8,
+                align: Alignment::Left,
+            },
+        ];
+
+        let child = SpawnedChild {
+            name: "/opt/homebrew/bin/claude".to_string(),
+            pid: 73903,
+            parent_pid: 73896,
+            command: "/opt/homebrew/bin/claude --dangerously-skip-permissions --long-long-long-arg".to_string(),
+            started_at: SystemTime::now(),
+            ttl: None,
+            depth: 4,
+            cpu_percent: Some(0.0),
+            rss_bytes: Some(253_100_000_000),
+            last_exit: None,
+            user: Some("rashad".to_string()),
+            kind: SpawnedChildKind::Peripheral,
+        };
+
+        let row = format_spawned_child_row(&child, &columns, false, "└─ ");
+        assert_eq!(visible_length(&row), total_inner_width(&columns) + 2);
     }
 }
 
@@ -1402,6 +1577,7 @@ fn format_spawned_child_row(
     no_color: bool,
     prefix: &str,
 ) -> String {
+    let is_peripheral = matches!(child.kind, SpawnedChildKind::Peripheral);
     let child_name = format!("{}{}", prefix, child.name);
     let user = child
         .user
@@ -1477,23 +1653,34 @@ fn format_spawned_child_row(
         display_name
     };
 
-    let kind_label = colorize("spwn", MAGENTA, no_color);
+    let kind_label = match child.kind {
+        SpawnedChildKind::Spawned => colorize("spwn", MAGENTA, no_color),
+        SpawnedChildKind::Peripheral => colorize("peri", ORANGE, no_color),
+    };
 
     let values = [
-        display_name_final,
+        style_peripheral_column(display_name_final, is_peripheral, no_color),
         kind_label,
         state,
-        user,
-        pid,
-        cpu_col,
-        rss_col,
-        uptime,
-        command,
-        last_exit,
+        style_peripheral_column(user, is_peripheral, no_color),
+        style_peripheral_column(pid, is_peripheral, no_color),
+        style_peripheral_column(cpu_col, is_peripheral, no_color),
+        style_peripheral_column(rss_col, is_peripheral, no_color),
+        style_peripheral_column(uptime, is_peripheral, no_color),
+        style_peripheral_column(command, is_peripheral, no_color),
+        style_peripheral_column(last_exit, is_peripheral, no_color),
         health_label,
     ];
 
     format_row(&values, columns)
+}
+
+fn style_peripheral_column(value: String, is_peripheral: bool, no_color: bool) -> String {
+    if is_peripheral {
+        colorize(&value, GRAY, no_color)
+    } else {
+        value
+    }
 }
 
 fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
@@ -1535,8 +1722,8 @@ fn format_row(values: &[String; 11], columns: &[Column]) -> String {
 fn ansi_pad(value: &str, width: usize, align: Alignment) -> String {
     let len = visible_length(value);
     if len > width {
-        // Truncate with ellipsis if content exceeds column width
-        return ellipsize(value, width);
+        // Truncate with ellipsis while preserving wrapping ANSI color.
+        return ellipsize_ansi_aware(value, width);
     }
 
     let pad = width - len;
@@ -1549,6 +1736,62 @@ fn ansi_pad(value: &str, width: usize, align: Alignment) -> String {
             format!("{}{}{}", " ".repeat(left), value, " ".repeat(right))
         }
     }
+}
+
+fn ellipsize_ansi_aware(value: &str, width: usize) -> String {
+    if !value.contains('\u{1b}') {
+        return ellipsize(value, width);
+    }
+
+    let plain = strip_ansi(value);
+    let truncated = ellipsize(&plain, width);
+
+    let prefix_len = leading_ansi_len(value);
+    let has_wrapping_reset = value.ends_with(RESET);
+    if prefix_len == 0 {
+        return truncated;
+    }
+
+    let mut out = String::new();
+    out.push_str(&value[..prefix_len]);
+    out.push_str(&truncated);
+    if has_wrapping_reset {
+        out.push_str(RESET);
+    }
+    out
+}
+
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for next in &mut chars {
+                if next == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn leading_ansi_len(value: &str) -> usize {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() && bytes[i] == 0x1b && bytes[i + 1] == b'[' {
+        i += 2;
+        while i < bytes.len() {
+            let b = bytes[i];
+            i += 1;
+            if b == b'm' {
+                break;
+            }
+        }
+    }
+    i
 }
 
 fn visible_length(text: &str) -> usize {

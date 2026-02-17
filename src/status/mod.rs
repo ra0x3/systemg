@@ -33,7 +33,7 @@ use crate::{
     daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary},
-    spawn::{DynamicSpawnManager, SpawnedChild},
+    spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind},
 };
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
@@ -284,6 +284,7 @@ fn build_spawn_tree_from_pidfile(
             rss_bytes: metadata.rss_bytes,
             last_exit: metadata.last_exit.clone(),
             user: Some(StatusManager::get_process_user(child_pid)),
+            kind: SpawnedChildKind::Spawned,
         };
 
         let (cpu, rss) = sample_process_metrics(system, child_pid);
@@ -320,6 +321,7 @@ fn build_spawn_tree_from_pidfile(
                 rss_bytes: metadata.rss_bytes,
                 last_exit: metadata.last_exit.clone(),
                 user: Some(StatusManager::get_process_user(metadata.pid)),
+                kind: SpawnedChildKind::Spawned,
             };
 
             let (cpu, rss) = sample_process_metrics(system, metadata.pid);
@@ -384,6 +386,7 @@ fn build_spawn_tree_from_system(
                     rss_bytes,
                     last_exit: None,
                     user: Some(StatusManager::get_process_user(child_pid)),
+                    kind: SpawnedChildKind::Peripheral,
                 };
 
                 let descendants =
@@ -433,6 +436,7 @@ fn build_spawn_tree_from_system(
                     rss_bytes,
                     last_exit: None,
                     user: Some(StatusManager::get_process_user(child_pid)),
+                    kind: SpawnedChildKind::Peripheral,
                 };
 
                 let descendants =

@@ -118,6 +118,29 @@ pub struct SpawnedChild {
     /// Process owner username.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Tracking category for this child process.
+    #[serde(default, skip_serializing_if = "is_spawned_kind")]
+    pub kind: SpawnedChildKind,
+}
+
+/// Classification of a child process shown in status output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnedChildKind {
+    /// Directly created and tracked by the supervisor via `sysg spawn`.
+    Spawned,
+    /// Discovered descendant process not directly created by the supervisor.
+    Peripheral,
+}
+
+impl Default for SpawnedChildKind {
+    fn default() -> Self {
+        Self::Spawned
+    }
+}
+
+fn is_spawned_kind(kind: &SpawnedChildKind) -> bool {
+    matches!(kind, SpawnedChildKind::Spawned)
 }
 
 /// Exit metadata recorded for a spawned child.
@@ -572,6 +595,7 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -617,6 +641,7 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         let root = manager
@@ -654,6 +679,7 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         manager
@@ -705,6 +731,7 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         manager
@@ -746,6 +773,7 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         manager
@@ -786,6 +814,7 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         let grandchild = SpawnedChild {
@@ -800,6 +829,7 @@ mod tests {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         manager

@@ -23,7 +23,7 @@ use crate::{
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
     logs::spawn_dynamic_child_log_writer,
     metrics::{self, MetricsCollector, MetricsHandle},
-    spawn::{DynamicSpawnManager, SpawnedChild, SpawnedExit},
+    spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{StatusCache, StatusRefresher, StatusSnapshot, collect_runtime_snapshot},
 };
 
@@ -807,6 +807,7 @@ impl Supervisor {
             rss_bytes: None,
             last_exit: None,
             user: None,
+            kind: SpawnedChildKind::Spawned,
         };
 
         let root_service = self.spawn_manager.record_spawn(
