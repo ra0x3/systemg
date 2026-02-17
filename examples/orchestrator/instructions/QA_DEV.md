@@ -60,7 +60,7 @@ When issues are found, report with:
 - Accessibility standards met
 
 ## Final Report
-Create `orchestrator-ui/qa-report.md` with:
+Create `reports/qa-report.md` with:
 - Test execution summary
 - Issues found and their severity
 - Coverage metrics

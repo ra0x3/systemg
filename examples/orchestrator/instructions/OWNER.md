@@ -21,4 +21,4 @@ Strategic oversight and quality enforcement for SystemG UI.
 ## Success Criteria
 - Team Lead confirms project ready
 - QA validation complete
-- Final report generated in `orchestrator-ui/snapshots/final_report.md`
+- Final report generated in `reports/final-report.md`
