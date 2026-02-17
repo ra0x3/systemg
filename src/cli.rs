@@ -199,6 +199,10 @@ pub enum Commands {
         #[arg(long = "no-color")]
         no_color: bool,
 
+        /// Show full command lines in the status table.
+        #[arg(long = "full-cmd")]
+        full_cmd: bool,
+
         /// Continuously refresh status at the provided interval in seconds.
         #[arg(long, value_name = "SECONDS")]
         watch: Option<u64>,

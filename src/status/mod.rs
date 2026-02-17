@@ -205,6 +205,10 @@ fn build_spawn_tree(
         .into_iter()
         .map(|mut child| {
             child.user = Some(StatusManager::get_process_user(child.pid));
+            let cmdline = StatusManager::get_process_cmdline(child.pid);
+            if !cmdline.is_empty() {
+                child.command = cmdline;
+            }
             let (cpu_percent, rss_bytes) = sample_process_metrics(system, child.pid);
             if cpu_percent.is_some() || rss_bytes.is_some() {
                 manager.update_child_metrics(child.pid, cpu_percent, rss_bytes);
@@ -216,6 +220,21 @@ fn build_spawn_tree(
             SpawnedProcessNode::new(child, descendants)
         })
         .collect()
+}
+
+fn augment_spawn_tree_with_system_descendants(
+    node: &mut SpawnedProcessNode,
+    system: Option<&System>,
+    seen: &mut HashSet<u32>,
+) {
+    seen.insert(node.child.pid);
+    for child in &mut node.children {
+        augment_spawn_tree_with_system_descendants(child, system, seen);
+    }
+
+    let system_nodes =
+        build_spawn_tree_from_system(system, node.child.pid, node.child.depth + 1, seen);
+    append_unique_nodes(&mut node.children, system_nodes, seen);
 }
 
 fn build_spawn_tree_from_pidfile(
@@ -467,6 +486,8 @@ pub struct UnitStatus {
     pub metrics: Option<UnitMetricsSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spawned_children: Vec<SpawnedProcessNode>,
 }
@@ -852,6 +873,10 @@ fn build_snapshot(
         let command = config
             .and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")))
             .map(|service_config| service_config.command.clone());
+        let runtime_command = process_runtime
+            .as_ref()
+            .map(|runtime| StatusManager::get_process_cmdline(runtime.pid))
+            .filter(|cmd| !cmd.is_empty());
         let service_hash_for_spawn = if matches!(kind, UnitKind::Service | UnitKind::Cron)
         {
             Some(hash.as_str())
@@ -897,6 +922,16 @@ fn build_snapshot(
             );
             append_unique_nodes(&mut nodes, system_nodes, &mut seen);
 
+            if let Some(refreshed_system) = fresh_system.as_ref() {
+                for node in &mut nodes {
+                    augment_spawn_tree_with_system_descendants(
+                        node,
+                        Some(refreshed_system),
+                        &mut seen,
+                    );
+                }
+            }
+
             nodes
         } else {
             Vec::new()
@@ -914,6 +949,7 @@ fn build_snapshot(
             cron,
             metrics: metrics_summary,
             command,
+            runtime_command,
             spawned_children,
         });
     }
@@ -971,6 +1007,8 @@ fn build_snapshot(
             cron: None,
             metrics: metrics_summary,
             command: None,
+            runtime_command: Some(StatusManager::get_process_cmdline(pid_value))
+                .filter(|cmd| !cmd.is_empty()),
             spawned_children,
         });
     }
@@ -2230,6 +2268,7 @@ services:
                 cron: None,
                 metrics: None,
                 command: None,
+                runtime_command: None,
                 spawned_children: Vec::new(),
             },
             UnitStatus {
@@ -2244,6 +2283,7 @@ services:
                 cron: None,
                 metrics: None,
                 command: None,
+                runtime_command: None,
                 spawned_children: Vec::new(),
             },
         ];

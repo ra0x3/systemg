@@ -194,6 +194,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             all,
             json,
             no_color,
+            full_cmd,
             watch,
         } => {
             let mut effective_config = config.clone();
@@ -206,6 +207,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let render_opts = StatusRenderOptions {
                 json,
                 no_color,
+                full_cmd,
                 include_orphans: all,
                 service_filter: service.as_deref(),
             };
@@ -536,6 +538,11 @@ mod tests {
                 align: Alignment::Left,
             },
             Column {
+                title: "CMD",
+                width: 14,
+                align: Alignment::Left,
+            },
+            Column {
                 title: "LAST_EXIT",
                 width: 10,
                 align: Alignment::Left,
@@ -563,6 +570,7 @@ mod tests {
             cron: None,
             metrics: None,
             command: None,
+            runtime_command: None,
             spawned_children: vec![],
         };
         let unit_row = format_unit_row(&unit, &columns, true);
@@ -591,6 +599,7 @@ mod tests {
 struct StatusRenderOptions<'a> {
     json: bool,
     no_color: bool,
+    full_cmd: bool,
     include_orphans: bool,
     service_filter: Option<&'a str>,
 }
@@ -738,6 +747,23 @@ fn render_status(
         .unwrap_or(4)  // Minimum width of "USER" header
         .max(4);
 
+    let max_cmd_len = units
+        .iter()
+        .map(max_unit_command_width)
+        .chain(
+            units
+                .iter()
+                .map(|unit| max_spawn_command_width(&unit.spawned_children)),
+        )
+        .max()
+        .unwrap_or(3)
+        .max(3);
+    let command_width = if opts.full_cmd {
+        max_cmd_len
+    } else {
+        max_cmd_len.min(48)
+    };
+
     // Create dynamic columns with adjusted widths
     let columns_array = [
         Column {
@@ -778,6 +804,11 @@ fn render_status(
         Column {
             title: "UPTIME",
             width: 18,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "CMD",
+            width: command_width,
             align: Alignment::Left,
         },
         Column {
@@ -1264,6 +1295,12 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     let rss_col = format_rss_column(unit.metrics.as_ref());
     let uptime = format_uptime_column(unit.uptime.as_ref());
     let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+    let command = unit
+        .command
+        .as_ref()
+        .or(unit.runtime_command.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "-".to_string());
     let health_label_text = health_label_extended(unit);
     let health_color = if health_label_text == "healthy-" {
         GREEN // Darker green for healthy-
@@ -1291,6 +1328,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         cpu_col,
         rss_col,
         uptime,
+        command,
         last_exit,
         health_label,
     ];
@@ -1317,6 +1355,25 @@ fn max_spawn_label_width(nodes: &[SpawnedProcessNode]) -> usize {
         }
     });
     max_len
+}
+
+fn max_spawn_command_width(nodes: &[SpawnedProcessNode]) -> usize {
+    let mut max_len = 0;
+    visit_spawn_tree(nodes, "", &mut |child, _, _| {
+        let len = visible_length(&child.command);
+        if len > max_len {
+            max_len = len;
+        }
+    });
+    max_len
+}
+
+fn max_unit_command_width(unit: &UnitStatus) -> usize {
+    unit.command
+        .as_ref()
+        .or(unit.runtime_command.as_ref())
+        .map(|cmd| visible_length(cmd))
+        .unwrap_or(1)
 }
 
 fn count_spawn_nodes(nodes: &[SpawnedProcessNode]) -> usize {
@@ -1401,6 +1458,11 @@ fn format_spawned_child_row(
     };
 
     let last_exit = format_spawn_exit(child.last_exit.as_ref());
+    let command = if child.command.is_empty() {
+        "-".to_string()
+    } else {
+        child.command.clone()
+    };
 
     let display_name = child_name;
 
@@ -1426,6 +1488,7 @@ fn format_spawned_child_row(
         cpu_col,
         rss_col,
         uptime,
+        command,
         last_exit,
         health_label,
     ];
@@ -1458,7 +1521,7 @@ fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
     }
 }
 
-fn format_row(values: &[String; 10], columns: &[Column]) -> String {
+fn format_row(values: &[String; 11], columns: &[Column]) -> String {
     let mut row = String::from('│');
     for (value, column) in values.iter().zip(columns.iter()) {
         row.push(' ');
@@ -1668,7 +1731,10 @@ fn render_inspect(
     );
 
     if let Some(command) = &unit.command {
-        println!("Command: {}", command);
+        println!("Configured command: {}", command);
+    }
+    if let Some(runtime_command) = &unit.runtime_command {
+        println!("Runtime command: {}", runtime_command);
     }
 
     if !unit.spawned_children.is_empty() {
