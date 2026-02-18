@@ -1,9 +1,5 @@
-__pycache__
-.pytest_cache
 .ruff_cache
-*.pyc
-venv
-snapshots
-systemg_orchestrator.egg-info
+.venv
 orchestrator-ui
+recovery-report.md
 reports/*.md

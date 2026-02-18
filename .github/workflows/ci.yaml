@@ -37,6 +37,65 @@ jobs:
         with:
           access_token: ${{ github.token }}
 
+  detect-version-bump:
+    name: Detect Version Bump
+    runs-on: ubuntu-latest
+    needs: cancel-previous
+    outputs:
+      bumped: ${{ steps.detect.outputs.bumped }}
+      current_version: ${{ steps.detect.outputs.current_version }}
+      previous_version: ${{ steps.detect.outputs.previous_version }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Detect version change on main push
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_version=$(python ci/extract_version.py)
+
+          previous_version=""
+          bumped="false"
+
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            before_sha="${{ github.event.before }}"
+            if [[ -n "$before_sha" && "$before_sha" != "0000000000000000000000000000000000000000" ]]; then
+              if git cat-file -e "$before_sha:Cargo.toml" 2>/dev/null; then
+                previous_version=$(git show "$before_sha:Cargo.toml" | python ci/extract_version.py --stdin)
+              else
+                echo "Previous commit does not contain Cargo.toml; treating as version change."
+                bumped="true"
+              fi
+
+              if [[ -z "$previous_version" ]]; then
+                bumped="true"
+              elif [[ "$current_version" != "$previous_version" ]]; then
+                bumped="true"
+              fi
+            else
+              echo "No valid before SHA available; treating as version change."
+              bumped="true"
+            fi
+          fi
+
+          echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
+          echo "previous_version=$previous_version" >> "$GITHUB_OUTPUT"
+          echo "bumped=$bumped" >> "$GITHUB_OUTPUT"
+
+          echo "Current version: $current_version"
+          echo "Previous version: ${previous_version:-<none>}"
+          echo "Version bumped: $bumped"
+
   docs:
     name: Docusaurus
     runs-on: ubuntu-latest
@@ -251,13 +310,63 @@ jobs:
           name: docker-${{ matrix.test-mode }}-logs
           path: test-output/${{ matrix.test-mode }}.log
 
+  create-github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - cargo-test
+      - detect-version-bump
+    permissions:
+      contents: write
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-version-bump.outputs.bumped == 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python ci/extract_version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create or Update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
   upload-release-binaries:
     name: Upload Release Binaries
     runs-on: ${{ matrix.job.os }}
     permissions:
       contents: write
-    needs: [cargo-test]
-    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
+    needs:
+      - cargo-test
+      - detect-version-bump
+      - create-github-release
+    if: |
+      !cancelled() &&
+      needs.cargo-test.result == 'success' &&
+      (
+        (needs.create-github-release.result == 'success') ||
+        (needs.create-github-release.result == 'skipped' && github.event_name == 'release' && github.event.action == 'published') ||
+        (github.event_name == 'workflow_dispatch')
+      )
     strategy:
       matrix:
         job:
@@ -421,8 +530,11 @@ jobs:
 
   upload-s3:
     name: Upload Binaries to S3
-    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
-    needs: [ upload-release-binaries ]
+    needs:
+      - upload-release-binaries
+    if: |
+      !cancelled() &&
+      needs.upload-release-binaries.result == 'success'
     environment: ci
     runs-on: ubuntu-latest
 
@@ -461,8 +573,20 @@ jobs:
   cargo-publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published' || github.event_name == 'workflow_dispatch'
-    needs: [upload-s3]
+    needs:
+      - cargo-test
+      - detect-version-bump
+      - create-github-release
+      - upload-s3
+    if: |
+      !cancelled() &&
+      needs.cargo-test.result == 'success' &&
+      needs.upload-s3.result == 'success' &&
+      (
+        (needs.create-github-release.result == 'success') ||
+        (needs.create-github-release.result == 'skipped' && github.event_name == 'release' && github.event.action == 'published') ||
+        (github.event_name == 'workflow_dispatch')
+      )
     environment: ci
     steps:
       - name: Checkout Repository
