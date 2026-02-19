@@ -3,7 +3,7 @@ version: "1"
 services:
   orchestrator:
     command: >-
-      porki
+      porki run
       --role orchestrator
       --instructions instructions/INSTRUCTIONS.md
       --redis-url redis://127.0.0.1:6379
