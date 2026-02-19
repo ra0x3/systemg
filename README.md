@@ -7,11 +7,12 @@ Process supervisor with dependencies, health checks, and rolling deployments. Bu
 [![CI](https://img.shields.io/github/actions/workflow/status/ra0x3/systemg/ci.yaml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/ra0x3/systemg/actions/workflows/ci.yaml)
 [![GitHub branch status](https://img.shields.io/github/checks-status/ra0x3/systemg/main?style=flat-square&label=checks)](https://github.com/ra0x3/systemg/actions)
 
-[![docs.rs](https://img.shields.io/docsrs/systemg?style=flat-square&logo=docs.rs&label=docs.rs)](https://docs.rs/systemg)
+[![docs.rs (with version)](https://img.shields.io/docsrs/systemg/latest)](https://docs.rs/systemg)
 [![GitHub tag](https://img.shields.io/github/v/tag/ra0x3/systemg?style=flat-square&logo=github&label=version)](https://github.com/ra0x3/systemg/releases)
 [![Crate size](https://img.shields.io/crates/size/systemg?style=flat-square&logo=rust&label=size)](https://crates.io/crates/systemg)
+![Crates.io Total Downloads](https://img.shields.io/crates/d/systemg)
 
-[![Dependencies](https://img.shields.io/deps.rs/systemg?style=flat-square&label=dependencies)](https://deps.rs/crate/systemg)
+[![Deps.rs Crate Dependencies (specific version)](https://img.shields.io/deps-rs/systemg/latest)](https://deps.rs/crate/systemg)
 [![License](https://img.shields.io/crates/l/systemg?style=flat-square)](LICENSE)
 
 </div>
