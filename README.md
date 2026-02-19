@@ -1,8 +1,22 @@
 # systemg
 
-![CI](https://github.com/ra0x3/systemg/actions/workflows/ci.yaml/badge.svg)
+Process supervisor with dependencies, health checks, and rolling deployments. Built on systemd/cgroups.
 
-<div display="flex" align-items="center">
+<div align="center">
+
+[![CI](https://img.shields.io/github/actions/workflow/status/ra0x3/systemg/ci.yaml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/ra0x3/systemg/actions/workflows/ci.yaml)
+[![GitHub branch status](https://img.shields.io/github/checks-status/ra0x3/systemg/main?style=flat-square&label=checks)](https://github.com/ra0x3/systemg/actions)
+
+[![docs.rs](https://img.shields.io/docsrs/systemg?style=flat-square&logo=docs.rs&label=docs.rs)](https://docs.rs/systemg)
+[![GitHub tag](https://img.shields.io/github/v/tag/ra0x3/systemg?style=flat-square&logo=github&label=version)](https://github.com/ra0x3/systemg/releases)
+[![Crate size](https://img.shields.io/crates/size/systemg?style=flat-square&logo=rust&label=size)](https://crates.io/crates/systemg)
+
+[![Dependencies](https://img.shields.io/deps.rs/systemg?style=flat-square&label=dependencies)](https://deps.rs/crate/systemg)
+[![License](https://img.shields.io/crates/l/systemg?style=flat-square)](LICENSE)
+
+</div>
+
+<div align="center">
     <img src="https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white" />
     <img src="https://img.shields.io/badge/ts--node-3178C6?style=for-the-badge&logo=ts-node&logoColor=white" />
     <img src="https://img.shields.io/badge/Vite-B73BFE?style=for-the-badge&logo=vite&logoColor=FFD62E" />
@@ -28,12 +42,6 @@
    - 3.1 [Testing](#testing)
    - 3.2 [Build from Source](#build-from-source)
    - 3.3 [Contributing](#contributing)
-
----
-
-# systemg - Process Supervisor
-
-Process supervisor with dependencies, health checks, and rolling deployments. Built on systemd/cgroups.
 
 ---
 
