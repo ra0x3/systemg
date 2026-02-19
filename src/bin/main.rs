@@ -688,7 +688,7 @@ mod tests {
         assert!(row.contains(&format!("{GRAY}-{RESET}")));
         assert!(row.contains(&format!("{ORANGE}peri{RESET}")));
         assert!(row.contains(&format!("{BRIGHT_GREEN}Running{RESET}")));
-        assert!(row.contains(&format!("{GREEN_BOLD}healthy{RESET}")));
+        assert!(row.contains(&format!("{GREEN_BOLD}Healthy{RESET}")));
     }
 
     #[test]
@@ -768,6 +768,33 @@ mod tests {
 
         let row = format_spawned_child_row(&child, &columns, false, "└─ ");
         assert_eq!(visible_length(&row), total_inner_width(&columns) + 2);
+    }
+
+    #[test]
+    fn truncate_unit_name_prefers_path_suffix() {
+        let value = "/Users/rashad/dev/repos/systemg/examples/orchestrator/orchestrator-ui/node_modules/@esbuild/darwin-arm64/bin/esbuild";
+        let truncated = truncate_unit_name(value, 24);
+        assert_eq!(visible_length(&truncated), 24);
+        assert!(truncated.starts_with("..."));
+        assert!(truncated.ends_with("/bin/esbuild"));
+    }
+
+    #[test]
+    fn truncate_nested_unit_label_keeps_tree_prefix() {
+        let prefix = "   │  └─ ";
+        let name = "/Users/rashad/dev/repos/systemg/examples/orchestrator/orchestrator-ui/node_modules/@esbuild/darwin-arm64/bin/esbuild";
+        let width = 32;
+        let label = truncate_nested_unit_label(prefix, name, width);
+        assert_eq!(visible_length(&label), width);
+        assert!(label.starts_with(prefix));
+        assert!(label.ends_with("/bin/esbuild"));
+    }
+
+    #[test]
+    fn truncate_nested_unit_label_truncates_prefix_if_no_room_for_name() {
+        let prefix = "   │  └─ ";
+        let label = truncate_nested_unit_label(prefix, "child", 6);
+        assert_eq!(label, "   ...");
     }
 }
 
@@ -875,21 +902,6 @@ fn render_status(
         .with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S %Z");
 
-    // Calculate the maximum widths for each column based on actual data
-    let mut max_unit_name_len = units
-        .iter()
-        .map(|unit| visible_length(&unit.name))
-        .max()
-        .unwrap_or(4)  // Minimum width of "UNIT" header
-        .max(4); // Ensure at least as wide as "UNIT" header
-
-    let spawn_tree_width = units
-        .iter()
-        .map(|unit| max_spawn_label_width(&unit.spawned_children))
-        .max()
-        .unwrap_or(0);
-    max_unit_name_len = max_unit_name_len.max(spawn_tree_width);
-
     // Calculate maximum width for STATE column
     let max_state_len = units
         .iter()
@@ -938,6 +950,22 @@ fn render_status(
     } else {
         max_cmd_len.min(48)
     };
+
+    // Keep UNIT width bounded so deeply nested trees stay aligned with the table.
+    let mut max_unit_name_len = units
+        .iter()
+        .map(|unit| visible_length(&unit.name))
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let spawn_tree_width = units
+        .iter()
+        .map(|unit| max_spawn_label_width(&unit.spawned_children))
+        .max()
+        .unwrap_or(0);
+    max_unit_name_len = max_unit_name_len.max(spawn_tree_width);
+    let unit_width_cap = command_width.max(4);
+    max_unit_name_len = max_unit_name_len.min(unit_width_cap);
 
     // Create dynamic columns with adjusted widths
     let columns_array = [
@@ -1063,9 +1091,9 @@ fn colorize(text: &str, color: &str, no_color: bool) -> String {
 
 fn overall_health_label(health: OverallHealth) -> &'static str {
     match health {
-        OverallHealth::Healthy => "healthy",
-        OverallHealth::Degraded => "degraded",
-        OverallHealth::Failing => "failing",
+        OverallHealth::Healthy => "Healthy",
+        OverallHealth::Degraded => "Degraded",
+        OverallHealth::Failing => "Failing",
     }
 }
 
@@ -1079,10 +1107,10 @@ fn overall_health_color(health: OverallHealth) -> &'static str {
 
 fn unit_health_label(health: UnitHealth) -> &'static str {
     match health {
-        UnitHealth::Healthy => "healthy",
-        UnitHealth::Degraded => "degraded",
-        UnitHealth::Failing => "failing",
-        UnitHealth::Inactive => "inactive",
+        UnitHealth::Healthy => "Healthy",
+        UnitHealth::Degraded => "Degraded",
+        UnitHealth::Failing => "Failing",
+        UnitHealth::Inactive => "Inactive",
     }
 }
 
@@ -1096,14 +1124,14 @@ fn health_label_extended(unit: &UnitStatus) -> String {
             CronExecutionStatus::Failed(reason)
                 if reason.starts_with("Failed to get PID") =>
             {
-                return "healthy-".to_string(); // Healthy but couldn't track properly
+                return "Healthy-".to_string(); // Healthy but couldn't track properly
             }
             CronExecutionStatus::Success => {
                 // Check if it had a non-zero exit code that we're treating as success
                 if let Some(code) = last.exit_code
                     && code == 0
                 {
-                    return "healthy+".to_string(); // Perfect health
+                    return "Healthy+".to_string(); // Perfect health
                 }
             }
             _ => {}
@@ -1402,15 +1430,15 @@ fn format_breakdown_banner(
     let health_str = healths
         .iter()
         .map(|(health, count)| {
-            let color = if health.starts_with("healthy") {
+            let color = if health.starts_with("Healthy") {
                 if health.ends_with('+') {
                     GREEN_BOLD
                 } else {
                     GREEN
                 }
-            } else if health.as_str() == "degraded" {
+            } else if health.as_str() == "Degraded" {
                 ORANGE
-            } else if health.as_str() == "failing" {
+            } else if health.as_str() == "Failing" {
                 RED_BOLD
             } else {
                 GRAY
@@ -1477,8 +1505,8 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         .cloned()
         .unwrap_or_else(|| "-".to_string());
     let health_label_text = health_label_extended(unit);
-    let health_color = if health_label_text == "healthy-" {
-        GREEN // Darker green for healthy-
+    let health_color = if health_label_text == "Healthy-" {
+        GREEN // Darker green for Healthy-
     } else {
         unit_health_color(unit.health)
     };
@@ -1488,11 +1516,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         .first()
         .map(|col| col.width)
         .unwrap_or_else(|| unit.name.len());
-    let display_name = if visible_length(&unit.name) > name_width {
-        ellipsize(&unit.name, name_width)
-    } else {
-        unit.name.clone()
-    };
+    let display_name = truncate_unit_name(&unit.name, name_width);
 
     let values = [
         display_name,
@@ -1578,7 +1602,8 @@ fn format_spawned_child_row(
     prefix: &str,
 ) -> String {
     let is_peripheral = matches!(child.kind, SpawnedChildKind::Peripheral);
-    let child_name = format!("{}{}", prefix, child.name);
+    let name_width = columns.first().map(|col| col.width).unwrap_or(4);
+    let child_name = truncate_nested_unit_label(prefix, &child.name, name_width);
     let user = child
         .user
         .as_ref()
@@ -1605,16 +1630,16 @@ fn format_spawned_child_row(
         };
 
         let health = if succeeded {
-            colorize("healthy", GREEN_BOLD, no_color)
+            colorize("Healthy", GREEN_BOLD, no_color)
         } else {
-            colorize("failing", RED_BOLD, no_color)
+            colorize("Failing", RED_BOLD, no_color)
         };
 
         (state_label, health)
     } else {
         (
             colorize("Running", BRIGHT_GREEN, no_color),
-            colorize("healthy", GREEN_BOLD, no_color),
+            colorize("Healthy", GREEN_BOLD, no_color),
         )
     };
 
@@ -1640,26 +1665,13 @@ fn format_spawned_child_row(
         child.command.clone()
     };
 
-    let display_name = child_name;
-
-    let name_width = columns
-        .first()
-        .map(|col| col.width)
-        .unwrap_or_else(|| display_name.len());
-
-    let display_name_final = if visible_length(&display_name) > name_width {
-        ellipsize(&display_name, name_width)
-    } else {
-        display_name
-    };
-
     let kind_label = match child.kind {
         SpawnedChildKind::Spawned => colorize("spwn", MAGENTA, no_color),
         SpawnedChildKind::Peripheral => colorize("peri", ORANGE, no_color),
     };
 
     let values = [
-        style_peripheral_column(display_name_final, is_peripheral, no_color),
+        style_peripheral_column(child_name, is_peripheral, no_color),
         kind_label,
         state,
         style_peripheral_column(user, is_peripheral, no_color),
@@ -1827,6 +1839,41 @@ fn ellipsize(value: &str, width: usize) -> String {
     }
     result.push_str("...");
     result
+}
+
+fn ellipsize_from_front(value: &str, width: usize) -> String {
+    if width <= 3 {
+        return "...".chars().take(width).collect();
+    }
+
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= width {
+        return value.to_string();
+    }
+
+    let keep = width - 3;
+    let suffix: String = chars[chars.len() - keep..].iter().collect();
+    format!("...{}", suffix)
+}
+
+fn truncate_unit_name(name: &str, width: usize) -> String {
+    if visible_length(name) <= width {
+        return name.to_string();
+    }
+    if name.contains('/') {
+        return ellipsize_from_front(name, width);
+    }
+    ellipsize(name, width)
+}
+
+fn truncate_nested_unit_label(prefix: &str, name: &str, width: usize) -> String {
+    let prefix_len = visible_length(prefix);
+    if prefix_len >= width {
+        return ellipsize(prefix, width);
+    }
+
+    let name_budget = width - prefix_len;
+    format!("{}{}", prefix, truncate_unit_name(name, name_budget))
 }
 
 fn format_cpu_column(metrics: Option<&UnitMetricsSummary>) -> String {
