@@ -18,7 +18,7 @@ $ sysg logs
 | `--config` | Path to configuration file |
 | `--service` | The name of the service whose logs should be displayed (optional) |
 | `--lines` | Number of lines to show (default: 50) |
-| `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stdout) |
+| `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stderr) |
 | `--sys` | Opt into privileged system mode. Requires running as root |
 | `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |

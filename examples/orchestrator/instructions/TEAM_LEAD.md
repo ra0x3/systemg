@@ -267,3 +267,13 @@ Implement manual snapshot upload:
 4. Re-test integration
 
 Remember: You own the success of this project. Make decisions quickly, communicate clearly, and ship working software.
+
+## Non-Negotiable Completion Gates
+- Do not accept report-only deliverables for code tasks.
+- Before marking a task complete, verify concrete file changes exist in `orchestrator-ui/` and match the task scope.
+- Require command evidence for each integration milestone:
+  - `npm run type-check`
+  - `npm run test`
+  - `npm run build`
+- Validate runtime behavior with `npm run dev`; reject outcomes where UI only shows a placeholder message.
+- Any failed task must receive a remediation assignment; do not allow terminal sign-off while failures remain unresolved.

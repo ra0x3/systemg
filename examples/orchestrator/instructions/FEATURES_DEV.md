@@ -723,3 +723,11 @@ Remember:
 - **Document** complex logic
 
 Your code is the brain of the application. Make it smart, fast, and reliable.
+
+## Artifact-Backed Delivery Requirements
+- Do not mark data/store features complete unless real code lands in `orchestrator-ui/src/store/` or related feature modules.
+- For each completion claim, include command evidence:
+  - `npm run type-check`
+  - `npm run test` (store/features scope or full suite)
+- Report-only deliverables are insufficient for implementation tasks.
+- Any failed feature task must be followed by a concrete remediation task with code changes and retest evidence.

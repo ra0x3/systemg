@@ -59,11 +59,19 @@ services:
       --role orchestrator
       --instructions instructions/INSTRUCTIONS.md
       --redis-url redis://127.0.0.1:6379
+    env:
+      vars:
+        PORKI_LLM_MAX_CONCURRENCY: "6"
+        PORKI_LLM_CONCURRENCY_WAIT_SECONDS: "900"
     depends_on: ["redis"]
     spawn:
       mode: dynamic
       limit: 10
 ```
+
+`PORKI_LLM_MAX_CONCURRENCY` raises the number of global LLM leases available
+across agents, and `PORKI_LLM_CONCURRENCY_WAIT_SECONDS` controls how long agents
+wait for a lease before timing out.
 
 **instructions/INSTRUCTIONS.md:**
 ```markdown

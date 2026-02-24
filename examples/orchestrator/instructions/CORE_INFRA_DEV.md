@@ -332,3 +332,12 @@ Your code must be:
 - **Well-documented** - Other devs depend on your APIs
 
 Remember: The File API is what makes this a "zero-backend" solution. It's the magic that lets us read SystemG state directly from disk. Make it excellent.
+
+## Artifact-Backed Delivery Requirements
+- Do not mark infrastructure tasks complete without concrete service-layer code in `orchestrator-ui/src/services/` and related modules.
+- For each task, provide command evidence:
+  - `npm run type-check`
+  - `npm run test` (services/integration scope or full suite)
+  - `npm run build`
+- Report-only outputs are not acceptable for implementation work.
+- When failures occur, produce remediation patches and rerun verification; do not leave unresolved failed infra tasks at terminal state.

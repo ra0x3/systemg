@@ -70,9 +70,9 @@ impl FromStr for LogLevelArg {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LogKind {
     /// Standard output logs
-    #[default]
     Stdout,
     /// Standard error logs
+    #[default]
     Stderr,
     /// Supervisor logs
     Supervisor,

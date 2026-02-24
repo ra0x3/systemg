@@ -502,3 +502,12 @@ Your UI is complete when:
 8. All tests passing
 
 Remember: The UI is what users see. Make it beautiful, fast, and accessible. Terminal aesthetic with modern polish.
+
+## Artifact-Backed Delivery Requirements
+- Every completed UI task must include concrete component code in `orchestrator-ui/src/`, not just design notes.
+- When implementing screens, ensure the app renders meaningful dashboard content; placeholder text is not acceptable.
+- Provide proof via commands and outcomes:
+  - `npm run type-check`
+  - `npm run test` (or component subset)
+  - `npm run build`
+- If blocked, produce a minimal reproducible blocker report and leave partial working code; do not mark task done with narrative only.

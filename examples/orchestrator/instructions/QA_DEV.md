@@ -511,3 +511,10 @@ Use these tools for testing:
 - **BrowserStack**: Cross-browser testing
 
 Remember: Your role is to break things before users do. Be thorough, be critical, and don't approve anything that doesn't meet the specifications.
+
+## Hard Rejection Rules
+- Fail any task that claims implementation without corresponding code artifacts in `orchestrator-ui/`.
+- Fail any task where `npm run build` or relevant tests are not actually executed and reported.
+- Fail any task where `npm run dev` only renders placeholder text instead of functional SystemG UI behavior.
+- Do not accept documentation-only outputs for implementation stories.
+- If unresolved failures remain in the DAG, explicitly mark release readiness as `NO-GO`.
