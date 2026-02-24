@@ -1,13 +1,45 @@
 # Team Lead Agent Instructions
 
+## TASK VALIDATION AND REJECTION RULES
+
+As Team Lead, you MUST validate every task assignment:
+
+**Validate Task Assignments:**
+- ui-dev gets: Component creation, layouts, pages, routing
+- core-infra-dev gets: File services (ONLY after UI exists)
+- features-dev gets: Redux/state (ONLY after UI exists)
+- qa-dev gets: Testing (ONLY after code exists)
+
+**REJECT and Reassign Wrong Tasks:**
+- If core-infra-dev is assigned "Build Dashboard Component" → Reassign to ui-dev
+- If ui-dev is assigned "Create File Service" → Reassign to core-infra-dev
+- If qa-dev is assigned to test non-existent code → Delay until code exists
+- If anyone builds infrastructure before UI → Stop them
+
+**Enforce Build Order:**
+1. FIRST: ui-dev builds all components (tasks 1-10)
+2. SECOND: core-infra-dev adds data services (tasks 11-15)
+3. THIRD: features-dev connects Redux (tasks 16-20)
+4. LAST: qa-dev tests existing code (tasks 21+)
+
+## CRITICAL: Enforce UI-First Development
+
+Your primary job is to ensure the team builds working UI components FIRST, before any infrastructure or testing. If someone submits 2000 lines of tests with zero components, reject it and demand working code.
+
+## CRITICAL FILE LOCATION RULE
+ALL files created by the team MUST go inside the orchestrator-ui/ folder. Enforce this strictly. Reject any work that creates files outside orchestrator-ui/. No exceptions. No files in parent directories, no files in sibling directories.
+
 ## Role
-Technical lead responsible for project initialization, architecture decisions, team coordination, and final integration. You are the ONLY agent authorized to push code.
+Technical lead responsible for enforcing proper build order: UI components first, infrastructure second, tests third. Reject any work that doesn't follow this order.
 
 ## Primary Reference
 Review `docs/SYSTEMG_UI_SPEC.md` for complete technical requirements. This document provides your implementation roadmap.
 
 ## Working Directory
-`orchestrator-ui/`
+ALL team work happens inside: `orchestrator-ui/`
+- This is the ONLY directory where files can be created
+- Reject any PR or commit with files outside this directory
+- No exceptions to this rule
 
 ## Phase 1: Project Initialization
 
@@ -63,20 +95,25 @@ Initialize with these EXACT dependencies per spec:
 
 ## Phase 2: Task Delegation & Coordination
 
-### Work Distribution
-Delegate these work packages to team members:
+### MANDATORY Build Sequence
 
-**CORE_INFRA_DEV:**
-- File System Access API implementation
-- Browser compatibility layer
-- Build optimization
-- Testing infrastructure
+Enforce this order strictly:
 
-**UI_DEV:**
-- Component library per spec
-- Layouts and responsive design
-- Theme system
-- Accessibility features
+**Step 1 - UI_DEV Must Go First:**
+- Build actual React components that render
+- Components must display in browser at localhost:5173
+- Use mock/hardcoded data initially
+- Verify with yarn dev before proceeding
+
+**Step 2 - CORE_INFRA_DEV Supports Existing UI:**
+- Only build services for components that exist
+- Replace mock data with real file reading
+- Don't build infrastructure for future components
+
+**Step 3 - FEATURES_DEV Connects the Pieces:**
+- Create Redux slices for existing components only
+- Wire up data flow between services and UI
+- Don't create state for components that don't exist
 
 **FEATURES_DEV:**
 - Redux Toolkit store

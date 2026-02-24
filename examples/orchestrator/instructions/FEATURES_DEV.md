@@ -1,7 +1,31 @@
 # Features Developer Instructions
 
+## TASK REJECTION RULES
+
+If you are assigned a task for UI component creation, REJECT IT immediately:
+- REJECT: "Build Resource Monitor Component" → belongs to ui-dev
+- REJECT: ANY component creation → belongs to ui-dev
+- REJECT: File system services → belongs to core-infra-dev
+- REJECT: Testing tasks → belongs to qa-dev
+- ACCEPT: Redux store setup, state slices
+- ACCEPT: Mock data services (ONLY after components exist)
+
+Your job is state management, not building UI or infrastructure.
+
+## CRITICAL: Only Build State Management for Existing Components
+
+Do not create Redux slices for components that don't exist. Do not build state management for imaginary features. If there's no ProcessList component rendering in the browser, don't create a processListSlice.
+
+Before building any Redux feature:
+1. Verify the UI component exists in src/components/
+2. Run yarn dev and see it rendering with mock data
+3. Only then create the Redux slice to replace mock data
+
+## CRITICAL FILE LOCATION RULE
+ALL files you create MUST go inside the orchestrator-ui/ folder. Never create files outside this directory. No files in parent directories, no files in sibling directories. Everything goes inside orchestrator-ui/.
+
 ## Role
-Implement core business logic, state management, and data flow using Redux Toolkit. You own the bridge between the File API infrastructure and UI components.
+Implement state management for EXISTING UI components. Build the bridge between File API and components that are already rendering in the browser.
 
 ## Primary Reference
 Review `docs/SYSTEMG_UI_SPEC.md` sections on:
@@ -11,7 +35,11 @@ Review `docs/SYSTEMG_UI_SPEC.md` sections on:
 - Performance requirements (throughout)
 
 ## Working Directory
-`orchestrator-ui/src/store/`, `orchestrator-ui/src/hooks/`, `orchestrator-ui/src/utils/`
+ALL your work happens inside: `orchestrator-ui/`
+- Store files go in: `orchestrator-ui/src/store/`
+- Hooks go in: `orchestrator-ui/src/hooks/`
+- Utils go in: `orchestrator-ui/src/utils/`
+- Never create files outside orchestrator-ui/ folder
 
 ## Architecture Overview
 
@@ -26,22 +54,31 @@ File System → File API → Sanitizer → Redux Store → UI Components
      └──── Polling Loop ────────┘
 ```
 
-## PRIORITY 1: Redux Toolkit Store Setup
+## Build Order - Follow Component Development
 
-### Store Structure
+1. Wait for UI developer to build Dashboard component with mock data
+2. Create minimal Redux slice for Dashboard's data needs
+3. Connect Dashboard to Redux instead of mock data
+4. Verify Dashboard still renders
+5. Move to next component only after current one works
+
+## PRIORITY 1: Incremental Redux Store Setup
+
+Start simple. Don't build all slices at once:
+
+### Initial Store Structure (Start Here)
 ```typescript
-// store/index.ts
+// store/index.ts - START WITH ONLY WHAT'S NEEDED
 import { configureStore } from '@reduxjs/toolkit';
 
 export const store = configureStore({
   reducer: {
-    services: servicesReducer,
-    supervisor: supervisorReducer,
-    cron: cronReducer,
-    logs: logsReducer,
-    metrics: metricsReducer,
-    system: systemReducer,
-    ui: uiReducer
+    // Add slices ONLY as components need them
+    dashboard: dashboardReducer,  // Only if Dashboard component exists
+    // Don't add these until components exist:
+    // services: servicesReducer,
+    // logs: logsReducer,
+    // etc.
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

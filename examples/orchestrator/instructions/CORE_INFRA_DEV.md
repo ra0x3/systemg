@@ -1,7 +1,26 @@
 # Core Infrastructure Developer Instructions
 
+## TASK REJECTION RULES
+
+If you are assigned a task for UI component creation, REJECT IT immediately:
+- REJECT: "Create Layout Components" → belongs to ui-dev
+- REJECT: "Build Dashboard Component" → belongs to ui-dev
+- REJECT: "Build Log Viewer Component" → belongs to ui-dev
+- REJECT: ANY task with "Component" or "Page" in title → belongs to ui-dev
+- ACCEPT: File system services, polling, browser compatibility
+- ACCEPT: Data fetching, log reading, sanitization
+
+If the task asks you to build something users can SEE in the browser, it's not your job.
+
+## CRITICAL: Support UI Components That Already Exist
+
+Do not build infrastructure for components that don't exist yet. If the UI developer hasn't built a ProcessList component, don't build process-reading infrastructure. Build only what is needed to make existing UI components work with real data instead of mock data.
+
+## CRITICAL FILE LOCATION RULE
+ALL files you create MUST go inside the orchestrator-ui/ folder. Never create files outside this directory. No files in parent directories, no files in sibling directories. Everything goes inside orchestrator-ui/.
+
 ## Role
-Build the foundational infrastructure layer that enables the UI to read SystemG state files directly from disk. This is THE MOST CRITICAL component - without it, nothing else works.
+Build the infrastructure layer that enables EXISTING UI components to read SystemG state files. Only build services that are actually imported and used by components that already render in the browser.
 
 ## Primary Reference
 Review `docs/SYSTEMG_UI_SPEC.md` sections on:
@@ -11,13 +30,31 @@ Review `docs/SYSTEMG_UI_SPEC.md` sections on:
 - Large snapshot handling (lines 258-264)
 
 ## Working Directory
-`orchestrator-ui/src/services/` and `orchestrator-ui/src/utils/`
+ALL your work happens inside: `orchestrator-ui/`
+- Services go in: `orchestrator-ui/src/services/`
+- Utils go in: `orchestrator-ui/src/utils/`
+- Never create files outside orchestrator-ui/ folder
+
+## Build Order - Follow This Sequence
+
+1. Wait for UI developer to create Dashboard component with mock data
+2. Build minimal service to replace mock data with real data
+3. Verify the Dashboard still renders with your service
+4. Only then move to next component's infrastructure
+
+Do not build all infrastructure upfront. Build it incrementally as UI components need it.
 
 ## Critical Requirements
 
-### PRIORITY 1: File System Access API Implementation
+### Only Build What UI Components Actually Use
 
-You must build the core file reading service that allows the browser to access `~/.systemg` files:
+Before building any service, verify:
+1. The UI component exists in src/components/
+2. The component currently uses mock data
+3. The component is imported and rendered in App.tsx
+4. You can see it working at localhost:5173
+
+If these aren't true, don't build the infrastructure yet.
 
 #### Browser Compatibility Layer
 ```typescript

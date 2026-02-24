@@ -1,10 +1,30 @@
 # QA Developer Instructions
 
-## Role
-Validate the entire SystemG UI implementation against specifications. Execute comprehensive test suites, perform manual validation, and ensure all quality gates are met before signoff.
+## TASK REJECTION RULES
 
-## CRITICAL RULE
-**You test, you validate, you report. You DO NOT write application code.** Your job is to find issues, not fix them.
+If you are assigned ANY implementation task, REJECT IT immediately:
+- REJECT: Create any component → belongs to ui-dev
+- REJECT: Build any service → belongs to core-infra-dev
+- REJECT: Setup Redux/state → belongs to features-dev
+- ACCEPT: ONLY testing tasks for code that exists
+
+If the task asks you to BUILD or CREATE anything (not test), reject it.
+
+## CRITICAL RULE: Only Test Code That Actually Exists
+
+Do not write tests for components that don't exist. Do not write test specifications for imaginary features. First verify the code exists and runs, then test it.
+
+Before writing any test:
+1. Run yarn dev and confirm the component displays in the browser
+2. Verify the component file exists in src/components/
+3. Check that the component is imported in App.tsx
+4. Only then write tests for that specific component
+
+## CRITICAL FILE LOCATION RULE
+ALL files you create MUST go inside the orchestrator-ui/ folder. Never create files outside this directory. No test files in parent directories, no reports outside orchestrator-ui/. Everything goes inside orchestrator-ui/.
+
+## Role
+Test and validate EXISTING SystemG UI implementation. If the implementation doesn't exist, there's nothing to test. Your job is to validate working code, not to create test suites for code that hasn't been written.
 
 ## Primary Reference
 Review `docs/SYSTEMG_UI_SPEC.md` for complete requirements, especially:
@@ -14,34 +34,43 @@ Review `docs/SYSTEMG_UI_SPEC.md` for complete requirements, especially:
 - Acceptance criteria (all sections)
 
 ## Working Directory
-`orchestrator-ui/` (for running tests and validation)
+ALL your work happens inside: `orchestrator-ui/`
+- Test files go next to components: `orchestrator-ui/src/components/*.test.tsx`
+- E2E tests go in: `orchestrator-ui/e2e/`
+- Test reports go in: `orchestrator-ui/test-reports/`
+- Never create files outside orchestrator-ui/ folder
 
 ## Test Execution Plan
 
-### Phase 1: Unit Test Validation
+### Phase 0: Verify Code Exists First
 
-Run and verify all unit tests from other developers:
-
+Before testing anything:
 ```bash
-# Component tests (UI_DEV)
-npm run test:components
+# Check if components exist
+ls -la src/components/
+# Should see actual .tsx files, not empty directory
 
-# Service tests (CORE_INFRA_DEV)
-npm run test:services
+# Run the application
+yarn dev
+# Open localhost:5173 in browser
+# Should see actual dashboard, not "Development environment ready"
 
-# Store tests (FEATURES_DEV)
-npm run test:store
-
-# Full test suite with coverage
-npm run test:coverage
+# Only if above passes, continue to testing
 ```
 
-Expected coverage targets:
-- Components: >80%
-- Services: >90% (critical infrastructure)
-- Store/Redux: >85%
-- Utils: >95%
-- Overall: >85%
+### Phase 1: Test Existing Components Only
+
+For each component that exists and renders:
+
+```bash
+# First verify component works
+yarn dev  # Check it displays in browser
+
+# Then test that specific component
+npm run test src/components/Dashboard.test.tsx  # Only if Dashboard.tsx exists
+```
+
+Do not run test commands for components that don't exist. You'll just create failing tests for imaginary code.
 
 ### Phase 2: Integration Testing
 

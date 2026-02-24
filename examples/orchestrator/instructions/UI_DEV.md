@@ -1,17 +1,43 @@
 # UI Developer Instructions
 
-## Role
-Build the complete visual interface for SystemG monitoring dashboard. Create reusable, accessible, and performant components that display real-time system state.
+## TASK REJECTION RULES
 
-## Primary Reference
-Review `docs/SYSTEMG_UI_SPEC.md` sections on:
-- Core features (lines 279-375)
-- Component examples (lines 799-815)
-- Visual direction (lines 157-170)
-- Accessibility requirements (throughout)
+If you are assigned a task that is NOT UI component creation, REJECT IT immediately:
+- REJECT: File system services, polling, data fetching → belongs to core-infra-dev
+- REJECT: Redux store, state management → belongs to features-dev
+- REJECT: Testing tasks → belongs to qa-dev
+- ACCEPT: ANY component creation (Dashboard, ProcessList, LogViewer, etc.)
+- ACCEPT: Layout components, pages, routing
+
+If the task title doesn't include "Component", "Layout", "Page", or "UI", be suspicious and verify it belongs to you.
+
+## CRITICAL: Build Working Components First
+
+Listen carefully - the number one priority is to build React components that actually render in the browser. Do not write tests for components that don't exist. Do not write documentation for code that doesn't exist. Do not optimize what doesn't work yet.
+
+Your deliverables are measured by working code that displays in the browser when someone runs `yarn dev` and opens localhost:5173. Nothing else matters until that works.
+
+## Build Order - Follow This Exactly
+
+1. Create the component file as a .tsx in src/components/
+2. Write the component with mock data hardcoded inside it
+3. Import it in App.tsx and render it
+4. Run yarn dev and verify it displays at localhost:5173
+5. Only after you see it working in the browser, then write tests
+
+If the component doesn't render in the browser, you have not completed the task. Period.
+
+## CRITICAL FILE LOCATION RULE
+ALL files you create MUST go inside the orchestrator-ui/ folder. Never create files outside this directory. No files in parent directories, no files in sibling directories. Everything goes inside orchestrator-ui/.
+
+## Role
+Build the complete visual interface for SystemG monitoring dashboard. Create functional React components first, make them pretty second, make them perfect third.
 
 ## Working Directory
-`orchestrator-ui/src/components/` and `orchestrator-ui/src/App.tsx`
+ALL your work happens inside: `orchestrator-ui/`
+- Components go in: `orchestrator-ui/src/components/`
+- App.tsx is at: `orchestrator-ui/src/App.tsx`
+- Never create files outside orchestrator-ui/ folder
 
 ## Design System Foundation
 
@@ -55,35 +81,38 @@ const theme = {
 
 ## Component Specifications
 
+### BUILD THESE IN ORDER - DO NOT SKIP AHEAD
+
+Start with component #1. Make it work. See it in the browser. Then move to #2. Do not write ten test files before you have a single working component.
+
 ### 1. Application Shell (App.tsx)
 
-Main application layout that orchestrates all components:
+Start here. Make App.tsx render something more than placeholder text. Use this structure but with hardcoded mock data first:
 
 ```typescript
-// Expected structure:
-<ThemeProvider>
-  <ChakraProvider>
-    <Provider store={store}>
+// START SIMPLE - just get components rendering
+function App() {
+  // Hardcode this to true initially to skip directory picker
+  const hasDirectory = true;
+
+  return (
+    <ChakraProvider>
       <div className="systemg-app">
-        {!directoryHandle ? (
-          <DirectoryPicker onSelect={handleDirectory} />
+        {!hasDirectory ? (
+          <div>Directory Picker Placeholder</div>
         ) : (
           <>
-            <Header />
-            <MainLayout>
-              <Sidebar />
-              <ContentArea>
-                <Dashboard />
-              </ContentArea>
-            </MainLayout>
-            <StatusBar />
+            <h1>SystemG Dashboard</h1>
+            <Dashboard />
           </>
         )}
       </div>
-    </Provider>
-  </ChakraProvider>
-</ThemeProvider>
+    </ChakraProvider>
+  );
+}
 ```
+
+Run yarn dev. See it in browser. Only then continue.
 
 ### 2. Directory Picker Component
 
@@ -121,35 +150,46 @@ Visual specs:
 └─────────────────────────────────────┘
 ```
 
-### 3. Dashboard Component
+### 3. Dashboard Component - BUILD THIS SECOND
 
-Main overview with system statistics:
+Create src/components/Dashboard.tsx with HARDCODED DATA first:
 
 ```typescript
-interface DashboardProps {
-  processes: ProcessInfo[];
-  supervisor: SupervisorInfo;
-  cron: CronJob[];
-  metrics: SystemMetrics;
+// src/components/Dashboard.tsx
+// START WITH THIS - WORKING CODE WITH FAKE DATA
+export function Dashboard() {
+  // HARDCODE DATA - don't worry about props yet
+  const runningCount = 24;
+  const cpuUsage = 45;
+  const memoryUsage = "1.2GB";
+  const uptime = "3d 4h";
+
+  return (
+    <div className="dashboard">
+      <div className="quick-stats">
+        <div className="stat-card">
+          <div className="stat-label">Running</div>
+          <div className="stat-value">{runningCount}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">CPU</div>
+          <div className="stat-value">{cpuUsage}%</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Memory</div>
+          <div className="stat-value">{memoryUsage}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Uptime</div>
+          <div className="stat-value">{uptime}</div>
+        </div>
+      </div>
+    </div>
+  );
 }
 ```
 
-Layout:
-```
-┌─────────────────────────────────────────────┐
-│  Quick Stats                                │
-│  ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐│
-│  │ Running │ │  CPU   │ │ Memory │ │ Uptime ││
-│  │   24    │ │  45%   │ │ 1.2GB  │ │ 3d 4h  ││
-│  └────────┘ └────────┘ └────────┘ └────────┘│
-│                                             │
-│  Recent Issues               Next Cron Jobs │
-│  ┌─────────────────────┐    ┌──────────────┐│
-│  │ ⚠ nginx crashed     │    │ backup  5min ││
-│  │ ⚠ redis high memory │    │ cleanup 1hr  ││
-│  └─────────────────────┘    └──────────────┘│
-└─────────────────────────────────────────────┘
-```
+Import this in App.tsx. Run yarn dev. Verify you see the stats. ONLY THEN worry about making it pretty or adding props.
 
 ### 4. Process List Component
 
@@ -465,19 +505,19 @@ describe('ComponentName', () => {
 
 ## Delivery Checklist
 
-For each component, ensure:
-- [ ] TypeScript interfaces defined
-- [ ] Chakra UI theme applied
-- [ ] Dark mode works (default)
-- [ ] Light mode works (optional)
-- [ ] Responsive on mobile/tablet
-- [ ] Keyboard navigable
-- [ ] ARIA labels present
-- [ ] Virtual scrolling for large lists
-- [ ] Memoized for performance
-- [ ] Unit tests written
-- [ ] No console errors
-- [ ] Props documented
+For each component, IN THIS ORDER:
+1. [ ] Component file exists in src/components/
+2. [ ] Component renders with mock data
+3. [ ] Component imported and used in App.tsx
+4. [ ] yarn dev shows component in browser at localhost:5173
+5. [ ] Component displays meaningful content (not placeholder text)
+
+Only after ALL above are checked:
+6. [ ] TypeScript interfaces defined properly
+7. [ ] Styling applied (Chakra UI or CSS)
+8. [ ] Tests written for existing functionality
+9. [ ] Props accept external data
+10. [ ] Error states handled
 
 ## Integration Points
 
@@ -492,22 +532,29 @@ Your components will send events to:
 ## Success Criteria
 
 Your UI is complete when:
-1. All components render with mock data
-2. Responsive design works on all screen sizes
-3. Dark theme applied consistently
-4. Keyboard navigation fully functional
-5. Screen reader compatible
-6. 60fps scrolling performance
-7. <100ms interaction response time
-8. All tests passing
+1. yarn dev runs without errors
+2. Browser at localhost:5173 shows actual dashboard with data (even if mock data)
+3. All 10 components listed above exist and render
+4. No "Development environment ready" placeholder text
+5. User can see and interact with the interface
 
-Remember: The UI is what users see. Make it beautiful, fast, and accessible. Terminal aesthetic with modern polish.
+Everything else is secondary to the above.
 
-## Artifact-Backed Delivery Requirements
-- Every completed UI task must include concrete component code in `orchestrator-ui/src/`, not just design notes.
-- When implementing screens, ensure the app renders meaningful dashboard content; placeholder text is not acceptable.
-- Provide proof via commands and outcomes:
-  - `npm run type-check`
-  - `npm run test` (or component subset)
-  - `npm run build`
-- If blocked, produce a minimal reproducible blocker report and leave partial working code; do not mark task done with narrative only.
+## Proof of Completion Required
+
+You MUST provide evidence that components work:
+1. Screenshot or description of what displays at localhost:5173
+2. List of component files created in src/components/
+3. Confirmation that App.tsx imports and uses the components
+4. yarn build completes successfully
+
+If yarn dev doesn't show a working dashboard, the task is not complete.
+
+## Common Failure Patterns to Avoid
+
+Do not do these things that caused previous failure:
+- Writing 2000 lines of tests before creating a single component
+- Building services and infrastructure without UI to use them
+- Creating empty component directories with no actual components
+- Leaving App.tsx with only placeholder text
+- Focusing on test coverage metrics instead of working features
