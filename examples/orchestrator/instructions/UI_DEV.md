@@ -61,8 +61,9 @@ const theme = {
       running: '#00c896',  // Green
       stopped: '#6b7280',  // Gray
       error: '#ef4444',    // Red
-      warning: '#f59e0b',  // Yellow
-      starting: '#3b82f6'  // Blue
+      warning: '#fbbf24',  // Yellow (not orange)
+      starting: '#3b82f6', // Blue
+      peri: '#fbbf24'      // Yellow specifically for peri service
     }
   },
   fonts: {

@@ -276,6 +276,9 @@ $ sysg status --service webserver
 
 # Show all services including orphaned state
 $ sysg status --all
+
+# Refresh status every 5 seconds (also accepts 1s, 2m, 1second)
+$ sysg status --stream 5
 ```
 
 **Inspect** - Inspect a service or cron unit in detail:
@@ -287,8 +290,8 @@ $ sysg inspect myservice
 # Show metrics in JSON format
 $ sysg inspect myservice --json
 
-# Display only the most recent data (last 2 minutes)
-$ sysg inspect myservice --window 2m
+# Refresh continuously using a rolling 2-minute metrics window
+$ sysg inspect myservice --stream 2m
 
 # Render output without ANSI coloring
 $ sysg inspect myservice --no-color
@@ -297,7 +300,7 @@ $ sysg inspect myservice --no-color
 **Logs** - View logs for a specific service:
 
 ```sh
-# View the last 50 lines of stdout logs (default)
+# View the last 50 lines of stderr logs (default)
 $ sysg logs
 
 # View logs for a specific service
@@ -305,6 +308,9 @@ $ sysg logs --service api-service
 
 # View a custom number of log lines
 $ sysg logs --service database --lines 100
+
+# Refresh log snapshots every 2 seconds (respects --lines)
+$ sysg logs --service api-service --lines 100 --stream 2
 
 # View specific log type (stdout, stderr, or supervisor)
 $ sysg logs --service myservice --kind stderr

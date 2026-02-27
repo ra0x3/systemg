@@ -19,6 +19,7 @@ $ sysg logs
 | `--service` | The name of the service whose logs should be displayed (optional) |
 | `--lines` | Number of lines to show (default: 50) |
 | `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stderr) |
+| `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
 | `--sys` | Opt into privileged system mode. Requires running as root |
 | `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
@@ -54,6 +55,14 @@ $ sysg logs --kind supervisor
 ```sh
 $ sysg logs --service api --lines 200
 ```
+
+### Stream snapshots
+
+```sh
+$ sysg logs --service api --lines 200 --stream 2
+```
+
+In stream mode, each refresh prints a new snapshot of the latest `--lines` entries.
 
 ## Log files
 

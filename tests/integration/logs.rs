@@ -39,6 +39,8 @@ fn logs_streams_when_pid_has_no_fds() {
         .arg("logs")
         .arg("--service")
         .arg("arb_rs")
+        .arg("--kind")
+        .arg("stdout")
         .arg("--lines")
         .arg("1")
         .assert()

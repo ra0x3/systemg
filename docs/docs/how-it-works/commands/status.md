@@ -22,7 +22,7 @@ $ sysg status
 | `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--json` | Emit machine-readable JSON output instead of a table |
 | `--no-color` | Disable ANSI colors in output |
-| `--watch` | Continuously refresh status at the provided interval in seconds |
+| `--stream` | Continuously refresh status at the provided interval (e.g., `5`, `1s`, `2m`) |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples
@@ -55,6 +55,12 @@ Uptime: 2h3m
 CPU: 1.2%
 Memory: 4.5%
 Command: python app.py
+```
+
+### Stream status updates
+
+```sh
+$ sysg status --stream 5
 ```
 
 ## Output fields

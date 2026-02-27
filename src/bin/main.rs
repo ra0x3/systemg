@@ -19,7 +19,7 @@ use nix::{
 };
 use sysinfo::{ProcessesToUpdate, System};
 use systemg::{
-    charting::{self, ChartConfig, parse_window_duration},
+    charting::{self, ChartConfig, parse_stream_duration},
     cli::{Cli, Commands, parse_args},
     config::load_config,
     cron::{CronExecutionStatus, CronStateFile},
@@ -195,7 +195,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             json,
             no_color,
             full_cmd,
-            watch,
+            stream,
         } => {
             let mut effective_config = config.clone();
             if load_config(Some(&config)).is_err()
@@ -212,8 +212,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 service_filter: service.as_deref(),
             };
 
-            if let Some(interval) = watch {
-                let sleep_interval = Duration::from_secs(interval.max(1));
+            if let Some(stream_interval) = stream {
+                let stream_seconds = match parse_stream_duration(&stream_interval) {
+                    Ok(seconds) => seconds,
+                    Err(err) => {
+                        eprintln!(
+                            "Invalid stream duration '{}': {}",
+                            stream_interval, err
+                        );
+                        process::exit(1);
+                    }
+                };
+                let sleep_interval = Duration::from_secs(stream_seconds);
                 loop {
                     match fetch_status_snapshot(&effective_config) {
                         Ok(snapshot) => {
@@ -230,7 +240,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 YELLOW, RESET
                             );
                             println!("\nWaiting for supervisor to restart...");
-                            println!("Press Ctrl+C to exit watch mode.");
+                            println!("Press Ctrl+C to exit stream mode.");
                         }
                     }
                     thread::sleep(sleep_interval);
@@ -251,7 +261,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             unit,
             json,
             no_color,
-            window,
+            stream,
         } => {
             let mut effective_config = config.clone();
             if load_config(Some(&config)).is_err()
@@ -260,49 +270,67 @@ fn main() -> Result<(), Box<dyn Error>> {
                 effective_config = hint.to_string_lossy().to_string();
             }
 
-            // Parse the window duration
-            let window_seconds = match parse_window_duration(&window) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Invalid window duration '{}': {}", window, e);
-                    process::exit(1);
-                }
+            let stream_seconds = match stream.as_deref() {
+                Some(value) => match parse_stream_duration(value) {
+                    Ok(seconds) => seconds,
+                    Err(err) => {
+                        eprintln!("Invalid stream duration '{}': {}", value, err);
+                        process::exit(1);
+                    }
+                },
+                None => 5,
             };
 
             // Calculate samples limit based on window
-            let samples_limit = if window_seconds < 3600 {
-                window_seconds as usize // For short windows, 1 sample per second
+            let samples_limit = if stream_seconds < 3600 {
+                stream_seconds as usize // For short windows, 1 sample per second
             } else {
                 720 // For longer windows, cap at 720 samples
             };
 
-            let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
-            if payload.unit.is_none() {
-                eprintln!("Unit '{unit}' not found.");
-                process::exit(2);
-            }
-
             let render_opts = InspectRenderOptions {
                 json,
                 no_color,
-                window_seconds,
-                window_desc: window.clone(),
+                window_seconds: stream_seconds,
+                window_desc: format!("last {}s", stream_seconds),
                 samples_limit,
             };
 
-            let health = render_inspect(&payload, &render_opts)?;
-            let exit_code = match health {
-                OverallHealth::Healthy => 0,
-                OverallHealth::Degraded => 1,
-                OverallHealth::Failing => 2,
-            };
-            process::exit(exit_code);
+            if stream.is_some() {
+                let sleep_interval = Duration::from_secs(stream_seconds);
+                loop {
+                    let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
+                    if payload.unit.is_none() {
+                        eprintln!("Unit '{unit}' not found.");
+                        process::exit(2);
+                    }
+                    print!("\x1B[2J\x1B[H");
+                    let _ = io::stdout().flush();
+                    let _ = render_inspect(&payload, &render_opts)?;
+                    thread::sleep(sleep_interval);
+                }
+            } else {
+                let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
+                if payload.unit.is_none() {
+                    eprintln!("Unit '{unit}' not found.");
+                    process::exit(2);
+                }
+
+                let health = render_inspect(&payload, &render_opts)?;
+                let exit_code = match health {
+                    OverallHealth::Healthy => 0,
+                    OverallHealth::Degraded => 1,
+                    OverallHealth::Failing => 2,
+                };
+                process::exit(exit_code);
+            }
         }
         Commands::Logs {
             config,
             service,
             lines,
             kind,
+            stream,
         } => {
             // Try to determine the actual config path, falling back to hint if needed
             let effective_config = match load_config(Some(&config)) {
@@ -318,45 +346,99 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
             let manager = LogManager::new(pid.clone());
-            match service {
-                Some(service) => {
-                    info!("Fetching logs for service: {service}");
-                    let process_pid = pid.lock().unwrap().pid_for(&service);
+            let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
+                match service.as_ref() {
+                    Some(service_name) => {
+                        info!("Fetching logs for service: {service_name}");
+                        let process_pid = pid.lock().unwrap().pid_for(service_name);
 
-                    if let Some(process_pid) = process_pid {
-                        manager.show_log(
-                            &service,
-                            process_pid,
-                            lines,
-                            Some(kind.as_str()),
-                        )?;
-                    } else {
-                        let cron_state = CronStateFile::load().unwrap_or_default();
-                        let stdout_exists = resolve_log_path(&service, "stdout").exists();
-                        let stderr_exists = resolve_log_path(&service, "stderr").exists();
+                        if let Some(process_pid) = process_pid {
+                            if snapshot_mode {
+                                manager.show_log_snapshot(
+                                    service_name,
+                                    process_pid,
+                                    lines,
+                                    Some(kind.as_str()),
+                                )?;
+                            } else {
+                                manager.show_log(
+                                    service_name,
+                                    process_pid,
+                                    lines,
+                                    Some(kind.as_str()),
+                                )?;
+                            }
+                        } else {
+                            let cron_state = CronStateFile::load().unwrap_or_default();
+                            let stdout_exists =
+                                resolve_log_path(service_name, "stdout").exists();
+                            let stderr_exists =
+                                resolve_log_path(service_name, "stderr").exists();
 
-                        if cron_state.jobs().contains_key(&service)
-                            || stdout_exists
-                            || stderr_exists
-                        {
-                            manager.show_inactive_log(
-                                &service,
+                            if cron_state.jobs().contains_key(service_name)
+                                || stdout_exists
+                                || stderr_exists
+                            {
+                                if snapshot_mode {
+                                    manager.show_inactive_log_snapshot(
+                                        service_name,
+                                        lines,
+                                        Some(kind.as_str()),
+                                    )?;
+                                } else {
+                                    manager.show_inactive_log(
+                                        service_name,
+                                        lines,
+                                        Some(kind.as_str()),
+                                    )?;
+                                }
+                            } else {
+                                warn!(
+                                    "Service '{service_name}' is not currently running"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        info!("Fetching logs for all services");
+                        if snapshot_mode {
+                            manager.show_logs_snapshot(
                                 lines,
                                 Some(kind.as_str()),
+                                Some(&effective_config),
                             )?;
                         } else {
-                            warn!("Service '{service}' is not currently running");
+                            manager.show_logs(
+                                lines,
+                                Some(kind.as_str()),
+                                Some(&effective_config),
+                            )?;
                         }
                     }
                 }
-                None => {
-                    info!("Fetching logs for all services");
-                    manager.show_logs(
-                        lines,
-                        Some(kind.as_str()),
-                        Some(&effective_config),
-                    )?;
+                Ok(())
+            };
+
+            if let Some(stream_interval) = stream {
+                let stream_seconds = match parse_stream_duration(&stream_interval) {
+                    Ok(seconds) => seconds,
+                    Err(err) => {
+                        eprintln!(
+                            "Invalid stream duration '{}': {}",
+                            stream_interval, err
+                        );
+                        process::exit(1);
+                    }
+                };
+                let sleep_interval = Duration::from_secs(stream_seconds);
+                loop {
+                    print!("\x1B[2J\x1B[H");
+                    let _ = io::stdout().flush();
+                    render_logs_once(true)?;
+                    thread::sleep(sleep_interval);
                 }
+            } else {
+                render_logs_once(false)?;
             }
         }
         Commands::Purge => {

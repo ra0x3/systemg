@@ -15,7 +15,7 @@ $ sysg inspect myservice
 
 | Option | Description |
 |--------|------------|
-| `--window` | Time window to display (e.g., "5s" for live, "12h" for historical). Short durations (&lt;=60s) enable live mode with auto-refresh (default: 5s) |
+| `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
 | `--config` | Path to configuration file |
 | `--json` | Emit machine-readable JSON output instead of a report |
 | `--sys` | Opt into privileged system mode. Requires running as root |
@@ -51,10 +51,10 @@ CPU & Memory Usage - api (Last 5m)
 CPU: 45.2% (current)  Memory: 23.1% (current)
 ```
 
-### View longer time window
+### Stream with a longer rolling window
 
 ```sh
-$ sysg inspect api --window 24h
+$ sysg inspect api --stream 24h
 ```
 
 ### Inspect by hash

@@ -288,7 +288,30 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
-        self.show_logs_platform(service_name, Some(pid), lines, kind)
+        self.show_logs_platform_with_mode(
+            service_name,
+            Some(pid),
+            lines,
+            kind,
+            TailMode::current(),
+        )
+    }
+
+    /// Shows a one-shot snapshot of logs for a specific service.
+    pub fn show_log_snapshot(
+        &self,
+        service_name: &str,
+        pid: u32,
+        lines: usize,
+        kind: Option<&str>,
+    ) -> Result<(), LogsManagerError> {
+        self.show_logs_platform_with_mode(
+            service_name,
+            Some(pid),
+            lines,
+            kind,
+            TailMode::OneShot,
+        )
     }
 
     /// Shows logs for a service that is not currently running.
@@ -298,17 +321,40 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
     ) -> Result<(), LogsManagerError> {
-        self.show_logs_platform(service_name, None, lines, kind)
+        self.show_logs_platform_with_mode(
+            service_name,
+            None,
+            lines,
+            kind,
+            TailMode::current(),
+        )
+    }
+
+    /// Shows a one-shot snapshot of logs for a service that is not currently running.
+    pub fn show_inactive_log_snapshot(
+        &self,
+        service_name: &str,
+        lines: usize,
+        kind: Option<&str>,
+    ) -> Result<(), LogsManagerError> {
+        self.show_logs_platform_with_mode(
+            service_name,
+            None,
+            lines,
+            kind,
+            TailMode::OneShot,
+        )
     }
 
     /// Platform-specific implementation for showing logs.
     #[cfg(target_os = "linux")]
-    fn show_logs_platform(
+    fn show_logs_platform_with_mode(
         &self,
         service_name: &str,
         pid: Option<u32>,
         lines: usize,
         kind: Option<&str>,
+        mode: TailMode,
     ) -> Result<(), LogsManagerError> {
         println!(
             "\n+{:-^33}+\n\
@@ -324,7 +370,6 @@ impl LogManager {
         debug!("Streaming logs via tail for '{}'", service_name);
 
         let mut cmd = Command::new("tail");
-        let mode = TailMode::current();
         #[cfg(target_os = "linux")]
         {
             if let Some(pid_value) = pid
@@ -350,12 +395,13 @@ impl LogManager {
 
     /// macOS implementation for showing logs using log files.
     #[cfg(target_os = "macos")]
-    fn show_logs_platform(
+    fn show_logs_platform_with_mode(
         &self,
         service_name: &str,
         pid: Option<u32>,
         lines: usize,
         kind: Option<&str>,
+        mode: TailMode,
     ) -> Result<(), LogsManagerError> {
         println!(
             "\n+{:-^33}+\n\
@@ -371,13 +417,7 @@ impl LogManager {
         debug!("Streaming logs via tail for '{}'", service_name);
 
         let mut cmd = Command::new("tail");
-        TailMode::current().configure_command(
-            &mut cmd,
-            lines,
-            &stdout_path,
-            &stderr_path,
-            kind,
-        );
+        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
         cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
 
@@ -392,16 +432,36 @@ impl LogManager {
     /// Streams logs for all active services in real-time.
     pub fn show_logs(
         &self,
-        _lines: usize,
+        lines: usize,
         kind: Option<&str>,
         config_path: Option<&str>,
+    ) -> Result<(), LogsManagerError> {
+        self.show_logs_with_mode(lines, kind, config_path, TailMode::current())
+    }
+
+    /// Streams one-shot snapshots for all active services.
+    pub fn show_logs_snapshot(
+        &self,
+        lines: usize,
+        kind: Option<&str>,
+        config_path: Option<&str>,
+    ) -> Result<(), LogsManagerError> {
+        self.show_logs_with_mode(lines, kind, config_path, TailMode::OneShot)
+    }
+
+    fn show_logs_with_mode(
+        &self,
+        lines: usize,
+        kind: Option<&str>,
+        config_path: Option<&str>,
+        mode: TailMode,
     ) -> Result<(), LogsManagerError> {
         debug!("Fetching logs for all services...");
 
         println!(
             "\n\
             ╭{}╮\n\
-            │ ⚠️  Showing first 20 logs per service (stdout & stderr)           │\n\
+            │ ⚠️  Showing latest logs per service (stdout & stderr)             │\n\
             │                                                                   │\n\
             │ For complete logs, run: sysg logs <service>                      │\n\
             ╰{}╯\n",
@@ -410,7 +470,7 @@ impl LogManager {
         );
 
         if matches!(kind, None | Some("supervisor")) {
-            let _ = self.show_supervisor_log(20).map_err(|err| {
+            let _ = self.show_supervisor_log(lines).map_err(|err| {
                 eprintln!("Failed to show supervisor logs: {}", err);
             });
 
@@ -463,7 +523,12 @@ impl LogManager {
         for service_name in service_names {
             if let Some(pid) = pid_snapshot.get(&service_name) {
                 debug!("Service: {service_name}, PID: {pid}");
-                if let Err(err) = self.show_log(&service_name, *pid, 20, kind) {
+                let result = if matches!(mode, TailMode::OneShot) {
+                    self.show_log_snapshot(&service_name, *pid, lines, kind)
+                } else {
+                    self.show_log(&service_name, *pid, lines, kind)
+                };
+                if let Err(err) = result {
                     eprintln!("Failed to stream logs for '{}': {}", service_name, err);
                 }
                 continue;
@@ -475,7 +540,12 @@ impl LogManager {
                 let service_hash = service_config.compute_hash();
                 if let Some(_cron_job) = cron_state.jobs().get(&service_hash) {
                     debug!("Showing inactive logs for cron service '{}'", service_name);
-                    if let Err(err) = self.show_inactive_log(&service_name, 20, kind) {
+                    let result = if matches!(mode, TailMode::OneShot) {
+                        self.show_inactive_log_snapshot(&service_name, lines, kind)
+                    } else {
+                        self.show_inactive_log(&service_name, lines, kind)
+                    };
+                    if let Err(err) = result {
                         eprintln!(
                             "Failed to stream logs for '{}': {}",
                             service_name, err

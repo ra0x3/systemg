@@ -203,9 +203,9 @@ pub enum Commands {
         #[arg(long = "full-cmd")]
         full_cmd: bool,
 
-        /// Continuously refresh status at the provided interval in seconds.
-        #[arg(long, value_name = "SECONDS")]
-        watch: Option<u64>,
+        /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
+        #[arg(long, value_name = "DURATION")]
+        stream: Option<String>,
     },
 
     /// Inspect a single service or cron unit in detail.
@@ -225,10 +225,9 @@ pub enum Commands {
         #[arg(long = "no-color")]
         no_color: bool,
 
-        /// Time window to display (e.g., "5s" for live, "12h" for historical).
-        /// Short durations (<=60s) enable live mode with auto-refresh.
-        #[arg(long, default_value = "5s")]
-        window: String,
+        /// Continuously refresh output and use a rolling metrics window (e.g., "5", "1s", "2m").
+        #[arg(long, value_name = "DURATION")]
+        stream: Option<String>,
     },
 
     /// Show logs for a specific service.
@@ -248,6 +247,10 @@ pub enum Commands {
         /// Kind of logs to show: stdout, stderr, or supervisor (default: stdout).
         #[arg(short = 'k', long, default_value_t = LogKind::default())]
         kind: LogKind,
+
+        /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
+        #[arg(long, value_name = "DURATION")]
+        stream: Option<String>,
     },
 
     /// Purge all systemg state and runtime files.
@@ -280,4 +283,55 @@ pub enum Commands {
 /// Parses command-line arguments and returns a `Cli` struct.
 pub fn parse_args() -> Cli {
     Cli::parse()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_accepts_stream() {
+        let cli = Cli::try_parse_from(["sysg", "status", "--stream", "5"]).unwrap();
+        match cli.command {
+            Commands::Status { stream, .. } => assert_eq!(stream.as_deref(), Some("5")),
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn inspect_accepts_stream() {
+        let cli =
+            Cli::try_parse_from(["sysg", "inspect", "demo", "--stream", "2m"]).unwrap();
+        match cli.command {
+            Commands::Inspect { stream, .. } => {
+                assert_eq!(stream.as_deref(), Some("2m"))
+            }
+            _ => panic!("expected inspect command"),
+        }
+    }
+
+    #[test]
+    fn logs_accepts_stream() {
+        let cli =
+            Cli::try_parse_from(["sysg", "logs", "--service", "demo", "--stream", "1s"])
+                .unwrap();
+        match cli.command {
+            Commands::Logs { stream, .. } => {
+                assert_eq!(stream.as_deref(), Some("1s"))
+            }
+            _ => panic!("expected logs command"),
+        }
+    }
+
+    #[test]
+    fn status_rejects_watch() {
+        assert!(Cli::try_parse_from(["sysg", "status", "--watch", "5"]).is_err());
+    }
+
+    #[test]
+    fn inspect_rejects_window() {
+        assert!(
+            Cli::try_parse_from(["sysg", "inspect", "demo", "--window", "5s"]).is_err()
+        );
+    }
 }

@@ -247,6 +247,29 @@ pub fn parse_window_duration(window: &str) -> Result<u64, String> {
     Ok(seconds as u64)
 }
 
+/// Parse a stream interval into seconds.
+///
+/// Accepts either unit-qualified durations like "1s" / "2m" or a bare number
+/// of seconds like "5".
+pub fn parse_stream_duration(input: &str) -> Result<u64, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("Stream duration cannot be empty".to_string());
+    }
+
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        let seconds: u64 = trimmed
+            .parse()
+            .map_err(|_| format!("Invalid stream duration: {trimmed}"))?;
+        if seconds == 0 {
+            return Err("Stream duration must be positive".to_string());
+        }
+        return Ok(seconds);
+    }
+
+    parse_window_duration(trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,6 +285,18 @@ mod tests {
         assert!(parse_window_duration("").is_err());
         assert!(parse_window_duration("-5s").is_err());
         assert!(parse_window_duration("invalid").is_err());
+    }
+
+    #[test]
+    fn test_parse_stream_duration() {
+        assert_eq!(parse_stream_duration("5").unwrap(), 5);
+        assert_eq!(parse_stream_duration("1s").unwrap(), 1);
+        assert_eq!(parse_stream_duration("2m").unwrap(), 120);
+        assert_eq!(parse_stream_duration("1second").unwrap(), 1);
+
+        assert!(parse_stream_duration("").is_err());
+        assert!(parse_stream_duration("0").is_err());
+        assert!(parse_stream_duration("invalid").is_err());
     }
 
     #[test]
