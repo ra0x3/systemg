@@ -518,7 +518,7 @@ jobs:
 
       - name: Upload Sysg Artifact
         uses: softprops/action-gh-release@v1
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || needs.create-github-release.result == 'success'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
