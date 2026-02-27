@@ -370,6 +370,7 @@ jobs:
       - cargo-test
       - detect-version-bump
       - create-github-release
+      - extract-version
     if: |
       !cancelled() &&
       needs.cargo-test.result == 'success' &&
@@ -490,9 +491,13 @@ jobs:
           TARGET: ${{ matrix.job.target }}
           ARTIFACT_SUFFIX: ${{ matrix.job.artifact_suffix || '' }}
         run: >
-          # trim refs/tags/ prefix
+          # Get version from either the tag (for auto-release) or GITHUB_REF (for manual releases)
 
-          SYSG_VERSION="${GITHUB_REF#refs/tags/}"
+          if [ "${{ needs.extract-version.outputs.tag }}" != "" ]; then
+            SYSG_VERSION="${{ needs.extract-version.outputs.tag }}"
+          else
+            SYSG_VERSION="${GITHUB_REF#refs/tags/}"
+          fi
 
           # optionally trim v from tag prefix
 
@@ -518,10 +523,11 @@ jobs:
 
       - name: Upload Sysg Artifact
         uses: softprops/action-gh-release@v1
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || needs.create-github-release.result == 'success'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
+          tag_name: ${{ needs.extract-version.outputs.tag }}
           files: ./${{ env.SYSG_ZIP_FILE_NAME }}
 
 #      - name: Notify if Job Fails
@@ -543,6 +549,7 @@ jobs:
     name: Upload Binaries to S3
     needs:
       - upload-release-binaries
+      - extract-version
     if: |
       !cancelled() &&
       needs.upload-release-binaries.result == 'success'
@@ -556,13 +563,24 @@ jobs:
       - name: Download and upload release assets to AWS S3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_ID: ${{ github.event.release.id }}
+          RELEASE_TAG: ${{ needs.extract-version.outputs.tag }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-2   # change if needed
           S3_BUCKET: sh.sysg.dev
         run: |
           set -euo pipefail
+
+          # Get release ID from tag (works for both auto-release and manual releases)
+          if [ -n "${{ github.event.release.id }}" ]; then
+            RELEASE_ID="${{ github.event.release.id }}"
+          else
+            # Fetch release ID by tag for auto-releases
+            RELEASE_ID=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+              | jq -r '.id')
+          fi
 
           echo "Fetching .tar.gz assets for release ID $RELEASE_ID ..."
 

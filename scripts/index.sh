@@ -7,7 +7,7 @@ while [ $# -gt 0 ]; do
     --version|-v)
       shift
       if [ -z "${1:-}" ]; then
-        echo "❌ --version requires a version number"
+        echo "X --version requires a version number"
         echo ""
         echo "  Usage: curl ... | sh -s -- --version VERSION"
         exit 1
@@ -32,7 +32,7 @@ while [ $# -gt 0 ]; do
       exit 0
       ;;
     *)
-      echo "❌ Unknown option: $1"
+      echo "X Unknown option: $1"
       echo ""
       echo "  Use --help for usage information"
       exit 1
@@ -75,7 +75,7 @@ if [ "$OS" = "linux" ]; then
   elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-unknown-linux-gnu"
   else
-    echo "❌ Unsupported architecture: $ARCH"
+    echo "X Unsupported architecture: $ARCH"
     exit 1
   fi
 elif [ "$OS" = "darwin" ]; then
@@ -84,11 +84,11 @@ elif [ "$OS" = "darwin" ]; then
   elif [ "$ARCH" = "arm64" ]; then
     TARGET="aarch64-apple-darwin"
   else
-    echo "❌ Unsupported architecture: $ARCH"
+    echo "X Unsupported architecture: $ARCH"
     exit 1
   fi
 else
-  echo "❌ Unsupported OS: $OS"
+  echo "X Unsupported OS: $OS"
   exit 1
 fi
 
@@ -110,7 +110,7 @@ if [ -n "$REQUESTED_VERSION" ]; then
 else
   VERSION="$(fetch_latest)"
   if [ -z "$VERSION" ]; then
-    echo "❌ Failed to determine latest version from GitHub"
+    echo "X Failed to determine latest version from GitHub"
     exit 1
   fi
   LATEST_VERSION="$VERSION"
@@ -137,7 +137,7 @@ if [ -x "$VERSION_BINARY" ]; then
       echo ""
       echo "  Run: sysg --help to get started"
       echo ""
-      echo "✅ Setup complete!"
+      echo "✔ Setup complete!"
       exit 0
     else
       echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
@@ -146,7 +146,7 @@ if [ -x "$VERSION_BINARY" ]; then
       echo ""
       echo "  Run: sysg --help to get started"
       echo ""
-      echo "✅ Setup complete!"
+      echo "✔ Setup complete!"
       exit 0
     fi
   else
@@ -158,7 +158,7 @@ FILE="sysg-$VERSION-$TARGET.tar.gz"
 URL="https://sh.sysg.dev/$FILE"
 
 if ! curl -sSfL "$URL" -o "$FILE" 2>/dev/null; then
-  echo "❌ Binary '$FILE' not available for your platform"
+  echo "X Binary '$FILE' not available for your platform"
   echo ""
   echo "  Available releases: https://github.com/ra0x3/systemg/releases"
   exit 1
@@ -180,7 +180,7 @@ else
   if [ -n "$FOUND" ]; then
     BINARY="$FOUND"
   else
-    echo "❌ sysg binary not found after extraction"
+    echo "X sysg binary not found after extraction"
     cd "$ORIGINAL_DIR"
     rm -rf "$TEMP_DIR"
     exit 1
@@ -203,7 +203,7 @@ DOWNLOADED_VERSION=$(
 
 if [ -n "$DOWNLOADED_VERSION" ] && [ "$DOWNLOADED_VERSION" != "$VERSION" ]; then
   if [ "${SYSG_INSTALL_ALLOW_VERSION_MISMATCH:-}" != "1" ]; then
-    echo "❌ Version mismatch detected (got $DOWNLOADED_VERSION, expected $VERSION)" >&2
+    echo "X Version mismatch detected (got $DOWNLOADED_VERSION, expected $VERSION)" >&2
     echo "" >&2
     echo "  To continue anyway: SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1" >&2
     cd "$ORIGINAL_DIR"
@@ -383,4 +383,4 @@ if [ $PATH_NEEDS_UPDATE -eq 1 ]; then
 fi
 
 echo ""
-echo "✅ Installation complete!"
+echo "✔ Installation complete!"
