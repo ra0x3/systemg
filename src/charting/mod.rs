@@ -1,5 +1,6 @@
 //! ASCII charting for metrics visualization using our custom rasciigraph.
 
+use std::env;
 use std::error::Error;
 
 use chrono::Local;
@@ -33,8 +34,9 @@ pub fn render_metrics_chart(
         .map(|s| s.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
         .collect();
 
-    let cpu_resampled = resample_to_width(&cpu_values, 50);
-    let mem_resampled = resample_to_width(&mem_gb_values, 50);
+    let chart_width = 48usize;
+    let cpu_resampled = resample_to_width(&cpu_values, chart_width);
+    let mem_resampled = resample_to_width(&mem_gb_values, chart_width);
 
     let cpu_resampled: Vec<f64> = cpu_resampled
         .iter()
@@ -45,35 +47,8 @@ pub fn render_metrics_chart(
         .map(|&v| if v.is_finite() { v } else { 0.0 })
         .collect();
 
-    let cpu_min = cpu_resampled.iter().cloned().fold(f64::INFINITY, f64::min);
-    let cpu_max = cpu_resampled
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-    let cpu_final = if (cpu_max - cpu_min).abs() < 0.00001 {
-        cpu_resampled
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| v + (i as f64 * 0.00001))
-            .collect()
-    } else {
-        cpu_resampled
-    };
-
-    let mem_min = mem_resampled.iter().cloned().fold(f64::INFINITY, f64::min);
-    let mem_max = mem_resampled
-        .iter()
-        .cloned()
-        .fold(f64::NEG_INFINITY, f64::max);
-    let mem_final = if (mem_max - mem_min).abs() < 0.00001 {
-        mem_resampled
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| v + (i as f64 * 0.00001))
-            .collect()
-    } else {
-        mem_resampled
-    };
+    let cpu_final = cpu_resampled;
+    let mem_final = mem_resampled;
 
     let first_time = samples
         .first()
@@ -92,44 +67,67 @@ pub fn render_metrics_chart(
 
     println!();
 
-    println!("CPU Usage (%):");
-    let cpu_caption = format!("{} - {} to {}", config.window_desc, first_time, last_time);
+    let x_axis_label = format!(
+        "X-axis: Time ({first_time} -> {last_time}) | Window: {}",
+        config.window_desc
+    );
+
+    let chart_width = compute_chart_width(terminal_columns());
 
     let cpu_graph = plot(
         cpu_final,
         Config::default()
+            .with_width(chart_width as u32)
             .with_height(10)
-            .with_y_precision(4)
-            .with_caption(cpu_caption),
+            .with_y_precision(4),
+    );
+    let cpu_card = build_chart_card(
+        ChartCardSpec {
+            title: "CPU Usage".to_string(),
+            legend: "Legend: CPU (%)".to_string(),
+            y_axis_label: "Y-axis: CPU (%)".to_string(),
+        },
+        &cpu_graph,
+        config.no_color,
+        Some("\x1b[36m"),
     );
 
-    if !config.no_color {
-        for line in cpu_graph.lines() {
-            println!("\x1b[36m{}\x1b[0m", line);
-        }
-    } else {
-        println!("{}", cpu_graph);
-    }
-
-    println!();
-
-    println!("Memory Usage (GB):");
-    let mem_caption = format!("{} - {} to {}", config.window_desc, first_time, last_time);
-
+    let mem_max_for_percent = mem_final
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(0.0);
     let mem_graph = plot(
         mem_final,
         Config::default()
+            .with_width(chart_width as u32)
             .with_height(10)
-            .with_y_precision(4)
-            .with_caption(mem_caption),
+            .with_y_precision(4),
+    );
+    let mem_dual_axis =
+        add_right_axis_percentage_labels(&mem_graph, mem_max_for_percent, "(%)", true);
+    let mem_card = build_chart_card(
+        ChartCardSpec {
+            title: "Memory Usage (Dual Y-axis)".to_string(),
+            legend: "Legend: RSS (GB); right axis shows normalized percent".to_string(),
+            y_axis_label: "Y-axis Left: RSS (GB) | Right: RSS (%)".to_string(),
+        },
+        &mem_dual_axis,
+        config.no_color,
+        Some("\x1b[35m"),
     );
 
-    if !config.no_color {
-        for line in mem_graph.lines() {
-            println!("\x1b[35m{}\x1b[0m", line);
+    let cards = vec![cpu_card, mem_card];
+    let rendered_rows = layout_cards_with_wrapping(&cards, terminal_columns());
+    for (idx, row) in rendered_rows.iter().enumerate() {
+        for line in row {
+            println!("{line}");
         }
-    } else {
-        println!("{}", mem_graph);
+        println!();
+        println!("{x_axis_label}");
+        if idx + 1 < rendered_rows.len() {
+            println!();
+        }
     }
 
     println!();
@@ -169,6 +167,201 @@ pub fn render_metrics_chart(
     println!("  Samples: {}", samples.len());
 
     Ok(())
+}
+
+struct ChartCardSpec {
+    title: String,
+    legend: String,
+    y_axis_label: String,
+}
+
+fn build_chart_card(
+    spec: ChartCardSpec,
+    graph: &str,
+    no_color: bool,
+    graph_color: Option<&str>,
+) -> Vec<String> {
+    let mut lines = vec![spec.title, spec.legend, spec.y_axis_label, String::new()];
+
+    for line in graph.lines() {
+        let colored = if no_color {
+            line.to_string()
+        } else if let Some(color) = graph_color {
+            format!("{color}{line}\x1b[0m")
+        } else {
+            line.to_string()
+        };
+        lines.push(colored);
+    }
+
+    lines
+}
+
+fn add_right_axis_percentage_labels(
+    graph: &str,
+    raw_max: f64,
+    suffix: &str,
+    clamp_to_hundred: bool,
+) -> String {
+    let axis_rows = extract_axis_rows(graph);
+    let scale_max = axis_rows
+        .iter()
+        .map(|(raw, _)| raw.abs())
+        .fold(raw_max.max(0.0), f64::max)
+        .max(0.0);
+    let mut out = Vec::new();
+    for line in graph.lines() {
+        let axis_index = line.find('┤').or_else(|| line.find('┼'));
+        if let Some(axis_index) = axis_index {
+            let raw_label = line[..axis_index].trim();
+            let percent_label = raw_label.parse::<f64>().ok().map_or(0.0, |raw| {
+                if scale_max <= 0.0 {
+                    0.0
+                } else {
+                    let pct = (raw / scale_max * 100.0).max(0.0);
+                    if clamp_to_hundred {
+                        pct.min(100.0)
+                    } else {
+                        pct
+                    }
+                }
+            });
+            out.push(format!(
+                "{line}  {right:>7.2}{suffix}",
+                right = percent_label
+            ));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n")
+}
+
+fn extract_axis_rows(graph: &str) -> Vec<(f64, usize)> {
+    graph
+        .lines()
+        .filter_map(|line| {
+            let axis_index = line.find('┤').or_else(|| line.find('┼'))?;
+            let raw = line[..axis_index].trim().parse::<f64>().ok()?;
+            Some((raw, axis_index))
+        })
+        .collect()
+}
+
+fn layout_cards_with_wrapping(
+    cards: &[Vec<String>],
+    max_width: usize,
+) -> Vec<Vec<String>> {
+    if cards.is_empty() {
+        return Vec::new();
+    }
+
+    let mut output: Vec<Vec<String>> = Vec::new();
+    let mut row_cards: Vec<&Vec<String>> = Vec::new();
+    let mut row_width = 0usize;
+    let gap = 4usize;
+
+    for card in cards {
+        let width = card_width(card);
+        let projected_width = if row_cards.is_empty() {
+            width
+        } else {
+            row_width + gap + width
+        };
+        if !row_cards.is_empty() && projected_width > max_width {
+            output.push(render_card_row(&row_cards, gap));
+            row_cards.clear();
+            row_width = 0;
+        }
+
+        if row_cards.is_empty() {
+            row_width = width;
+        } else {
+            row_width += gap + width;
+        }
+        row_cards.push(card);
+    }
+
+    if !row_cards.is_empty() {
+        output.push(render_card_row(&row_cards, gap));
+    }
+
+    output
+}
+
+fn render_card_row(cards: &[&Vec<String>], gap: usize) -> Vec<String> {
+    let row_height = cards.iter().map(|card| card.len()).max().unwrap_or(0);
+    let card_widths: Vec<usize> = cards.iter().map(|card| card_width(card)).collect();
+    let spacer = " ".repeat(gap);
+    let mut row_lines = Vec::new();
+
+    for line_idx in 0..row_height {
+        let mut assembled = String::new();
+        for (card_idx, card) in cards.iter().enumerate() {
+            if card_idx > 0 {
+                assembled.push_str(&spacer);
+            }
+            let line = card.get(line_idx).map(String::as_str).unwrap_or("");
+            assembled.push_str(line);
+            let visible_pad = card_widths[card_idx].saturating_sub(visible_width(line));
+            if visible_pad > 0 {
+                assembled.push_str(&" ".repeat(visible_pad));
+            }
+        }
+        row_lines.push(assembled.trim_end().to_string());
+    }
+
+    row_lines
+}
+
+fn card_width(card: &[String]) -> usize {
+    card.iter()
+        .map(|line| visible_width(line))
+        .max()
+        .unwrap_or(0)
+}
+
+fn terminal_columns() -> usize {
+    env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&width| width >= 60)
+        .unwrap_or(120)
+}
+
+fn compute_chart_width(columns: usize) -> usize {
+    let min_width = 24usize;
+    let preferred = 40usize;
+    let gap = 4usize;
+    let estimated_cpu_overhead = 10usize;
+    let estimated_mem_overhead = 22usize;
+    let total_overhead = estimated_cpu_overhead + estimated_mem_overhead + gap;
+
+    if columns <= total_overhead + (min_width * 2) {
+        return min_width;
+    }
+
+    let available_plot_space = columns - total_overhead;
+    let per_chart = available_plot_space / 2;
+    per_chart.clamp(min_width, preferred)
+}
+
+fn visible_width(s: &str) -> usize {
+    let mut width = 0usize;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += 1;
+    }
+    width
 }
 
 /// Resample data to a specific width by interpolation or repetition
@@ -316,5 +509,39 @@ mod tests {
         // Test downsampling
         let downsampled = resample_to_width(&[1.0, 2.0, 3.0, 4.0, 5.0], 3);
         assert_eq!(downsampled.len(), 3);
+    }
+
+    #[test]
+    fn test_add_right_axis_percentage_labels() {
+        let graph = " 2.0000┤╭─\n 1.0000┤│ \n 0.0000┼─ ";
+        let with_right = add_right_axis_percentage_labels(graph, 2.0, "(%)", true);
+        assert!(with_right.contains("100.00(%)"));
+        assert!(with_right.contains(" 50.00(%)"));
+        assert!(with_right.contains("  0.00(%)"));
+    }
+
+    #[test]
+    fn test_layout_cards_wraps_when_width_small() {
+        let cards = vec![
+            vec!["card1".to_string(), "line2".to_string()],
+            vec!["card2".to_string(), "line2".to_string()],
+            vec!["card3".to_string(), "line2".to_string()],
+        ];
+        let rendered = layout_cards_with_wrapping(&cards, 15);
+        let joined = rendered
+            .iter()
+            .map(|row| row.join("\n"))
+            .collect::<Vec<String>>()
+            .join("\n\n");
+        assert!(joined.contains("card1"));
+        assert!(joined.contains("card2"));
+        assert!(joined.contains("card3"));
+        assert!(joined.contains("\n\n"));
+    }
+
+    #[test]
+    fn test_compute_chart_width_prefers_inline_layout() {
+        assert_eq!(compute_chart_width(120), 40);
+        assert_eq!(compute_chart_width(80), 24);
     }
 }
