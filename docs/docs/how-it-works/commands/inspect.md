@@ -8,18 +8,18 @@ title: inspect
 View detailed metrics for a specific service.
 
 ```sh
-$ sysg inspect myservice
+$ sysg inspect --service myservice
 ```
 
 ## Options
 
 | Option | Description |
 |--------|------------|
+| `-s, --service` | Name of the service to inspect |
 | `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
 | `--config` | Path to configuration file |
 | `--json` | Emit machine-readable JSON output instead of a report |
 | `--sys` | Opt into privileged system mode. Requires running as root |
-| `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--no-color` | Disable ANSI colors in output |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
@@ -28,7 +28,7 @@ $ sysg inspect myservice
 ### View service metrics
 
 ```sh
-$ sysg inspect api
+$ sysg inspect --service api
 ```
 
 Shows CPU and memory usage chart:
@@ -54,15 +54,7 @@ CPU: 45.2% (current)  Memory: 23.1% (current)
 ### Stream with a longer rolling window
 
 ```sh
-$ sysg inspect api --stream 24h
-```
-
-### Inspect by hash
-
-Useful for cron jobs:
-
-```sh
-$ sysg inspect 3abad7ffa39c
+$ sysg inspect --service api --stream 24h
 ```
 
 ## Metrics shown

@@ -90,6 +90,9 @@ services:
     user: "www-data"  # Drops root after binding port 80
 ```
 
+`--drop-privileges` affects child service spawning (`start`/`restart`) and does
+not change privileges for read-only control commands.
+
 ### Isolate untrusted workloads
 
 ```yaml

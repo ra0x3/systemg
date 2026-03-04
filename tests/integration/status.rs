@@ -116,7 +116,8 @@ services:
     let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
     let output = Command::new(sysg_bin)
         .arg("inspect")
-        .arg(&hash)
+        .arg("--service")
+        .arg("demo")
         .arg("--config")
         .arg(config_path.as_os_str())
         .arg("--json")

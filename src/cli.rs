@@ -214,8 +214,9 @@ pub enum Commands {
         #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
 
-        /// Name or hash of the unit to inspect.
-        unit: String,
+        /// Name of the service to inspect.
+        #[arg(short, long)]
+        service: String,
 
         /// Emit machine-readable JSON output instead of a report.
         #[arg(long)]
@@ -300,8 +301,15 @@ mod tests {
 
     #[test]
     fn inspect_accepts_stream() {
-        let cli =
-            Cli::try_parse_from(["sysg", "inspect", "demo", "--stream", "2m"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "sysg",
+            "inspect",
+            "--service",
+            "demo",
+            "--stream",
+            "2m",
+        ])
+        .unwrap();
         match cli.command {
             Commands::Inspect { stream, .. } => {
                 assert_eq!(stream.as_deref(), Some("2m"))
@@ -331,7 +339,15 @@ mod tests {
     #[test]
     fn inspect_rejects_window() {
         assert!(
-            Cli::try_parse_from(["sysg", "inspect", "demo", "--window", "5s"]).is_err()
+            Cli::try_parse_from([
+                "sysg",
+                "inspect",
+                "--service",
+                "demo",
+                "--window",
+                "5s",
+            ])
+            .is_err()
         );
     }
 }

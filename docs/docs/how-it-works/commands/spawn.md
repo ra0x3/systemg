@@ -19,7 +19,6 @@ $ sysg spawn --name worker_1 -- python worker.py
 | `--ttl` | Time-to-live in seconds (optional) |
 | `--parent-pid` | Parent process ID (defaults to caller's parent PID if not specified) |
 | `--sys` | Opt into privileged system mode. Requires running as root |
-| `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--log-level` | Override the logging verbosity for the spawned process |
 
 ## Examples

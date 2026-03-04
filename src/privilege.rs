@@ -10,6 +10,8 @@ use std::{collections::HashMap, io, path::PathBuf};
 use libc::{RLIM_INFINITY, RLIMIT_MEMLOCK, c_int, id_t, rlimit};
 #[cfg(target_os = "linux")]
 use libc::{c_uint, size_t};
+#[cfg(target_os = "linux")]
+use nix::errno::Errno;
 use nix::unistd::{Group, Uid, User, getgid, getuid};
 #[cfg(target_os = "linux")]
 use tracing::info;
@@ -314,15 +316,15 @@ impl PrivilegeContext {
         }
 
         if self.capabilities.is_empty() {
-            for set in [
-                CapSet::Effective,
-                CapSet::Permitted,
-                CapSet::Inheritable,
-                CapSet::Bounding,
-                CapSet::Ambient,
-            ] {
+            for set in [CapSet::Effective, CapSet::Permitted, CapSet::Inheritable] {
                 caps::clear(None, set).map_err(caps_err)?;
             }
+
+            // Some container kernels disallow bounding/ambient mutations even
+            // for root (EINVAL/EPERM). Keep service startup resilient in those
+            // environments while still clearing the core capability sets.
+            clear_cap_set_best_effort(CapSet::Bounding);
+            clear_cap_set_best_effort(CapSet::Ambient);
             return Ok(());
         }
 
@@ -357,7 +359,7 @@ impl PrivilegeContext {
         }
 
         if self.capabilities.is_empty() {
-            caps::clear(None, CapSet::Ambient).map_err(caps_err)?;
+            clear_cap_set_best_effort(CapSet::Ambient);
             return Ok(());
         }
 
@@ -512,6 +514,23 @@ impl PrivilegeContext {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn clear_cap_set_best_effort(set: CapSet) {
+    if let Err(err) = caps::clear(None, set) {
+        match caps_errno(&err) {
+            Some(Errno::EINVAL) | Some(Errno::EPERM) | Some(Errno::ENOTSUP) => {
+                warn!(
+                    "Skipping unsupported capability set clear for {:?}: {}",
+                    set, err
+                );
+            }
+            _ => {
+                warn!("Failed to clear capability set {:?}: {}", set, err);
+            }
+        }
+    }
+}
+
 fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
     let rlim = match value {
         LimitValue::Fixed(v) => rlimit {
@@ -552,6 +571,16 @@ fn parse_caps(names: &[String]) -> io::Result<HashSet<Capability>> {
 #[cfg(target_os = "linux")]
 fn caps_err(err: CapsError) -> io::Error {
     io::Error::other(err.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn caps_errno(err: &CapsError) -> Option<Errno> {
+    err.to_string()
+        .split(':')
+        .next_back()
+        .map(str::trim)
+        .and_then(|segment| segment.parse::<i32>().ok())
+        .map(Errno::from_raw)
 }
 
 #[cfg(target_os = "linux")]

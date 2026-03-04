@@ -1,7 +1,6 @@
 //! ASCII charting for metrics visualization using our custom rasciigraph.
 
-use std::env;
-use std::error::Error;
+use std::{env, error::Error};
 
 use chrono::Local;
 

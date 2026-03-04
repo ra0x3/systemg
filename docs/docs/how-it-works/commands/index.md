@@ -13,7 +13,7 @@ $ sysg stop                      # Stop services
 $ sysg restart                   # Restart services
 $ sysg status                    # Check health
 $ sysg logs                      # View output
-$ sysg inspect api               # View metrics
+$ sysg inspect --service api     # View metrics
 $ sysg spawn --name w1 -- cmd    # Create child
 $ sysg purge                     # Clear all state
 ```

@@ -40,13 +40,57 @@ cleanup() {
     CLEANUP_IN_PROGRESS=1
 
     log_info "Cleaning up..."
-    sysg purge 2>/dev/null || true
-    rm -rf /var/run/systemg/* /var/log/systemg/* /tmp/sysg-test-*
+    sysg --sys purge 2>/dev/null || true
+    rm -rf /var/lib/systemg/* /var/log/systemg/* /tmp/sysg-test-*
     pkill -f "sysg supervisor" 2>/dev/null || true
 }
 
 # Set up trap for cleanup
 trap cleanup EXIT INT TERM
+
+# ==============================================================================
+# SCENARIO 0: Privileged Flag Contract
+# ==============================================================================
+log_test "Scenario 0: --sys and --drop-privileges contract"
+
+cat > /tmp/priv-flags.yaml <<EOF
+version: "1"
+services:
+  privilege_probe:
+    command: "sh -lc 'id -un > /tmp/privilege_probe_user; sleep 30'"
+    restart_policy: "never"
+EOF
+
+sysg --sys purge 2>/dev/null || true
+
+log_info "Starting privilege probe with --sys --drop-privileges..."
+if sysg start --sys --drop-privileges --daemonize --config /tmp/priv-flags.yaml; then
+    log_success "Privilege probe launched"
+else
+    log_fail "Privilege probe failed to launch"
+fi
+
+sleep 2
+if [ -f /tmp/privilege_probe_user ]; then
+    RUN_USER=$(cat /tmp/privilege_probe_user | tr -d '[:space:]')
+    if [ "$RUN_USER" = "nobody" ]; then
+        log_success "Child service dropped to nobody as expected"
+    else
+        log_fail "Expected child service user 'nobody', got '$RUN_USER'"
+    fi
+else
+    log_fail "Privilege probe did not write runtime user marker"
+fi
+
+log_info "Verifying --drop-privileges no-op warning on non-spawn command..."
+STATUS_WARN=$(sysg --sys status --drop-privileges --config /tmp/priv-flags.yaml 2>&1 || true)
+if echo "$STATUS_WARN" | grep -q "only applies when spawning child services"; then
+    log_success "Non-spawn command emitted drop-privileges no-op warning"
+else
+    log_fail "Expected no-op warning for --drop-privileges on status"
+fi
+
+sysg --sys purge 2>/dev/null || true
 
 # ==============================================================================
 # SCENARIO 1: System Service Management (Database, Web Server, Cache)
@@ -131,7 +175,7 @@ if [ "$START_RESULT" -eq 0 ]; then
     log_success "All services started successfully"
 else
     log_fail "Failed to start services (exit code: $START_RESULT)"
-    sysg status --config /etc/systemg/systemg.yaml 2>&1 || true
+    sysg --sys status --config /etc/systemg/systemg.yaml 2>&1 || true
     exit 1
 fi
 
@@ -139,16 +183,16 @@ sleep 3
 
 # Test 2: Verify service status and health checks
 log_info "Checking service health..."
-STATUS_OUTPUT=$(sysg status --config /etc/systemg/systemg.yaml 2>&1) || true
+STATUS_OUTPUT=$(sysg --sys status --no-color --config /etc/systemg/systemg.yaml 2>&1) || true
 echo "$STATUS_OUTPUT"
 
-if echo "$STATUS_OUTPUT" | grep -q "postgres.*running"; then
+if echo "$STATUS_OUTPUT" | grep -q "postgres" && ! echo "$STATUS_OUTPUT" | grep -q "postgres.*Not running"; then
     log_success "PostgreSQL is running"
 else
     log_fail "PostgreSQL is not running"
 fi
 
-if echo "$STATUS_OUTPUT" | grep -q "nginx.*running"; then
+if echo "$STATUS_OUTPUT" | grep -q "nginx" && ! echo "$STATUS_OUTPUT" | grep -q "nginx.*Not running"; then
     log_success "Nginx is running with dependency"
 else
     log_fail "Nginx failed to start"
@@ -157,7 +201,8 @@ fi
 # Test 3: Service isolation and resource management
 log_info "Testing service isolation..."
 # For mock services, we'll check if the service is reported as running
-if sysg status --config /etc/systemg/systemg.yaml | grep -q "postgres.*running"; then
+if sysg --sys status --no-color --config /etc/systemg/systemg.yaml | grep -q "postgres" \
+    && ! sysg --sys status --no-color --config /etc/systemg/systemg.yaml | grep -q "postgres.*Not running"; then
     log_success "PostgreSQL service managed by systemg (mock)"
 else
     log_fail "PostgreSQL service not running"
@@ -184,7 +229,7 @@ sed -i 's/worker.py/worker_v2.py/' /etc/systemg/systemg.yaml
 
 # Perform rolling restart
 log_info "Performing rolling restart of workers..."
-if sysg restart --service app_worker --config /etc/systemg/systemg.yaml 2>&1; then
+if sysg --sys restart --service app_worker --config /etc/systemg/systemg.yaml 2>&1; then
     log_success "Rolling deployment completed"
 else
     log_fail "Rolling deployment failed"
@@ -197,7 +242,7 @@ log_test "Scenario 3: System monitoring and troubleshooting"
 
 # Test log streaming
 log_info "Testing real-time log streaming..."
-timeout 5 sysg logs --service app_worker &
+timeout 5 sysg --sys logs --service app_worker &
 LOGS_PID=$!
 sleep 2
 if kill -0 $LOGS_PID 2>/dev/null; then
@@ -209,7 +254,7 @@ fi
 
 # Test metrics collection
 log_info "Collecting system metrics..."
-if sysg inspect app_worker --json > /tmp/metrics.json; then
+if sysg --sys inspect --service app_worker --json > /tmp/metrics.json; then
     if [ -s /tmp/metrics.json ]; then
         log_success "Metrics collection successful"
     else
@@ -221,7 +266,7 @@ fi
 
 # Test specific service logs
 log_info "Testing service-specific log retrieval..."
-if sysg logs --service nginx --lines 10 2>/dev/null | grep -q nginx; then
+if sysg --sys logs --service nginx --lines 10 2>/dev/null | grep -q nginx; then
     log_success "Service-specific logs accessible"
 else
     log_info "Nginx logs may not be available yet"
@@ -252,9 +297,9 @@ fi
 
 # Test graceful degradation
 log_info "Testing graceful service degradation..."
-sysg stop --service postgres --config /etc/systemg/systemg.yaml 2>&1 || true
+sysg --sys stop --service postgres --config /etc/systemg/systemg.yaml 2>&1 || true
 sleep 2
-if sysg status --config /etc/systemg/systemg.yaml 2>&1 | grep -q "app_worker.*stopped"; then
+if sysg --sys status --config /etc/systemg/systemg.yaml 2>&1 | grep -q "app_worker.*stopped"; then
     log_success "Dependent services stopped gracefully"
 else
     log_info "Dependent services may still be running"
@@ -286,14 +331,14 @@ EOF
 
 # Reload configuration
 log_info "Reloading configuration with cron jobs..."
-if sysg restart --config /etc/systemg/systemg.yaml; then
+if sysg --sys restart --config /etc/systemg/systemg.yaml; then
     log_success "Configuration reloaded with cron jobs"
 else
     log_fail "Failed to reload configuration"
 fi
 
 # Verify cron jobs are scheduled
-if sysg status --config /etc/systemg/systemg.yaml | grep -q "db_backup.*scheduled"; then
+if sysg --sys status --config /etc/systemg/systemg.yaml | grep -q "db_backup.*scheduled"; then
     log_success "Backup cron job scheduled"
 else
     log_fail "Backup cron job not scheduled"
@@ -320,8 +365,8 @@ fi
 
 # Test PID file permissions
 log_info "Checking PID file security..."
-if [ -f /var/run/systemg/supervisor.pid ]; then
-    PERMS=$(stat -c %a /var/run/systemg/supervisor.pid)
+if [ -f /var/lib/systemg/sysg.pid ]; then
+    PERMS=$(stat -c %a /var/lib/systemg/sysg.pid)
     if [ "$PERMS" = "644" ] || [ "$PERMS" = "600" ]; then
         log_success "PID file has secure permissions"
     else
@@ -338,9 +383,9 @@ log_test "Scenario 7: Bulk operations for maintenance"
 
 # Stop all services except critical ones
 log_info "Entering maintenance mode (stopping non-critical services)..."
-sysg stop --service app_worker --config /etc/systemg/systemg.yaml
-sysg stop --service log_aggregator --config /etc/systemg/systemg.yaml
-if sysg status --config /etc/systemg/systemg.yaml | grep -q "app_worker.*stopped"; then
+sysg --sys stop --service app_worker --config /etc/systemg/systemg.yaml
+sysg --sys stop --service log_aggregator --config /etc/systemg/systemg.yaml
+if sysg --sys status --config /etc/systemg/systemg.yaml | grep -q "app_worker.*stopped"; then
     log_success "Non-critical services stopped for maintenance"
 else
     log_fail "Failed to stop services for maintenance"
@@ -352,7 +397,7 @@ sed -i 's/max_restarts: 3/max_restarts: 5/' /etc/systemg/systemg.yaml
 
 # Restart all services
 log_info "Exiting maintenance mode..."
-if sysg restart --config /etc/systemg/systemg.yaml; then
+if sysg --sys restart --config /etc/systemg/systemg.yaml; then
     log_success "All services restarted after maintenance"
 else
     log_fail "Failed to restart services"
@@ -365,14 +410,14 @@ log_test "Scenario 8: Emergency recovery procedures"
 
 # Simulate stuck supervisor
 log_info "Testing recovery from stuck supervisor..."
-SUPER_PID=$(cat /var/run/systemg/supervisor.pid 2>/dev/null)
+SUPER_PID=$(cat /var/lib/systemg/sysg.pid 2>/dev/null)
 if [ -n "$SUPER_PID" ]; then
     # Create artificial deadlock scenario
     kill -STOP $SUPER_PID 2>/dev/null || true
     sleep 2
 
     # Try to recover
-    if sysg purge; then
+    if sysg --sys purge; then
         log_success "Successfully purged stuck supervisor"
     else
         log_fail "Failed to purge stuck supervisor"
@@ -409,7 +454,7 @@ done
 
 cd /tmp
 if sysg start --sys --daemonize --config load-test.yaml; then
-    SERVICE_COUNT=$(sysg status --config load-test.yaml | grep -c "running")
+    SERVICE_COUNT=$(sysg --sys status --config load-test.yaml | grep -c "running")
     if [ "$SERVICE_COUNT" -ge 15 ]; then
         log_success "Successfully managing $SERVICE_COUNT services"
     else
@@ -420,7 +465,7 @@ else
 fi
 
 # Clean up load test
-sysg purge
+sysg --sys purge
 
 # ==============================================================================
 # FINAL: Clean shutdown test
@@ -432,14 +477,14 @@ sysg start --sys --daemonize --config /etc/systemg/systemg.yaml
 
 # Test graceful shutdown
 log_info "Testing graceful shutdown..."
-if sysg stop --config /etc/systemg/systemg.yaml; then
+if sysg --sys stop --config /etc/systemg/systemg.yaml; then
     log_success "Graceful shutdown completed"
 else
     log_fail "Graceful shutdown failed"
 fi
 
 # Verify cleanup
-if [ -z "$(ls -A /var/run/systemg 2>/dev/null)" ]; then
+if [ -z "$(ls -A /var/lib/systemg 2>/dev/null)" ]; then
     log_success "PID files cleaned up"
 else
     log_fail "PID files remain after shutdown"

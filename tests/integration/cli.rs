@@ -208,3 +208,45 @@ fn sys_flag_requires_root_privileges() {
         "stderr should mention missing root privileges: {stderr}"
     );
 }
+
+#[test]
+fn inspect_requires_service_flag_not_positional_arg() {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("inspect")
+        .arg("demo-service")
+        .output()
+        .expect("failed to invoke sysg inspect");
+
+    assert!(
+        !output.status.success(),
+        "inspect should reject positional service arguments"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument") && stderr.contains("--service"),
+        "stderr should direct usage to --service: {stderr}"
+    );
+}
+
+#[test]
+fn drop_privileges_warns_for_non_spawn_commands() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("status")
+        .arg("--drop-privileges")
+        .output()
+        .expect("failed to invoke sysg status");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let expected_non_root = "--drop-privileges has no effect when not running as root";
+    let expected_non_spawn = "--drop-privileges only applies when spawning child services during start/restart; this command will ignore it";
+    assert!(
+        stderr.contains(expected_non_root) || stderr.contains(expected_non_spawn),
+        "expected drop-privileges warning in stderr: {stderr}"
+    );
+}

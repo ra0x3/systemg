@@ -22,6 +22,9 @@ Enable privileged mode to:
 $ sudo sysg --sys start --daemonize
 ```
 
+If you also pass `--drop-privileges`, it applies to child service processes at
+spawn time (not to read-only control commands like `status` or `logs`).
+
 The `--sys` flag moves state to system directories:
 - `/var/lib/systemg/` - Runtime state
 - `/var/log/systemg/` - Logs

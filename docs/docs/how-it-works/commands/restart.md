@@ -47,7 +47,8 @@ $ sudo sysg restart --sys
 
 ### `--drop-privileges`
 
-Drop privileges after performing privileged setup.
+Drop child service privileges during spawn. When enabled in root/system mode,
+services without an explicit `user` run as `nobody`.
 
 ```sh
 $ sudo sysg restart --sys --drop-privileges

@@ -18,7 +18,6 @@ $ sysg purge
 | Option | Description |
 |--------|------------|
 | `--sys` | Opt into privileged system mode. Requires running as root |
-| `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## What gets removed

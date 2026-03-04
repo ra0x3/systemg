@@ -19,7 +19,6 @@ $ sysg status
 | `--service` | Show specific service details |
 | `--all` | Show all services including orphaned state (services not in current config) |
 | `--sys` | Opt into privileged system mode. Requires running as root |
-| `--drop-privileges` | Drop privileges after performing privileged setup |
 | `--json` | Emit machine-readable JSON output instead of a table |
 | `--no-color` | Disable ANSI colors in output |
 | `--stream` | Continuously refresh status at the provided interval (e.g., `5`, `1s`, `2m`) |

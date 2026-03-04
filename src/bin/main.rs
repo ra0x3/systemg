@@ -42,6 +42,8 @@ use tracing_subscriber::EnvFilter;
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
     let euid = Uid::effective();
+    let drop_privileges_effective =
+        args.drop_privileges && drop_privileges_applies_to_command(&args.command);
 
     let runtime_mode = if args.sys {
         if !euid.is_root() {
@@ -57,10 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     runtime::init(runtime_mode);
-    runtime::set_drop_privileges(args.drop_privileges);
-    if args.drop_privileges && !euid.is_root() {
-        warn!("--drop-privileges has no effect when not running as root");
-    }
+    runtime::set_drop_privileges(drop_privileges_effective);
     runtime::capture_socket_activation();
 
     let use_file_logging = matches!(
@@ -75,8 +74,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     init_logging(&args, use_file_logging);
 
+    if args.drop_privileges && !euid.is_root() {
+        warn!("--drop-privileges has no effect when not running as root");
+    } else if args.drop_privileges && !drop_privileges_effective {
+        warn!(
+            "--drop-privileges only applies when spawning child services during start/restart; this command will ignore it"
+        );
+    }
+
     if euid.is_root() && runtime_mode == RuntimeMode::User {
         warn!("Running as root without --sys; state will be stored in userspace paths");
+        if system_mode_state_detected() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Detected system-mode state at /var/lib/systemg while running as root without --sys. Re-run with --sys to avoid targeting the wrong runtime.",
+            )
+            .into());
+        }
     }
 
     match args.command {
@@ -88,6 +102,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             if daemonize {
                 if supervisor_running() {
                     // If supervisor is running and we have a specific service, send Start command
+                    if args.drop_privileges {
+                        warn!(
+                            "--drop-privileges is managed by the running supervisor and has no effect for this start request"
+                        );
+                    }
                     if let Some(service_name) = service {
                         let command = ControlCommand::Start {
                             service: Some(service_name.clone()),
@@ -169,6 +188,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             daemonize,
         } => {
             if supervisor_running() {
+                if args.drop_privileges {
+                    warn!(
+                        "--drop-privileges is managed by the running supervisor and has no effect for this restart request"
+                    );
+                }
                 let config_override = if config.is_empty() {
                     None
                 } else {
@@ -258,7 +282,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         Commands::Inspect {
             config,
-            unit,
+            service,
             json,
             no_color,
             stream,
@@ -299,9 +323,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             if stream.is_some() {
                 let sleep_interval = Duration::from_secs(stream_seconds);
                 loop {
-                    let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
+                    let payload =
+                        fetch_inspect(&effective_config, &service, samples_limit)?;
                     if payload.unit.is_none() {
-                        eprintln!("Unit '{unit}' not found.");
+                        eprintln!("Service '{service}' not found.");
                         process::exit(2);
                     }
                     print!("\x1B[2J\x1B[H");
@@ -310,9 +335,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                     thread::sleep(sleep_interval);
                 }
             } else {
-                let payload = fetch_inspect(&effective_config, &unit, samples_limit)?;
+                let payload = fetch_inspect(&effective_config, &service, samples_limit)?;
                 if payload.unit.is_none() {
-                    eprintln!("Unit '{unit}' not found.");
+                    eprintln!("Service '{service}' not found.");
                     process::exit(2);
                 }
 
@@ -483,6 +508,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn drop_privileges_applies_to_command(command: &Commands) -> bool {
+    matches!(command, Commands::Start { .. } | Commands::Restart { .. })
+}
+
+fn system_mode_state_detected() -> bool {
+    let state_dir = PathBuf::from("/var/lib/systemg");
+    state_dir.join("sysg.pid").exists() || state_dir.join("control.sock").exists()
 }
 
 #[cfg(test)]
@@ -877,6 +911,29 @@ mod tests {
         let prefix = "   │  └─ ";
         let label = truncate_nested_unit_label(prefix, "child", 6);
         assert_eq!(label, "   ...");
+    }
+
+    #[test]
+    fn drop_privileges_is_spawn_only() {
+        assert!(drop_privileges_applies_to_command(&Commands::Start {
+            config: "systemg.yaml".to_string(),
+            daemonize: false,
+            service: None,
+        }));
+        assert!(drop_privileges_applies_to_command(&Commands::Restart {
+            config: "systemg.yaml".to_string(),
+            service: None,
+            daemonize: false,
+        }));
+        assert!(!drop_privileges_applies_to_command(&Commands::Status {
+            config: "systemg.yaml".to_string(),
+            service: None,
+            all: false,
+            json: false,
+            no_color: false,
+            full_cmd: false,
+            stream: None,
+        }));
     }
 }
 
