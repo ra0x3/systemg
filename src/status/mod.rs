@@ -1865,6 +1865,15 @@ impl StatusManager {
             .output()
             .ok()
             .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|s| {
+                s.trim()
+                    .chars()
+                    .map(|ch| if ch.is_control() { ' ' } else { ch })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .unwrap_or_else(|| "Unknown".to_string())
     }
 }

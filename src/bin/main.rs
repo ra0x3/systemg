@@ -920,6 +920,90 @@ mod tests {
         assert!(rendered.contains('.'));
     }
 
+    #[test]
+    fn sanitize_table_cell_collapses_control_characters() {
+        let sanitized = sanitize_table_cell("foo\tbar\nbaz\rqux");
+        assert_eq!(sanitized, "foo bar baz qux");
+    }
+
+    #[test]
+    fn format_row_sanitizes_multiline_cells() {
+        let columns = vec![
+            Column {
+                title: "A",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "B",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "C",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "D",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "E",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "F",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "G",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "H",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "I",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "J",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "K",
+                width: 8,
+                align: Alignment::Left,
+            },
+        ];
+        let values = [
+            "ok".to_string(),
+            "ok".to_string(),
+            "ok".to_string(),
+            "ok".to_string(),
+            "ok".to_string(),
+            "ok".to_string(),
+            "ok".to_string(),
+            "ok".to_string(),
+            "cmd line one\nline two".to_string(),
+            "ok".to_string(),
+            "ok".to_string(),
+        ];
+
+        let row = format_row(&values, &columns);
+        assert!(!row.contains('\n'));
+        assert_eq!(visible_length(&row), total_inner_width(&columns) + 2);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn parse_proc_stat_line_extracts_priority_and_cpu_ticks() {
@@ -1880,8 +1964,9 @@ fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
 fn format_row(values: &[String; 11], columns: &[Column]) -> String {
     let mut row = String::from('│');
     for (value, column) in values.iter().zip(columns.iter()) {
+        let sanitized = sanitize_table_cell(value);
         row.push(' ');
-        row.push_str(&ansi_pad(value, column.width, column.align));
+        row.push_str(&ansi_pad(&sanitized, column.width, column.align));
         row.push(' ');
         row.push('│');
     }
@@ -2617,12 +2702,44 @@ fn append_inspect_process_rows(
 fn format_row_cells(values: &[String], columns: &[Column], _no_color: bool) -> String {
     let mut row = String::from('│');
     for (value, column) in values.iter().zip(columns.iter()) {
+        let sanitized = sanitize_table_cell(value);
         row.push(' ');
-        row.push_str(&ansi_pad(value, column.width, column.align));
+        row.push_str(&ansi_pad(&sanitized, column.width, column.align));
         row.push(' ');
         row.push('│');
     }
     row
+}
+
+fn sanitize_table_cell(value: &str) -> String {
+    let mut collapsed = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            collapsed.push(ch);
+            for next in chars.by_ref() {
+                collapsed.push(next);
+                if next == 'm' {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if matches!(ch, '\n' | '\r' | '\t') {
+            collapsed.push(' ');
+            continue;
+        }
+
+        if ch.is_control() {
+            collapsed.push(' ');
+            continue;
+        }
+
+        collapsed.push(ch);
+    }
+
+    collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn process_display_name(process: &sysinfo::Process) -> String {
