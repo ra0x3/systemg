@@ -17,7 +17,7 @@ use nix::{
     sys::signal,
     unistd::{Pid, Uid},
 };
-use sysinfo::{ProcessesToUpdate, System};
+use sysinfo::{Pid as SysPid, ProcessesToUpdate, System, Users};
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
     cli::{Cli, Commands, parse_args},
@@ -911,6 +911,24 @@ mod tests {
         let prefix = "   │  └─ ";
         let label = truncate_nested_unit_label(prefix, "child", 6);
         assert_eq!(label, "   ...");
+    }
+
+    #[test]
+    fn format_cpu_time_from_ticks_formats_centiseconds() {
+        let rendered = format_cpu_time_from_ticks(1234);
+        assert!(rendered.contains(':'));
+        assert!(rendered.contains('.'));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_stat_line_extracts_priority_and_cpu_ticks() {
+        let sample = "1234 (bash) S 1000 1234 1234 0 -1 4194560 290 0 0 0 210 35 0 0 20 0 1 0 12345 123456789 1024 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+        let parsed = parse_proc_stat_line(sample).expect("parse stat line");
+        assert_eq!(parsed.ppid, Some(1000));
+        assert_eq!(parsed.priority, Some(20));
+        assert_eq!(parsed.nice, Some(0));
+        assert_eq!(parsed.cpu_ticks, Some(245));
     }
 
     #[test]
@@ -2238,6 +2256,11 @@ fn render_inspect(
         println!("No metrics available for the specified window.");
     }
 
+    if unit.kind != UnitKind::Cron {
+        println!();
+        render_inspect_process_table(unit, opts.no_color);
+    }
+
     // Show cron history for cron units
     if unit.kind == UnitKind::Cron
         && let Some(cron_status) = &unit.cron
@@ -2299,6 +2322,417 @@ fn render_inspect(
     }
 
     Ok(health)
+}
+
+#[derive(Clone)]
+struct InspectProcessRow {
+    tree_label: String,
+    pid: u32,
+    ppid: Option<u32>,
+    user: String,
+    pri: Option<i64>,
+    nice: Option<i64>,
+    virt_bytes: u64,
+    res_bytes: u64,
+    shared_bytes: Option<u64>,
+    state: String,
+    cpu_percent: f32,
+    mem_percent: f64,
+    cpu_time: String,
+    command: String,
+}
+
+#[derive(Default)]
+struct LinuxProcStats {
+    ppid: Option<u32>,
+    priority: Option<i64>,
+    nice: Option<i64>,
+    cpu_ticks: Option<u64>,
+    shared_bytes: Option<u64>,
+}
+
+struct InspectProcessContext<'a> {
+    system: &'a System,
+    users: &'a Users,
+    children_by_parent: &'a HashMap<u32, Vec<u32>>,
+    total_memory: f64,
+}
+
+fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
+    let Some(root_runtime) = unit.process.as_ref() else {
+        println!("Process Table: unit is not currently running.");
+        return;
+    };
+
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+
+    let root_pid = root_runtime.pid;
+    if system.process(SysPid::from_u32(root_pid)).is_none() {
+        println!(
+            "Process Table: root process {} is no longer available.",
+            root_pid
+        );
+        return;
+    }
+
+    let users = Users::new_with_refreshed_list();
+    let total_memory = system.total_memory() as f64;
+
+    let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, process) in system.processes() {
+        if let Some(parent) = process.parent() {
+            children_by_parent
+                .entry(parent.as_u32())
+                .or_default()
+                .push(pid.as_u32());
+        }
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_unstable();
+    }
+
+    let context = InspectProcessContext {
+        system: &system,
+        users: &users,
+        children_by_parent: &children_by_parent,
+        total_memory,
+    };
+
+    let mut rows = Vec::new();
+    append_inspect_process_rows(&context, root_pid, "", "", true, &mut rows);
+
+    if rows.is_empty() {
+        println!("Process Table: no running process rows collected.");
+        return;
+    }
+
+    let tree_width = rows
+        .iter()
+        .map(|row| visible_length(&row.tree_label))
+        .max()
+        .unwrap_or(4)
+        .clamp(4, 32);
+    let user_width = rows
+        .iter()
+        .map(|row| visible_length(&row.user))
+        .max()
+        .unwrap_or(4)
+        .clamp(4, 16);
+    let cmd_width = rows
+        .iter()
+        .map(|row| visible_length(&row.command))
+        .max()
+        .unwrap_or(3)
+        .clamp(24, 72);
+
+    let columns = [
+        Column {
+            title: "PROC",
+            width: tree_width,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "PID",
+            width: 7,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "PPID",
+            width: 7,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "USER",
+            width: user_width,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "PRI",
+            width: 4,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "NI",
+            width: 4,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "VIRT",
+            width: 9,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "RES",
+            width: 9,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "SHR",
+            width: 9,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "S",
+            width: 1,
+            align: Alignment::Left,
+        },
+        Column {
+            title: "CPU%",
+            width: 6,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "MEM%",
+            width: 6,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "TIME+",
+            width: 9,
+            align: Alignment::Right,
+        },
+        Column {
+            title: "CMD",
+            width: cmd_width,
+            align: Alignment::Left,
+        },
+    ];
+
+    println!(
+        "Process Table (htop-like, root PID {} with descendants):",
+        root_pid
+    );
+    println!("{}", make_top_border(&columns));
+    println!("{}", format_header_row(&columns));
+    println!("{}", make_separator_border(&columns));
+    for row in &rows {
+        let values = vec![
+            row.tree_label.clone(),
+            row.pid.to_string(),
+            row.ppid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            row.user.clone(),
+            row.pri
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            row.nice
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            format_bytes(row.virt_bytes),
+            format_bytes(row.res_bytes),
+            row.shared_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string()),
+            row.state.clone(),
+            format!("{:.1}", row.cpu_percent),
+            format!("{:.1}", row.mem_percent),
+            row.cpu_time.clone(),
+            row.command.clone(),
+        ];
+        println!("{}", format_row_cells(&values, &columns, no_color));
+    }
+    println!("{}", make_bottom_border(&columns));
+}
+
+fn append_inspect_process_rows(
+    context: &InspectProcessContext<'_>,
+    pid: u32,
+    display_prefix: &str,
+    child_indent: &str,
+    is_root: bool,
+    rows: &mut Vec<InspectProcessRow>,
+) {
+    let Some(process) = context.system.process(SysPid::from_u32(pid)) else {
+        return;
+    };
+
+    let name = process_display_name(process);
+    let tree_label = if is_root {
+        name.clone()
+    } else {
+        format!("{display_prefix}{name}")
+    };
+    let user = process
+        .user_id()
+        .and_then(|uid| context.users.get_user_by_id(uid))
+        .map(|entry| entry.name().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let virt_bytes = process.virtual_memory().saturating_mul(1024);
+    let res_bytes = process.memory().saturating_mul(1024);
+    let mem_percent = if context.total_memory > 0.0 {
+        (process.memory() as f64 / context.total_memory) * 100.0
+    } else {
+        0.0
+    };
+    let linux_stats = read_linux_proc_stats(pid);
+    let ppid = process
+        .parent()
+        .map(|parent| parent.as_u32())
+        .or(linux_stats.ppid);
+    let state = process_status_code(process.status());
+    let cpu_time = linux_stats
+        .cpu_ticks
+        .map(format_cpu_time_from_ticks)
+        .unwrap_or_else(|| format_elapsed(process.run_time()));
+    let command = process_command_line(process);
+
+    rows.push(InspectProcessRow {
+        tree_label,
+        pid,
+        ppid,
+        user,
+        pri: linux_stats.priority,
+        nice: linux_stats.nice,
+        virt_bytes,
+        res_bytes,
+        shared_bytes: linux_stats.shared_bytes,
+        state,
+        cpu_percent: process.cpu_usage(),
+        mem_percent,
+        cpu_time,
+        command,
+    });
+
+    if let Some(children) = context.children_by_parent.get(&pid) {
+        for (index, child_pid) in children.iter().enumerate() {
+            let is_last = index + 1 == children.len();
+            let branch = if is_last { "└─ " } else { "├─ " };
+            let child_display_prefix = format!("{child_indent}{branch}");
+            let next_child_indent =
+                format!("{}{}", child_indent, if is_last { "   " } else { "│  " });
+            append_inspect_process_rows(
+                context,
+                *child_pid,
+                &child_display_prefix,
+                &next_child_indent,
+                false,
+                rows,
+            );
+        }
+    }
+}
+
+fn format_row_cells(values: &[String], columns: &[Column], _no_color: bool) -> String {
+    let mut row = String::from('│');
+    for (value, column) in values.iter().zip(columns.iter()) {
+        row.push(' ');
+        row.push_str(&ansi_pad(value, column.width, column.align));
+        row.push(' ');
+        row.push('│');
+    }
+    row
+}
+
+fn process_display_name(process: &sysinfo::Process) -> String {
+    process.name().to_string_lossy().into_owned()
+}
+
+fn process_command_line(process: &sysinfo::Process) -> String {
+    if process.cmd().is_empty() {
+        process_display_name(process)
+    } else {
+        process
+            .cmd()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn process_status_code(status: sysinfo::ProcessStatus) -> String {
+    format!("{status:?}")
+        .chars()
+        .next()
+        .map(|ch| ch.to_string())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_proc_stats(pid: u32) -> LinuxProcStats {
+    let stat_path = format!("/proc/{pid}/stat");
+    let statm_path = format!("/proc/{pid}/statm");
+    let mut stats = LinuxProcStats::default();
+
+    if let Ok(contents) = fs::read_to_string(stat_path)
+        && let Some(parsed) = parse_proc_stat_line(&contents)
+    {
+        stats.ppid = parsed.ppid;
+        stats.priority = parsed.priority;
+        stats.nice = parsed.nice;
+        stats.cpu_ticks = parsed.cpu_ticks;
+    }
+
+    if let Ok(contents) = fs::read_to_string(statm_path) {
+        let mut fields = contents.split_whitespace();
+        let _size = fields.next();
+        let _resident = fields.next();
+        if let Some(shared_pages) = fields.next()
+            && let Ok(pages) = shared_pages.parse::<u64>()
+        {
+            let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            let page_size = if page_size > 0 {
+                page_size as u64
+            } else {
+                4096
+            };
+            stats.shared_bytes = Some(pages.saturating_mul(page_size));
+        }
+    }
+
+    stats
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_linux_proc_stats(_pid: u32) -> LinuxProcStats {
+    LinuxProcStats::default()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat_line(contents: &str) -> Option<LinuxProcStats> {
+    let closing_paren = contents.rfind(')')?;
+    let remainder = contents.get((closing_paren + 1)..)?.trim();
+    let fields: Vec<&str> = remainder.split_whitespace().collect();
+    if fields.len() <= 16 {
+        return None;
+    }
+
+    let ppid = fields.get(1)?.parse::<u32>().ok();
+    let utime = fields.get(11)?.parse::<u64>().ok();
+    let stime = fields.get(12)?.parse::<u64>().ok();
+    let priority = fields.get(15)?.parse::<i64>().ok();
+    let nice = fields.get(16)?.parse::<i64>().ok();
+
+    Some(LinuxProcStats {
+        ppid,
+        priority,
+        nice,
+        cpu_ticks: match (utime, stime) {
+            (Some(u), Some(s)) => Some(u.saturating_add(s)),
+            _ => None,
+        },
+        shared_bytes: None,
+    })
+}
+
+fn format_cpu_time_from_ticks(ticks: u64) -> String {
+    #[cfg(target_os = "linux")]
+    let hz = {
+        let raw = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if raw > 0 { raw as u64 } else { 100 }
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let hz = 100;
+
+    let hundredths = ticks.saturating_mul(100) / hz.max(1);
+    let secs = hundredths / 100;
+    let centis = hundredths % 100;
+    let mins = secs / 60;
+    let rem_secs = secs % 60;
+    format!("{mins:02}:{rem_secs:02}.{centis:02}")
 }
 
 fn filter_samples(
