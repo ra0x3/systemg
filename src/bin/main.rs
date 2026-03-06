@@ -208,6 +208,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let config_path = resolve_config_path(&config)?;
                 start_supervisor_daemon(config_path, None)?;
             } else {
+                warn!(
+                    "No running supervisor detected; executing restart in local one-shot mode. \
+Use --daemonize in deployment scripts to ensure daemonized supervision is restored if detection fails."
+                );
                 let daemon = build_daemon(&config)?;
                 daemon.restart_services()?;
             }

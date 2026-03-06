@@ -267,6 +267,132 @@ services:
     daemon.shutdown_monitor();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn restart_kills_orphan_when_parent_exits_before_stop() {
+    use std::time::Instant;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let marker_path = dir.join("worker.pid");
+    let script = dir.join("leader_exits.py");
+    fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import os
+import signal
+import sys
+import time
+
+marker = os.environ["WORKER_PID_PATH"]
+
+pid = os.fork()
+if pid == 0:
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    with open(marker, "w") as fh:
+        fh.write(str(os.getpid()))
+        fh.flush()
+    while True:
+        time.sleep(1)
+
+# Leader exits immediately; child remains in the original process group.
+sys.exit(0)
+"#,
+    )
+    .expect("failed to write script");
+    let mut perms = fs::metadata(&script).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  leader_exits:
+    command: "{}"
+    restart_policy: "always"
+    backoff: "1s"
+    env:
+      vars:
+        WORKER_PID_PATH: "{}"
+    deployment:
+      strategy: "immediate"
+"#,
+            script.display(),
+            marker_path.display()
+        ),
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let service_cfg = config
+        .services
+        .get("leader_exits")
+        .expect("service present")
+        .clone();
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services().expect("start services");
+    common::wait_for_path(&marker_path);
+    let first_worker_pid: u32 = fs::read_to_string(&marker_path)
+        .expect("read first worker pid")
+        .trim()
+        .parse()
+        .expect("parse first worker pid");
+    assert!(
+        common::is_process_alive(first_worker_pid),
+        "first worker should be alive before restart"
+    );
+
+    daemon
+        .restart_service("leader_exits", &service_cfg)
+        .expect("restart service");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut new_worker_pid = 0u32;
+    while Instant::now() < deadline {
+        if let Ok(contents) = fs::read_to_string(&marker_path)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && pid != first_worker_pid
+        {
+            new_worker_pid = pid;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        new_worker_pid != 0,
+        "replacement worker pid should be observed"
+    );
+
+    let mut attempts = 0;
+    while attempts < 50 && common::is_process_alive(first_worker_pid) {
+        thread::sleep(Duration::from_millis(100));
+        attempts += 1;
+    }
+
+    assert!(
+        !common::is_process_alive(first_worker_pid),
+        "old worker should be terminated during restart"
+    );
+    assert!(
+        common::is_process_alive(new_worker_pid),
+        "replacement worker should be alive after restart"
+    );
+
+    daemon
+        .stop_service("leader_exits")
+        .expect("stop leader_exits");
+    daemon.shutdown_monitor();
+}
+
 #[test]
 fn stop_succeeds_with_stale_pidfile_entry_with_corrupted_pid() {
     let temp = tempdir().expect("failed to create tempdir");

@@ -1111,11 +1111,20 @@ impl Daemon {
         pending.insert(root_pid);
 
         let supervisor_pgid = unsafe { libc::getpgid(0) };
-        let child_pgid = unsafe { libc::getpgid(root_pid as libc::pid_t) };
+        let group_target = match unsafe { libc::getpgid(root_pid as libc::pid_t) } {
+            pgid if pgid >= 0 => Some(pgid),
+            _ => match std::io::Error::last_os_error().raw_os_error() {
+                Some(code) if code == libc::ESRCH => Some(root_pid as libc::pid_t),
+                _ => None,
+            },
+        };
 
         let signal_group = |signal: libc::c_int| {
-            if child_pgid >= 0 && child_pgid != supervisor_pgid {
-                let result = unsafe { libc::killpg(child_pgid, signal) };
+            if let Some(target_pgid) = group_target
+                && target_pgid >= 0
+                && target_pgid != supervisor_pgid
+            {
+                let result = unsafe { libc::killpg(target_pgid, signal) };
                 if result < 0 {
                     let err = std::io::Error::last_os_error();
                     match err.raw_os_error() {
@@ -1123,12 +1132,12 @@ impl Daemon {
                         Some(code) if code == libc::EPERM => {
                             warn!(
                                 "Insufficient permissions to signal process group {} for '{}'",
-                                child_pgid, service_name
+                                target_pgid, service_name
                             );
                         }
                         _ => {
                             warn!(
-                                "Failed to signal process group {child_pgid} for '{service_name}': {err}"
+                                "Failed to signal process group {target_pgid} for '{service_name}': {err}"
                             );
                         }
                     }
