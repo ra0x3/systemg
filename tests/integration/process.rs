@@ -1,7 +1,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -172,6 +172,7 @@ services:
         .to_string();
     assert_eq!(switched_slot, "8001");
 
+    common::wait_for_path(&port_path);
     let active_slot = fs::read_to_string(&port_path)
         .expect("read active port")
         .trim()
@@ -359,9 +360,13 @@ services:
     daemon.shutdown_monitor();
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn restart_kills_orphan_when_parent_exits_before_stop() {
+#[cfg(unix)]
+fn assert_restart_replaces_worker(
+    service_name: &str,
+    script_name: &str,
+    script_contents: &str,
+    shutdown_monitor_before_restart: bool,
+) {
     use std::time::Instant;
 
     let temp = tempdir().expect("failed to create tempdir");
@@ -371,35 +376,8 @@ fn restart_kills_orphan_when_parent_exits_before_stop() {
     let _home = HomeEnvGuard::set(&home);
 
     let marker_path = dir.join("worker.pid");
-    let script = dir.join("leader_exits.py");
-    fs::write(
-        &script,
-        r#"#!/usr/bin/env python3
-import os
-import signal
-import sys
-import time
-
-marker = os.environ["WORKER_PID_PATH"]
-
-# Place the service in its own process group so restart fallback killpg(root_pid)
-# can still reach the orphan worker after the leader exits.
-os.setpgid(0, 0)
-
-pid = os.fork()
-if pid == 0:
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    with open(marker, "w") as fh:
-        fh.write(str(os.getpid()))
-        fh.flush()
-    while True:
-        time.sleep(1)
-
-# Leader exits immediately; child remains in the original process group.
-sys.exit(0)
-"#,
-    )
-    .expect("failed to write script");
+    let script = dir.join(script_name);
+    fs::write(&script, script_contents).expect("failed to write script");
     let mut perms = fs::metadata(&script).expect("metadata").permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).expect("chmod script");
@@ -410,7 +388,7 @@ sys.exit(0)
         format!(
             r#"version: "1"
 services:
-  leader_exits:
+  {service_name}:
     command: "{}"
     restart_policy: "never"
     backoff: "1s"
@@ -421,7 +399,7 @@ services:
       strategy: "immediate"
 "#,
             script.display(),
-            marker_path.display()
+            marker_path.display(),
         ),
     )
     .expect("write config");
@@ -429,14 +407,15 @@ services:
     let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
     let service_cfg = config
         .services
-        .get("leader_exits")
+        .get(service_name)
         .expect("service present")
         .clone();
     let daemon = Daemon::from_config(config, false).expect("daemon from config");
 
     daemon.start_services().expect("start services");
-    // Keep PID bookkeeping stable for this race-sensitive orphan cleanup scenario.
-    daemon.shutdown_monitor();
+    if shutdown_monitor_before_restart {
+        daemon.shutdown_monitor();
+    }
     common::wait_for_path(&marker_path);
     let first_worker_pid: u32 = fs::read_to_string(&marker_path)
         .expect("read first worker pid")
@@ -449,7 +428,7 @@ services:
     );
 
     daemon
-        .restart_service("leader_exits", &service_cfg)
+        .restart_service(service_name, &service_cfg)
         .expect("restart service");
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -485,10 +464,45 @@ services:
         "replacement worker should be alive after restart"
     );
 
-    daemon
-        .stop_service("leader_exits")
-        .expect("stop leader_exits");
+    daemon.stop_service(service_name).expect("stop service");
     daemon.shutdown_monitor();
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_replaces_worker_without_leak_unix() {
+    let script = r#"#!/bin/sh
+echo $$ > "$WORKER_PID_PATH"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+"#;
+    assert_restart_replaces_worker("steady_worker", "steady_worker.sh", script, false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restart_kills_orphan_parent_exit_linux() {
+    let script = r#"#!/usr/bin/env python3
+import os
+import signal
+import sys
+import time
+
+marker = os.environ["WORKER_PID_PATH"]
+
+pid = os.fork()
+if pid == 0:
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    with open(marker, "w") as fh:
+        fh.write(str(os.getpid()))
+        fh.flush()
+    while True:
+        time.sleep(1)
+
+# Leader exits immediately; child remains alive.
+sys.exit(0)
+"#;
+    assert_restart_replaces_worker("leader_exits", "leader_exits.py", script, true);
 }
 
 #[test]

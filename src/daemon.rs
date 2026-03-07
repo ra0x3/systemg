@@ -101,6 +101,9 @@ fn collect_service_env(
 pub struct PidFile {
     /// Service name -> PID map.
     services: HashMap<String, u32>,
+    /// Service name -> process group ID.
+    #[serde(default)]
+    service_groups: HashMap<String, i32>,
     /// Child PID -> Parent PID mapping for spawned processes.
     #[serde(default)]
     parent_map: HashMap<u32, u32>,
@@ -185,6 +188,11 @@ impl PidFile {
         self.services.get(service).copied()
     }
 
+    /// Returns the process group ID for a specific service.
+    pub fn pgid_for(&self, service: &str) -> Option<i32> {
+        self.service_groups.get(service).copied()
+    }
+
     /// Reloads from disk.
     pub fn reload() -> Result<Self, PidFileError> {
         let _lock = Self::acquire_lock()?;
@@ -207,6 +215,16 @@ impl PidFile {
 
     /// Atomically inserts PID.
     pub fn insert(&mut self, service: &str, pid: u32) -> Result<(), PidFileError> {
+        self.insert_with_group(service, pid, None)
+    }
+
+    /// Atomically inserts PID and optional process group ID.
+    pub fn insert_with_group(
+        &mut self,
+        service: &str,
+        pid: u32,
+        pgid: Option<i32>,
+    ) -> Result<(), PidFileError> {
         let _lock = Self::acquire_lock()?;
 
         let path = Self::path();
@@ -216,6 +234,28 @@ impl PidFile {
         }
 
         self.services.insert(service.to_string(), pid);
+        if let Some(group) = pgid {
+            self.service_groups.insert(service.to_string(), group);
+        }
+
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    /// Atomically clears a service PID while preserving the last known process-group metadata.
+    pub fn clear_pid(&mut self, service: &str) -> Result<(), PidFileError> {
+        let _lock = Self::acquire_lock()?;
+
+        let path = Self::path();
+        if path.exists() {
+            let contents = fs::read_to_string(&path)?;
+            *self = serde_json::from_str::<Self>(&contents)?;
+        }
+
+        if self.services.remove(service).is_none() {
+            return Err(PidFileError::ServiceNotFound);
+        }
 
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
@@ -235,6 +275,7 @@ impl PidFile {
         if self.services.remove(service).is_none() {
             return Err(PidFileError::ServiceNotFound);
         }
+        self.service_groups.remove(service);
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, serde_json::to_string_pretty(self)?)?;
         Ok(())
@@ -463,6 +504,7 @@ mod pidfile_tests {
     fn remove_spawn_subtree_in_memory_prunes_all_descendants() {
         let mut pid_file = PidFile {
             services: HashMap::new(),
+            service_groups: HashMap::new(),
             parent_map: HashMap::from([(2, 1), (3, 2)]),
             children_map: HashMap::from([(1, vec![2]), (2, vec![3])]),
             spawn_depth: HashMap::from([(1, 0), (2, 1), (3, 2)]),
@@ -766,6 +808,7 @@ pub enum ServiceReadyState {
 struct DetachedService {
     child: Child,
     pid: u32,
+    pgid: Option<libc::pid_t>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1011,6 +1054,12 @@ impl Daemon {
         descendants
     }
 
+    /// Returns the process-group ID for `pid` if it can be resolved.
+    fn process_group_for_pid(pid: u32) -> Option<libc::pid_t> {
+        let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if pgid >= 0 { Some(pgid) } else { None }
+    }
+
     /// Signals process. None = liveness check. Also detects Linux zombies.
     fn signal_pid(
         service_name: &str,
@@ -1110,6 +1159,7 @@ impl Daemon {
     pub(crate) fn terminate_process_tree(
         service_name: &str,
         root_pid: u32,
+        group_hint: Option<libc::pid_t>,
     ) -> Result<(), ProcessManagerError> {
         use nix::sys::signal::Signal::{SIGKILL, SIGTERM};
 
@@ -1117,12 +1167,15 @@ impl Daemon {
         pending.insert(root_pid);
 
         let supervisor_pgid = unsafe { libc::getpgid(0) };
-        let group_target = match unsafe { libc::getpgid(root_pid as libc::pid_t) } {
-            pgid if pgid >= 0 => Some(pgid),
-            _ => match std::io::Error::last_os_error().raw_os_error() {
+        let group_target = if let Some(pgid) =
+            group_hint.or_else(|| Self::process_group_for_pid(root_pid))
+        {
+            Some(pgid)
+        } else {
+            match std::io::Error::last_os_error().raw_os_error() {
                 Some(code) if code == libc::ESRCH => Some(root_pid as libc::pid_t),
                 _ => None,
-            },
+            }
         };
 
         let signal_group = |signal: libc::c_int| {
@@ -1398,14 +1451,14 @@ impl Daemon {
     /// * `processes` - Shared process tracking map.
     ///
     /// # Returns
-    /// A [`Child`] process handle if successful.
+    /// The launched PID and resolved process-group ID if successful.
     fn launch_attached_service(
         service_name: &str,
         service_config: &ServiceConfig,
         working_dir: PathBuf,
         processes: Arc<Mutex<HashMap<String, Child>>>,
         detach_children: bool,
-    ) -> Result<u32, ProcessManagerError> {
+    ) -> Result<(u32, Option<libc::pid_t>), ProcessManagerError> {
         let command = &service_config.command;
         debug!("Launching service: '{service_name}' with command: `{command}`");
 
@@ -1499,7 +1552,11 @@ impl Daemon {
                         "Failed to apply post-spawn privilege adjustments for '{service_name}': {err}"
                     );
                 }
-                Ok(pid)
+                let pgid = Self::process_group_for_pid(pid).or_else(|| {
+                    debug!("Could not get pgid for {service_name} (pid {pid}), assuming pid == pgid");
+                    Some(pid as libc::pid_t)
+                });
+                Ok((pid, pgid))
             }
             Err(e) => {
                 error!("Failed to start service '{service_name}': {e}");
@@ -2718,13 +2775,18 @@ impl Daemon {
         let detached_child = self.processes.lock()?.remove(service_name);
 
         if let Some(child) = detached_child {
-            let pid = self
-                .pid_file
-                .lock()?
-                .pid_for(service_name)
-                .unwrap_or(child.id());
+            let (pid, mut pgid) = {
+                let guard = self.pid_file.lock()?;
+                (
+                    guard.pid_for(service_name).unwrap_or(child.id()),
+                    guard.pgid_for(service_name).map(|id| id as libc::pid_t),
+                )
+            };
+            if pgid.is_none() {
+                pgid = Self::process_group_for_pid(pid);
+            }
 
-            Ok(Some(DetachedService { child, pid }))
+            Ok(Some(DetachedService { child, pid, pgid }))
         } else {
             Ok(None)
         }
@@ -2740,7 +2802,11 @@ impl Daemon {
             .lock()?
             .insert(service_name.to_string(), detached.child);
 
-        self.pid_file.lock()?.insert(service_name, detached.pid)?;
+        self.pid_file.lock()?.insert_with_group(
+            service_name,
+            detached.pid,
+            detached.pgid,
+        )?;
 
         info!("Restored original instance of '{service_name}' after restart failure.");
 
@@ -2754,7 +2820,7 @@ impl Daemon {
         mut detached: DetachedService,
     ) -> Result<(), ProcessManagerError> {
         let pid = detached.pid;
-        Self::terminate_process_tree(service_name, pid)?;
+        Self::terminate_process_tree(service_name, pid, detached.pgid)?;
 
         // Best-effort wait to reap the child and avoid zombies.
         if let Err(err) = detached.child.wait() {
@@ -2801,10 +2867,9 @@ impl Daemon {
                 processes.clone(),
                 detach_children,
             ) {
-                Ok(pid) => {
+                Ok((pid, pgid)) => {
                     let mut pid_guard = pid_file.lock()?;
-                    pid_guard.services.insert(service_name.clone(), pid);
-                    pid_guard.save()?;
+                    pid_guard.insert_with_group(&service_name, pid, pgid)?;
                     Ok(pid)
                 }
                 Err(e) => {
@@ -2943,11 +3008,12 @@ impl Daemon {
             );
 
             match launch_result {
-                Ok(pid) => {
+                Ok((pid, pgid)) => {
                     match pid_file.lock() {
                         Ok(mut guard) => {
-                            guard.services.insert(service_name.clone(), pid);
-                            if let Err(err) = guard.save() {
+                            if let Err(err) =
+                                guard.insert_with_group(&service_name, pid, pgid)
+                            {
                                 error!(
                                     "Failed to save PID file for service '{service_name}': {}",
                                     err
@@ -3078,20 +3144,38 @@ impl Daemon {
         state_file: &Arc<Mutex<ServiceStateFile>>,
         config: &Arc<Config>,
     ) -> Result<(), ProcessManagerError> {
-        // First, get the PID without removing from HashMap yet
-        let pid = {
+        // First, get the PID and process group without removing handles yet.
+        let (pid, service_group_id) = {
             let mut processes_guard = processes.lock()?;
             if let Some(child) = processes_guard.get_mut(service_name) {
-                Some(child.id())
+                let process_id = child.id();
+                let group_id = Self::process_group_for_pid(process_id).or_else(|| {
+                    pid_file
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.pgid_for(service_name))
+                        .map(|id| id as libc::pid_t)
+                });
+                (Some(process_id), group_id)
             } else {
                 let guard = pid_file.lock()?;
-                guard.get(service_name)
+                let stored_pid = guard.get(service_name);
+                let mut group_id =
+                    guard.pgid_for(service_name).map(|id| id as libc::pid_t);
+
+                // If we have a PID but no stored pgid, try to get it from the process
+                if stored_pid.is_some() && group_id.is_none() {
+                    group_id = stored_pid.and_then(Self::process_group_for_pid);
+                }
+
+                (stored_pid, group_id)
             }
         };
 
         // Terminate the process tree
         if let Some(process_id) = pid {
-            match Self::terminate_process_tree(service_name, process_id) {
+            match Self::terminate_process_tree(service_name, process_id, service_group_id)
+            {
                 Ok(_) => {
                     debug!(
                         "Process tree for '{service_name}' (pid {process_id}) terminated successfully"
@@ -3107,6 +3191,28 @@ impl Daemon {
                     }
                     _ => return Err(err),
                 },
+            }
+        } else if let Some(group_id) = service_group_id {
+            // Root PID can disappear before stop (leader exits), but its process group may still
+            // contain leaked workers. Best-effort terminate the full group in that case.
+            let result = unsafe { libc::killpg(group_id, libc::SIGTERM) };
+            if result < 0 {
+                let err = std::io::Error::last_os_error();
+                if !matches!(err.raw_os_error(), Some(libc::ESRCH)) {
+                    warn!(
+                        "Failed to signal process group {group_id} for '{service_name}': {err}"
+                    );
+                }
+            }
+            thread::sleep(PROCESS_CHECK_INTERVAL);
+            let result = unsafe { libc::killpg(group_id, libc::SIGKILL) };
+            if result < 0 {
+                let err = std::io::Error::last_os_error();
+                if !matches!(err.raw_os_error(), Some(libc::ESRCH)) {
+                    warn!(
+                        "Failed to force-kill process group {group_id} for '{service_name}': {err}"
+                    );
+                }
             }
         }
 
@@ -3495,7 +3601,7 @@ impl Daemon {
                         debug!(
                             "Service '{name}' exited cleanly. Removing from PID file."
                         );
-                        if let Err(e) = pid_file_guard.remove(&name) {
+                        if let Err(e) = pid_file_guard.clear_pid(&name) {
                             error!("Failed to remove '{name}' from PID file: {e}");
                         }
                         if let Err(err) = Self::persist_service_state(
@@ -3612,13 +3718,14 @@ impl Daemon {
             );
 
             match restart_result {
-                Ok(pid) => {
+                Ok((pid, pgid)) => {
                     let record_result = ctx.pid_file
                         .lock()
                         .map_err(ProcessManagerError::from)
                         .and_then(|mut guard| {
-                            guard.services.insert(name.clone(), pid);
-                            guard.save().map_err(ProcessManagerError::from)
+                            guard
+                                .insert_with_group(&name, pid, pgid)
+                                .map_err(ProcessManagerError::from)
                         });
 
                     if let Err(err) = record_result {
@@ -3627,7 +3734,7 @@ impl Daemon {
                         );
 
                         if let Err(stop_err) =
-                            Self::terminate_process_tree(&name, pid)
+                            Self::terminate_process_tree(&name, pid, pgid)
                         {
                             warn!(
                                 "Also failed to terminate untracked restart of '{name}': {stop_err}"
@@ -4520,7 +4627,7 @@ fi
             );
 
             // Terminate the process tree
-            match Daemon::terminate_process_tree("test", parent_pid) {
+            match Daemon::terminate_process_tree("test", parent_pid, None) {
                 Ok(_) => {
                     thread::sleep(Duration::from_millis(200));
 

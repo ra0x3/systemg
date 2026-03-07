@@ -898,6 +898,7 @@ impl Supervisor {
                         if let Err(err) = Daemon::terminate_process_tree(
                             &descendant.name,
                             descendant.pid,
+                            None,
                         ) {
                             warn!(
                                 "Failed to terminate descendant {} (pid {}) of '{}' after cascade: {}",
