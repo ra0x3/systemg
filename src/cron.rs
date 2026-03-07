@@ -12,6 +12,7 @@ use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
+use serde_xml_rs;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -22,6 +23,62 @@ use crate::{
 
 /// Maximum number of execution history entries to keep per cron job.
 const MAX_EXECUTION_HISTORY: usize = 10;
+
+mod systemtime_serde {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let duration = time
+            .duration_since(UNIX_EPOCH)
+            .map_err(serde::ser::Error::custom)?;
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+}
+
+mod systemtime_serde_opt {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(
+        time: &Option<SystemTime>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match time {
+            Some(t) => {
+                let duration = t
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(serde::ser::Error::custom)?;
+                serializer.serialize_some(&duration.as_secs())
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs: Option<u64> = Option::deserialize(deserializer)?;
+        Ok(secs.map(|s| UNIX_EPOCH + Duration::from_secs(s)))
+    }
+}
 
 /// Status of a cron job execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,8 +95,10 @@ pub enum CronExecutionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronExecutionRecord {
     /// When the cron job execution started.
+    #[serde(with = "systemtime_serde")]
     pub started_at: SystemTime,
     /// When the cron job execution completed (None if still running).
+    #[serde(with = "systemtime_serde_opt")]
     pub completed_at: Option<SystemTime>,
     /// Final status of the execution (None if still running).
     pub status: Option<CronExecutionStatus>,
@@ -463,16 +522,55 @@ impl CronManager {
     }
 }
 
+/// Wrapper for cron job entries to make them XML-safe
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct CronJobEntry {
+    hash: String,
+    state: PersistedCronJobState,
+}
+
 /// Persistent storage for cron job state across supervisor restarts.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CronStateFile {
+    #[serde(
+        serialize_with = "serialize_cron_jobs",
+        deserialize_with = "deserialize_cron_jobs"
+    )]
     jobs: std::collections::BTreeMap<String, PersistedCronJobState>,
+}
+
+fn serialize_cron_jobs<S>(
+    map: &std::collections::BTreeMap<String, PersistedCronJobState>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&CronJobEntry {
+            hash: k.clone(),
+            state: v.clone(),
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_cron_jobs<'de, D>(
+    d: D,
+) -> Result<std::collections::BTreeMap<String, PersistedCronJobState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<CronJobEntry> = Vec::deserialize(d)?;
+    Ok(entries.into_iter().map(|e| (e.hash, e.state)).collect())
 }
 
 impl CronStateFile {
     /// Returns the path to the cron state file.
     fn path() -> PathBuf {
-        runtime::state_dir().join("cron_state.json")
+        runtime::state_dir().join("cron_state.xml")
     }
 
     /// Saves the cron state to disk.
@@ -481,7 +579,7 @@ impl CronStateFile {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let data = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let data = serde_xml_rs::to_string(self).map_err(std::io::Error::other)?;
 
         use std::io::Write;
         let mut file = fs::File::create(&path)?;
@@ -498,7 +596,7 @@ impl CronStateFile {
         }
 
         let raw = fs::read_to_string(path)?;
-        let state = serde_json::from_str(&raw)
+        let state = serde_xml_rs::from_str(&raw)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         Ok(state)
     }
@@ -520,6 +618,7 @@ impl CronStateFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedCronJobState {
     /// Timestamp of the last execution start.
+    #[serde(with = "systemtime_serde_opt")]
     pub last_execution: Option<SystemTime>,
     /// Rolling history of recent executions.
     pub execution_history: VecDeque<CronExecutionRecord>,

@@ -109,12 +109,12 @@ services:
     thread::sleep(Duration::from_millis(500));
 
     let runtime_dir = home.join(".local/share/systemg");
-    let state_file = runtime_dir.join("state.json");
-    let pid_file = runtime_dir.join("pid.json");
-    let lock_file = runtime_dir.join("pid.json.lock");
+    let state_file = runtime_dir.join("state.xml");
+    let pid_file = runtime_dir.join("pid.xml");
+    let lock_file = runtime_dir.join("pid.xml.lock");
     let supervisor_log = runtime_dir.join("logs/supervisor.log");
 
-    assert!(state_file.exists(), "state.json should exist before purge");
+    assert!(state_file.exists(), "state.xml should exist before purge");
     assert!(
         pid_file.exists() || lock_file.exists() || supervisor_log.exists(),
         "At least one runtime file should exist before purge"
@@ -127,12 +127,12 @@ services:
 
     assert!(
         !state_file.exists(),
-        "state.json should be removed after purge"
+        "state.xml should be removed after purge"
     );
-    assert!(!pid_file.exists(), "pid.json should be removed after purge");
+    assert!(!pid_file.exists(), "pid.xml should be removed after purge");
     assert!(
         !lock_file.exists(),
-        "pid.json.lock should be removed after purge"
+        "pid.xml.lock should be removed after purge"
     );
     assert!(
         !supervisor_log.exists(),

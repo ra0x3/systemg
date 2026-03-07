@@ -19,26 +19,31 @@ Runtime files systemg uses to track services.
 ├── sysg.pid           # Supervisor PID
 ├── control.sock       # Unix socket for IPC
 ├── config_hint        # Last config path
-├── pid.json          # Service → PID mapping
-├── state.json        # Service metadata
+├── pid.xml           # Service → PID mapping
+├── state.xml         # Service metadata
 └── logs/             # Service output
 ```
 
 ## Key files
 
-### pid.json
+### pid.xml
 
 Maps services to process IDs:
 
-```json
-{"services": {"web": 67235, "db": 67236}}
+```xml
+<PidFile>
+  <services>
+    <web>67235</web>
+    <db>67236</db>
+  </services>
+</PidFile>
 ```
 
 ### config_hint
 
 Stores the last config path so you don't need `--config` on every command.
 
-### state.json
+### state.xml
 
 Tracks service status, restart counts, and exit codes.
 

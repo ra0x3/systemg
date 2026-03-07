@@ -106,14 +106,14 @@ impl Ord for DaemonLock {
 
 /// Name of the PID file stored in the state directory.
 /// Contains mappings of service names to process IDs.
-pub const PID_FILE_NAME: &str = "pid.json";
+pub const PID_FILE_NAME: &str = "pid.xml";
 
 /// Lock file suffix for PID file to ensure exclusive access.
 pub const PID_LOCK_SUFFIX: &str = ".lock";
 
 /// Name of the service state file stored in the state directory.
 /// Contains the current state and metadata for all managed services.
-pub const STATE_FILE_NAME: &str = "state.json";
+pub const STATE_FILE_NAME: &str = "state.xml";
 
 // ============================================================================
 // Shell Execution Constants

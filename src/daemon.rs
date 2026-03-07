@@ -20,6 +20,7 @@ use std::{
 use fs2::FileExt;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::Error as _};
+use serde_xml_rs;
 use serde_yaml;
 use sysinfo::{ProcessesToUpdate, System};
 use tracing::{debug, error, info, trace, warn};
@@ -41,6 +42,30 @@ use crate::{
     runtime,
     spawn::SpawnedExit,
 };
+
+mod systemtime_serde {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let duration = time
+            .duration_since(UNIX_EPOCH)
+            .map_err(serde::ser::Error::custom)?;
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+}
 
 /// Builds env map for service (inline vars override file entries).
 fn collect_service_env(
@@ -96,25 +121,92 @@ fn collect_service_env(
     resolved
 }
 
+/// Wrapper for service entries to make them XML-safe
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ServiceEntry {
+    name: String,
+    pid: u32,
+}
+
+/// Wrapper for group entries
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct GroupEntry {
+    name: String,
+    pgid: i32,
+}
+
+/// Wrapper for parent map entries
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ParentMapEntry {
+    child: u32,
+    parent: u32,
+}
+
+/// Wrapper for children map entries
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ChildrenMapEntry {
+    parent: u32,
+    children: Vec<u32>,
+}
+
+/// Wrapper for depth entries
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct DepthEntry {
+    pid: u32,
+    depth: usize,
+}
+
+/// Wrapper for metadata entries
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct MetadataEntry {
+    pid: u32,
+    metadata: PersistedSpawnChild,
+}
+
 /// PID tracking file.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct PidFile {
     /// Service name -> PID map.
+    #[serde(default, rename = "services")]
+    #[serde(
+        serialize_with = "serialize_services",
+        deserialize_with = "deserialize_services"
+    )]
     services: HashMap<String, u32>,
     /// Service name -> process group ID.
-    #[serde(default)]
+    #[serde(default, rename = "service_groups")]
+    #[serde(
+        serialize_with = "serialize_groups",
+        deserialize_with = "deserialize_groups"
+    )]
     service_groups: HashMap<String, i32>,
     /// Child PID -> Parent PID mapping for spawned processes.
-    #[serde(default)]
+    #[serde(default, rename = "parent_map")]
+    #[serde(
+        serialize_with = "serialize_parent_map",
+        deserialize_with = "deserialize_parent_map"
+    )]
     parent_map: HashMap<u32, u32>,
     /// Parent PID -> list of Child PIDs for reverse lookup.
-    #[serde(default)]
+    #[serde(default, rename = "children_map")]
+    #[serde(
+        serialize_with = "serialize_children_map",
+        deserialize_with = "deserialize_children_map"
+    )]
     children_map: HashMap<u32, Vec<u32>>,
     /// PID -> spawn depth in the tree (0 = root service).
-    #[serde(default)]
+    #[serde(default, rename = "spawn_depth")]
+    #[serde(
+        serialize_with = "serialize_depth",
+        deserialize_with = "deserialize_depth"
+    )]
     spawn_depth: HashMap<u32, usize>,
     /// Additional metadata for spawned children.
-    #[serde(default)]
+    #[serde(default, rename = "spawn_metadata")]
+    #[serde(
+        serialize_with = "serialize_metadata",
+        deserialize_with = "deserialize_metadata"
+    )]
     spawn_metadata: HashMap<u32, PersistedSpawnChild>,
 }
 
@@ -123,7 +215,7 @@ pub(crate) struct PersistedSpawnChild {
     pub(crate) pid: u32,
     pub(crate) name: String,
     pub(crate) command: String,
-    #[serde(default = "SystemTime::now")]
+    #[serde(with = "systemtime_serde")]
     pub(crate) started_at: SystemTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ttl_secs: Option<u64>,
@@ -137,6 +229,152 @@ pub(crate) struct PersistedSpawnChild {
     pub(crate) rss_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_exit: Option<SpawnedExit>,
+}
+
+fn serialize_services<S>(map: &HashMap<String, u32>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&ServiceEntry {
+            name: k.clone(),
+            pid: *v,
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_services<'de, D>(d: D) -> Result<HashMap<String, u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<ServiceEntry> = Vec::deserialize(d)?;
+    Ok(entries.into_iter().map(|e| (e.name, e.pid)).collect())
+}
+
+fn serialize_groups<S>(map: &HashMap<String, i32>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&GroupEntry {
+            name: k.clone(),
+            pgid: *v,
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_groups<'de, D>(d: D) -> Result<HashMap<String, i32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<GroupEntry> = Vec::deserialize(d)?;
+    Ok(entries.into_iter().map(|e| (e.name, e.pgid)).collect())
+}
+
+fn serialize_parent_map<S>(map: &HashMap<u32, u32>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&ParentMapEntry {
+            child: *k,
+            parent: *v,
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_parent_map<'de, D>(d: D) -> Result<HashMap<u32, u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<ParentMapEntry> = Vec::deserialize(d)?;
+    Ok(entries.into_iter().map(|e| (e.child, e.parent)).collect())
+}
+
+fn serialize_children_map<S>(
+    map: &HashMap<u32, Vec<u32>>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&ChildrenMapEntry {
+            parent: *k,
+            children: v.clone(),
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_children_map<'de, D>(d: D) -> Result<HashMap<u32, Vec<u32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<ChildrenMapEntry> = Vec::deserialize(d)?;
+    Ok(entries
+        .into_iter()
+        .map(|e| (e.parent, e.children))
+        .collect())
+}
+
+fn serialize_depth<S>(map: &HashMap<u32, usize>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&DepthEntry { pid: *k, depth: *v })?;
+    }
+    seq.end()
+}
+
+fn deserialize_depth<'de, D>(d: D) -> Result<HashMap<u32, usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<DepthEntry> = Vec::deserialize(d)?;
+    Ok(entries.into_iter().map(|e| (e.pid, e.depth)).collect())
+}
+
+fn serialize_metadata<S>(
+    map: &HashMap<u32, PersistedSpawnChild>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&MetadataEntry {
+            pid: *k,
+            metadata: v.clone(),
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_metadata<'de, D>(
+    d: D,
+) -> Result<HashMap<u32, PersistedSpawnChild>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<MetadataEntry> = Vec::deserialize(d)?;
+    Ok(entries.into_iter().map(|e| (e.pid, e.metadata)).collect())
 }
 
 impl PidFile {
@@ -179,7 +417,7 @@ impl PidFile {
             return Ok(Self::default());
         }
         let contents = fs::read_to_string(path)?;
-        let pid_data = serde_json::from_str::<Self>(&contents)?;
+        let pid_data = serde_xml_rs::from_str::<Self>(&contents)?;
         Ok(pid_data)
     }
 
@@ -199,7 +437,7 @@ impl PidFile {
 
         let path = Self::path();
         let contents = fs::read_to_string(&path)?;
-        let pid_data = serde_json::from_str::<Self>(&contents)?;
+        let pid_data = serde_xml_rs::from_str::<Self>(&contents)?;
         Ok(pid_data)
     }
 
@@ -209,7 +447,7 @@ impl PidFile {
 
         let path = Self::path();
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -230,7 +468,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_json::from_str::<Self>(&contents)?;
+            *self = serde_xml_rs::from_str::<Self>(&contents)?;
         }
 
         self.services.insert(service.to_string(), pid);
@@ -239,7 +477,7 @@ impl PidFile {
         }
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -250,7 +488,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_json::from_str::<Self>(&contents)?;
+            *self = serde_xml_rs::from_str::<Self>(&contents)?;
         }
 
         if self.services.remove(service).is_none() {
@@ -258,7 +496,7 @@ impl PidFile {
         }
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -269,7 +507,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_json::from_str::<Self>(&contents)?;
+            *self = serde_xml_rs::from_str::<Self>(&contents)?;
         }
 
         if self.services.remove(service).is_none() {
@@ -277,7 +515,7 @@ impl PidFile {
         }
         self.service_groups.remove(service);
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -296,7 +534,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_json::from_str::<Self>(&contents)?;
+            *self = serde_xml_rs::from_str::<Self>(&contents)?;
         }
 
         let child_pid = metadata.pid;
@@ -312,7 +550,7 @@ impl PidFile {
         self.spawn_metadata.insert(child_pid, metadata);
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -326,7 +564,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_json::from_str::<Self>(&contents)?;
+            *self = serde_xml_rs::from_str::<Self>(&contents)?;
         }
 
         if let Some(metadata) = self.spawn_metadata.get_mut(&child_pid) {
@@ -334,7 +572,7 @@ impl PidFile {
         }
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -345,7 +583,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_json::from_str::<Self>(&contents)?;
+            *self = serde_xml_rs::from_str::<Self>(&contents)?;
         }
 
         if let Some(parent_pid) = self.parent_map.remove(&child_pid)
@@ -360,7 +598,7 @@ impl PidFile {
         self.spawn_metadata.remove(&child_pid);
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -373,13 +611,13 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_json::from_str::<Self>(&contents)?;
+            *self = serde_xml_rs::from_str::<Self>(&contents)?;
         }
 
         let removed = self.remove_spawn_subtree_in_memory(root_pid);
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
 
         Ok(removed)
     }
@@ -597,10 +835,49 @@ pub struct ServiceStateEntry {
     pub signal: Option<i32>,
 }
 
+/// Wrapper for state entries to make them XML-safe
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct StateEntry {
+    name: String,
+    state: ServiceStateEntry,
+}
+
 /// Persistent record of the last-known state for every managed service.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct ServiceStateFile {
+    #[serde(
+        serialize_with = "serialize_state_entries",
+        deserialize_with = "deserialize_state_entries"
+    )]
     services: HashMap<String, ServiceStateEntry>,
+}
+
+fn serialize_state_entries<S>(
+    map: &HashMap<String, ServiceStateEntry>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (k, v) in map {
+        seq.serialize_element(&StateEntry {
+            name: k.clone(),
+            state: v.clone(),
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_state_entries<'de, D>(
+    d: D,
+) -> Result<HashMap<String, ServiceStateEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<StateEntry> = Vec::deserialize(d)?;
+    Ok(entries.into_iter().map(|e| (e.name, e.state)).collect())
 }
 
 impl ServiceStateFile {
@@ -616,7 +893,7 @@ impl ServiceStateFile {
         }
 
         let contents = fs::read_to_string(path)?;
-        let state = serde_json::from_str::<Self>(&contents)?;
+        let state = serde_xml_rs::from_str::<Self>(&contents)?;
         Ok(state)
     }
 
@@ -626,7 +903,7 @@ impl ServiceStateFile {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, serde_json::to_string_pretty(self)?)?;
+        fs::write(&path, serde_xml_rs::to_string(self)?)?;
         Ok(())
     }
 
@@ -2573,13 +2850,14 @@ impl Daemon {
             )))
         })?;
 
-        let state: BlueGreenState = serde_json::from_str(&content).map_err(|source| {
-            ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
-                "Failed parsing blue/green state '{}': {}",
-                path.display(),
-                source
-            )))
-        })?;
+        let state: BlueGreenState =
+            serde_xml_rs::from_str(&content).map_err(|source| {
+                ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
+                    "Failed parsing blue/green state '{}': {}",
+                    path.display(),
+                    source
+                )))
+            })?;
 
         if state.active_slot_index > 1 {
             return Err(Self::config_error(format!(
@@ -2602,7 +2880,7 @@ impl Daemon {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string(&BlueGreenState { active_slot_index })
+        let content = serde_xml_rs::to_string(&BlueGreenState { active_slot_index })
             .map_err(|source| {
                 ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(
                     source.to_string(),

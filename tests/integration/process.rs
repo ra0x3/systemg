@@ -127,7 +127,7 @@ exec tail -f /dev/null\n",
     }
 
     let switch_path = dir.join("switch_target.txt");
-    let state_path = dir.join("bg_state.json");
+    let state_path = dir.join("bg_state.xml");
     let config_path = dir.join("config.yaml");
     fs::write(
         &config_path,
@@ -543,11 +543,11 @@ services:
     let real_pid = common::wait_for_pid("stale");
 
     let bogus_pid = real_pid.saturating_add(10_000);
-    let pid_file_path = home.join(".local/share/systemg/pid.json");
+    let pid_file_path = home.join(".local/share/systemg/pid.xml");
     fs::create_dir_all(pid_file_path.parent().unwrap())
         .expect("failed to create pid directory");
     let fake_contents = format!(
-        "{{\n  \"services\": {{\n    \"stale\": {}\n  }}\n}}\n",
+        "<PidFile><services><ServiceEntry><name>stale</name><pid>{}</pid></ServiceEntry></services></PidFile>",
         bogus_pid
     );
     fs::write(&pid_file_path, fake_contents).expect("failed to corrupt pid file");
