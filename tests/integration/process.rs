@@ -97,6 +97,98 @@ services:
 }
 
 #[test]
+fn rolling_blue_green_switches_slot_and_persists_state() {
+    let temp = tempdir().expect("create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let service_script = dir.join("bg_service.sh");
+    let port_path = dir.join("active_port.txt");
+    fs::write(
+        &service_script,
+        format!(
+            "#!/bin/sh\n\
+echo \"${{PORT:-none}}\" > \"{}\"\n\
+exec tail -f /dev/null\n",
+            port_path.display()
+        ),
+    )
+    .expect("write service script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&service_script)
+            .expect("metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&service_script, perms).expect("chmod script");
+    }
+
+    let switch_path = dir.join("switch_target.txt");
+    let state_path = dir.join("bg_state.json");
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  bg_app:
+    command: "{}"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"
+      blue_green:
+        env_var: "PORT"
+        slots: ["8000", "8001"]
+        switch_command: "echo \"{{candidate_slot}}\" > \"{}\""
+        state_path: "{}"
+"#,
+            service_script.display(),
+            switch_path.display(),
+            state_path.display()
+        ),
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let service_cfg = config.services.get("bg_app").expect("service").clone();
+    let daemon = Daemon::from_config(config, false).expect("daemon");
+
+    daemon
+        .restart_service("bg_app", &service_cfg)
+        .expect("restart bg_app");
+
+    let new_pid = common::wait_for_pid("bg_app");
+    assert!(
+        common::is_process_alive(new_pid),
+        "service should be running after blue/green restart"
+    );
+
+    let switched_slot = fs::read_to_string(&switch_path)
+        .expect("read switch target")
+        .trim()
+        .to_string();
+    assert_eq!(switched_slot, "8001");
+
+    let active_slot = fs::read_to_string(&port_path)
+        .expect("read active port")
+        .trim()
+        .to_string();
+    assert_eq!(active_slot, "8001");
+
+    let state_json = fs::read_to_string(&state_path).expect("read state");
+    assert!(
+        state_json.contains("\"active_slot_index\":1"),
+        "expected state to point at slot 1, got: {state_json}"
+    );
+
+    daemon.stop_service("bg_app").expect("stop bg_app");
+    daemon.shutdown_monitor();
+}
+
+#[test]
 fn stop_succeeds_with_stale_pidfile_entry() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
@@ -290,6 +382,10 @@ import time
 
 marker = os.environ["WORKER_PID_PATH"]
 
+# Place the service in its own process group so restart fallback killpg(root_pid)
+# can still reach the orphan worker after the leader exits.
+os.setpgid(0, 0)
+
 pid = os.fork()
 if pid == 0:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -316,7 +412,7 @@ sys.exit(0)
 services:
   leader_exits:
     command: "{}"
-    restart_policy: "always"
+    restart_policy: "never"
     backoff: "1s"
     env:
       vars:
@@ -339,6 +435,8 @@ services:
     let daemon = Daemon::from_config(config, false).expect("daemon from config");
 
     daemon.start_services().expect("start services");
+    // Keep PID bookkeeping stable for this race-sensitive orphan cleanup scenario.
+    daemon.shutdown_monitor();
     common::wait_for_path(&marker_path);
     let first_worker_pid: u32 = fs::read_to_string(&marker_path)
         .expect("read first worker pid")

@@ -414,6 +414,25 @@ pub struct DeploymentConfig {
     pub health_check: Option<HealthCheckConfig>,
     /// Grace period before stopping the old service instance.
     pub grace_period: Option<String>,
+    /// Optional blue/green rollout settings for single-host zero-downtime deployments.
+    pub blue_green: Option<BlueGreenDeploymentConfig>,
+}
+
+/// Blue/green rollout configuration used by rolling deployments on a single host.
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+pub struct BlueGreenDeploymentConfig {
+    /// Environment variable used to inject the selected slot value (defaults to "PORT").
+    pub env_var: Option<String>,
+    /// Two slot values (commonly two port numbers) used as alternating targets.
+    pub slots: Vec<String>,
+    /// Command executed to switch traffic to the candidate slot once healthy.
+    pub switch_command: Option<String>,
+    /// Optional URL template for candidate health checks (supports `{slot}` substitution).
+    pub candidate_health_check_url: Option<String>,
+    /// Optional URL to verify after switch command completes.
+    pub switch_verify_url: Option<String>,
+    /// Optional path for persisting the active slot state.
+    pub state_path: Option<String>,
 }
 
 /// Health check configuration used during rolling deployments.
@@ -1142,6 +1161,55 @@ services:
         assert_eq!(vars2.get("SHARED"), Some(&"root_value".to_string()));
         assert_eq!(vars2.get("ROOT_ONLY"), Some(&"root".to_string()));
         assert!(vars2.get("SERVICE_ONLY").is_none());
+    }
+
+    #[test]
+    fn load_config_parses_blue_green_deployment_block() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).expect("create yaml");
+        writeln!(
+            yaml_file,
+            r#"
+version: "1"
+services:
+  web:
+    command: "python app.py"
+    deployment:
+      strategy: "rolling"
+      blue_green:
+        env_var: "PORT"
+        slots: ["8000", "8001"]
+        switch_command: "echo switch"
+        candidate_health_check_url: "http://127.0.0.1:{{slot}}/health"
+        switch_verify_url: "http://127.0.0.1/health"
+        state_path: ".state/web-slot.json"
+"#
+        )
+        .expect("write yaml");
+
+        let config = load_config(Some(yaml_path.to_str().expect("yaml path")))
+            .expect("load config");
+        let deployment = config
+            .services
+            .get("web")
+            .expect("web service")
+            .deployment
+            .as_ref()
+            .expect("deployment");
+        let blue_green = deployment.blue_green.as_ref().expect("blue_green");
+
+        assert_eq!(deployment.strategy.as_deref(), Some("rolling"));
+        assert_eq!(blue_green.env_var.as_deref(), Some("PORT"));
+        assert_eq!(blue_green.slots, vec!["8000", "8001"]);
+        assert_eq!(
+            blue_green.candidate_health_check_url.as_deref(),
+            Some("http://127.0.0.1:{slot}/health")
+        );
+        assert_eq!(
+            blue_green.switch_verify_url.as_deref(),
+            Some("http://127.0.0.1/health")
+        );
     }
 
     #[test]

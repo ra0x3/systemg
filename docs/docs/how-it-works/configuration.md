@@ -214,13 +214,22 @@ services:
         url: "http://localhost:8000/health"
         timeout: "30s"
       grace_period: "5s"
+      blue_green:
+        env_var: "PORT"
+        slots: ["8000", "8001"]
+        candidate_health_check_url: "http://127.0.0.1:{slot}/health"
+        switch_command: "/usr/local/bin/switch-upstream {candidate_slot}"
+        switch_verify_url: "http://localhost:8000/health"
+        state_path: ".state/api-slot.json"
 ```
 
-Rolling deployments start the new instance, wait for health checks, then stop the old instance. The `grace_period` allows in-flight requests to complete.
+Rolling deployments start the new instance, wait for health checks, then stop the old instance. For single-host zero-downtime with fixed ports, use `blue_green` so traffic can be switched between two slots.
 
 ## Field reference
 
 ### Service fields
+
+Primary keys available on each service definition.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -237,12 +246,16 @@ Rolling deployments start the new instance, wait for health checks, then stop th
 
 ### Environment object
 
+Environment sources and inline overrides merged into the service process environment.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `vars` | object | Key-value environment variables |
 | `file` | string | Path to env file |
 
 ### Hooks object
+
+Lifecycle callbacks you can trigger on service start/stop/restart outcomes.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -256,6 +269,8 @@ Each hook has `success` and `error` handlers with:
 
 ### Health check object
 
+Probe configuration used to determine readiness/health during deployment workflows.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `command` | string | Check command |
@@ -266,9 +281,25 @@ Each hook has `success` and `error` handlers with:
 
 ### Deployment object
 
+Controls how restarts are performed and what validation happens before cutover.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `strategy` | string | `rolling` or `immediate` |
 | `pre_start` | string | Command to run before starting |
 | `health_check` | object | Health check configuration |
 | `grace_period` | string | Time before stopping old instance |
+| `blue_green` | object | Single-host blue/green rollout settings |
+
+### Blue/green deployment object
+
+Single-host zero-downtime options for alternating between two rollout slots (typically ports).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `env_var` | string | Env var injected with slot value (`PORT` default) |
+| `slots` | array | Exactly two slot values to alternate between |
+| `switch_command` | string | Command to switch traffic to candidate slot |
+| `candidate_health_check_url` | string | Candidate health probe URL template (`{slot}` supported) |
+| `switch_verify_url` | string | Optional post-switch verify URL |
+| `state_path` | string | Optional persisted active-slot state file path |

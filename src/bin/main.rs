@@ -2447,6 +2447,7 @@ struct InspectProcessContext<'a> {
     total_memory: f64,
 }
 
+/// Renders an htop-style process table for the inspected unit and all discovered descendants.
 fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
     let Some(root_runtime) = unit.process.as_ref() else {
         println!("Process Table: unit is not currently running.");
@@ -2625,6 +2626,7 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
     println!("{}", make_bottom_border(&columns));
 }
 
+/// Walks the process tree rooted at `pid` and appends formatted table rows in tree order.
 fn append_inspect_process_rows(
     context: &InspectProcessContext<'_>,
     pid: u32,
@@ -2703,6 +2705,7 @@ fn append_inspect_process_rows(
     }
 }
 
+/// Formats a generic table row using dynamic columns with control-character sanitization.
 fn format_row_cells(values: &[String], columns: &[Column], _no_color: bool) -> String {
     let mut row = String::from('│');
     for (value, column) in values.iter().zip(columns.iter()) {
@@ -2715,6 +2718,7 @@ fn format_row_cells(values: &[String], columns: &[Column], _no_color: bool) -> S
     row
 }
 
+/// Normalizes cell text to a single printable line while preserving ANSI color escape sequences.
 fn sanitize_table_cell(value: &str) -> String {
     let mut collapsed = String::new();
     let mut chars = value.chars().peekable();
@@ -2746,10 +2750,12 @@ fn sanitize_table_cell(value: &str) -> String {
     collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Returns a display-friendly process name from sysinfo process metadata.
 fn process_display_name(process: &sysinfo::Process) -> String {
     process.name().to_string_lossy().into_owned()
 }
 
+/// Returns the full command line when available, otherwise falls back to process display name.
 fn process_command_line(process: &sysinfo::Process) -> String {
     if process.cmd().is_empty() {
         process_display_name(process)
@@ -2763,6 +2769,7 @@ fn process_command_line(process: &sysinfo::Process) -> String {
     }
 }
 
+/// Converts sysinfo's status enum into a compact single-letter process state marker.
 fn process_status_code(status: sysinfo::ProcessStatus) -> String {
     format!("{status:?}")
         .chars()
@@ -2772,6 +2779,7 @@ fn process_status_code(status: sysinfo::ProcessStatus) -> String {
 }
 
 #[cfg(target_os = "linux")]
+/// Reads Linux `/proc` process stats used by inspect table columns (PPID, PRI/NI, CPU ticks, SHR).
 fn read_linux_proc_stats(pid: u32) -> LinuxProcStats {
     let stat_path = format!("/proc/{pid}/stat");
     let statm_path = format!("/proc/{pid}/statm");
@@ -2807,11 +2815,13 @@ fn read_linux_proc_stats(pid: u32) -> LinuxProcStats {
 }
 
 #[cfg(not(target_os = "linux"))]
+/// Non-Linux stub returning empty Linux-specific process stats.
 fn read_linux_proc_stats(_pid: u32) -> LinuxProcStats {
     LinuxProcStats::default()
 }
 
 #[cfg(target_os = "linux")]
+/// Parses a `/proc/<pid>/stat` line into selected fields needed for inspect table rendering.
 fn parse_proc_stat_line(contents: &str) -> Option<LinuxProcStats> {
     let closing_paren = contents.rfind(')')?;
     let remainder = contents.get((closing_paren + 1)..)?.trim();
@@ -2838,6 +2848,7 @@ fn parse_proc_stat_line(contents: &str) -> Option<LinuxProcStats> {
     })
 }
 
+/// Formats CPU clock ticks as `MM:SS.CC`, matching htop-style time display.
 fn format_cpu_time_from_ticks(ticks: u64) -> String {
     #[cfg(target_os = "linux")]
     let hz = {

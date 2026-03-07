@@ -155,7 +155,7 @@ If `database` fails to come up, `web` will remain stopped and log the dependency
 
 #### Rolling Deployments
 
-Services can opt into rolling restarts so existing instances keep serving traffic until replacements are healthy. Add a `deployment` block to configure the behavior:
+Services can opt into rolling restarts. For single-host web services that bind a fixed port, use the `blue_green` block so the replacement starts on an alternate slot and traffic is switched after health checks.
 
 ```yaml
 version: "1"
@@ -167,18 +167,31 @@ services:
       strategy: "rolling"          # default is "immediate"
       pre_start: "cargo build --release"
       health_check:
-        url: "http://localhost:8080/health"
+        url: "http://localhost:8000/health"
         timeout: "60s"
         retries: 5
       grace_period: "5s"
+      blue_green:
+        env_var: "PORT"
+        slots: ["8000", "8001"]
+        candidate_health_check_url: "http://127.0.0.1:{slot}/health"
+        switch_command: "/usr/local/bin/switch-upstream {candidate_slot}"
+        switch_verify_url: "http://localhost:8000/health"
+        state_path: ".state/api-slot.json"
 ```
 
-- `strategy` — set to `rolling` to enable the zero-downtime workflow, or omit to keep the traditional stop/start cycle.
+- `strategy` — set to `rolling` to enable restart-time rollout workflow, or omit to keep the traditional stop/start cycle.
 - `pre_start` — optional shell command executed before the new instance launches (perfect for build or migrate steps).
-- `health_check` — optional HTTP probe the replacement must pass before traffic flips; configure timeout and retry budget per service.
+- `health_check` — optional HTTP probe settings reused by rolling checks.
 - `grace_period` — optional delay to keep the old instance alive after the new one passes health checks, giving load balancers time to rebalance.
+- `blue_green.env_var` — env var injected into the candidate instance (`PORT` by default).
+- `blue_green.slots` — exactly two alternating slot values (typically port numbers).
+- `blue_green.switch_command` — command run after candidate is healthy; supports `{candidate_slot}`, `{active_slot}`, `{service_name}` placeholders.
+- `blue_green.candidate_health_check_url` — optional candidate probe URL template with `{slot}`.
+- `blue_green.switch_verify_url` — optional post-switch verify URL.
+- `blue_green.state_path` — optional path for persisted active-slot state.
 
-If any rolling step fails, systemg restores the original instance and surfaces the error so unhealthy builds never replace running services.
+If any rolling step fails, systemg restores the original instance and surfaces the error so unhealthy builds never replace running services. For deployment scripts, use `sysg restart --daemonize` so supervisor state is restored even if detection fails.
 
 #### Cron Scheduling
 

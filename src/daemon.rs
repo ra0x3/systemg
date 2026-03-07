@@ -26,8 +26,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     config::{
-        Config, EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage,
-        ServiceConfig, SkipConfig,
+        BlueGreenDeploymentConfig, Config, EnvConfig, HealthCheckConfig, HookAction,
+        HookOutcome, HookStage, ServiceConfig, SkipConfig,
     },
     constants::{
         DEFAULT_SHELL, DaemonLock, DeploymentStrategy, MAX_STATUS_LOG_LINES,
@@ -766,6 +766,12 @@ pub enum ServiceReadyState {
 struct DetachedService {
     child: Child,
     pid: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BlueGreenState {
+    /// Index of the currently active slot (0 or 1).
+    active_slot_index: usize,
 }
 
 thread_local! {
@@ -1947,6 +1953,14 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
     ) -> Result<(), ProcessManagerError> {
+        if let Some(blue_green) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.blue_green.as_ref())
+        {
+            return self.blue_green_restart_service(name, service, blue_green);
+        }
+
         info!("Performing rolling restart for service: {name}");
 
         let mut previous = self.detach_service_handle(name)?;
@@ -2051,6 +2065,139 @@ impl Daemon {
             self.terminate_service(name, detached)?;
         }
 
+        Ok(())
+    }
+
+    /// Performs a blue/green restart by launching a candidate on the inactive slot, switching traffic,
+    /// and retiring the previous instance after optional grace-period drain.
+    fn blue_green_restart_service(
+        &self,
+        name: &str,
+        service: &ServiceConfig,
+        blue_green: &BlueGreenDeploymentConfig,
+    ) -> Result<(), ProcessManagerError> {
+        info!("Performing blue/green rolling restart for service: {name}");
+
+        if blue_green.slots.len() != 2 {
+            return Err(Self::config_error(format!(
+                "blue_green.slots for '{name}' must contain exactly two entries"
+            )));
+        }
+
+        let env_var = blue_green
+            .env_var
+            .clone()
+            .unwrap_or_else(|| "PORT".to_string());
+        let active_idx = self.read_blue_green_active_index(name, blue_green)?;
+        let candidate_idx = if active_idx == 0 { 1 } else { 0 };
+        let active_slot = blue_green.slots[active_idx].clone();
+        let candidate_slot = blue_green.slots[candidate_idx].clone();
+
+        let mut previous = self.detach_service_handle(name)?;
+
+        if let Some(pre_start) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.pre_start.as_ref())
+        {
+            info!("Running pre-start command for '{name}': {pre_start}");
+            if let Err(err) = self.run_pre_start_command(name, pre_start) {
+                if let Some(detached) = previous.take() {
+                    self.restore_detached_service(name, detached)?;
+                }
+                return Err(err);
+            }
+        }
+
+        let candidate_service =
+            Self::service_with_env_override(service, &env_var, &candidate_slot);
+
+        let start_state = match self.start_service(name, &candidate_service) {
+            Ok(state) => state,
+            Err(err) => {
+                if let Err(stop_err) = self.stop_service_with_intent(name, false) {
+                    warn!(
+                        "Failed to stop candidate instance of '{name}' after start error: {stop_err}"
+                    );
+                }
+                if let Some(detached) = previous.take() {
+                    self.restore_detached_service(name, detached)?;
+                }
+                return Err(err);
+            }
+        };
+
+        if matches!(start_state, ServiceReadyState::CompletedSuccess) {
+            info!(
+                "Candidate service '{name}' exited successfully immediately after blue/green start."
+            );
+        }
+
+        if let Some(url_template) = &blue_green.candidate_health_check_url {
+            let health_url = Self::resolve_slot_template(url_template, &candidate_slot);
+            self.wait_for_health_check_url(name, &health_url, service)?;
+        } else if let Some(health_check) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.health_check.as_ref())
+            && let Err(err) = self.wait_for_health_check(name, health_check)
+        {
+            if let Err(stop_err) = self.stop_service_with_intent(name, false) {
+                warn!(
+                    "Failed to stop candidate instance of '{name}' after health-check failure: {stop_err}"
+                );
+            }
+            if let Some(detached) = previous.take() {
+                self.restore_detached_service(name, detached)?;
+            }
+            return Err(err);
+        }
+
+        if let Some(command) = &blue_green.switch_command {
+            if let Err(err) = self.run_blue_green_switch_command(
+                name,
+                command,
+                &active_slot,
+                &candidate_slot,
+            ) {
+                if let Err(stop_err) = self.stop_service_with_intent(name, false) {
+                    warn!(
+                        "Failed to stop candidate instance of '{name}' after switch error: {stop_err}"
+                    );
+                }
+                if let Some(detached) = previous.take() {
+                    self.restore_detached_service(name, detached)?;
+                }
+                return Err(err);
+            }
+        } else {
+            return Err(Self::config_error(format!(
+                "blue_green.switch_command is required for service '{name}'"
+            )));
+        }
+
+        if let Some(verify_url_template) = &blue_green.switch_verify_url {
+            let verify_url =
+                Self::resolve_slot_template(verify_url_template, &candidate_slot);
+            self.wait_for_health_check_url(name, &verify_url, service)?;
+        }
+
+        if let Some(grace_period) = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.grace_period.as_ref())
+        {
+            let duration = Self::parse_duration(grace_period)?;
+            if !duration.is_zero() {
+                thread::sleep(duration);
+            }
+        }
+
+        if let Some(detached) = previous.take() {
+            self.terminate_service(name, detached)?;
+        }
+
+        self.write_blue_green_active_index(name, blue_green, candidate_idx)?;
         Ok(())
     }
 
@@ -2251,6 +2398,195 @@ impl Daemon {
         })?;
 
         Ok(Duration::from_secs(amount.saturating_mul(multiplier)))
+    }
+
+    /// Returns a cloned service config with a single env var overridden for candidate startup.
+    fn service_with_env_override(
+        service: &ServiceConfig,
+        key: &str,
+        value: &str,
+    ) -> ServiceConfig {
+        let mut cloned = service.clone();
+        let mut env_cfg = cloned.env.take().unwrap_or(EnvConfig {
+            file: None,
+            vars: None,
+        });
+        let mut vars = env_cfg.vars.take().unwrap_or_default();
+        vars.insert(key.to_string(), value.to_string());
+        env_cfg.vars = Some(vars);
+        cloned.env = Some(env_cfg);
+        cloned
+    }
+
+    /// Replaces `{slot}` placeholders in health-check URL templates.
+    fn resolve_slot_template(template: &str, slot: &str) -> String {
+        template.replace("{slot}", slot)
+    }
+
+    /// Performs an HTTP health check loop for an explicit URL, reusing deployment timeout/retry settings.
+    fn wait_for_health_check_url(
+        &self,
+        service_name: &str,
+        url: &str,
+        service: &ServiceConfig,
+    ) -> Result<(), ProcessManagerError> {
+        let timeout = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.health_check.as_ref())
+            .and_then(|health| health.timeout.as_ref())
+            .map_or(Ok(Duration::from_secs(30)), |raw| Self::parse_duration(raw))?;
+
+        let retries = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.health_check.as_ref())
+            .and_then(|health| health.retries)
+            .unwrap_or(3)
+            .max(1);
+
+        let interval = timeout / retries;
+        let client = Client::builder().timeout(interval).build().map_err(|err| {
+            ProcessManagerError::ServiceStartError {
+                service: service_name.to_string(),
+                source: std::io::Error::other(err.to_string()),
+            }
+        })?;
+
+        for attempt in 0..retries {
+            match self.perform_health_check(&client, url) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(err) => {
+                    debug!(
+                        "Blue/green health check failed for '{}' on attempt {}/{}: {}",
+                        service_name,
+                        attempt + 1,
+                        retries,
+                        err
+                    );
+                }
+            }
+            thread::sleep(interval.min(Duration::from_secs(5)));
+        }
+
+        Err(ProcessManagerError::ServiceStartError {
+            service: service_name.to_string(),
+            source: std::io::Error::other(format!(
+                "Blue/green health check failed for '{}' at {}",
+                service_name, url
+            )),
+        })
+    }
+
+    /// Resolves the persisted state path used to track the active blue/green slot.
+    fn blue_green_state_path(
+        &self,
+        service_name: &str,
+        blue_green: &BlueGreenDeploymentConfig,
+    ) -> PathBuf {
+        if let Some(raw_path) = &blue_green.state_path {
+            let path = PathBuf::from(raw_path);
+            if path.is_absolute() {
+                path
+            } else {
+                self.project_root.join(path)
+            }
+        } else {
+            runtime::state_dir().join(format!("blue_green_{}.json", service_name))
+        }
+    }
+
+    /// Loads the active slot index from disk, defaulting to slot 0 when no state exists.
+    fn read_blue_green_active_index(
+        &self,
+        service_name: &str,
+        blue_green: &BlueGreenDeploymentConfig,
+    ) -> Result<usize, ProcessManagerError> {
+        let path = self.blue_green_state_path(service_name, blue_green);
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        let content = fs::read_to_string(&path).map_err(|source| {
+            ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
+                "Failed reading blue/green state '{}': {}",
+                path.display(),
+                source
+            )))
+        })?;
+
+        let state: BlueGreenState = serde_json::from_str(&content).map_err(|source| {
+            ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
+                "Failed parsing blue/green state '{}': {}",
+                path.display(),
+                source
+            )))
+        })?;
+
+        if state.active_slot_index > 1 {
+            return Err(Self::config_error(format!(
+                "blue/green state for '{}' contains invalid slot index {}",
+                service_name, state.active_slot_index
+            )));
+        }
+
+        Ok(state.active_slot_index)
+    }
+
+    /// Persists the active slot index after a successful blue/green cutover.
+    fn write_blue_green_active_index(
+        &self,
+        service_name: &str,
+        blue_green: &BlueGreenDeploymentConfig,
+        active_slot_index: usize,
+    ) -> Result<(), ProcessManagerError> {
+        let path = self.blue_green_state_path(service_name, blue_green);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string(&BlueGreenState { active_slot_index })
+            .map_err(|source| {
+                ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(
+                    source.to_string(),
+                ))
+            })?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Executes the configured traffic-switch command with slot placeholders and env vars populated.
+    fn run_blue_green_switch_command(
+        &self,
+        service_name: &str,
+        command: &str,
+        active_slot: &str,
+        candidate_slot: &str,
+    ) -> Result<(), ProcessManagerError> {
+        let rendered_command = command
+            .replace("{active_slot}", active_slot)
+            .replace("{candidate_slot}", candidate_slot)
+            .replace("{service_name}", service_name);
+
+        let mut cmd = Command::new(DEFAULT_SHELL);
+        cmd.arg(SHELL_COMMAND_FLAG).arg(rendered_command);
+        cmd.current_dir(&self.project_root);
+        cmd.env("SYSG_ACTIVE_SLOT", active_slot);
+        cmd.env("SYSG_CANDIDATE_SLOT", candidate_slot);
+        cmd.env("SYSG_SERVICE_NAME", service_name);
+
+        let output = cmd.output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(ProcessManagerError::ServiceStartError {
+                service: service_name.to_string(),
+                source: std::io::Error::other(format!(
+                    "blue/green switch command failed: {stderr}"
+                )),
+            })
+        }
     }
 
     /// Scans the last 50 lines of a service's stderr log for port conflict indicators. Returns

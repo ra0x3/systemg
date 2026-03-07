@@ -25,7 +25,13 @@ env:
 services:
   node__web_server:
     command: "node server.js"
-    deployment_strategy: "rolling_start"
+    deployment:
+      strategy: "rolling"
+      blue_green:
+        env_var: "PORT"
+        slots: ["3000", "3001"]
+        candidate_health_check_url: "http://127.0.0.1:{slot}/health"
+        switch_command: "sudo /usr/local/bin/switch-crud-upstream {candidate_slot}"
     env:
       vars:
         NODE_ENV: "${NODE_ENV}"
@@ -148,7 +154,7 @@ $ git pull
 $ npm install
 
 # Rolling restart - zero downtime
-$ sysg restart node__web_server
+$ sysg restart --service node__web_server --daemonize
 ```
 
 ### View logs
