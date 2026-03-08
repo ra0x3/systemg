@@ -17,7 +17,7 @@ use nix::{
     sys::signal,
     unistd::{Pid, Uid},
 };
-use sysinfo::{Pid as SysPid, ProcessesToUpdate, System, Users};
+use sysinfo::{Pid as SysPid, ProcessRefreshKind, ProcessesToUpdate, System, Users};
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
     cli::{Cli, Commands, parse_args},
@@ -1061,8 +1061,14 @@ mod tests {
         let max_state_len = 7;
         let max_user_len = 6;
 
-        let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
-                         CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+        let fixed_width = KIND_WIDTH
+            + max_state_len
+            + max_user_len
+            + PID_WIDTH
+            + CPU_WIDTH
+            + RSS_WIDTH
+            + UPTIME_WIDTH
+            + HEALTH_WIDTH;
         let padding_and_separators = 11 * 3 + 2;
         let fixed_total = fixed_width + padding_and_separators;
 
@@ -1070,7 +1076,8 @@ mod tests {
 
         assert!(remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH + MIN_EXIT_WIDTH));
 
-        let (unit_width, cmd_width, exit_width) = (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH);
+        let (unit_width, cmd_width, exit_width) =
+            (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH);
         assert_eq!(unit_width, 20);
         assert_eq!(cmd_width, 15);
         assert_eq!(exit_width, 10);
@@ -1095,8 +1102,14 @@ mod tests {
         let max_state_len = 7;
         let max_user_len = 6;
 
-        let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
-                         CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+        let fixed_width = KIND_WIDTH
+            + max_state_len
+            + max_user_len
+            + PID_WIDTH
+            + CPU_WIDTH
+            + RSS_WIDTH
+            + UPTIME_WIDTH
+            + HEALTH_WIDTH;
         let padding_and_separators = 11 * 3 + 2;
         let fixed_total = fixed_width + padding_and_separators;
 
@@ -1137,8 +1150,14 @@ mod tests {
         let max_state_len = 7;
         let max_user_len = 6;
 
-        let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
-                         CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+        let fixed_width = KIND_WIDTH
+            + max_state_len
+            + max_user_len
+            + PID_WIDTH
+            + CPU_WIDTH
+            + RSS_WIDTH
+            + UPTIME_WIDTH
+            + HEALTH_WIDTH;
         let padding_and_separators = 11 * 3 + 2;
         let fixed_total = fixed_width + padding_and_separators;
 
@@ -1151,12 +1170,12 @@ mod tests {
         let (unit_width, cmd_width, exit_width) = (
             unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
             cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
-            exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH)
+            exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH),
         );
 
-        assert_eq!(unit_width, MAX_UNIT_WIDTH);
-        assert_eq!(cmd_width, MAX_CMD_WIDTH);
-        assert!(exit_width >= MIN_EXIT_WIDTH && exit_width <= MAX_EXIT_WIDTH);
+        assert!((MIN_UNIT_WIDTH..=MAX_UNIT_WIDTH).contains(&unit_width));
+        assert!((MIN_CMD_WIDTH..=MAX_CMD_WIDTH).contains(&cmd_width));
+        assert!((MIN_EXIT_WIDTH..=MAX_EXIT_WIDTH).contains(&exit_width));
     }
 
     #[test]
@@ -1188,9 +1207,18 @@ mod tests {
 
     #[test]
     fn test_format_last_exit_shortened() {
-        let exit_zero = Some(ExitMetadata { exit_code: Some(0), signal: None });
-        let exit_one = Some(ExitMetadata { exit_code: Some(1), signal: None });
-        let signal_kill = Some(ExitMetadata { exit_code: None, signal: Some(9) });
+        let exit_zero = Some(ExitMetadata {
+            exit_code: Some(0),
+            signal: None,
+        });
+        let exit_one = Some(ExitMetadata {
+            exit_code: Some(1),
+            signal: None,
+        });
+        let signal_kill = Some(ExitMetadata {
+            exit_code: None,
+            signal: Some(9),
+        });
 
         assert_eq!(format_last_exit(exit_zero.as_ref(), None), "e0");
         assert_eq!(format_last_exit(exit_one.as_ref(), None), "e1");
@@ -1202,6 +1230,7 @@ mod tests {
 struct StatusRenderOptions<'a> {
     json: bool,
     no_color: bool,
+    #[allow(dead_code)]
     full_cmd: bool,
     include_orphans: bool,
     service_filter: Option<&'a str>,
@@ -1306,7 +1335,7 @@ fn render_status(
     // Detect terminal width and calculate target table width (75% of terminal)
     let terminal_width = terminal_size::terminal_size()
         .map(|(width, _)| width.0 as usize)
-        .unwrap_or(120);  // Default to 120 chars if detection fails
+        .unwrap_or(120); // Default to 120 chars if detection fails
     let target_table_width = (terminal_width as f64 * 0.75) as usize;
 
     const MIN_UNIT_WIDTH: usize = 20;
@@ -1332,7 +1361,8 @@ fn render_status(
     let max_user_len = units
         .iter()
         .map(|unit| {
-            unit.process.as_ref()
+            unit.process
+                .as_ref()
                 .and_then(|p| p.user.as_ref())
                 .map(|u| visible_length(u))
                 .unwrap_or(1)
@@ -1341,26 +1371,33 @@ fn render_status(
         .unwrap_or(6)
         .clamp(6, 8);
 
-    let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
-                     CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+    let fixed_width = KIND_WIDTH
+        + max_state_len
+        + max_user_len
+        + PID_WIDTH
+        + CPU_WIDTH
+        + RSS_WIDTH
+        + UPTIME_WIDTH
+        + HEALTH_WIDTH;
     let padding_and_separators = 11 * 3 + 2;
     let fixed_total = fixed_width + padding_and_separators;
 
     let remaining_space = target_table_width.saturating_sub(fixed_total);
 
-    let (unit_width, cmd_width, exit_width) = if remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH + MIN_EXIT_WIDTH) {
-        (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH)
-    } else {
-        let unit_alloc = (remaining_space as f64 * 0.4) as usize;
-        let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
-        let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
+    let (unit_width, cmd_width, exit_width) =
+        if remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH + MIN_EXIT_WIDTH) {
+            (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH)
+        } else {
+            let unit_alloc = (remaining_space as f64 * 0.4) as usize;
+            let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
+            let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
 
-        (
-            unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
-            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
-            exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH)
-        )
-    };
+            (
+                unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
+                cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
+                exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH),
+            )
+        };
 
     // Create columns with calculated widths
     let columns_array = [
@@ -1676,6 +1713,7 @@ fn format_duration(seconds: u64) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn format_relative_time(from: DateTime<Utc>) -> String {
     let now = Utc::now();
     let duration = now.signed_duration_since(from);
@@ -1716,12 +1754,10 @@ fn format_last_exit(
                     } else {
                         format!("e{} {}", code, time_str)
                     }
+                } else if time_str.is_empty() {
+                    "ok".to_string()
                 } else {
-                    if time_str.is_empty() {
-                        "ok".to_string()
-                    } else {
-                        format!("ok {}", time_str)
-                    }
+                    format!("ok {}", time_str)
                 }
             }
             Some(CronExecutionStatus::Failed(reason)) => {
@@ -2004,6 +2040,7 @@ fn render_spawn_rows(nodes: &[SpawnedProcessNode], columns: &[Column], no_color:
     });
 }
 
+#[allow(dead_code)]
 fn max_spawn_label_width(nodes: &[SpawnedProcessNode]) -> usize {
     let mut max_len = 0;
     visit_spawn_tree(nodes, "", &mut |child, prefix, _| {
@@ -2016,6 +2053,7 @@ fn max_spawn_label_width(nodes: &[SpawnedProcessNode]) -> usize {
     max_len
 }
 
+#[allow(dead_code)]
 fn max_spawn_command_width(nodes: &[SpawnedProcessNode]) -> usize {
     let mut max_len = 0;
     visit_spawn_tree(nodes, "", &mut |child, _, _| {
@@ -2027,6 +2065,7 @@ fn max_spawn_command_width(nodes: &[SpawnedProcessNode]) -> usize {
     max_len
 }
 
+#[allow(dead_code)]
 fn max_unit_command_width(unit: &UnitStatus) -> usize {
     unit.command
         .as_ref()
@@ -2397,6 +2436,121 @@ fn fetch_inspect(
     }
 }
 
+fn assign_user_colors(users: &[String]) -> HashMap<String, &'static str> {
+    const USER_COLORS: [&str; 12] = [
+        "\x1b[38;5;39m",  // Bright blue
+        "\x1b[38;5;208m", // Orange
+        "\x1b[38;5;46m",  // Bright green
+        "\x1b[38;5;201m", // Magenta
+        "\x1b[38;5;226m", // Yellow
+        "\x1b[38;5;51m",  // Cyan
+        "\x1b[38;5;196m", // Red
+        "\x1b[38;5;82m",  // Light green
+        "\x1b[38;5;135m", // Purple
+        "\x1b[38;5;214m", // Gold
+        "\x1b[38;5;33m",  // Blue
+        "\x1b[38;5;165m", // Light magenta
+    ];
+
+    let mut color_map = HashMap::new();
+    for (i, user) in users.iter().enumerate() {
+        let color = USER_COLORS[i % USER_COLORS.len()];
+        color_map.insert(user.clone(), color);
+    }
+    color_map
+}
+
+fn render_htop_bars(_metrics: Option<&UnitMetricsSummary>, no_color: bool) {
+    let mut system = System::new();
+    system.refresh_cpu_all();
+    system.refresh_memory();
+    let total_mem = system.total_memory();
+    let used_mem = system.used_memory();
+    let total_swap = system.total_swap();
+    let used_swap = system.used_swap();
+
+    let mem_percentage = if total_mem > 0 {
+        (used_mem as f64 / total_mem as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let swap_percentage = if total_swap > 0 {
+        (used_swap as f64 / total_swap as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let bar_width = 40;
+
+    for (i, cpu) in system.cpus().iter().enumerate() {
+        let cpu_usage = cpu.cpu_usage();
+        let filled = ((cpu_usage / 100.0) * bar_width as f32) as usize;
+        let bar = render_usage_bar(filled, bar_width, cpu_usage as f64, no_color);
+
+        let label = if i < 10 {
+            format!("{:2}", i)
+        } else {
+            format!("{}", i)
+        };
+
+        println!("{}[{}] {:>5.1}%", label, bar, cpu_usage);
+    }
+
+    let mem_filled = ((mem_percentage / 100.0) * bar_width as f64) as usize;
+    let mem_bar = render_usage_bar(mem_filled, bar_width, mem_percentage, no_color);
+    println!(
+        "Mem[{}] {:.2}/{:.2}G",
+        mem_bar,
+        used_mem as f64 / 1024.0 / 1024.0 / 1024.0,
+        total_mem as f64 / 1024.0 / 1024.0 / 1024.0
+    );
+
+    if total_swap > 0 {
+        let swap_filled = ((swap_percentage / 100.0) * bar_width as f64) as usize;
+        let swap_bar =
+            render_usage_bar(swap_filled, bar_width, swap_percentage, no_color);
+        println!(
+            "Swp[{}] {:.2}/{:.2}G",
+            swap_bar,
+            used_swap as f64 / 1024.0 / 1024.0 / 1024.0,
+            total_swap as f64 / 1024.0 / 1024.0 / 1024.0
+        );
+    }
+}
+
+fn render_usage_bar(
+    filled: usize,
+    total_width: usize,
+    percentage: f64,
+    no_color: bool,
+) -> String {
+    let mut bar = String::new();
+
+    for i in 0..total_width {
+        if i < filled {
+            let color = if no_color {
+                ""
+            } else if percentage > 90.0 {
+                RED
+            } else if percentage > 70.0 {
+                YELLOW
+            } else if percentage > 50.0 {
+                CYAN
+            } else {
+                GREEN
+            };
+
+            let reset = if no_color { "" } else { RESET };
+            bar.push_str(&format!("{}|{}", color, reset));
+        } else {
+            bar.push(' ');
+        }
+    }
+
+    bar
+}
+
 fn render_inspect(
     payload: &InspectPayload,
     opts: &InspectRenderOptions,
@@ -2529,7 +2683,10 @@ fn render_inspect(
         println!("Metrics: not available (service not running)");
     }
 
-    // Use gnuplot visualization for metrics
+    println!();
+    render_htop_bars(unit.metrics.as_ref(), opts.no_color);
+    println!();
+
     if !filtered_samples.is_empty() {
         // For cron jobs, indicate we're showing last run's metrics
         if unit.kind == UnitKind::Cron
@@ -2662,7 +2819,7 @@ struct InspectProcessContext<'a> {
     total_memory: f64,
 }
 
-/// Renders an htop-style process table for the inspected unit and all discovered descendants.
+/// Renders a process table for the inspected unit and all discovered descendants.
 fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
     let Some(root_runtime) = unit.process.as_ref() else {
         println!("Process Table: unit is not currently running.");
@@ -2670,7 +2827,11 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
     };
 
     let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
 
     let root_pid = root_runtime.pid;
     if system.process(SysPid::from_u32(root_pid)).is_none() {
@@ -2707,44 +2868,92 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
     let mut rows = Vec::new();
     append_inspect_process_rows(&context, root_pid, "", "", true, &mut rows);
 
+    let mut distinct_users: Vec<String> = rows
+        .iter()
+        .map(|row| row.user.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    distinct_users.sort();
+
+    let user_colors = assign_user_colors(&distinct_users);
+
     if rows.is_empty() {
         println!("Process Table: no running process rows collected.");
         return;
     }
 
-    let tree_width = rows
-        .iter()
-        .map(|row| visible_length(&row.tree_label))
-        .max()
-        .unwrap_or(4)
-        .clamp(4, 32);
+    let terminal_width = terminal_size::terminal_size()
+        .map(|(width, _)| width.0 as usize)
+        .unwrap_or(120);
+    let target_table_width = (terminal_width as f64 * 0.75) as usize;
+
+    const MIN_PROC_WIDTH: usize = 15;
+    const MAX_PROC_WIDTH: usize = 32;
+    const MIN_CMD_WIDTH: usize = 20;
+    const MAX_CMD_WIDTH: usize = 80;
+
+    const PID_WIDTH: usize = 7;
+    const PPID_WIDTH: usize = 7;
+    const PRI_WIDTH: usize = 4;
+    const NI_WIDTH: usize = 4;
+    const VIRT_WIDTH: usize = 9;
+    const RES_WIDTH: usize = 9;
+    const SHR_WIDTH: usize = 9;
+    const S_WIDTH: usize = 1;
+    const CPU_WIDTH: usize = 6;
+    const MEM_WIDTH: usize = 6;
+    const TIME_WIDTH: usize = 9;
+
     let user_width = rows
         .iter()
         .map(|row| visible_length(&row.user))
         .max()
         .unwrap_or(4)
-        .clamp(4, 16);
-    let cmd_width = rows
-        .iter()
-        .map(|row| visible_length(&row.command))
-        .max()
-        .unwrap_or(3)
-        .clamp(24, 72);
+        .clamp(4, 8);
+
+    let fixed_width = PID_WIDTH
+        + PPID_WIDTH
+        + user_width
+        + PRI_WIDTH
+        + NI_WIDTH
+        + VIRT_WIDTH
+        + RES_WIDTH
+        + SHR_WIDTH
+        + S_WIDTH
+        + CPU_WIDTH
+        + MEM_WIDTH
+        + TIME_WIDTH;
+    let padding_and_separators = 14 * 3 + 2;
+    let fixed_total = fixed_width + padding_and_separators;
+
+    let remaining_space = target_table_width.saturating_sub(fixed_total);
+
+    let (proc_width, cmd_width) = if remaining_space < (MIN_PROC_WIDTH + MIN_CMD_WIDTH) {
+        (MIN_PROC_WIDTH, MIN_CMD_WIDTH)
+    } else {
+        let proc_alloc = (remaining_space as f64 * 0.3) as usize;
+        let cmd_alloc = (remaining_space as f64 * 0.7) as usize;
+        (
+            proc_alloc.clamp(MIN_PROC_WIDTH, MAX_PROC_WIDTH),
+            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
+        )
+    };
 
     let columns = [
         Column {
             title: "PROC",
-            width: tree_width,
+            width: proc_width,
             align: Alignment::Left,
         },
         Column {
             title: "PID",
-            width: 7,
+            width: PID_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "PPID",
-            width: 7,
+            width: PPID_WIDTH,
             align: Alignment::Right,
         },
         Column {
@@ -2754,47 +2963,47 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
         },
         Column {
             title: "PRI",
-            width: 4,
+            width: PRI_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "NI",
-            width: 4,
+            width: NI_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "VIRT",
-            width: 9,
+            width: VIRT_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "RES",
-            width: 9,
+            width: RES_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "SHR",
-            width: 9,
+            width: SHR_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "S",
-            width: 1,
+            width: S_WIDTH,
             align: Alignment::Left,
         },
         Column {
             title: "CPU%",
-            width: 6,
+            width: CPU_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "MEM%",
-            width: 6,
+            width: MEM_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "TIME+",
-            width: 9,
+            width: TIME_WIDTH,
             align: Alignment::Right,
         },
         Column {
@@ -2804,28 +3013,38 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
         },
     ];
 
-    println!(
-        "Process Table (htop-like, root PID {} with descendants):",
-        root_pid
-    );
+    println!("Process Table (root PID {} with descendants):", root_pid);
     println!("{}", make_top_border(&columns));
     println!("{}", format_header_row(&columns));
     println!("{}", make_separator_border(&columns));
     for row in &rows {
+        let virt_colored = if no_color {
+            format_bytes(row.virt_bytes)
+        } else {
+            format!("{}{}{}", GREEN, format_bytes(row.virt_bytes), RESET)
+        };
+
+        let user_colored = if no_color || row.user == "-" {
+            row.user.clone()
+        } else {
+            let color = user_colors.get(&row.user).unwrap_or(&"");
+            format!("{}{}{}", color, row.user, RESET)
+        };
+
         let values = vec![
             row.tree_label.clone(),
             row.pid.to_string(),
             row.ppid
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".to_string()),
-            row.user.clone(),
+            user_colored,
             row.pri
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".to_string()),
             row.nice
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "-".to_string()),
-            format_bytes(row.virt_bytes),
+            virt_colored,
             format_bytes(row.res_bytes),
             row.shared_bytes
                 .map(format_bytes)
@@ -3063,7 +3282,7 @@ fn parse_proc_stat_line(contents: &str) -> Option<LinuxProcStats> {
     })
 }
 
-/// Formats CPU clock ticks as `MM:SS.CC`, matching htop-style time display.
+/// Formats CPU clock ticks as `MM:SS.CC` time display.
 fn format_cpu_time_from_ticks(ticks: u64) -> String {
     #[cfg(target_os = "linux")]
     let hz = {
@@ -3195,7 +3414,11 @@ fn stop_supervisors() {
 
 fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
     let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
 
     let mut set = HashSet::new();
 

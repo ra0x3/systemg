@@ -11,6 +11,7 @@ use predicates as _;
 use strum as _;
 #[cfg(test)]
 use tempfile as _;
+use terminal_size as _;
 use tracing_subscriber as _;
 
 /// ASCII charting.

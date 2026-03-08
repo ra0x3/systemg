@@ -218,6 +218,18 @@ mv "$BINARY" "$VERSION_BINARY"
 ln -sf "$VERSION_BINARY" "$SYSG_BIN_DIR/sysg"
 echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
 
+for check_dir in "$HOME/.sysg/bin" "/usr/local/bin"; do
+  if [ -d "$check_dir" ] && [ "$check_dir" != "$SYSG_BIN_DIR" ]; then
+    OLD_SYSG="$check_dir/sysg"
+    if [ -f "$OLD_SYSG" ] || [ -L "$OLD_SYSG" ]; then
+      if [ -w "$check_dir" ]; then
+        rm -f "$OLD_SYSG"
+        ln -sf "$SYSG_BIN_DIR/sysg" "$OLD_SYSG"
+      fi
+    fi
+  fi
+done
+
 cd "$ORIGINAL_DIR"
 rm -rf "$TEMP_DIR"
 
