@@ -1041,6 +1041,162 @@ mod tests {
             stream: None,
         }));
     }
+
+    #[test]
+    fn test_column_width_allocation_small_terminal() {
+        let terminal_width = 80;
+        let target_table_width = (terminal_width as f64 * 0.75) as usize; // 60
+
+        const MIN_UNIT_WIDTH: usize = 20;
+        const MIN_CMD_WIDTH: usize = 15;
+        const MIN_EXIT_WIDTH: usize = 10;
+
+        const KIND_WIDTH: usize = 6;
+        const PID_WIDTH: usize = 7;
+        const CPU_WIDTH: usize = 6;
+        const RSS_WIDTH: usize = 8;
+        const UPTIME_WIDTH: usize = 10;
+        const HEALTH_WIDTH: usize = 8;
+
+        let max_state_len = 7;
+        let max_user_len = 6;
+
+        let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
+                         CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+        let padding_and_separators = 11 * 3 + 2;
+        let fixed_total = fixed_width + padding_and_separators;
+
+        let remaining_space = target_table_width.saturating_sub(fixed_total);
+
+        assert!(remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH + MIN_EXIT_WIDTH));
+
+        let (unit_width, cmd_width, exit_width) = (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH);
+        assert_eq!(unit_width, 20);
+        assert_eq!(cmd_width, 15);
+        assert_eq!(exit_width, 10);
+    }
+
+    #[test]
+    fn test_column_width_allocation_medium_terminal() {
+        let terminal_width = 120;
+        let target_table_width = (terminal_width as f64 * 0.75) as usize; // 90
+
+        const MAX_UNIT_WIDTH: usize = 60;
+        const MAX_CMD_WIDTH: usize = 50;
+        const MAX_EXIT_WIDTH: usize = 30;
+
+        const KIND_WIDTH: usize = 6;
+        const PID_WIDTH: usize = 7;
+        const CPU_WIDTH: usize = 6;
+        const RSS_WIDTH: usize = 8;
+        const UPTIME_WIDTH: usize = 10;
+        const HEALTH_WIDTH: usize = 8;
+
+        let max_state_len = 7;
+        let max_user_len = 6;
+
+        let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
+                         CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+        let padding_and_separators = 11 * 3 + 2;
+        let fixed_total = fixed_width + padding_and_separators;
+
+        let remaining_space = target_table_width.saturating_sub(fixed_total);
+
+        let unit_alloc = (remaining_space as f64 * 0.4) as usize;
+        let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
+        let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
+
+        let unit_width = unit_alloc.min(MAX_UNIT_WIDTH);
+        let cmd_width = cmd_alloc.min(MAX_CMD_WIDTH);
+        let exit_width = exit_alloc.min(MAX_EXIT_WIDTH);
+
+        assert!(unit_width <= MAX_UNIT_WIDTH);
+        assert!(cmd_width <= MAX_CMD_WIDTH);
+        assert!(exit_width <= MAX_EXIT_WIDTH);
+    }
+
+    #[test]
+    fn test_column_width_allocation_large_terminal() {
+        let terminal_width = 200;
+        let target_table_width = (terminal_width as f64 * 0.75) as usize; // 150
+
+        const MIN_UNIT_WIDTH: usize = 20;
+        const MAX_UNIT_WIDTH: usize = 60;
+        const MIN_CMD_WIDTH: usize = 15;
+        const MAX_CMD_WIDTH: usize = 50;
+        const MIN_EXIT_WIDTH: usize = 10;
+        const MAX_EXIT_WIDTH: usize = 30;
+
+        const KIND_WIDTH: usize = 6;
+        const PID_WIDTH: usize = 7;
+        const CPU_WIDTH: usize = 6;
+        const RSS_WIDTH: usize = 8;
+        const UPTIME_WIDTH: usize = 10;
+        const HEALTH_WIDTH: usize = 8;
+
+        let max_state_len = 7;
+        let max_user_len = 6;
+
+        let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
+                         CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+        let padding_and_separators = 11 * 3 + 2;
+        let fixed_total = fixed_width + padding_and_separators;
+
+        let remaining_space = target_table_width.saturating_sub(fixed_total);
+
+        let unit_alloc = (remaining_space as f64 * 0.4) as usize;
+        let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
+        let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
+
+        let (unit_width, cmd_width, exit_width) = (
+            unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
+            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
+            exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH)
+        );
+
+        assert_eq!(unit_width, MAX_UNIT_WIDTH);
+        assert_eq!(cmd_width, MAX_CMD_WIDTH);
+        assert!(exit_width >= MIN_EXIT_WIDTH && exit_width <= MAX_EXIT_WIDTH);
+    }
+
+    #[test]
+    fn test_format_uptime_short() {
+        assert_eq!(format_uptime_short("30 secs ago"), "< 1m");
+        assert_eq!(format_uptime_short("5 mins ago"), "5m");
+        assert_eq!(format_uptime_short("90 mins ago"), "1h");
+        assert_eq!(format_uptime_short("3 hours ago"), "3h");
+        assert_eq!(format_uptime_short("25 hours ago"), "1d");
+        assert_eq!(format_uptime_short("4 days ago"), "4d");
+        assert_eq!(format_uptime_short("2 weeks ago"), "2w");
+    }
+
+    #[test]
+    fn test_format_relative_time_short() {
+        use chrono::Duration as ChronoDuration;
+
+        let now = Utc::now();
+        let thirty_secs_ago = now - ChronoDuration::seconds(30);
+        let five_mins_ago = now - ChronoDuration::minutes(5);
+        let two_hours_ago = now - ChronoDuration::hours(2);
+        let three_days_ago = now - ChronoDuration::days(3);
+
+        assert_eq!(format_relative_time_short(thirty_secs_ago), "<1m");
+        assert_eq!(format_relative_time_short(five_mins_ago), "5m");
+        assert_eq!(format_relative_time_short(two_hours_ago), "2h");
+        assert_eq!(format_relative_time_short(three_days_ago), "3d");
+    }
+
+    #[test]
+    fn test_format_last_exit_shortened() {
+        let exit_zero = Some(ExitMetadata { exit_code: Some(0), signal: None });
+        let exit_one = Some(ExitMetadata { exit_code: Some(1), signal: None });
+        let signal_kill = Some(ExitMetadata { exit_code: None, signal: Some(9) });
+
+        assert_eq!(format_last_exit(exit_zero.as_ref(), None), "e0");
+        assert_eq!(format_last_exit(exit_one.as_ref(), None), "e1");
+        assert_eq!(format_last_exit(signal_kill.as_ref(), None), "s9");
+        assert_eq!(format_last_exit(None, None), "-");
+    }
 }
 
 struct StatusRenderOptions<'a> {
@@ -1147,26 +1303,32 @@ fn render_status(
         .with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S %Z");
 
-    // Calculate maximum width for STATE column
+    // Detect terminal width and calculate target table width (75% of terminal)
+    let terminal_width = terminal_size::terminal_size()
+        .map(|(width, _)| width.0 as usize)
+        .unwrap_or(120);  // Default to 120 chars if detection fails
+    let target_table_width = (terminal_width as f64 * 0.75) as usize;
+
+    const MIN_UNIT_WIDTH: usize = 20;
+    const MAX_UNIT_WIDTH: usize = 60;
+    const MIN_CMD_WIDTH: usize = 15;
+    const MAX_CMD_WIDTH: usize = 50;
+    const MIN_EXIT_WIDTH: usize = 10;
+    const MAX_EXIT_WIDTH: usize = 30;
+
+    const KIND_WIDTH: usize = 6;
+    const PID_WIDTH: usize = 7;
+    const CPU_WIDTH: usize = 6;
+    const RSS_WIDTH: usize = 8;
+    const UPTIME_WIDTH: usize = 10;
+    const HEALTH_WIDTH: usize = 8;
     let max_state_len = units
         .iter()
         .map(|unit| visible_length(&unit_state_label(unit, opts.no_color)))
         .max()
-        .unwrap_or(5)  // Minimum width of "STATE" header
-        .max(5);
+        .unwrap_or(7)
+        .clamp(7, 10);
 
-    // Calculate maximum width for LAST_EXIT column
-    let max_last_exit_len = units
-        .iter()
-        .map(|unit| {
-            let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
-            visible_length(&last_exit)
-        })
-        .max()
-        .unwrap_or(9)  // Minimum width of "LAST_EXIT" header
-        .max(9);
-
-    // Calculate maximum width for USER column
     let max_user_len = units
         .iter()
         .map(|unit| {
@@ -1176,52 +1338,40 @@ fn render_status(
                 .unwrap_or(1)
         })
         .max()
-        .unwrap_or(4)  // Minimum width of "USER" header
-        .max(4);
+        .unwrap_or(6)
+        .clamp(6, 8);
 
-    let max_cmd_len = units
-        .iter()
-        .map(max_unit_command_width)
-        .chain(
-            units
-                .iter()
-                .map(|unit| max_spawn_command_width(&unit.spawned_children)),
-        )
-        .max()
-        .unwrap_or(3)
-        .max(3);
-    let command_width = if opts.full_cmd {
-        max_cmd_len
+    let fixed_width = KIND_WIDTH + max_state_len + max_user_len + PID_WIDTH +
+                     CPU_WIDTH + RSS_WIDTH + UPTIME_WIDTH + HEALTH_WIDTH;
+    let padding_and_separators = 11 * 3 + 2;
+    let fixed_total = fixed_width + padding_and_separators;
+
+    let remaining_space = target_table_width.saturating_sub(fixed_total);
+
+    let (unit_width, cmd_width, exit_width) = if remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH + MIN_EXIT_WIDTH) {
+        (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH)
     } else {
-        max_cmd_len.min(48)
+        let unit_alloc = (remaining_space as f64 * 0.4) as usize;
+        let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
+        let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
+
+        (
+            unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
+            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
+            exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH)
+        )
     };
 
-    // Keep UNIT width bounded so deeply nested trees stay aligned with the table.
-    let mut max_unit_name_len = units
-        .iter()
-        .map(|unit| visible_length(&unit.name))
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let spawn_tree_width = units
-        .iter()
-        .map(|unit| max_spawn_label_width(&unit.spawned_children))
-        .max()
-        .unwrap_or(0);
-    max_unit_name_len = max_unit_name_len.max(spawn_tree_width);
-    let unit_width_cap = command_width.max(4);
-    max_unit_name_len = max_unit_name_len.min(unit_width_cap);
-
-    // Create dynamic columns with adjusted widths
+    // Create columns with calculated widths
     let columns_array = [
         Column {
             title: "UNIT",
-            width: max_unit_name_len,
+            width: unit_width,
             align: Alignment::Left,
         },
         Column {
             title: "KIND",
-            width: 6,
+            width: KIND_WIDTH,
             align: Alignment::Left,
         },
         Column {
@@ -1236,37 +1386,37 @@ fn render_status(
         },
         Column {
             title: "PID",
-            width: 8,
+            width: PID_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "CPU",
-            width: 10,
+            width: CPU_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "RSS",
-            width: 10,
+            width: RSS_WIDTH,
             align: Alignment::Right,
         },
         Column {
             title: "UPTIME",
-            width: 18,
+            width: UPTIME_WIDTH,
             align: Alignment::Left,
         },
         Column {
             title: "CMD",
-            width: command_width,
+            width: cmd_width,
             align: Alignment::Left,
         },
         Column {
             title: "LAST_EXIT",
-            width: max_last_exit_len,
+            width: exit_width,
             align: Alignment::Left,
         },
         Column {
             title: "HEALTH",
-            width: 10,
+            width: HEALTH_WIDTH,
             align: Alignment::Left,
         },
     ];
@@ -1465,9 +1615,42 @@ fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
 
 fn format_uptime_column(uptime: Option<&UptimeInfo>) -> String {
     if let Some(info) = uptime {
-        info.human.clone()
+        format_uptime_short(&info.human)
     } else {
         "-".to_string()
+    }
+}
+
+fn format_uptime_short(uptime: &str) -> String {
+    if uptime.contains("secs ago") {
+        "< 1m".to_string()
+    } else if let Some(mins) = extract_time_value(uptime, "mins ago") {
+        if mins < 60 {
+            format!("{}m", mins)
+        } else {
+            format!("{}h", mins / 60)
+        }
+    } else if let Some(hours) = extract_time_value(uptime, "hours ago") {
+        if hours < 24 {
+            format!("{}h", hours)
+        } else {
+            format!("{}d", hours / 24)
+        }
+    } else if let Some(days) = extract_time_value(uptime, "days ago") {
+        format!("{}d", days)
+    } else if let Some(weeks) = extract_time_value(uptime, "weeks ago") {
+        format!("{}w", weeks)
+    } else {
+        uptime.to_string()
+    }
+}
+
+fn extract_time_value(uptime: &str, suffix: &str) -> Option<u64> {
+    if uptime.ends_with(suffix) {
+        let num_str = uptime.trim_end_matches(suffix).trim();
+        num_str.parse().ok()
+    } else {
+        None
     }
 }
 
@@ -1518,13 +1701,11 @@ fn format_last_exit(
         && let Some(last) = &cron.last_run
     {
         let time_str = if let Some(completed_at) = last.completed_at {
-            format!(" {}", format_relative_time(completed_at))
+            format_relative_time_short(completed_at)
         } else if last.status.is_none() {
-            // Still running, no completion time
             "".to_string()
         } else {
-            // Has status but no completion time, use start time
-            format!(" {}", format_relative_time(last.started_at))
+            format_relative_time_short(last.started_at)
         };
 
         return match &last.status {
@@ -1533,10 +1714,14 @@ fn format_last_exit(
                     if time_str.is_empty() {
                         format!("exit {}", code)
                     } else {
-                        format!("exit {},{}", code, time_str)
+                        format!("e{} {}", code, time_str)
                     }
                 } else {
-                    format!("cron ok{}", time_str)
+                    if time_str.is_empty() {
+                        "ok".to_string()
+                    } else {
+                        format!("ok {}", time_str)
+                    }
                 }
             }
             Some(CronExecutionStatus::Failed(reason)) => {
@@ -1544,36 +1729,66 @@ fn format_last_exit(
                     if time_str.is_empty() {
                         format!("exit {}", code)
                     } else {
-                        format!("exit {},{}", code, time_str)
+                        format!("e{} {}", code, time_str)
                     }
                 } else if reason.is_empty() {
-                    format!("cron failed{}", time_str)
-                } else {
-                    // Truncate reason if it's too long but keep full text recognizable
-                    let display_reason = if reason.len() > 24 {
-                        &reason[..24]
+                    if time_str.is_empty() {
+                        "failed".to_string()
                     } else {
-                        reason.as_str()
+                        format!("fail {}", time_str)
+                    }
+                } else {
+                    let short_reason = if reason.contains("signal") {
+                        "sig"
+                    } else if reason.contains("Failed to start") {
+                        "start"
+                    } else if reason.contains("Failed to get PID") {
+                        "pid"
+                    } else {
+                        "err"
                     };
                     if time_str.is_empty() {
-                        format!("failed: {}", display_reason)
+                        short_reason.to_string()
                     } else {
-                        format!("failed: {},{}", display_reason, time_str)
+                        format!("{} {}", short_reason, time_str)
                     }
                 }
             }
-            Some(CronExecutionStatus::OverlapError) => format!("overlap{}", time_str),
+            Some(CronExecutionStatus::OverlapError) => {
+                if time_str.is_empty() {
+                    "overlap".to_string()
+                } else {
+                    format!("ovlp {}", time_str)
+                }
+            }
             None => "running".to_string(),
         };
     }
 
     match exit {
         Some(metadata) => match (metadata.exit_code, metadata.signal) {
-            (Some(code), _) => format!("exit {}", code),
-            (None, Some(signal)) => format!("signal {}", signal),
-            _ => "unknown".to_string(),
+            (Some(code), _) => format!("e{}", code),
+            (None, Some(signal)) => format!("s{}", signal),
+            _ => "?".to_string(),
         },
         None => "-".to_string(),
+    }
+}
+
+fn format_relative_time_short(from: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(from);
+
+    if duration.num_seconds() < 60 {
+        "<1m".to_string()
+    } else if duration.num_minutes() < 60 {
+        format!("{}m", duration.num_minutes())
+    } else if duration.num_hours() < 24 {
+        format!("{}h", duration.num_hours())
+    } else if duration.num_days() < 7 {
+        format!("{}d", duration.num_days())
+    } else {
+        format!("{}w", duration.num_weeks())
     }
 }
 

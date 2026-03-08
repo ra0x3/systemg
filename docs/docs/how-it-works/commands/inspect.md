@@ -8,7 +8,7 @@ title: inspect
 View detailed metrics for a specific service.
 
 ```sh
-$ sysg inspect --service myservice
+$ sysg inspect -s myservice
 ```
 
 ## Options
@@ -28,7 +28,7 @@ $ sysg inspect --service myservice
 ### View service metrics
 
 ```sh
-$ sysg inspect --service api
+$ sysg inspect -s api
 ```
 
 Shows CPU and memory usage chart:
@@ -54,7 +54,7 @@ CPU: 45.2% (current)  Memory: 23.1% (current)
 ### Stream with a longer rolling window
 
 ```sh
-$ sysg inspect --service api --stream 24h
+$ sysg inspect -s api --stream 24h
 ```
 
 ## Metrics shown

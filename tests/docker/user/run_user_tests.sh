@@ -341,7 +341,7 @@ log_success "Service-specific log streaming works"
 
 # Test metrics/inspection
 log_info "Collecting performance metrics..."
-if sysg inspect --config systemg.yaml --service backend --json > /tmp/user_metrics.json 2>/dev/null; then
+if sysg inspect --config systemg.yaml -s backend --json > /tmp/user_metrics.json 2>/dev/null; then
     log_success "Metrics collection successful"
 else
     log_fail "Metrics collection failed"

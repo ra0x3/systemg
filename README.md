@@ -298,16 +298,16 @@ $ sysg status --stream 5
 
 ```sh
 # Inspect a specific service or cron unit by name or hash
-$ sysg inspect myservice
+$ sysg inspect -s myservice
 
 # Show metrics in JSON format
-$ sysg inspect myservice --json
+$ sysg inspect -s myservice --json
 
 # Refresh continuously using a rolling 2-minute metrics window
-$ sysg inspect myservice --stream 2m
+$ sysg inspect -s myservice --stream 2m
 
 # Render output without ANSI coloring
-$ sysg inspect myservice --no-color
+$ sysg inspect -s myservice --no-color
 ```
 
 **Logs** - View logs for a specific service:
