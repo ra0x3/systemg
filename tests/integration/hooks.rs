@@ -25,7 +25,7 @@ env:
     VARS_TOKEN: "file_only"
 services:
   demo:
-    command: "sleep 0.1"
+    command: "sleep 10"
     hooks:
       on_start:
         success:
@@ -50,6 +50,9 @@ services:
 
     let lines = wait_for_lines(&hook_log, 1);
     assert_eq!(lines, vec!["START:file_only:service_only".to_string()]);
+
+    // Give the service a moment to be fully running before stopping
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     daemon.stop_service("demo").expect("stop service");
 

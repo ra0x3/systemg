@@ -12,7 +12,6 @@ use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
 use serde::{Deserialize, Serialize};
-use serde_xml_rs;
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -65,9 +64,9 @@ mod systemtime_serde_opt {
                 let duration = t
                     .duration_since(UNIX_EPOCH)
                     .map_err(serde::ser::Error::custom)?;
-                serializer.serialize_some(&duration.as_secs())
+                serializer.serialize_u64(duration.as_secs())
             }
-            None => serializer.serialize_none(),
+            None => serializer.serialize_u64(0), // Use 0 to represent None for XML compatibility
         }
     }
 
@@ -75,8 +74,13 @@ mod systemtime_serde_opt {
     where
         D: Deserializer<'de>,
     {
-        let secs: Option<u64> = Option::deserialize(deserializer)?;
-        Ok(secs.map(|s| UNIX_EPOCH + Duration::from_secs(s)))
+        let secs = u64::deserialize(deserializer)?;
+        // 0 represents None for XML compatibility
+        if secs == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(UNIX_EPOCH + Duration::from_secs(secs)))
+        }
     }
 }
 
@@ -579,7 +583,7 @@ impl CronStateFile {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let data = serde_xml_rs::to_string(self).map_err(std::io::Error::other)?;
+        let data = quick_xml::se::to_string(self).map_err(std::io::Error::other)?;
 
         use std::io::Write;
         let mut file = fs::File::create(&path)?;
@@ -596,7 +600,7 @@ impl CronStateFile {
         }
 
         let raw = fs::read_to_string(path)?;
-        let state = serde_xml_rs::from_str(&raw)
+        let state = quick_xml::de::from_str(&raw)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         Ok(state)
     }
@@ -618,13 +622,16 @@ impl CronStateFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedCronJobState {
     /// Timestamp of the last execution start.
-    #[serde(with = "systemtime_serde_opt")]
+    #[serde(with = "systemtime_serde_opt", default)]
     pub last_execution: Option<SystemTime>,
     /// Rolling history of recent executions.
+    #[serde(default)]
     pub execution_history: VecDeque<CronExecutionRecord>,
     /// Human-readable timezone label.
+    #[serde(default)]
     pub timezone_label: String,
     /// Optional timezone string (e.g., "UTC", "America/New_York").
+    #[serde(default)]
     pub timezone: Option<String>,
 }
 

@@ -1,5 +1,4 @@
 //! Error handling for systemg.
-use serde_xml_rs;
 use thiserror::Error;
 
 /// Defines all possible errors that can occur in the process manager.
@@ -148,7 +147,7 @@ pub enum PidFileError {
 
     /// Error parsing XML PID file.
     #[error("Failed to parse PID file: {0}")]
-    ParseError(#[from] serde_xml_rs::Error),
+    ParseError(#[from] quick_xml::DeError),
 
     /// Error writing to a PID file.
     #[error("Service not found in PID file")]
@@ -164,7 +163,7 @@ pub enum ServiceStateError {
 
     /// Error parsing XML contents of the state file.
     #[error("Failed to parse service state file: {0}")]
-    ParseError(#[from] serde_xml_rs::Error),
+    ParseError(#[from] quick_xml::DeError),
 
     /// Attempted to update or remove a non-existent service entry.
     #[error("Service not found in state file")]

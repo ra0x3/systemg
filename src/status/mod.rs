@@ -1886,7 +1886,7 @@ mod tests {
         time::SystemTime,
     };
 
-    use serde_json::{Map, Value, json};
+    use serde_json::json;
     use tempfile::tempdir_in;
 
     use super::*;
@@ -1947,11 +1947,12 @@ mod tests {
         };
 
         let pid_file: PidFile = serde_json::from_value(json!({
-            "services": {},
-            "parent_map": { child_pid.to_string(): parent_pid },
-            "children_map": { parent_pid.to_string(): [child_pid] },
-            "spawn_depth": { child_pid.to_string(): 1 },
-            "spawn_metadata": { child_pid.to_string(): metadata },
+            "services": [],
+            "service_groups": [],
+            "parent_map": [{ "child": child_pid, "parent": parent_pid }],
+            "children_map": [{ "parent": parent_pid, "children": [child_pid] }],
+            "spawn_depth": [{ "pid": child_pid, "depth": 1 }],
+            "spawn_metadata": [{ "pid": child_pid, "metadata": metadata }],
         }))
         .expect("deserialize pid file");
 
@@ -2014,34 +2015,23 @@ mod tests {
             last_exit: None,
         };
 
-        let mut spawn_metadata = Map::new();
-        spawn_metadata.insert(
-            team_lead_pid.to_string(),
-            serde_json::to_value(&team_lead).expect("serialize team lead"),
-        );
-        spawn_metadata.insert(
-            core_pid.to_string(),
-            serde_json::to_value(&core_infra).expect("serialize core"),
-        );
-        spawn_metadata.insert(
-            ui_pid.to_string(),
-            serde_json::to_value(&ui_dev).expect("serialize ui"),
-        );
-
-        let mut spawn_depth = Map::new();
-        spawn_depth.insert(team_lead_pid.to_string(), json!(1));
-        spawn_depth.insert(core_pid.to_string(), json!(2));
-        spawn_depth.insert(ui_pid.to_string(), json!(2));
-
-        let mut root = Map::new();
-        root.insert("services".to_string(), json!({}));
-        root.insert("parent_map".to_string(), json!({}));
-        root.insert("children_map".to_string(), json!({}));
-        root.insert("spawn_depth".to_string(), Value::Object(spawn_depth));
-        root.insert("spawn_metadata".to_string(), Value::Object(spawn_metadata));
-
-        let pid_file: PidFile =
-            serde_json::from_value(Value::Object(root)).expect("deserialize pid file");
+        let pid_file: PidFile = serde_json::from_value(json!({
+            "services": [],
+            "service_groups": [],
+            "parent_map": [],
+            "children_map": [],
+            "spawn_depth": [
+                { "pid": team_lead_pid, "depth": 1 },
+                { "pid": core_pid, "depth": 2 },
+                { "pid": ui_pid, "depth": 2 }
+            ],
+            "spawn_metadata": [
+                { "pid": team_lead_pid, "metadata": team_lead },
+                { "pid": core_pid, "metadata": core_infra },
+                { "pid": ui_pid, "metadata": ui_dev }
+            ],
+        }))
+        .expect("deserialize pid file");
 
         let nodes = build_spawn_tree_from_pidfile(
             &pid_file,
@@ -2231,14 +2221,15 @@ services:
         let mut service_state = ServiceStateFile::default();
 
         let cron_state_json = json!({
-            "jobs": {
-                "deadbeefdeadbeef": {
-                    "last_execution": null,
+            "jobs": [{
+                "hash": "deadbeefdeadbeef",
+                "state": {
+                    "last_execution": 0,  // 0 represents None for XML compatibility
                     "execution_history": [],
                     "timezone_label": "UTC",
                     "timezone": "UTC"
                 }
-            }
+            }]
         });
         let mut cron_state: CronStateFile =
             serde_json::from_value(cron_state_json).expect("deserialize cron state");

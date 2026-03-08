@@ -18,9 +18,9 @@ use std::{
 };
 
 use fs2::FileExt;
+use quick_xml::{de::from_str as xml_from_str, se::to_string as xml_to_string};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::Error as _};
-use serde_xml_rs;
 use serde_yaml;
 use sysinfo::{ProcessesToUpdate, System};
 use tracing::{debug, error, info, trace, warn};
@@ -417,7 +417,7 @@ impl PidFile {
             return Ok(Self::default());
         }
         let contents = fs::read_to_string(path)?;
-        let pid_data = serde_xml_rs::from_str::<Self>(&contents)?;
+        let pid_data = xml_from_str::<Self>(&contents)?;
         Ok(pid_data)
     }
 
@@ -437,7 +437,7 @@ impl PidFile {
 
         let path = Self::path();
         let contents = fs::read_to_string(&path)?;
-        let pid_data = serde_xml_rs::from_str::<Self>(&contents)?;
+        let pid_data = xml_from_str::<Self>(&contents)?;
         Ok(pid_data)
     }
 
@@ -447,7 +447,7 @@ impl PidFile {
 
         let path = Self::path();
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -468,7 +468,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_xml_rs::from_str::<Self>(&contents)?;
+            *self = xml_from_str::<Self>(&contents)?;
         }
 
         self.services.insert(service.to_string(), pid);
@@ -477,7 +477,7 @@ impl PidFile {
         }
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -488,7 +488,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_xml_rs::from_str::<Self>(&contents)?;
+            *self = xml_from_str::<Self>(&contents)?;
         }
 
         if self.services.remove(service).is_none() {
@@ -496,7 +496,7 @@ impl PidFile {
         }
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -507,7 +507,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_xml_rs::from_str::<Self>(&contents)?;
+            *self = xml_from_str::<Self>(&contents)?;
         }
 
         if self.services.remove(service).is_none() {
@@ -515,7 +515,7 @@ impl PidFile {
         }
         self.service_groups.remove(service);
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -534,7 +534,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_xml_rs::from_str::<Self>(&contents)?;
+            *self = xml_from_str::<Self>(&contents)?;
         }
 
         let child_pid = metadata.pid;
@@ -550,7 +550,7 @@ impl PidFile {
         self.spawn_metadata.insert(child_pid, metadata);
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -564,7 +564,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_xml_rs::from_str::<Self>(&contents)?;
+            *self = xml_from_str::<Self>(&contents)?;
         }
 
         if let Some(metadata) = self.spawn_metadata.get_mut(&child_pid) {
@@ -572,7 +572,7 @@ impl PidFile {
         }
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -583,7 +583,7 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_xml_rs::from_str::<Self>(&contents)?;
+            *self = xml_from_str::<Self>(&contents)?;
         }
 
         if let Some(parent_pid) = self.parent_map.remove(&child_pid)
@@ -598,7 +598,7 @@ impl PidFile {
         self.spawn_metadata.remove(&child_pid);
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -611,13 +611,13 @@ impl PidFile {
         let path = Self::path();
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
-            *self = serde_xml_rs::from_str::<Self>(&contents)?;
+            *self = xml_from_str::<Self>(&contents)?;
         }
 
         let removed = self.remove_spawn_subtree_in_memory(root_pid);
 
         fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
 
         Ok(removed)
     }
@@ -893,7 +893,7 @@ impl ServiceStateFile {
         }
 
         let contents = fs::read_to_string(path)?;
-        let state = serde_xml_rs::from_str::<Self>(&contents)?;
+        let state = xml_from_str::<Self>(&contents)?;
         Ok(state)
     }
 
@@ -903,7 +903,7 @@ impl ServiceStateFile {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, serde_xml_rs::to_string(self)?)?;
+        fs::write(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -2850,14 +2850,13 @@ impl Daemon {
             )))
         })?;
 
-        let state: BlueGreenState =
-            serde_xml_rs::from_str(&content).map_err(|source| {
-                ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
-                    "Failed parsing blue/green state '{}': {}",
-                    path.display(),
-                    source
-                )))
-            })?;
+        let state: BlueGreenState = xml_from_str(&content).map_err(|source| {
+            ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
+                "Failed parsing blue/green state '{}': {}",
+                path.display(),
+                source
+            )))
+        })?;
 
         if state.active_slot_index > 1 {
             return Err(Self::config_error(format!(
@@ -2880,8 +2879,8 @@ impl Daemon {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = serde_xml_rs::to_string(&BlueGreenState { active_slot_index })
-            .map_err(|source| {
+        let content =
+            xml_to_string(&BlueGreenState { active_slot_index }).map_err(|source| {
                 ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(
                     source.to_string(),
                 ))
