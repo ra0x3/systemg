@@ -13,7 +13,7 @@ Minimal service configuration.
 
 ## [CRUD Application](crud)
 
-Production Node.js API with database backups and automated testing.
+Simple FastAPI CRUD service for testing systemg service management.
 
 ## [Orchestrator](orchestrator)
 

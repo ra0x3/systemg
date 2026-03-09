@@ -1,186 +1,168 @@
-# CRUD Application Example
+# FastAPI CRUD Example
 
-This example demonstrates how to use `systemg` to manage a production-ready Node.js CRUD application with automated testing, database backups, and deployment notifications.
+A minimal FastAPI CRUD application demonstrating `systemg` service management and automatic recovery from failures.
 
 ## Overview
 
-This example showcases advanced `systemg` features for managing a realistic web application:
+This example showcases:
+- **FastAPI** with modern Python async/await
+- **uvicorn** ASGI server managed by `systemg`
+- **uv** package manager for fast dependency installation
+- **Automatic recovery** from service failures
+- **Simple in-memory storage** using Python dict
 
-- **Web Server Management**: Run a Node.js/Express API server as a managed service
-- **Rolling Deployments**: Zero-downtime deployments using `rolling_start` strategy
-- **Scheduled Testing**: Automated hourly test suite execution via cron
-- **Database Backups**: Automated backups every 6 hours with S3 storage
-- **Webhook Notifications**: Slack alerts for deployment and operational events
-- **Environment Management**: Secure configuration using environment variables
+## Quick Start
 
-## What's Included
-
-This is a minimal Node.js CRUD application with:
-
-- **Express.js** web server with REST API endpoints
-- **PostgreSQL** database for data persistence
-- **Automated tests** to ensure API reliability
-- **Database backup script** for data safety
-- **systemg configuration** for complete lifecycle management
-
-## Setup
-
-### 1. Install Dependencies
+### 1. Install dependencies with uv
 
 ```bash
-npm install
+cd examples/crud
+uv sync
 ```
 
-### 2. Configure Environment
-
-Copy the example environment file and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and provide:
-- Database connection strings
-- AWS S3 credentials for backups
-- Slack webhook URLs for notifications
-- Application port and environment
-
-### 3. Database Setup
-
-Create your PostgreSQL database and run migrations:
-
-```bash
-npm run migrate
-```
-
-## Running with systemg
-
-### Start All Services
-
-Start the web server and enable all scheduled jobs:
+### 2. Start the service with systemg
 
 ```bash
 sysg start
 ```
 
-This will:
-- Start the web server with rolling deployment strategy
-- Enable hourly automated testing
-- Enable 6-hourly database backups
-- Send success/error notifications to Slack
+### 3. Test the API
 
-### Check Status
+The API will be available at `http://localhost:8888`
 
-View the status of all services and cron jobs:
+Check the interactive docs at `http://localhost:8888/docs`
 
-```bash
-sysg status
-```
-
-### View Logs
-
-View logs for the web server:
-
-```bash
-sysg logs --service node__web_server
-```
-
-### Stop Services
+### 4. Stop the service
 
 ```bash
 sysg stop
 ```
 
-## Configuration Highlights
+## API Endpoints
 
-### Rolling Deployments
-
-```yaml
-deployment_strategy: "rolling_start"
+### Todo Model
+```python
+{
+    "title": "string",
+    "description": "string",
+    "id": "integer",
+    "timestamp": "datetime",
+    "is_completed": "boolean"
+}
 ```
 
-When you update your application, `systemg` will:
-1. Start the new version
-2. Wait for it to be healthy
-3. Stop the old version
-4. Ensure zero downtime
+### Endpoints
 
-### Automated Testing
+- `GET /` - Health check
+- `POST /todos` - Create a new todo
+- `GET /todos` - List all todos
+- `GET /todos/{id}` - Get a specific todo
+- `PUT /todos/{id}` - Update a todo
+- `DELETE /todos/{id}` - Delete a todo
+- `GET /chaos` - Random failure endpoint (70% failure rate)
 
-```yaml
-cron:
-  test_suite:
-    schedule: "0 * * * *"  # Every hour
-    command: "npm test"
+## Testing All Endpoints
+
+Run the included test script to verify all endpoints:
+
+```bash
+uv run python test_api.py
 ```
 
-Tests run automatically every hour and send notifications on success/failure.
+This will:
+1. Create a new todo
+2. Read all todos
+3. Update the todo
+4. Get a specific todo
+5. Test the chaos endpoint (demonstrates recovery)
+6. Delete the todo
 
-### Database Backups
+## Demonstrating Recovery
 
-```yaml
-cron:
-  database_backup:
-    schedule: "0 */6 * * *"  # Every 6 hours
-    command: "bash scripts/backup-database.sh"
+The `/chaos` endpoint has a 70% chance of returning a 500 error. This demonstrates how `systemg` handles failures:
+
+```bash
+# Watch the service recover from failures
+sysg logs --service fastapi_server
+
+# In another terminal, hit the chaos endpoint
+curl http://localhost:8888/chaos
 ```
 
-Automated backups run 4 times per day (00:00, 06:00, 12:00, 18:00) and upload to S3.
+With `restart_policy: "on_failure"` and `backoff: "5s"`, systemg will automatically restart the service if it crashes, with a 5-second delay between attempts.
 
-### Webhook Notifications
+## Configuration
 
-Both the web server and cron jobs send Slack notifications:
-- **on_success**: Sent when services start successfully or jobs complete
-- **on_error**: Sent when services fail or jobs encounter errors
+The `crud.sysg.yaml` file configures:
+
+```yaml
+version: "1"
+
+services:
+  fastapi_server:
+    command: "uv run uvicorn main:app --host 0.0.0.0 --port 8888"
+    deployment_strategy: "rolling_start"  # Zero-downtime deployments
+    restart_policy: "on_failure"          # Auto-restart on crashes
+    retries: "10"                          # Max restart attempts
+    backoff: "5s"                          # Delay between restarts
+```
 
 ## Project Structure
 
 ```
 crud/
-├── server.js                  # Express.js web server
-├── routes/                    # API route handlers
-├── models/                    # Database models
-├── tests/                     # Test suite
-├── scripts/
-│   └── backup-database.sh    # Database backup script
-├── package.json              # Node.js dependencies
-├── .env.example              # Environment variable template
-├── crud.sysg.yaml            # systemg configuration
-└── README.md                 # This file
+├── main.py            # FastAPI application
+├── test_api.py        # Test script for all endpoints
+├── pyproject.toml     # Python dependencies (uv)
+├── crud.sysg.yaml     # systemg configuration
+└── README.md          # This file
 ```
 
-## API Endpoints
+## Example Usage
 
-The CRUD API provides standard RESTful endpoints:
+### Create a Todo
+```bash
+curl -X POST http://localhost:8888/todos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Learn systemg",
+    "description": "Understand service management with systemg",
+    "is_completed": false
+  }'
+```
 
-- `GET /api/items` - List all items
-- `GET /api/items/:id` - Get a specific item
-- `POST /api/items` - Create a new item
-- `PUT /api/items/:id` - Update an item
-- `DELETE /api/items/:id` - Delete an item
+### List Todos
+```bash
+curl http://localhost:8888/todos
+```
 
-## Monitoring
+### Update a Todo
+```bash
+curl -X PUT http://localhost:8888/todos/1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Learn systemg",
+    "description": "Master service management with systemg",
+    "is_completed": true
+  }'
+```
 
-With `systemg`, you get built-in monitoring:
+### Delete a Todo
+```bash
+curl -X DELETE http://localhost:8888/todos/1
+```
 
-1. **Service Health**: Automatic restart on failure with configurable backoff
-2. **Deployment Notifications**: Know immediately if a deployment succeeds or fails
-3. **Scheduled Job Status**: Slack notifications for test and backup results
-4. **Logs**: Centralized logging with `sysg logs` command
+### Test Chaos Endpoint
+```bash
+# This will fail 70% of the time
+curl http://localhost:8888/chaos
+```
 
-## Best Practices Demonstrated
+## Why This Example?
 
+This example demonstrates:
+- ✅ Modern Python web development with FastAPI
+- ✅ Simple service management with `sysg start` and `sysg stop`
+- ✅ Automatic recovery from failures
 - ✅ Zero-downtime deployments with rolling strategy
-- ✅ Separation of configuration from code using environment variables
-- ✅ Automated testing for continuous quality assurance
-- ✅ Regular database backups for disaster recovery
-- ✅ Real-time operational notifications via webhooks
-- ✅ Proper restart policies with exponential backoff
-
-## Learn More
-
-For more information about `systemg` features used in this example, see:
-
-- [Configuration Reference](https://docs.systemg.dev/docs/configuration)
-- [Cron Jobs](https://docs.systemg.dev/docs/cron)
-- [Webhooks](https://docs.systemg.dev/docs/webhooks)
+- ✅ Minimal configuration for maximum clarity

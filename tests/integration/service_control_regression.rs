@@ -371,7 +371,7 @@ services:
         "Expected configured service to remain visible after purge"
     );
     assert!(
-        stdout_after.contains("Not running"),
-        "Service should show as Not running after purge"
+        stdout_after.contains("Stopped"),
+        "Service should show as Stopped after purge"
     );
 }

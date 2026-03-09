@@ -599,10 +599,22 @@ impl CronStateFile {
             return Ok(Self::default());
         }
 
-        let raw = fs::read_to_string(path)?;
-        let state = quick_xml::de::from_str(&raw)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        Ok(state)
+        let raw = fs::read_to_string(&path)?;
+
+        if raw.trim().is_empty() || raw.trim() == "<CronStateFile/>" {
+            return Ok(Self::default());
+        }
+
+        match quick_xml::de::from_str(&raw) {
+            Ok(state) => Ok(state),
+            Err(err) => {
+                eprintln!(
+                    "Warning: Failed to deserialize cron state file at {:?}: {}. Using default state.",
+                    path, err
+                );
+                Ok(Self::default())
+            }
+        }
     }
 
     /// Returns a reference to the map of persisted cron job states.

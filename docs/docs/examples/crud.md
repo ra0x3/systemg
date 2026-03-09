@@ -5,199 +5,235 @@ title: CRUD Application
 
 # CRUD Application
 
-Production-ready Node.js API with automated testing, backups, and Slack notifications.
+A simple FastAPI CRUD service for testing systemg service management capabilities.
 
 ## Features demonstrated
 
+- Service management with `sysg start` and `sysg stop`
+- Automatic recovery from failures
 - Zero-downtime rolling deployments
-- Scheduled database backups
-- Automated testing via cron
-- Slack webhook notifications
-- Environment variable management
+- Modern Python with FastAPI and uvicorn
+- Package management with uv
 
 ## Configuration
 
 ```yaml
 version: "1"
-env:
-  file: ".env.example"
 
 services:
-  node__web_server:
-    command: "node server.js"
-    deployment:
-      strategy: "rolling"
-      blue_green:
-        env_var: "PORT"
-        slots: ["3000", "3001"]
-        candidate_health_check_url: "http://127.0.0.1:{slot}/health"
-        switch_command: "sudo /usr/local/bin/switch-crud-upstream {candidate_slot}"
-    env:
-      vars:
-        NODE_ENV: "${NODE_ENV}"
-        PORT: "${PORT}"
-        DATABASE_URL: "${DATABASE_URL}"
+  fastapi_server:
+    command: "uv run uvicorn main:app --host 0.0.0.0 --port 8888"
+    deployment_strategy: "rolling_start"
     restart_policy: "on_failure"
     retries: "10"
-    backoff: "10s"
-    webhooks:
-      on_success:
-        url: "${SLACK_WEBHOOK_SUCCESS_URL}"
-        method: "POST"
-        timeout: "30s"
-      on_failure:
-        url: "${SLACK_WEBHOOK_FAILURE_URL}"
-        method: "POST"
-        timeout: "30s"
-
-cron:
-  automated_testing:
-    command: "npm test"
-    schedule: "0 */6 * * *"
-    retries: "3"
-    timeout: "120s"
-    webhooks:
-      on_failure:
-        url: "${SLACK_WEBHOOK_TEST_FAILURE_URL}"
-        method: "POST"
-
-  database_backup:
-    command: >
-      pg_dump ${DATABASE_URL} >
-      /backups/db_$(date +%Y%m%d_%H%M%S).sql
-    schedule: "0 2 * * *"
-    retries: "5"
-    timeout: "300s"
-    webhooks:
-      on_success:
-        url: "${SLACK_WEBHOOK_BACKUP_URL}"
-        method: "POST"
-      on_failure:
-        url: "${SLACK_WEBHOOK_BACKUP_FAILURE_URL}"
-        method: "POST"
-```
-
-## Environment file
-
-Create `.env.example`:
-
-```dotenv
-NODE_ENV=production
-PORT=3000
-DATABASE_URL=postgres://user:pass@localhost/crud_db
-SLACK_WEBHOOK_SUCCESS_URL=https://hooks.slack.com/services/xxx
-SLACK_WEBHOOK_FAILURE_URL=https://hooks.slack.com/services/yyy
-SLACK_WEBHOOK_TEST_FAILURE_URL=https://hooks.slack.com/services/zzz
-SLACK_WEBHOOK_BACKUP_URL=https://hooks.slack.com/services/aaa
-SLACK_WEBHOOK_BACKUP_FAILURE_URL=https://hooks.slack.com/services/bbb
+    backoff: "5s"
 ```
 
 ## Application code
 
-### server.js
+### main.py
 
-```javascript
-const express = require('express');
-const app = express();
-const port = process.env.PORT || 3000;
+```python
+import random
+from datetime import datetime, timezone
+from typing import Dict, Optional
 
-app.use(express.json());
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
-// In-memory database for demo
-let items = [];
-let nextId = 1;
+app = FastAPI(title="CRUD API", version="0.1.0")
 
-app.get('/items', (req, res) => {
-  res.json(items);
-});
+class Todo(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(..., min_length=1, max_length=1000)
+    id: Optional[int] = Field(default=None)
+    timestamp: Optional[datetime] = Field(default=None)
+    is_completed: bool = Field(default=False)
 
-app.post('/items', (req, res) => {
-  const item = { id: nextId++, ...req.body };
-  items.push(item);
-  res.status(201).json(item);
-});
+todos_db: Dict[int, Todo] = {}
+next_id = 1
 
-app.put('/items/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const index = items.findIndex(item => item.id === id);
-  if (index === -1) return res.status(404).json({ error: 'Not found' });
-  items[index] = { id, ...req.body };
-  res.json(items[index]);
-});
+@app.get("/")
+async def root():
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
-app.delete('/items/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  items = items.filter(item => item.id !== id);
-  res.status(204).send();
-});
+@app.post("/todos", response_model=Todo)
+async def create_todo(todo: Todo) -> Todo:
+    global next_id
+    todo.id = next_id
+    todo.timestamp = datetime.now(timezone.utc)
+    next_id += 1
+    todos_db[todo.id] = todo
+    return todo
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+@app.get("/todos", response_model=list[Todo])
+async def read_todos() -> list[Todo]:
+    return list(todos_db.values())
+
+@app.get("/todos/{todo_id}", response_model=Todo)
+async def read_todo(todo_id: int) -> Todo:
+    if todo_id not in todos_db:
+        raise HTTPException(status_code=404, detail=f"Todo with id {todo_id} not found")
+    return todos_db[todo_id]
+
+@app.put("/todos/{todo_id}", response_model=Todo)
+async def update_todo(todo_id: int, todo_update: Todo) -> Todo:
+    if todo_id not in todos_db:
+        raise HTTPException(status_code=404, detail=f"Todo with id {todo_id} not found")
+
+    existing_todo = todos_db[todo_id]
+    existing_todo.title = todo_update.title
+    existing_todo.description = todo_update.description
+    existing_todo.is_completed = todo_update.is_completed
+    return existing_todo
+
+@app.delete("/todos/{todo_id}")
+async def delete_todo(todo_id: int):
+    if todo_id not in todos_db:
+        raise HTTPException(status_code=404, detail=f"Todo with id {todo_id} not found")
+
+    del todos_db[todo_id]
+    return {"message": f"Todo {todo_id} deleted successfully"}
+
+@app.get("/chaos")
+async def chaos_endpoint():
+    if random.random() < 0.7:
+        raise HTTPException(
+            status_code=500,
+            detail="Chaos monkey struck! Random failure to test recovery."
+        )
+    return {"message": "Lucky you! The chaos monkey was sleeping."}
+```
+
+## Dependencies
+
+Create `pyproject.toml`:
+
+```toml
+[project]
+name = "crud-example"
+version = "0.1.0"
+description = "Simple CRUD API with FastAPI demonstrating systemg recovery"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
 ```
 
 ## Run it
 
 ```bash
 $ cd examples/crud
-$ npm install
+$ uv sync
 $ sysg start --config crud.sysg.yaml
 ```
 
-## Operations
+## API endpoints
 
-### Deploy new version
+- `GET /` - Health check
+- `POST /todos` - Create a new todo
+- `GET /todos` - List all todos
+- `GET /todos/{id}` - Get a specific todo
+- `PUT /todos/{id}` - Update a todo
+- `DELETE /todos/{id}` - Delete a todo
+- `GET /chaos` - Random failure endpoint (70% failure rate)
+
+## Testing
+
+Run the test script to verify all endpoints:
 
 ```bash
-# Update code
-$ git pull
-$ npm install
+$ uv run python test_api.py
+```
 
-# Rolling restart - zero downtime
-$ sysg restart --service node__web_server --daemonize
+The test script will:
+1. Create a new todo
+2. Read all todos
+3. Update the todo
+4. Get a specific todo
+5. Test the chaos endpoint (demonstrates recovery)
+6. Delete the todo
+
+## Operations
+
+### Stop the service
+
+```bash
+$ sysg stop --config crud.sysg.yaml
 ```
 
 ### View logs
 
 ```bash
-$ sysg logs --service node__web_server
+$ sysg logs --service fastapi_server
 ```
 
-### Manual backup
+### Check status
 
 ```bash
-$ sysg cron trigger database_backup
+$ sysg status
 ```
 
-### Check cron schedules
+## Example usage
 
+### Create a Todo
 ```bash
-$ sysg cron list
+curl -X POST http://localhost:8888/todos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Test systemg",
+    "description": "Verify systemg service management",
+    "is_completed": false
+  }'
+```
+
+### List Todos
+```bash
+curl http://localhost:8888/todos
+```
+
+### Update a Todo
+```bash
+curl -X PUT http://localhost:8888/todos/1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Test systemg",
+    "description": "Successfully tested systemg!",
+    "is_completed": true
+  }'
+```
+
+### Test chaos endpoint
+```bash
+curl http://localhost:8888/chaos
 ```
 
 ## What happens
 
-1. **Web server** starts and serves API on configured port
-2. **Tests** run automatically every 6 hours
-3. **Backups** execute nightly at 2 AM
-4. **Slack notifications** fire on:
-   - Successful/failed deployments
-   - Failed tests
-   - Backup completion or failure
+1. **Service starts** with `sysg start` and serves the API on port 8888
+2. **In-memory storage** using Python dict for simplicity
+3. **Chaos endpoint** randomly fails to demonstrate recovery capabilities
+4. **Automatic restarts** when service crashes (up to 10 retries with 5s backoff)
 5. **Rolling deployments** ensure zero downtime during updates
 
-## Monitoring
+## Interactive API docs
 
-```bash
-$ sysg status                                    # Service health
-$ sysg cron status                               # Cron job history
-$ sysg logs --service automated_testing          # Test results
-$ sysg logs --service database_backup            # Backup logs
-```
+FastAPI provides automatic interactive documentation at:
+- Swagger UI: `http://localhost:8888/docs`
+- ReDoc: `http://localhost:8888/redoc`
 
 ## See also
 
 - [Configuration](../how-it-works/configuration) - Service definitions
-- [Cron](../how-it-works/cron) - Scheduled tasks
-- [Webhooks](../how-it-works/webhooks) - Notifications
-- [Rolling deployments](../how-it-works/configuration#deployment-strategies)
+- [Hello World](./hello-world) - Simple example to get started
+- [Orchestrator](./orchestrator) - Multi-agent task execution

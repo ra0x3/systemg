@@ -832,6 +832,11 @@ fn build_snapshot(
             }
         }
 
+        // For configured services with no state (e.g., after purge), default to Stopped
+        if lifecycle.is_none() && actual_name.is_some() && kind != UnitKind::Orphaned {
+            lifecycle = Some(ServiceLifecycleStatus::Stopped);
+        }
+
         let uptime = match process_runtime.as_ref() {
             Some(runtime) if matches!(runtime.state, ProcessState::Running) => {
                 compute_uptime(runtime.pid)
