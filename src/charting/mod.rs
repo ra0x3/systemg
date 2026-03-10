@@ -15,6 +15,8 @@ pub struct ChartConfig {
     pub no_color: bool,
     /// Time window description for the title.
     pub window_desc: String,
+    /// Optional max render width for chart output.
+    pub max_width: Option<usize>,
 }
 
 /// Render metrics as ASCII charts using rasciigraph.
@@ -71,7 +73,8 @@ pub fn render_metrics_chart(
         config.window_desc
     );
 
-    let chart_width = compute_chart_width(terminal_columns());
+    let available_columns = effective_chart_columns(config);
+    let chart_width = compute_chart_width(available_columns);
 
     let cpu_graph = plot(
         cpu_final,
@@ -117,7 +120,7 @@ pub fn render_metrics_chart(
     );
 
     let cards = vec![cpu_card, mem_card];
-    let rendered_rows = layout_cards_with_wrapping(&cards, terminal_columns());
+    let rendered_rows = layout_cards_with_wrapping(&cards, available_columns);
     for (idx, row) in rendered_rows.iter().enumerate() {
         for line in row {
             println!("{line}");
@@ -326,6 +329,13 @@ fn terminal_columns() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&width| width >= 60)
         .unwrap_or(120)
+}
+
+fn effective_chart_columns(config: &ChartConfig) -> usize {
+    match config.max_width {
+        Some(width) => width.max(1),
+        None => terminal_columns(),
+    }
 }
 
 fn compute_chart_width(columns: usize) -> usize {
@@ -542,5 +552,15 @@ mod tests {
     fn test_compute_chart_width_prefers_inline_layout() {
         assert_eq!(compute_chart_width(120), 40);
         assert_eq!(compute_chart_width(80), 24);
+    }
+
+    #[test]
+    fn test_effective_chart_columns_uses_max_width_override() {
+        let config = ChartConfig {
+            no_color: true,
+            window_desc: "5m".to_string(),
+            max_width: Some(90),
+        };
+        assert_eq!(effective_chart_columns(&config), 90);
     }
 }

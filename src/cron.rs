@@ -11,7 +11,10 @@ use std::{
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Serialize,
+    de::{EnumAccess, IgnoredAny, MapAccess, VariantAccess, Visitor},
+};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -85,7 +88,7 @@ mod systemtime_serde_opt {
 }
 
 /// Status of a cron job execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub enum CronExecutionStatus {
     /// Cron job completed successfully.
     Success,
@@ -93,6 +96,154 @@ pub enum CronExecutionStatus {
     Failed(String),
     /// Cron job was scheduled to run but previous execution was still running.
     OverlapError,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FailedReasonValue {
+    Plain(String),
+    Text {
+        #[serde(rename = "$text")]
+        value: String,
+    },
+}
+
+impl FailedReasonValue {
+    /// Converts a compatibility wrapper into the concrete failure reason string.
+    fn into_reason(self) -> String {
+        match self {
+            Self::Plain(reason) => reason,
+            Self::Text { value } => value,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CronExecutionStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CronExecutionStatusVisitor;
+
+        impl<'de> Visitor<'de> for CronExecutionStatusVisitor {
+            type Value = CronExecutionStatus;
+
+            fn expecting(
+                &self,
+                formatter: &mut std::fmt::Formatter<'_>,
+            ) -> std::fmt::Result {
+                formatter.write_str("a cron execution status in enum-tag or text form")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "Success" => Ok(CronExecutionStatus::Success),
+                    "OverlapError" => Ok(CronExecutionStatus::OverlapError),
+                    "Failed" => Ok(CronExecutionStatus::Failed("failed".to_string())),
+                    other => Err(E::unknown_variant(
+                        other,
+                        &["Success", "Failed", "OverlapError"],
+                    )),
+                }
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+            where
+                A: EnumAccess<'de>,
+            {
+                let (variant, access) = data.variant::<String>()?;
+                match variant.as_str() {
+                    "Success" => {
+                        access.unit_variant()?;
+                        Ok(CronExecutionStatus::Success)
+                    }
+                    "OverlapError" => {
+                        access.unit_variant()?;
+                        Ok(CronExecutionStatus::OverlapError)
+                    }
+                    "Failed" => {
+                        let reason = access.newtype_variant::<FailedReasonValue>()?;
+                        Ok(CronExecutionStatus::Failed(reason.into_reason()))
+                    }
+                    other => Err(serde::de::Error::unknown_variant(
+                        other,
+                        &["Success", "Failed", "OverlapError"],
+                    )),
+                }
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut text_variant: Option<String> = None;
+                let mut failed_reason: Option<String> = None;
+                let mut tagged_variant: Option<CronExecutionStatus> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "$text" => text_variant = Some(map.next_value::<String>()?),
+                        "$value" => failed_reason = Some(map.next_value::<String>()?),
+                        "Success" => {
+                            let _: IgnoredAny = map.next_value()?;
+                            tagged_variant = Some(CronExecutionStatus::Success);
+                        }
+                        "OverlapError" => {
+                            let _: IgnoredAny = map.next_value()?;
+                            tagged_variant = Some(CronExecutionStatus::OverlapError);
+                        }
+                        "Failed" => {
+                            let value = map.next_value::<FailedReasonValue>()?;
+                            let reason = value.into_reason();
+                            failed_reason = Some(reason.clone());
+                            tagged_variant = Some(CronExecutionStatus::Failed(reason));
+                        }
+                        _ => {
+                            let _: IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                if let Some(status) = tagged_variant {
+                    return Ok(status);
+                }
+
+                if let Some(text) = text_variant {
+                    return match text.as_str() {
+                        "Success" => Ok(CronExecutionStatus::Success),
+                        "OverlapError" => Ok(CronExecutionStatus::OverlapError),
+                        "Failed" => Ok(CronExecutionStatus::Failed(
+                            failed_reason.unwrap_or_else(|| "failed".to_string()),
+                        )),
+                        other => Err(serde::de::Error::unknown_variant(
+                            other,
+                            &["Success", "Failed", "OverlapError"],
+                        )),
+                    };
+                }
+
+                if let Some(reason) = failed_reason {
+                    return Ok(CronExecutionStatus::Failed(reason));
+                }
+
+                Err(serde::de::Error::custom(
+                    "missing cron execution status value",
+                ))
+            }
+        }
+
+        deserializer.deserialize_any(CronExecutionStatusVisitor)
+    }
 }
 
 /// Record of a single cron job execution.
@@ -711,7 +862,7 @@ fn resolve_timezone(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         fs,
         time::{Duration, SystemTime},
     };
@@ -958,5 +1109,45 @@ mod tests {
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn cron_execution_status_accepts_text_compat_shape() {
+        let status: CronExecutionStatus = serde_json::from_str(r#"{"$text":"Success"}"#)
+            .expect("deserialize compat text status");
+        assert!(matches!(status, CronExecutionStatus::Success));
+    }
+
+    #[test]
+    fn cron_state_deserializes_legacy_text_status_entries() {
+        let mut state = CronStateFile::default();
+        let mut history = VecDeque::new();
+        history.push_back(CronExecutionRecord {
+            started_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            completed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(12)),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            metrics: vec![],
+        });
+
+        state.jobs.insert(
+            "legacy-hash".to_string(),
+            PersistedCronJobState {
+                last_execution: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+                execution_history: history,
+                timezone_label: "UTC".to_string(),
+                timezone: Some("UTC".to_string()),
+            },
+        );
+
+        let xml = quick_xml::se::to_string(&state).expect("serialize cron state");
+        let parsed: CronStateFile =
+            quick_xml::de::from_str(&xml).expect("deserialize legacy state");
+        let record = parsed
+            .jobs()
+            .get("legacy-hash")
+            .and_then(|job| job.execution_history.back())
+            .expect("legacy record present");
+        assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
     }
 }

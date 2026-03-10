@@ -1070,10 +1070,13 @@ mod tests {
     }
 
     #[test]
-    fn target_table_width_uses_full_terminal_width() {
-        assert_eq!(target_table_width(80), 80);
-        assert_eq!(target_table_width(120), 120);
-        assert_eq!(target_table_width(200), 200);
+    fn target_table_width_uses_seventy_five_percent_of_terminal_width() {
+        assert_eq!(target_table_width(1), 1);
+        assert_eq!(target_table_width(2), 1);
+        assert_eq!(target_table_width(3), 2);
+        assert_eq!(target_table_width(80), 60);
+        assert_eq!(target_table_width(120), 90);
+        assert_eq!(target_table_width(200), 150);
     }
 
     #[test]
@@ -1081,6 +1084,14 @@ mod tests {
         let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
         shrink_status_widths_to_fit(&mut widths, 120);
         assert!(status_row_width(&widths) <= 120);
+    }
+
+    #[test]
+    fn status_widths_fit_target_table_width() {
+        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
+        let target_width = target_table_width(120);
+        shrink_status_widths_to_fit(&mut widths, target_width);
+        assert!(status_row_width(&widths) <= target_width);
     }
 
     #[test]
@@ -1120,9 +1131,24 @@ mod tests {
     }
 
     #[test]
+    fn status_widths_balance_unit_and_cmd_columns() {
+        let mut widths = [8, 4, 7, 8, 7, 6, 8, 10, 90, 20, 8];
+        shrink_status_widths_to_fit(&mut widths, 120);
+
+        let diff = widths[STATUS_COL_UNIT].abs_diff(widths[STATUS_COL_CMD]);
+        assert!(
+            diff <= STATUS_UNIT_CMD_MAX_DIFF,
+            "expected UNIT/CMD widths to stay close, got UNIT={} CMD={}",
+            widths[STATUS_COL_UNIT],
+            widths[STATUS_COL_CMD]
+        );
+    }
+
+    #[test]
     fn inspect_process_widths_fit_terminal_width() {
         let rows = vec![InspectProcessRow {
             tree_label: "└─ very-long-process-name-with-depth".to_string(),
+            is_root: true,
             pid: 12345,
             ppid: Some(1234),
             user: "engineer".to_string(),
@@ -1143,6 +1169,31 @@ mod tests {
     }
 
     #[test]
+    fn inspect_process_widths_fit_target_table_width() {
+        let rows = vec![InspectProcessRow {
+            tree_label: "└─ very-long-process-name-with-depth".to_string(),
+            is_root: true,
+            pid: 12345,
+            ppid: Some(1234),
+            user: "engineer".to_string(),
+            pri: Some(20),
+            nice: Some(0),
+            virt_bytes: 5_240_000_000,
+            res_bytes: 250_000_000,
+            shared_bytes: Some(64_000_000),
+            state: "R".to_string(),
+            cpu_percent: 67.3,
+            mem_percent: 2.1,
+            cpu_time: "15:42.11".to_string(),
+            command: "sh very-long-command --with many args and values".to_string(),
+        }];
+        let mut widths = compute_inspect_process_preferred_widths(&rows);
+        let target_width = target_table_width(120);
+        shrink_inspect_process_widths_to_fit(&mut widths, target_width);
+        assert!(inspect_process_row_width(&widths) <= target_width);
+    }
+
+    #[test]
     fn inspect_process_shrink_priority_prefers_proc_and_cmd() {
         let mut widths = [30, 7, 7, 8, 4, 4, 9, 9, 9, 1, 6, 6, 9, 30];
         let original = widths;
@@ -1153,6 +1204,72 @@ mod tests {
         assert_eq!(widths[INSPECT_COL_MEM], original[INSPECT_COL_MEM]);
         assert!(widths[INSPECT_COL_PROC] <= original[INSPECT_COL_PROC]);
         assert!(widths[INSPECT_COL_CMD] <= original[INSPECT_COL_CMD]);
+    }
+
+    #[test]
+    fn inspect_process_descendant_rows_gray_proc_and_cmd_only() {
+        let mut user_colors = HashMap::new();
+        let user_color = "\x1b[38;5;39m";
+        user_colors.insert("ubuntu".to_string(), user_color);
+
+        let root = InspectProcessRow {
+            tree_label: "sh".to_string(),
+            is_root: true,
+            pid: 1,
+            ppid: None,
+            user: "ubuntu".to_string(),
+            pri: Some(20),
+            nice: Some(0),
+            virt_bytes: 10_000,
+            res_bytes: 5_000,
+            shared_bytes: Some(1_000),
+            state: "S".to_string(),
+            cpu_percent: 0.0,
+            mem_percent: 0.0,
+            cpu_time: "00:00.00".to_string(),
+            command: "sh -c run".to_string(),
+        };
+        let child = InspectProcessRow {
+            tree_label: "└─ worker".to_string(),
+            is_root: false,
+            pid: 2,
+            ppid: Some(1),
+            user: "ubuntu".to_string(),
+            pri: Some(20),
+            nice: Some(0),
+            virt_bytes: 10_000,
+            res_bytes: 5_000,
+            shared_bytes: Some(1_000),
+            state: "S".to_string(),
+            cpu_percent: 0.0,
+            mem_percent: 0.0,
+            cpu_time: "00:00.00".to_string(),
+            command: "python worker.py".to_string(),
+        };
+
+        let root_values = inspect_process_row_values(&root, &user_colors, false);
+        let child_values = inspect_process_row_values(&child, &user_colors, false);
+
+        assert!(!root_values[INSPECT_COL_PROC].contains(GRAY));
+        assert!(!root_values[INSPECT_COL_CMD].contains(GRAY));
+        assert!(child_values[INSPECT_COL_PROC].contains(GRAY));
+        assert!(child_values[INSPECT_COL_CMD].contains(GRAY));
+        assert!(child_values[INSPECT_COL_USER].contains(user_color));
+        assert!(child_values[INSPECT_COL_VIRT].contains(GREEN));
+    }
+
+    #[test]
+    fn inspect_cron_widths_fit_target_table_width() {
+        let rows = vec![InspectCronRunRow {
+            started: "2026-03-10 14:03:00".to_string(),
+            status: "Failed".to_string(),
+            duration: "12h".to_string(),
+            exit_code: "123".to_string(),
+        }];
+        let mut widths = compute_inspect_cron_preferred_widths(&rows);
+        let target_width = target_table_width(120);
+        shrink_inspect_cron_widths_to_fit(&mut widths, target_width);
+        assert!(inspect_cron_row_width(&widths) <= target_width);
     }
 
     #[test]
@@ -1283,7 +1400,25 @@ fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Er
         ))
         .into()),
         Err(ControlError::NotAvailable) => {
-            let config = load_config(Some(config_path)).ok();
+            let config = match load_config(Some(config_path)) {
+                Ok(config) => Some(config),
+                Err(primary_err) => {
+                    if let Ok(Some(hint)) = ipc::read_config_hint() {
+                        let hint_path = hint.to_string_lossy().to_string();
+                        match load_config(Some(&hint_path)) {
+                            Ok(config) => Some(config),
+                            Err(hint_err) => {
+                                return Err(io::Error::other(format!(
+                                    "failed to load config '{config_path}' ({primary_err}); fallback config hint '{hint_path}' also failed ({hint_err})"
+                                ))
+                                .into());
+                            }
+                        }
+                    } else {
+                        return Err(primary_err.into());
+                    }
+                }
+            };
             collect_disk_snapshot(config).map_err(|err| Box::new(err) as Box<dyn Error>)
         }
         Err(err) => Err(Box::new(err)),
@@ -1291,7 +1426,7 @@ fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Er
 }
 
 fn target_table_width(terminal_width: usize) -> usize {
-    terminal_width.max(1)
+    terminal_width.saturating_mul(3).saturating_div(4).max(1)
 }
 
 fn detect_target_table_width(default_terminal_width: usize) -> usize {
@@ -1343,9 +1478,10 @@ const STATUS_COLUMN_ALIGNS: [Alignment; STATUS_COLUMN_COUNT] = [
 ];
 
 const STATUS_SOFT_MIN_WIDTHS: [usize; STATUS_COLUMN_COUNT] =
-    [6, 4, 5, 4, 3, 3, 3, 4, 8, 9, 6];
+    [12, 4, 5, 4, 3, 3, 3, 4, 12, 9, 6];
 const STATUS_SHRINK_PRIORITY: [usize; STATUS_COLUMN_COUNT] =
-    [0, 8, 9, 3, 2, 7, 1, 10, 6, 5, 4];
+    [8, 9, 3, 2, 7, 1, 10, 0, 6, 5, 4];
+const STATUS_UNIT_CMD_MAX_DIFF: usize = 4;
 
 #[cfg(test)]
 fn status_row_width(content_widths: &[usize; STATUS_COLUMN_COUNT]) -> usize {
@@ -1369,10 +1505,12 @@ fn shrink_status_widths_to_fit(
     reduce_status_widths(widths, &STATUS_SOFT_MIN_WIDTHS, budget);
 
     if widths.iter().sum::<usize>() <= budget {
+        rebalance_status_unit_cmd_widths(widths);
         return;
     }
 
     reduce_status_widths(widths, &[1; STATUS_COLUMN_COUNT], budget);
+    rebalance_status_unit_cmd_widths(widths);
 }
 
 fn reduce_status_widths(
@@ -1407,6 +1545,29 @@ fn reduce_status_widths(
         if !changed {
             break;
         }
+    }
+}
+
+/// Rebalances status table widths so UNIT and CMD stay close in visible width.
+fn rebalance_status_unit_cmd_widths(widths: &mut [usize; STATUS_COLUMN_COUNT]) {
+    let unit = STATUS_COL_UNIT;
+    let cmd = STATUS_COL_CMD;
+
+    if widths[cmd] > widths[unit] + STATUS_UNIT_CMD_MAX_DIFF {
+        let diff = widths[cmd] - widths[unit] - STATUS_UNIT_CMD_MAX_DIFF;
+        let needed = diff.div_ceil(2);
+        let cmd_floor = STATUS_SOFT_MIN_WIDTHS[cmd].max(STATUS_COLUMN_TITLES[cmd].len());
+        let transfer = needed.min(widths[cmd].saturating_sub(cmd_floor));
+        widths[cmd] -= transfer;
+        widths[unit] += transfer;
+    } else if widths[unit] > widths[cmd] + STATUS_UNIT_CMD_MAX_DIFF {
+        let diff = widths[unit] - widths[cmd] - STATUS_UNIT_CMD_MAX_DIFF;
+        let needed = diff.div_ceil(2);
+        let unit_floor =
+            STATUS_SOFT_MIN_WIDTHS[unit].max(STATUS_COLUMN_TITLES[unit].len());
+        let transfer = needed.min(widths[unit].saturating_sub(unit_floor));
+        widths[unit] -= transfer;
+        widths[cmd] += transfer;
     }
 }
 
@@ -3275,6 +3436,7 @@ fn render_inspect(
         let chart_config = ChartConfig {
             no_color: opts.no_color,
             window_desc: opts.window_desc.clone(),
+            max_width: Some(table_width),
         };
 
         if let Err(e) = charting::render_metrics_chart(&filtered_samples, &chart_config) {
@@ -3304,65 +3466,99 @@ fn render_inspect(
         && let Some(cron_status) = &unit.cron
         && !cron_status.recent_runs.is_empty()
     {
-        println!();
-        println!(
-            "═══ {} (last 10) ═════════════════════════════════════════════",
-            colorize("Recent Cron Runs", CYAN, opts.no_color)
-        );
-        println!();
-        println!(
-            "{:<24} {:>10} {:>12} {:>10}",
-            colorize("STARTED", DIM_WHITE, opts.no_color),
-            colorize("STATUS", DIM_WHITE, opts.no_color),
-            colorize("DURATION", DIM_WHITE, opts.no_color),
-            colorize("EXIT CODE", DIM_WHITE, opts.no_color)
-        );
-        println!("{:-<24} {:-<10} {:-<12} {:-<10}", "", "", "", "");
+        let rows: Vec<InspectCronRunRow> = cron_status
+            .recent_runs
+            .iter()
+            .take(10)
+            .map(|run| {
+                let started = run
+                    .started_at
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
 
-        let runs_to_show = cron_status.recent_runs.iter().take(10);
-        for run in runs_to_show {
-            let started = run
-                .started_at
-                .with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string();
-
-            let status = match &run.status {
-                Some(CronExecutionStatus::Success) => {
-                    colorize("Success", GREEN, opts.no_color)
-                }
-                Some(CronExecutionStatus::Failed(_)) => {
-                    colorize("Failed", RED, opts.no_color)
-                }
-                Some(CronExecutionStatus::OverlapError) => {
-                    colorize("Overlap", YELLOW_BOLD, opts.no_color)
-                }
-                None => colorize("Running", BRIGHT_GREEN, opts.no_color),
-            };
-
-            let duration = if let Some(completed) = run.completed_at {
-                let dur = completed.signed_duration_since(run.started_at);
-                if dur.num_seconds() < 60 {
-                    format!("{}s", dur.num_seconds())
-                } else if dur.num_minutes() < 60 {
-                    format!("{}m", dur.num_minutes())
+                let (status_label, _) =
+                    cron_run_status_label_and_color(run.status.as_ref());
+                let duration = if let Some(completed) = run.completed_at {
+                    let dur = completed.signed_duration_since(run.started_at);
+                    if dur.num_seconds() < 60 {
+                        format!("{}s", dur.num_seconds())
+                    } else if dur.num_minutes() < 60 {
+                        format!("{}m", dur.num_minutes())
+                    } else {
+                        format!("{}h", dur.num_hours())
+                    }
                 } else {
-                    format!("{}h", dur.num_hours())
+                    "-".to_string()
+                };
+                let exit_code = run
+                    .exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+
+                InspectCronRunRow {
+                    started,
+                    status: status_label.to_string(),
+                    duration,
+                    exit_code,
                 }
-            } else {
-                "-".to_string()
-            };
+            })
+            .collect();
 
-            let exit_code = run
-                .exit_code
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string());
+        let mut widths = compute_inspect_cron_preferred_widths(&rows);
+        shrink_inspect_cron_widths_to_fit(&mut widths, table_width);
+        let columns = [
+            Column {
+                title: INSPECT_CRON_COLUMN_TITLES[0],
+                width: widths[0],
+                align: INSPECT_CRON_COLUMN_ALIGNS[0],
+            },
+            Column {
+                title: INSPECT_CRON_COLUMN_TITLES[1],
+                width: widths[1],
+                align: INSPECT_CRON_COLUMN_ALIGNS[1],
+            },
+            Column {
+                title: INSPECT_CRON_COLUMN_TITLES[2],
+                width: widths[2],
+                align: INSPECT_CRON_COLUMN_ALIGNS[2],
+            },
+            Column {
+                title: INSPECT_CRON_COLUMN_TITLES[3],
+                width: widths[3],
+                align: INSPECT_CRON_COLUMN_ALIGNS[3],
+            },
+        ];
 
-            println!(
-                "{:<24} {:>10} {:>12} {:>10}",
-                started, status, duration, exit_code
-            );
+        println!();
+        println!("{}", make_top_border(&columns));
+        println!(
+            "{}",
+            format_banner(
+                &format!(
+                    "{} (last 10)",
+                    colorize("Recent Cron Runs", CYAN, opts.no_color)
+                ),
+                &columns,
+            )
+        );
+        println!("{}", make_separator_border(&columns));
+        println!("{}", format_header_row(&columns));
+        println!("{}", make_separator_border(&columns));
+
+        for (run_row, run) in rows.iter().zip(cron_status.recent_runs.iter().take(10)) {
+            let (_, status_color) = cron_run_status_label_and_color(run.status.as_ref());
+            let status_colored = colorize(&run_row.status, status_color, opts.no_color);
+            let values = vec![
+                run_row.started.clone(),
+                status_colored,
+                run_row.duration.clone(),
+                run_row.exit_code.clone(),
+            ];
+            println!("{}", format_row_cells(&values, &columns, opts.no_color));
         }
+
+        println!("{}", make_bottom_border(&columns));
     }
 
     Ok(health)
@@ -3371,6 +3567,7 @@ fn render_inspect(
 #[derive(Clone)]
 struct InspectProcessRow {
     tree_label: String,
+    is_root: bool,
     pid: u32,
     ppid: Option<u32>,
     user: String,
@@ -3384,6 +3581,13 @@ struct InspectProcessRow {
     mem_percent: f64,
     cpu_time: String,
     command: String,
+}
+
+struct InspectCronRunRow {
+    started: String,
+    status: String,
+    duration: String,
+    exit_code: String,
 }
 
 #[derive(Default)]
@@ -3445,6 +3649,18 @@ const INSPECT_PROCESS_SOFT_MIN_WIDTHS: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
 const INSPECT_PROCESS_SHRINK_PRIORITY: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
     [0, 13, 3, 12, 6, 7, 8, 9, 4, 5, 2, 11, 10, 1];
 
+const INSPECT_CRON_COLUMN_COUNT: usize = 4;
+const INSPECT_CRON_COLUMN_TITLES: [&str; INSPECT_CRON_COLUMN_COUNT] =
+    ["STARTED", "STATUS", "DURATION", "EXIT CODE"];
+const INSPECT_CRON_COLUMN_ALIGNS: [Alignment; INSPECT_CRON_COLUMN_COUNT] = [
+    Alignment::Left,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Right,
+];
+const INSPECT_CRON_SOFT_MIN_WIDTHS: [usize; INSPECT_CRON_COLUMN_COUNT] = [19, 7, 8, 9];
+const INSPECT_CRON_SHRINK_PRIORITY: [usize; INSPECT_CRON_COLUMN_COUNT] = [0, 2, 3, 1];
+
 fn inspect_process_content_budget(terminal_width: usize) -> usize {
     terminal_width.saturating_sub((3 * INSPECT_PROCESS_COLUMN_COUNT) + 1)
 }
@@ -3453,6 +3669,15 @@ fn inspect_process_row_width(
     content_widths: &[usize; INSPECT_PROCESS_COLUMN_COUNT],
 ) -> usize {
     content_widths.iter().sum::<usize>() + (3 * INSPECT_PROCESS_COLUMN_COUNT) + 1
+}
+
+fn inspect_cron_content_budget(terminal_width: usize) -> usize {
+    terminal_width.saturating_sub((3 * INSPECT_CRON_COLUMN_COUNT) + 1)
+}
+
+#[cfg(test)]
+fn inspect_cron_row_width(content_widths: &[usize; INSPECT_CRON_COLUMN_COUNT]) -> usize {
+    content_widths.iter().sum::<usize>() + (3 * INSPECT_CRON_COLUMN_COUNT) + 1
 }
 
 fn reduce_inspect_process_widths(
@@ -3468,6 +3693,41 @@ fn reduce_inspect_process_widths(
 
         let mut changed = false;
         for index in INSPECT_PROCESS_SHRINK_PRIORITY {
+            if total <= budget {
+                break;
+            }
+
+            if widths[index] <= min_widths[index] {
+                continue;
+            }
+
+            let reducible = widths[index] - min_widths[index];
+            let needed = total - budget;
+            let delta = reducible.min(needed);
+            widths[index] -= delta;
+            total -= delta;
+            changed = true;
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn reduce_inspect_cron_widths(
+    widths: &mut [usize; INSPECT_CRON_COLUMN_COUNT],
+    min_widths: &[usize; INSPECT_CRON_COLUMN_COUNT],
+    budget: usize,
+) {
+    loop {
+        let mut total = widths.iter().sum::<usize>();
+        if total <= budget {
+            break;
+        }
+
+        let mut changed = false;
+        for index in INSPECT_CRON_SHRINK_PRIORITY {
             if total <= budget {
                 break;
             }
@@ -3506,6 +3766,24 @@ fn shrink_inspect_process_widths_to_fit(
     }
 
     reduce_inspect_process_widths(widths, &[1; INSPECT_PROCESS_COLUMN_COUNT], budget);
+}
+
+fn shrink_inspect_cron_widths_to_fit(
+    widths: &mut [usize; INSPECT_CRON_COLUMN_COUNT],
+    terminal_width: usize,
+) {
+    let budget = inspect_cron_content_budget(terminal_width);
+    if widths.iter().sum::<usize>() <= budget {
+        return;
+    }
+
+    reduce_inspect_cron_widths(widths, &INSPECT_CRON_SOFT_MIN_WIDTHS, budget);
+
+    if widths.iter().sum::<usize>() <= budget {
+        return;
+    }
+
+    reduce_inspect_cron_widths(widths, &[1; INSPECT_CRON_COLUMN_COUNT], budget);
 }
 
 fn compute_inspect_process_preferred_widths(
@@ -3556,6 +3834,19 @@ fn compute_inspect_process_preferred_widths(
             widths[INSPECT_COL_CMD].max(visible_length(&row.command));
     }
 
+    widths
+}
+
+fn compute_inspect_cron_preferred_widths(
+    rows: &[InspectCronRunRow],
+) -> [usize; INSPECT_CRON_COLUMN_COUNT] {
+    let mut widths = INSPECT_CRON_COLUMN_TITLES.map(visible_length);
+    for row in rows {
+        widths[0] = widths[0].max(visible_length(&row.started));
+        widths[1] = widths[1].max(visible_length(&row.status));
+        widths[2] = widths[2].max(visible_length(&row.duration));
+        widths[3] = widths[3].max(visible_length(&row.exit_code));
+    }
     widths
 }
 
@@ -3615,6 +3906,73 @@ fn compute_inspect_process_table_width(unit: &UnitStatus) -> usize {
     let mut widths = compute_inspect_process_preferred_widths(&rows);
     shrink_inspect_process_widths_to_fit(&mut widths, table_width);
     inspect_process_row_width(&widths)
+}
+
+fn cron_run_status_label_and_color(
+    status: Option<&CronExecutionStatus>,
+) -> (&'static str, &'static str) {
+    match status {
+        Some(CronExecutionStatus::Success) => ("Success", GREEN),
+        Some(CronExecutionStatus::Failed(_)) => ("Failed", RED),
+        Some(CronExecutionStatus::OverlapError) => ("Overlap", YELLOW_BOLD),
+        None => ("Running", BRIGHT_GREEN),
+    }
+}
+
+fn inspect_process_row_values(
+    row: &InspectProcessRow,
+    user_colors: &HashMap<String, &'static str>,
+    no_color: bool,
+) -> Vec<String> {
+    let virt_colored = if no_color {
+        format_bytes(row.virt_bytes)
+    } else {
+        format!("{}{}{}", GREEN, format_bytes(row.virt_bytes), RESET)
+    };
+
+    let user_colored = if no_color || row.user == "-" {
+        row.user.clone()
+    } else {
+        let color = user_colors.get(&row.user).unwrap_or(&"");
+        format!("{}{}{}", color, row.user, RESET)
+    };
+
+    let proc_value = if row.is_root || no_color {
+        row.tree_label.clone()
+    } else {
+        colorize(&row.tree_label, GRAY, no_color)
+    };
+
+    let cmd_value = if row.is_root || no_color {
+        row.command.clone()
+    } else {
+        colorize(&row.command, GRAY, no_color)
+    };
+
+    vec![
+        proc_value,
+        row.pid.to_string(),
+        row.ppid
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        user_colored,
+        row.pri
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        row.nice
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        virt_colored,
+        format_bytes(row.res_bytes),
+        row.shared_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "-".to_string()),
+        row.state.clone(),
+        format!("{:.1}", row.cpu_percent),
+        format!("{:.1}", row.mem_percent),
+        row.cpu_time.clone(),
+        cmd_value,
+    ]
 }
 
 /// Renders a process table for the inspected unit and all discovered descendants.
@@ -3801,43 +4159,7 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool, table_width: 
     println!("{}", format_header_row(&columns));
     println!("{}", make_separator_border(&columns));
     for row in &rows {
-        let virt_colored = if no_color {
-            format_bytes(row.virt_bytes)
-        } else {
-            format!("{}{}{}", GREEN, format_bytes(row.virt_bytes), RESET)
-        };
-
-        let user_colored = if no_color || row.user == "-" {
-            row.user.clone()
-        } else {
-            let color = user_colors.get(&row.user).unwrap_or(&"");
-            format!("{}{}{}", color, row.user, RESET)
-        };
-
-        let values = vec![
-            row.tree_label.clone(),
-            row.pid.to_string(),
-            row.ppid
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            user_colored,
-            row.pri
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            row.nice
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            virt_colored,
-            format_bytes(row.res_bytes),
-            row.shared_bytes
-                .map(format_bytes)
-                .unwrap_or_else(|| "-".to_string()),
-            row.state.clone(),
-            format!("{:.1}", row.cpu_percent),
-            format!("{:.1}", row.mem_percent),
-            row.cpu_time.clone(),
-            row.command.clone(),
-        ];
+        let values = inspect_process_row_values(row, &user_colors, no_color);
         println!("{}", format_row_cells(&values, &columns, no_color));
     }
     println!("{}", make_bottom_border(&columns));
@@ -3904,6 +4226,7 @@ fn append_inspect_process_rows(
 
     rows.push(InspectProcessRow {
         tree_label,
+        is_root,
         pid,
         ppid,
         user,
