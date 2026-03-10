@@ -712,6 +712,7 @@ pub fn collect_runtime_snapshot(
         &mut cron_state,
         metrics_guard.as_deref(),
         spawn_manager,
+        true,
     ))
 }
 
@@ -741,6 +742,7 @@ pub fn collect_disk_snapshot(
         &mut cron_state,
         None,
         None,
+        false,
     ))
 }
 
@@ -766,6 +768,7 @@ fn build_snapshot(
     cron_state: &mut CronStateFile,
     metrics_store: Option<&MetricsStore>,
     spawn_manager: Option<&DynamicSpawnManager>,
+    include_live_processes: bool,
 ) -> StatusSnapshot {
     let mut hash_to_name: HashMap<String, String> = HashMap::new();
     let mut hash_kind: HashMap<String, UnitKind> = HashMap::new();
@@ -789,10 +792,12 @@ fn build_snapshot(
 
     let mut units = Vec::new();
 
-    let process_system = {
+    let process_system = if include_live_processes {
         let mut sys = System::new();
         sys.refresh_processes(ProcessesToUpdate::All, true);
         Some(sys)
+    } else {
+        None
     };
 
     for hash in unit_hashes {
@@ -2264,6 +2269,7 @@ services:
             &mut cron_state,
             None,
             None,
+            false,
         );
 
         let orphan_cron_units: Vec<_> = snapshot

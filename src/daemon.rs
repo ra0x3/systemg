@@ -851,7 +851,7 @@ mod pidfile_tests {
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
 
-        let mut pid_file = PidFile {
+        let pid_file = PidFile {
             services: HashMap::from([("svc".to_string(), 10)]),
             service_groups: HashMap::from([("svc".to_string(), 10)]),
             parent_map: HashMap::from([(11, 10), (12, 11)]),

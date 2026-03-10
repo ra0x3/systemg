@@ -952,6 +952,12 @@ mod tests {
     }
 
     #[test]
+    fn format_inspect_elapsed_omits_ago_suffix() {
+        assert_eq!(format_inspect_elapsed(30), "30 secs");
+        assert_eq!(format_inspect_elapsed(5 * 60), "5 mins");
+    }
+
+    #[test]
     fn format_row_sanitizes_multiline_cells() {
         let columns = vec![
             Column {
@@ -1064,146 +1070,89 @@ mod tests {
     }
 
     #[test]
-    fn target_table_width_uses_status_ratio() {
-        assert_eq!(target_table_width(80), 60);
-        assert_eq!(target_table_width(120), 90);
-        assert_eq!(target_table_width(200), 150);
+    fn target_table_width_uses_full_terminal_width() {
+        assert_eq!(target_table_width(80), 80);
+        assert_eq!(target_table_width(120), 120);
+        assert_eq!(target_table_width(200), 200);
     }
 
     #[test]
-    fn test_column_width_allocation_small_terminal() {
-        let terminal_width = 80;
-        let target_table_width = target_table_width(terminal_width); // 60
-
-        const MIN_UNIT_WIDTH: usize = 20;
-        const MIN_CMD_WIDTH: usize = 15;
-        const MIN_EXIT_WIDTH: usize = 10;
-
-        const KIND_WIDTH: usize = 6;
-        const PID_WIDTH: usize = 7;
-        const CPU_WIDTH: usize = 6;
-        const RSS_WIDTH: usize = 8;
-        const UPTIME_WIDTH: usize = 10;
-        const HEALTH_WIDTH: usize = 8;
-
-        let max_state_len = 7;
-        let max_user_len = 6;
-
-        let fixed_width = KIND_WIDTH
-            + max_state_len
-            + max_user_len
-            + PID_WIDTH
-            + CPU_WIDTH
-            + RSS_WIDTH
-            + UPTIME_WIDTH
-            + HEALTH_WIDTH;
-        let padding_and_separators = 11 * 3 + 2;
-        let fixed_total = fixed_width + padding_and_separators;
-
-        let remaining_space = target_table_width.saturating_sub(fixed_total);
-
-        assert!(remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH + MIN_EXIT_WIDTH));
-
-        let (unit_width, cmd_width, exit_width) =
-            (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH);
-        assert_eq!(unit_width, 20);
-        assert_eq!(cmd_width, 15);
-        assert_eq!(exit_width, 10);
+    fn status_widths_fit_terminal_width() {
+        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
+        shrink_status_widths_to_fit(&mut widths, 120);
+        assert!(status_row_width(&widths) <= 120);
     }
 
     #[test]
-    fn test_column_width_allocation_medium_terminal() {
-        let terminal_width = 120;
-        let target_table_width = target_table_width(terminal_width); // 90
+    fn status_width_shrink_priority_preserves_critical_columns() {
+        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
+        let original = widths;
+        shrink_status_widths_to_fit(&mut widths, 120);
 
-        const MAX_UNIT_WIDTH: usize = 60;
-        const MAX_CMD_WIDTH: usize = 50;
-        const MAX_EXIT_WIDTH: usize = 30;
-
-        const KIND_WIDTH: usize = 6;
-        const PID_WIDTH: usize = 7;
-        const CPU_WIDTH: usize = 6;
-        const RSS_WIDTH: usize = 8;
-        const UPTIME_WIDTH: usize = 10;
-        const HEALTH_WIDTH: usize = 8;
-
-        let max_state_len = 7;
-        let max_user_len = 6;
-
-        let fixed_width = KIND_WIDTH
-            + max_state_len
-            + max_user_len
-            + PID_WIDTH
-            + CPU_WIDTH
-            + RSS_WIDTH
-            + UPTIME_WIDTH
-            + HEALTH_WIDTH;
-        let padding_and_separators = 11 * 3 + 2;
-        let fixed_total = fixed_width + padding_and_separators;
-
-        let remaining_space = target_table_width.saturating_sub(fixed_total);
-
-        let unit_alloc = (remaining_space as f64 * 0.4) as usize;
-        let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
-        let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
-
-        let unit_width = unit_alloc.min(MAX_UNIT_WIDTH);
-        let cmd_width = cmd_alloc.min(MAX_CMD_WIDTH);
-        let exit_width = exit_alloc.min(MAX_EXIT_WIDTH);
-
-        assert!(unit_width <= MAX_UNIT_WIDTH);
-        assert!(cmd_width <= MAX_CMD_WIDTH);
-        assert!(exit_width <= MAX_EXIT_WIDTH);
+        assert_eq!(widths[STATUS_COL_PID], original[STATUS_COL_PID]);
+        assert_eq!(widths[STATUS_COL_CPU], original[STATUS_COL_CPU]);
+        assert_eq!(widths[STATUS_COL_RSS], original[STATUS_COL_RSS]);
+        assert!(widths[STATUS_COL_UNIT] <= original[STATUS_COL_UNIT]);
+        assert!(widths[STATUS_COL_CMD] <= original[STATUS_COL_CMD]);
     }
 
     #[test]
-    fn test_column_width_allocation_large_terminal() {
-        let terminal_width = 200;
-        let target_table_width = target_table_width(terminal_width); // 150
+    fn status_widths_do_not_expand_when_terminal_is_wide() {
+        let unit = UnitStatus {
+            name: "app".to_string(),
+            hash: "abc".to_string(),
+            kind: UnitKind::Service,
+            lifecycle: Some(ServiceLifecycleStatus::Running),
+            health: UnitHealth::Healthy,
+            process: None,
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: Some("sh hello-world.sh".to_string()),
+            runtime_command: None,
+            spawned_children: vec![],
+        };
+        let widths = compute_status_preferred_widths(&[unit], true);
+        let mut fitted = widths;
+        shrink_status_widths_to_fit(&mut fitted, 240);
+        assert_eq!(fitted, widths);
+    }
 
-        const MIN_UNIT_WIDTH: usize = 20;
-        const MAX_UNIT_WIDTH: usize = 60;
-        const MIN_CMD_WIDTH: usize = 15;
-        const MAX_CMD_WIDTH: usize = 50;
-        const MIN_EXIT_WIDTH: usize = 10;
-        const MAX_EXIT_WIDTH: usize = 30;
+    #[test]
+    fn inspect_process_widths_fit_terminal_width() {
+        let rows = vec![InspectProcessRow {
+            tree_label: "└─ very-long-process-name-with-depth".to_string(),
+            pid: 12345,
+            ppid: Some(1234),
+            user: "engineer".to_string(),
+            pri: Some(20),
+            nice: Some(0),
+            virt_bytes: 5_240_000_000,
+            res_bytes: 250_000_000,
+            shared_bytes: Some(64_000_000),
+            state: "R".to_string(),
+            cpu_percent: 67.3,
+            mem_percent: 2.1,
+            cpu_time: "15:42.11".to_string(),
+            command: "sh very-long-command --with many args and values".to_string(),
+        }];
+        let mut widths = compute_inspect_process_preferred_widths(&rows);
+        shrink_inspect_process_widths_to_fit(&mut widths, 120);
+        assert!(inspect_process_row_width(&widths) <= 120);
+    }
 
-        const KIND_WIDTH: usize = 6;
-        const PID_WIDTH: usize = 7;
-        const CPU_WIDTH: usize = 6;
-        const RSS_WIDTH: usize = 8;
-        const UPTIME_WIDTH: usize = 10;
-        const HEALTH_WIDTH: usize = 8;
+    #[test]
+    fn inspect_process_shrink_priority_prefers_proc_and_cmd() {
+        let mut widths = [30, 7, 7, 8, 4, 4, 9, 9, 9, 1, 6, 6, 9, 30];
+        let original = widths;
+        shrink_inspect_process_widths_to_fit(&mut widths, 120);
 
-        let max_state_len = 7;
-        let max_user_len = 6;
-
-        let fixed_width = KIND_WIDTH
-            + max_state_len
-            + max_user_len
-            + PID_WIDTH
-            + CPU_WIDTH
-            + RSS_WIDTH
-            + UPTIME_WIDTH
-            + HEALTH_WIDTH;
-        let padding_and_separators = 11 * 3 + 2;
-        let fixed_total = fixed_width + padding_and_separators;
-
-        let remaining_space = target_table_width.saturating_sub(fixed_total);
-
-        let unit_alloc = (remaining_space as f64 * 0.4) as usize;
-        let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
-        let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
-
-        let (unit_width, cmd_width, exit_width) = (
-            unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
-            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
-            exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH),
-        );
-
-        assert!((MIN_UNIT_WIDTH..=MAX_UNIT_WIDTH).contains(&unit_width));
-        assert!((MIN_CMD_WIDTH..=MAX_CMD_WIDTH).contains(&cmd_width));
-        assert!((MIN_EXIT_WIDTH..=MAX_EXIT_WIDTH).contains(&exit_width));
+        assert_eq!(widths[INSPECT_COL_PID], original[INSPECT_COL_PID]);
+        assert_eq!(widths[INSPECT_COL_CPU], original[INSPECT_COL_CPU]);
+        assert_eq!(widths[INSPECT_COL_MEM], original[INSPECT_COL_MEM]);
+        assert!(widths[INSPECT_COL_PROC] <= original[INSPECT_COL_PROC]);
+        assert!(widths[INSPECT_COL_CMD] <= original[INSPECT_COL_CMD]);
     }
 
     #[test]
@@ -1342,7 +1291,7 @@ fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Er
 }
 
 fn target_table_width(terminal_width: usize) -> usize {
-    (terminal_width as f64 * 0.75) as usize
+    terminal_width.max(1)
 }
 
 fn detect_target_table_width(default_terminal_width: usize) -> usize {
@@ -1350,6 +1299,194 @@ fn detect_target_table_width(default_terminal_width: usize) -> usize {
         .map(|(width, _)| width.0 as usize)
         .unwrap_or(default_terminal_width);
     target_table_width(terminal_width)
+}
+
+const STATUS_COLUMN_COUNT: usize = 11;
+const STATUS_COL_UNIT: usize = 0;
+const STATUS_COL_KIND: usize = 1;
+const STATUS_COL_STATE: usize = 2;
+const STATUS_COL_USER: usize = 3;
+const STATUS_COL_PID: usize = 4;
+const STATUS_COL_CPU: usize = 5;
+const STATUS_COL_RSS: usize = 6;
+const STATUS_COL_UPTIME: usize = 7;
+const STATUS_COL_CMD: usize = 8;
+const STATUS_COL_LAST_EXIT: usize = 9;
+const STATUS_COL_HEALTH: usize = 10;
+
+const STATUS_COLUMN_TITLES: [&str; STATUS_COLUMN_COUNT] = [
+    "UNIT",
+    "KIND",
+    "STATE",
+    "USER",
+    "PID",
+    "CPU",
+    "RSS",
+    "UPTIME",
+    "CMD",
+    "LAST_EXIT",
+    "HEALTH",
+];
+
+const STATUS_COLUMN_ALIGNS: [Alignment; STATUS_COLUMN_COUNT] = [
+    Alignment::Left,
+    Alignment::Left,
+    Alignment::Left,
+    Alignment::Left,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Left,
+    Alignment::Left,
+    Alignment::Left,
+    Alignment::Left,
+];
+
+const STATUS_SOFT_MIN_WIDTHS: [usize; STATUS_COLUMN_COUNT] =
+    [6, 4, 5, 4, 3, 3, 3, 4, 8, 9, 6];
+const STATUS_SHRINK_PRIORITY: [usize; STATUS_COLUMN_COUNT] =
+    [0, 8, 9, 3, 2, 7, 1, 10, 6, 5, 4];
+
+#[cfg(test)]
+fn status_row_width(content_widths: &[usize; STATUS_COLUMN_COUNT]) -> usize {
+    content_widths.iter().sum::<usize>() + (3 * STATUS_COLUMN_COUNT) + 1
+}
+
+fn status_content_budget(terminal_width: usize) -> usize {
+    terminal_width.saturating_sub((3 * STATUS_COLUMN_COUNT) + 1)
+}
+
+fn shrink_status_widths_to_fit(
+    widths: &mut [usize; STATUS_COLUMN_COUNT],
+    terminal_width: usize,
+) {
+    let budget = status_content_budget(terminal_width);
+
+    if widths.iter().sum::<usize>() <= budget {
+        return;
+    }
+
+    reduce_status_widths(widths, &STATUS_SOFT_MIN_WIDTHS, budget);
+
+    if widths.iter().sum::<usize>() <= budget {
+        return;
+    }
+
+    reduce_status_widths(widths, &[1; STATUS_COLUMN_COUNT], budget);
+}
+
+fn reduce_status_widths(
+    widths: &mut [usize; STATUS_COLUMN_COUNT],
+    min_widths: &[usize; STATUS_COLUMN_COUNT],
+    budget: usize,
+) {
+    loop {
+        let mut total = widths.iter().sum::<usize>();
+        if total <= budget {
+            break;
+        }
+
+        let mut changed = false;
+        for index in STATUS_SHRINK_PRIORITY {
+            if total <= budget {
+                break;
+            }
+
+            if widths[index] <= min_widths[index] {
+                continue;
+            }
+
+            let reducible = widths[index] - min_widths[index];
+            let needed = total - budget;
+            let delta = reducible.min(needed);
+            widths[index] -= delta;
+            total -= delta;
+            changed = true;
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn compute_status_preferred_widths(
+    units: &[UnitStatus],
+    no_color: bool,
+) -> [usize; STATUS_COLUMN_COUNT] {
+    let mut widths = STATUS_COLUMN_TITLES.map(visible_length);
+
+    for unit in units {
+        widths[STATUS_COL_UNIT] = widths[STATUS_COL_UNIT].max(visible_length(&unit.name));
+        widths[STATUS_COL_KIND] = widths[STATUS_COL_KIND].max(4);
+        widths[STATUS_COL_STATE] = widths[STATUS_COL_STATE]
+            .max(visible_length(&unit_state_label(unit, no_color)));
+        widths[STATUS_COL_USER] = widths[STATUS_COL_USER].max(visible_length(
+            unit.process
+                .as_ref()
+                .and_then(|runtime| runtime.user.as_deref())
+                .unwrap_or("-"),
+        ));
+        widths[STATUS_COL_PID] = widths[STATUS_COL_PID].max(visible_length(
+            &unit
+                .process
+                .as_ref()
+                .map(|runtime| runtime.pid.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ));
+        widths[STATUS_COL_CPU] = widths[STATUS_COL_CPU]
+            .max(visible_length(&format_cpu_column(unit.metrics.as_ref())));
+        widths[STATUS_COL_RSS] = widths[STATUS_COL_RSS]
+            .max(visible_length(&format_rss_column(unit.metrics.as_ref())));
+        widths[STATUS_COL_UPTIME] = widths[STATUS_COL_UPTIME]
+            .max(visible_length(&format_uptime_column(unit.uptime.as_ref())));
+        widths[STATUS_COL_CMD] = widths[STATUS_COL_CMD].max(visible_length(
+            unit.command
+                .as_ref()
+                .or(unit.runtime_command.as_ref())
+                .map(|value| value.as_str())
+                .unwrap_or("-"),
+        ));
+        widths[STATUS_COL_LAST_EXIT] = widths[STATUS_COL_LAST_EXIT].max(visible_length(
+            &format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref()),
+        ));
+        widths[STATUS_COL_HEALTH] =
+            widths[STATUS_COL_HEALTH].max(visible_length(&health_label_extended(unit)));
+
+        visit_spawn_tree(&unit.spawned_children, "", &mut |child, prefix, _| {
+            let label = format!("{prefix}{}", child.name);
+            widths[STATUS_COL_UNIT] = widths[STATUS_COL_UNIT].max(visible_length(&label));
+            widths[STATUS_COL_USER] = widths[STATUS_COL_USER]
+                .max(visible_length(child.user.as_deref().unwrap_or("-")));
+            widths[STATUS_COL_PID] =
+                widths[STATUS_COL_PID].max(visible_length(&child.pid.to_string()));
+            let cpu = child
+                .cpu_percent
+                .map(|value| format!("{value:.1}%"))
+                .unwrap_or_else(|| "-".to_string());
+            widths[STATUS_COL_CPU] = widths[STATUS_COL_CPU].max(visible_length(&cpu));
+            let rss = child
+                .rss_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string());
+            widths[STATUS_COL_RSS] = widths[STATUS_COL_RSS].max(visible_length(&rss));
+            widths[STATUS_COL_CMD] =
+                widths[STATUS_COL_CMD].max(visible_length(&child.command));
+            widths[STATUS_COL_LAST_EXIT] = widths[STATUS_COL_LAST_EXIT]
+                .max(visible_length(&format_spawn_exit(child.last_exit.as_ref())));
+            let health = if let Some(exit) = &child.last_exit {
+                let succeeded = exit.exit_code.map(|code| code == 0).unwrap_or(false)
+                    && exit.signal.is_none();
+                if succeeded { "Healthy" } else { "Failing" }
+            } else {
+                "Healthy"
+            };
+            widths[STATUS_COL_HEALTH] =
+                widths[STATUS_COL_HEALTH].max(visible_length(health));
+        });
+    }
+
+    widths
 }
 
 fn render_status(
@@ -1396,133 +1533,66 @@ fn render_status(
         .with_timezone(&Local)
         .format("%Y-%m-%d %H:%M:%S %Z");
 
-    // Detect terminal width and calculate target table width (75% of terminal)
-    let target_table_width = detect_target_table_width(120);
+    let terminal_width = detect_target_table_width(120);
+    let mut widths = compute_status_preferred_widths(&units, opts.no_color);
+    shrink_status_widths_to_fit(&mut widths, terminal_width);
 
-    const MIN_UNIT_WIDTH: usize = 20;
-    const MAX_UNIT_WIDTH: usize = 60;
-    const MIN_CMD_WIDTH: usize = 15;
-    const MAX_CMD_WIDTH: usize = 50;
-    const KIND_WIDTH: usize = 6;
-    const PID_WIDTH: usize = 7;
-    const CPU_WIDTH: usize = 6;
-    const RSS_WIDTH: usize = 8;
-    const UPTIME_WIDTH: usize = 10;
-    const HEALTH_WIDTH: usize = 8;
-    let exit_width = units
-        .iter()
-        .map(|unit| {
-            visible_length(&format_last_exit(
-                unit.last_exit.as_ref(),
-                unit.cron.as_ref(),
-            ))
-        })
-        .max()
-        .unwrap_or(1)
-        .max(visible_length("LAST_EXIT"));
-
-    let max_state_len = units
-        .iter()
-        .map(|unit| visible_length(&unit_state_label(unit, opts.no_color)))
-        .max()
-        .unwrap_or(7)
-        .clamp(7, 10);
-
-    let max_user_len = units
-        .iter()
-        .map(|unit| {
-            unit.process
-                .as_ref()
-                .and_then(|p| p.user.as_ref())
-                .map(|u| visible_length(u))
-                .unwrap_or(1)
-        })
-        .max()
-        .unwrap_or(6)
-        .clamp(6, 8);
-
-    let fixed_width = KIND_WIDTH
-        + max_state_len
-        + max_user_len
-        + PID_WIDTH
-        + CPU_WIDTH
-        + RSS_WIDTH
-        + UPTIME_WIDTH
-        + exit_width
-        + HEALTH_WIDTH;
-    let padding_and_separators = 11 * 3 + 2;
-    let fixed_total = fixed_width + padding_and_separators;
-
-    let remaining_space = target_table_width.saturating_sub(fixed_total);
-
-    let (unit_width, cmd_width) = if remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH) {
-        (MIN_UNIT_WIDTH, MIN_CMD_WIDTH)
-    } else {
-        let unit_alloc = (remaining_space as f64 * 0.5) as usize;
-        let cmd_alloc = remaining_space.saturating_sub(unit_alloc);
-
-        (
-            unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
-            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
-        )
-    };
-
-    // Create columns with calculated widths
+    // Create columns with fitted widths
     let columns_array = [
         Column {
             title: "UNIT",
-            width: unit_width,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_UNIT],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_UNIT],
         },
         Column {
             title: "KIND",
-            width: KIND_WIDTH,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_KIND],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_KIND],
         },
         Column {
             title: "STATE",
-            width: max_state_len,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_STATE],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_STATE],
         },
         Column {
             title: "USER",
-            width: max_user_len,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_USER],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_USER],
         },
         Column {
             title: "PID",
-            width: PID_WIDTH,
-            align: Alignment::Right,
+            width: widths[STATUS_COL_PID],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_PID],
         },
         Column {
             title: "CPU",
-            width: CPU_WIDTH,
-            align: Alignment::Right,
+            width: widths[STATUS_COL_CPU],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_CPU],
         },
         Column {
             title: "RSS",
-            width: RSS_WIDTH,
-            align: Alignment::Right,
+            width: widths[STATUS_COL_RSS],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_RSS],
         },
         Column {
             title: "UPTIME",
-            width: UPTIME_WIDTH,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_UPTIME],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_UPTIME],
         },
         Column {
             title: "CMD",
-            width: cmd_width,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_CMD],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_CMD],
         },
         Column {
             title: "LAST_EXIT",
-            width: exit_width,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_LAST_EXIT],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_LAST_EXIT],
         },
         Column {
             title: "HEALTH",
-            width: HEALTH_WIDTH,
-            align: Alignment::Left,
+            width: widths[STATUS_COL_HEALTH],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_HEALTH],
         },
     ];
 
@@ -1748,6 +1818,14 @@ fn format_uptime_short(uptime: &str) -> String {
     } else {
         uptime.to_string()
     }
+}
+
+fn format_inspect_elapsed(seconds: u64) -> String {
+    let rendered = format_elapsed(seconds);
+    rendered
+        .strip_suffix(" ago")
+        .unwrap_or(&rendered)
+        .to_string()
 }
 
 fn extract_time_value(uptime: &str, suffix: &str) -> Option<u64> {
@@ -2892,8 +2970,8 @@ fn render_inspect(
         return Ok(health);
     }
 
-    let table_width = detect_target_table_width(120);
-    let inner_width = table_width - 4;
+    let table_width = compute_inspect_process_table_width(unit);
+    let inner_width = table_width.saturating_sub(2);
     let border_line = "═".repeat(inner_width);
 
     println!();
@@ -3219,7 +3297,7 @@ fn render_inspect(
 
     if unit.kind != UnitKind::Cron {
         println!();
-        render_inspect_process_table(unit, opts.no_color);
+        render_inspect_process_table(unit, opts.no_color, table_width);
     }
 
     if unit.kind == UnitKind::Cron
@@ -3324,10 +3402,224 @@ struct InspectProcessContext<'a> {
     total_memory: f64,
 }
 
-/// Renders a process table for the inspected unit and all discovered descendants.
-fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
+const INSPECT_PROCESS_COLUMN_COUNT: usize = 14;
+const INSPECT_COL_PROC: usize = 0;
+const INSPECT_COL_PID: usize = 1;
+const INSPECT_COL_PPID: usize = 2;
+const INSPECT_COL_USER: usize = 3;
+const INSPECT_COL_PRI: usize = 4;
+const INSPECT_COL_NI: usize = 5;
+const INSPECT_COL_VIRT: usize = 6;
+const INSPECT_COL_RES: usize = 7;
+const INSPECT_COL_SHR: usize = 8;
+const INSPECT_COL_STATE: usize = 9;
+const INSPECT_COL_CPU: usize = 10;
+const INSPECT_COL_MEM: usize = 11;
+const INSPECT_COL_TIME: usize = 12;
+const INSPECT_COL_CMD: usize = 13;
+
+const INSPECT_PROCESS_COLUMN_TITLES: [&str; INSPECT_PROCESS_COLUMN_COUNT] = [
+    "PROC", "PID", "PPID", "USER", "PRI", "NI", "VIRT", "RES", "SHR", "S", "CPU%",
+    "MEM%", "TIME+", "CMD",
+];
+
+const INSPECT_PROCESS_COLUMN_ALIGNS: [Alignment; INSPECT_PROCESS_COLUMN_COUNT] = [
+    Alignment::Left,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Left,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Left,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Right,
+    Alignment::Left,
+];
+
+const INSPECT_PROCESS_SOFT_MIN_WIDTHS: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
+    [8, 3, 4, 4, 3, 2, 4, 4, 4, 1, 4, 4, 5, 10];
+const INSPECT_PROCESS_SHRINK_PRIORITY: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
+    [0, 13, 3, 12, 6, 7, 8, 9, 4, 5, 2, 11, 10, 1];
+
+fn inspect_process_content_budget(terminal_width: usize) -> usize {
+    terminal_width.saturating_sub((3 * INSPECT_PROCESS_COLUMN_COUNT) + 1)
+}
+
+fn inspect_process_row_width(
+    content_widths: &[usize; INSPECT_PROCESS_COLUMN_COUNT],
+) -> usize {
+    content_widths.iter().sum::<usize>() + (3 * INSPECT_PROCESS_COLUMN_COUNT) + 1
+}
+
+fn reduce_inspect_process_widths(
+    widths: &mut [usize; INSPECT_PROCESS_COLUMN_COUNT],
+    min_widths: &[usize; INSPECT_PROCESS_COLUMN_COUNT],
+    budget: usize,
+) {
+    loop {
+        let mut total = widths.iter().sum::<usize>();
+        if total <= budget {
+            break;
+        }
+
+        let mut changed = false;
+        for index in INSPECT_PROCESS_SHRINK_PRIORITY {
+            if total <= budget {
+                break;
+            }
+
+            if widths[index] <= min_widths[index] {
+                continue;
+            }
+
+            let reducible = widths[index] - min_widths[index];
+            let needed = total - budget;
+            let delta = reducible.min(needed);
+            widths[index] -= delta;
+            total -= delta;
+            changed = true;
+        }
+
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn shrink_inspect_process_widths_to_fit(
+    widths: &mut [usize; INSPECT_PROCESS_COLUMN_COUNT],
+    terminal_width: usize,
+) {
+    let budget = inspect_process_content_budget(terminal_width);
+    if widths.iter().sum::<usize>() <= budget {
+        return;
+    }
+
+    reduce_inspect_process_widths(widths, &INSPECT_PROCESS_SOFT_MIN_WIDTHS, budget);
+
+    if widths.iter().sum::<usize>() <= budget {
+        return;
+    }
+
+    reduce_inspect_process_widths(widths, &[1; INSPECT_PROCESS_COLUMN_COUNT], budget);
+}
+
+fn compute_inspect_process_preferred_widths(
+    rows: &[InspectProcessRow],
+) -> [usize; INSPECT_PROCESS_COLUMN_COUNT] {
+    let mut widths = INSPECT_PROCESS_COLUMN_TITLES.map(visible_length);
+
+    for row in rows {
+        widths[INSPECT_COL_PROC] =
+            widths[INSPECT_COL_PROC].max(visible_length(&row.tree_label));
+        widths[INSPECT_COL_PID] =
+            widths[INSPECT_COL_PID].max(visible_length(&row.pid.to_string()));
+        widths[INSPECT_COL_PPID] = widths[INSPECT_COL_PPID].max(visible_length(
+            &row.ppid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ));
+        widths[INSPECT_COL_USER] =
+            widths[INSPECT_COL_USER].max(visible_length(&row.user));
+        widths[INSPECT_COL_PRI] = widths[INSPECT_COL_PRI].max(visible_length(
+            &row.pri
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ));
+        widths[INSPECT_COL_NI] = widths[INSPECT_COL_NI].max(visible_length(
+            &row.nice
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ));
+        widths[INSPECT_COL_VIRT] =
+            widths[INSPECT_COL_VIRT].max(visible_length(&format_bytes(row.virt_bytes)));
+        widths[INSPECT_COL_RES] =
+            widths[INSPECT_COL_RES].max(visible_length(&format_bytes(row.res_bytes)));
+        widths[INSPECT_COL_SHR] = widths[INSPECT_COL_SHR].max(visible_length(
+            &row.shared_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string()),
+        ));
+        widths[INSPECT_COL_STATE] =
+            widths[INSPECT_COL_STATE].max(visible_length(&row.state));
+        widths[INSPECT_COL_CPU] = widths[INSPECT_COL_CPU]
+            .max(visible_length(&format!("{:.1}", row.cpu_percent)));
+        widths[INSPECT_COL_MEM] = widths[INSPECT_COL_MEM]
+            .max(visible_length(&format!("{:.1}", row.mem_percent)));
+        widths[INSPECT_COL_TIME] =
+            widths[INSPECT_COL_TIME].max(visible_length(&row.cpu_time));
+        widths[INSPECT_COL_CMD] =
+            widths[INSPECT_COL_CMD].max(visible_length(&row.command));
+    }
+
+    widths
+}
+
+fn compute_inspect_process_table_width(unit: &UnitStatus) -> usize {
     let table_width = detect_target_table_width(120);
-    let inner_width = table_width - 4;
+    let Some(root_runtime) = unit.process.as_ref() else {
+        return table_width;
+    };
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+
+    let tracked_root_pid = root_runtime.pid;
+    let root_pid = if system.process(SysPid::from_u32(tracked_root_pid)).is_some() {
+        tracked_root_pid
+    } else if let Some(live_descendant_pid) =
+        find_live_spawn_root_pid(&unit.spawned_children, &system)
+    {
+        live_descendant_pid
+    } else {
+        return table_width;
+    };
+
+    let users = Users::new_with_refreshed_list();
+    let total_memory = system.total_memory() as f64;
+
+    let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, process) in system.processes() {
+        if let Some(parent) = process.parent() {
+            children_by_parent
+                .entry(parent.as_u32())
+                .or_default()
+                .push(pid.as_u32());
+        }
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_unstable();
+    }
+
+    let context = InspectProcessContext {
+        system: &system,
+        users: &users,
+        children_by_parent: &children_by_parent,
+        total_memory,
+    };
+
+    let mut rows = Vec::new();
+    append_inspect_process_rows(&context, root_pid, "", "", true, &mut rows);
+    if rows.is_empty() {
+        return table_width;
+    }
+
+    let mut widths = compute_inspect_process_preferred_widths(&rows);
+    shrink_inspect_process_widths_to_fit(&mut widths, table_width);
+    inspect_process_row_width(&widths)
+}
+
+/// Renders a process table for the inspected unit and all discovered descendants.
+fn render_inspect_process_table(unit: &UnitStatus, no_color: bool, table_width: usize) {
+    let inner_width = table_width.saturating_sub(2).max(1);
     let border_line = "═".repeat(inner_width);
 
     println!("╔{}╗", border_line);
@@ -3421,130 +3713,79 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
         return;
     }
 
-    let target_table_width = detect_target_table_width(120);
-
-    const MIN_PROC_WIDTH: usize = 15;
-    const MAX_PROC_WIDTH: usize = 32;
-    const MIN_CMD_WIDTH: usize = 20;
-    const MAX_CMD_WIDTH: usize = 80;
-
-    const PID_WIDTH: usize = 7;
-    const PPID_WIDTH: usize = 7;
-    const PRI_WIDTH: usize = 4;
-    const NI_WIDTH: usize = 4;
-    const VIRT_WIDTH: usize = 9;
-    const RES_WIDTH: usize = 9;
-    const SHR_WIDTH: usize = 9;
-    const S_WIDTH: usize = 1;
-    const CPU_WIDTH: usize = 6;
-    const MEM_WIDTH: usize = 6;
-    const TIME_WIDTH: usize = 9;
-
-    let user_width = rows
-        .iter()
-        .map(|row| visible_length(&row.user))
-        .max()
-        .unwrap_or(4)
-        .clamp(4, 8);
-
-    let fixed_width = PID_WIDTH
-        + PPID_WIDTH
-        + user_width
-        + PRI_WIDTH
-        + NI_WIDTH
-        + VIRT_WIDTH
-        + RES_WIDTH
-        + SHR_WIDTH
-        + S_WIDTH
-        + CPU_WIDTH
-        + MEM_WIDTH
-        + TIME_WIDTH;
-    let padding_and_separators = 14 * 3 + 2;
-    let fixed_total = fixed_width + padding_and_separators;
-
-    let remaining_space = target_table_width.saturating_sub(fixed_total);
-
-    let (proc_width, cmd_width) = if remaining_space < (MIN_PROC_WIDTH + MIN_CMD_WIDTH) {
-        (MIN_PROC_WIDTH, MIN_CMD_WIDTH)
-    } else {
-        let proc_alloc = (remaining_space as f64 * 0.3) as usize;
-        let cmd_alloc = (remaining_space as f64 * 0.7) as usize;
-        (
-            proc_alloc.clamp(MIN_PROC_WIDTH, MAX_PROC_WIDTH),
-            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
-        )
-    };
+    let mut widths = compute_inspect_process_preferred_widths(&rows);
+    shrink_inspect_process_widths_to_fit(&mut widths, table_width);
 
     let columns = [
         Column {
             title: "PROC",
-            width: proc_width,
-            align: Alignment::Left,
+            width: widths[INSPECT_COL_PROC],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_PROC],
         },
         Column {
             title: "PID",
-            width: PID_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_PID],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_PID],
         },
         Column {
             title: "PPID",
-            width: PPID_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_PPID],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_PPID],
         },
         Column {
             title: "USER",
-            width: user_width,
-            align: Alignment::Left,
+            width: widths[INSPECT_COL_USER],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_USER],
         },
         Column {
             title: "PRI",
-            width: PRI_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_PRI],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_PRI],
         },
         Column {
             title: "NI",
-            width: NI_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_NI],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_NI],
         },
         Column {
             title: "VIRT",
-            width: VIRT_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_VIRT],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_VIRT],
         },
         Column {
             title: "RES",
-            width: RES_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_RES],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_RES],
         },
         Column {
             title: "SHR",
-            width: SHR_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_SHR],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_SHR],
         },
         Column {
             title: "S",
-            width: S_WIDTH,
-            align: Alignment::Left,
+            width: widths[INSPECT_COL_STATE],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_STATE],
         },
         Column {
             title: "CPU%",
-            width: CPU_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_CPU],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_CPU],
         },
         Column {
             title: "MEM%",
-            width: MEM_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_MEM],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_MEM],
         },
         Column {
             title: "TIME+",
-            width: TIME_WIDTH,
-            align: Alignment::Right,
+            width: widths[INSPECT_COL_TIME],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_TIME],
         },
         Column {
             title: "CMD",
-            width: cmd_width,
-            align: Alignment::Left,
+            width: widths[INSPECT_COL_CMD],
+            align: INSPECT_PROCESS_COLUMN_ALIGNS[INSPECT_COL_CMD],
         },
     ];
 
@@ -3658,7 +3899,7 @@ fn append_inspect_process_rows(
     let cpu_time = linux_stats
         .cpu_ticks
         .map(format_cpu_time_from_ticks)
-        .unwrap_or_else(|| format_elapsed(process.run_time()));
+        .unwrap_or_else(|| format_inspect_elapsed(process.run_time()));
     let command = process_command_line(process);
 
     rows.push(InspectProcessRow {
