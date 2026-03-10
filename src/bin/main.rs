@@ -918,6 +918,27 @@ mod tests {
     }
 
     #[test]
+    fn wrap_plain_text_splits_long_tokens() {
+        let wrapped =
+            wrap_plain_text("alpha beta-super-long-token-without-spaces omega", 10);
+        assert!(wrapped.len() > 2);
+        assert!(wrapped.iter().all(|line| visible_length(line) <= 10));
+    }
+
+    #[test]
+    fn format_command_value_lines_wraps_and_colors_value_gray() {
+        let lines = format_command_value_lines(
+            "Configured",
+            "sh -c veryveryveryveryverylongvalue --flag",
+            28,
+            false,
+        );
+        assert!(lines.len() > 1);
+        assert!(lines[0].contains(&format!("{WHITE}Configured{RESET}: ")));
+        assert!(lines.iter().all(|line| line.contains(GRAY)));
+    }
+
+    #[test]
     fn format_cpu_time_from_ticks_formats_centiseconds() {
         let rendered = format_cpu_time_from_ticks(1234);
         assert!(rendered.contains(':'));
@@ -1043,9 +1064,16 @@ mod tests {
     }
 
     #[test]
+    fn target_table_width_uses_status_ratio() {
+        assert_eq!(target_table_width(80), 60);
+        assert_eq!(target_table_width(120), 90);
+        assert_eq!(target_table_width(200), 150);
+    }
+
+    #[test]
     fn test_column_width_allocation_small_terminal() {
         let terminal_width = 80;
-        let target_table_width = (terminal_width as f64 * 0.75) as usize; // 60
+        let target_table_width = target_table_width(terminal_width); // 60
 
         const MIN_UNIT_WIDTH: usize = 20;
         const MIN_CMD_WIDTH: usize = 15;
@@ -1086,7 +1114,7 @@ mod tests {
     #[test]
     fn test_column_width_allocation_medium_terminal() {
         let terminal_width = 120;
-        let target_table_width = (terminal_width as f64 * 0.75) as usize; // 90
+        let target_table_width = target_table_width(terminal_width); // 90
 
         const MAX_UNIT_WIDTH: usize = 60;
         const MAX_CMD_WIDTH: usize = 50;
@@ -1131,7 +1159,7 @@ mod tests {
     #[test]
     fn test_column_width_allocation_large_terminal() {
         let terminal_width = 200;
-        let target_table_width = (terminal_width as f64 * 0.75) as usize; // 150
+        let target_table_width = target_table_width(terminal_width); // 150
 
         const MIN_UNIT_WIDTH: usize = 20;
         const MAX_UNIT_WIDTH: usize = 60;
@@ -1292,6 +1320,17 @@ fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Er
     }
 }
 
+fn target_table_width(terminal_width: usize) -> usize {
+    (terminal_width as f64 * 0.75) as usize
+}
+
+fn detect_target_table_width(default_terminal_width: usize) -> usize {
+    let terminal_width = terminal_size::terminal_size()
+        .map(|(width, _)| width.0 as usize)
+        .unwrap_or(default_terminal_width);
+    target_table_width(terminal_width)
+}
+
 fn render_status(
     snapshot: &StatusSnapshot,
     opts: &StatusRenderOptions,
@@ -1337,10 +1376,7 @@ fn render_status(
         .format("%Y-%m-%d %H:%M:%S %Z");
 
     // Detect terminal width and calculate target table width (75% of terminal)
-    let terminal_width = terminal_size::terminal_size()
-        .map(|(width, _)| width.0 as usize)
-        .unwrap_or(120); // Default to 120 chars if detection fails
-    let target_table_width = (terminal_width as f64 * 0.75) as usize;
+    let target_table_width = detect_target_table_width(120);
 
     const MIN_UNIT_WIDTH: usize = 20;
     const MAX_UNIT_WIDTH: usize = 60;
@@ -2450,6 +2486,101 @@ fn pad_ansi_str(s: &str, width: usize) -> String {
     }
 }
 
+/// Wraps plain text to a fixed visible width.
+fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut line = String::new();
+    let mut line_len = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+
+        if line_len == 0 && word_len <= width {
+            line.push_str(word);
+            line_len = word_len;
+            continue;
+        }
+
+        if line_len > 0 && line_len + 1 + word_len <= width {
+            line.push(' ');
+            line.push_str(word);
+            line_len += 1 + word_len;
+            continue;
+        }
+
+        if line_len > 0 {
+            wrapped.push(line);
+            line = String::new();
+            line_len = 0;
+        }
+
+        if word_len <= width {
+            line.push_str(word);
+            line_len = word_len;
+            continue;
+        }
+
+        let mut chunk = String::new();
+        let mut chunk_len = 0usize;
+        for ch in word.chars() {
+            chunk.push(ch);
+            chunk_len += 1;
+            if chunk_len == width {
+                wrapped.push(chunk);
+                chunk = String::new();
+                chunk_len = 0;
+            }
+        }
+        if !chunk.is_empty() {
+            line = chunk;
+            line_len = chunk_len;
+        }
+    }
+
+    if !line.is_empty() {
+        wrapped.push(line);
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+
+    wrapped
+}
+
+fn format_command_value_lines(
+    field_label: &str,
+    command: &str,
+    width: usize,
+    no_color: bool,
+) -> Vec<String> {
+    let field = colorize(field_label, WHITE, no_color);
+    let prefix = format!("{field}: ");
+    let prefix_width = visible_length(&prefix);
+    let value_width = width.saturating_sub(prefix_width).max(1);
+    let wrapped_values = wrap_plain_text(command, value_width);
+
+    wrapped_values
+        .into_iter()
+        .enumerate()
+        .map(|(idx, segment)| {
+            let value = colorize(&segment, GRAY, no_color);
+            if idx == 0 {
+                format!("{prefix}{value}")
+            } else {
+                format!("{}{}", " ".repeat(prefix_width), value)
+            }
+        })
+        .collect()
+}
+
 /// Formats a single inspect box row with consistent width relative to the border.
 fn format_inspect_box_line(content: &str, inner_width: usize) -> String {
     let content_width = inner_width.saturating_sub(3);
@@ -2692,10 +2823,7 @@ fn render_inspect(
         return Ok(health);
     }
 
-    let terminal_width = terminal_size::terminal_size()
-        .map(|(width, _)| width.0 as usize)
-        .unwrap_or(80);
-    let table_width = terminal_width.min(100);
+    let table_width = detect_target_table_width(120);
     let inner_width = table_width - 4;
     let border_line = "═".repeat(inner_width);
 
@@ -2774,24 +2902,46 @@ fn render_inspect(
     if unit.command.is_some() || unit.runtime_command.is_some() {
         println!("╠{}╣", border_line);
         if let Some(command) = &unit.command {
-            let cmd_label = colorize("Command", DIM_CYAN, opts.no_color);
-            let conf_label = colorize("Configured", DIM_WHITE, opts.no_color);
-            let cmd_line = format!("{}: {}", conf_label, command);
+            let cmd_label = colorize("Command", WHITE, opts.no_color);
             let cmd_label_padded = pad_ansi_str(&cmd_label, label_width);
-            let cmd_line_padded = pad_ansi_str(&cmd_line, data_width);
-            println!("║  {} │ {} ║", cmd_label_padded, cmd_line_padded);
+            let cmd_lines = format_command_value_lines(
+                "Configured",
+                command,
+                data_width,
+                opts.no_color,
+            );
+            for (idx, cmd_line) in cmd_lines.iter().enumerate() {
+                let label = if idx == 0 {
+                    &cmd_label_padded
+                } else {
+                    &empty_label
+                };
+                let cmd_line_padded = pad_ansi_str(cmd_line, data_width);
+                println!("║  {} │ {} ║", label, cmd_line_padded);
+            }
         }
         if let Some(runtime_command) = &unit.runtime_command {
             let prefix_str = if unit.command.is_some() {
                 String::from("")
             } else {
-                colorize("Command", DIM_CYAN, opts.no_color)
+                colorize("Command", WHITE, opts.no_color)
             };
-            let runtime_label = colorize("Runtime", DIM_WHITE, opts.no_color);
-            let runtime_line = format!("{}: {}", runtime_label, runtime_command);
             let prefix_padded = pad_ansi_str(&prefix_str, label_width);
-            let runtime_line_padded = pad_ansi_str(&runtime_line, data_width);
-            println!("║  {} │ {} ║", prefix_padded, runtime_line_padded);
+            let runtime_lines = format_command_value_lines(
+                "Runtime",
+                runtime_command,
+                data_width,
+                opts.no_color,
+            );
+            for (idx, runtime_line) in runtime_lines.iter().enumerate() {
+                let label = if idx == 0 {
+                    &prefix_padded
+                } else {
+                    &empty_label
+                };
+                let runtime_line_padded = pad_ansi_str(runtime_line, data_width);
+                println!("║  {} │ {} ║", label, runtime_line_padded);
+            }
         }
     }
 
@@ -3100,10 +3250,7 @@ struct InspectProcessContext<'a> {
 
 /// Renders a process table for the inspected unit and all discovered descendants.
 fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
-    let terminal_width = terminal_size::terminal_size()
-        .map(|(width, _)| width.0 as usize)
-        .unwrap_or(80);
-    let table_width = terminal_width.min(100);
+    let table_width = detect_target_table_width(120);
     let inner_width = table_width - 4;
     let border_line = "═".repeat(inner_width);
 
@@ -3181,10 +3328,7 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
         return;
     }
 
-    let terminal_width = terminal_size::terminal_size()
-        .map(|(width, _)| width.0 as usize)
-        .unwrap_or(120);
-    let target_table_width = (terminal_width as f64 * 0.75) as usize;
+    let target_table_width = detect_target_table_width(120);
 
     const MIN_PROC_WIDTH: usize = 15;
     const MAX_PROC_WIDTH: usize = 32;
