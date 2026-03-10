@@ -1207,6 +1207,20 @@ mod tests {
     }
 
     #[test]
+    fn inspect_process_widths_balance_proc_and_cmd_columns() {
+        let mut widths = [8, 7, 7, 8, 4, 4, 9, 9, 9, 1, 6, 6, 9, 90];
+        shrink_inspect_process_widths_to_fit(&mut widths, 120);
+
+        let diff = widths[INSPECT_COL_PROC].abs_diff(widths[INSPECT_COL_CMD]);
+        assert!(
+            diff <= INSPECT_PROC_CMD_MAX_DIFF,
+            "expected PROC/CMD widths to stay close, got PROC={} CMD={}",
+            widths[INSPECT_COL_PROC],
+            widths[INSPECT_COL_CMD]
+        );
+    }
+
+    #[test]
     fn inspect_process_descendant_rows_gray_proc_and_cmd_only() {
         let mut user_colors = HashMap::new();
         let user_color = "\x1b[38;5;39m";
@@ -3648,6 +3662,7 @@ const INSPECT_PROCESS_SOFT_MIN_WIDTHS: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
     [8, 3, 4, 4, 3, 2, 4, 4, 4, 1, 4, 4, 5, 10];
 const INSPECT_PROCESS_SHRINK_PRIORITY: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
     [0, 13, 3, 12, 6, 7, 8, 9, 4, 5, 2, 11, 10, 1];
+const INSPECT_PROC_CMD_MAX_DIFF: usize = 4;
 
 const INSPECT_CRON_COLUMN_COUNT: usize = 4;
 const INSPECT_CRON_COLUMN_TITLES: [&str; INSPECT_CRON_COLUMN_COUNT] =
@@ -3762,10 +3777,38 @@ fn shrink_inspect_process_widths_to_fit(
     reduce_inspect_process_widths(widths, &INSPECT_PROCESS_SOFT_MIN_WIDTHS, budget);
 
     if widths.iter().sum::<usize>() <= budget {
+        rebalance_inspect_process_proc_cmd_widths(widths);
         return;
     }
 
     reduce_inspect_process_widths(widths, &[1; INSPECT_PROCESS_COLUMN_COUNT], budget);
+    rebalance_inspect_process_proc_cmd_widths(widths);
+}
+
+/// Rebalances inspect process table widths so PROC and CMD stay close in visible width.
+fn rebalance_inspect_process_proc_cmd_widths(
+    widths: &mut [usize; INSPECT_PROCESS_COLUMN_COUNT],
+) {
+    let proc = INSPECT_COL_PROC;
+    let cmd = INSPECT_COL_CMD;
+
+    if widths[cmd] > widths[proc] + INSPECT_PROC_CMD_MAX_DIFF {
+        let diff = widths[cmd] - widths[proc] - INSPECT_PROC_CMD_MAX_DIFF;
+        let needed = diff.div_ceil(2);
+        let cmd_floor = INSPECT_PROCESS_SOFT_MIN_WIDTHS[cmd]
+            .max(INSPECT_PROCESS_COLUMN_TITLES[cmd].len());
+        let transfer = needed.min(widths[cmd].saturating_sub(cmd_floor));
+        widths[cmd] -= transfer;
+        widths[proc] += transfer;
+    } else if widths[proc] > widths[cmd] + INSPECT_PROC_CMD_MAX_DIFF {
+        let diff = widths[proc] - widths[cmd] - INSPECT_PROC_CMD_MAX_DIFF;
+        let needed = diff.div_ceil(2);
+        let proc_floor = INSPECT_PROCESS_SOFT_MIN_WIDTHS[proc]
+            .max(INSPECT_PROCESS_COLUMN_TITLES[proc].len());
+        let transfer = needed.min(widths[proc].saturating_sub(proc_floor));
+        widths[proc] -= transfer;
+        widths[cmd] += transfer;
+    }
 }
 
 fn shrink_inspect_cron_widths_to_fit(
