@@ -806,7 +806,7 @@ mod tests {
             "{GRAY}/opt/homebrew/bin/claude --dangerously-skip-permissions{RESET}"
         )));
         assert!(row.contains(&format!("{GRAY}-{RESET}")));
-        assert!(row.contains(&format!("{ORANGE}peri{RESET}")));
+        assert!(row.contains(&format!("{MAGENTA}peri{RESET}")));
         assert!(row.contains(&format!("{BRIGHT_GREEN}Running{RESET}")));
         assert!(row.contains(&format!("{GREEN_BOLD}Healthy{RESET}")));
     }
@@ -2170,7 +2170,7 @@ fn format_spawned_child_row(
 
     let kind_label = match child.kind {
         SpawnedChildKind::Spawned => colorize("spwn", MAGENTA, no_color),
-        SpawnedChildKind::Peripheral => colorize("peri", ORANGE, no_color),
+        SpawnedChildKind::Peripheral => colorize("peri", MAGENTA, no_color),
     };
 
     let values = [
