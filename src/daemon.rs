@@ -510,10 +510,43 @@ impl PidFile {
             *self = xml_from_str::<Self>(&contents)?;
         }
 
-        if self.services.remove(service).is_none() {
-            return Err(PidFileError::ServiceNotFound);
+        let removed_pid = match self.services.remove(service) {
+            Some(pid) => pid,
+            None => return Err(PidFileError::ServiceNotFound),
+        };
+
+        if self.parent_map.contains_key(&removed_pid)
+            || self.children_map.contains_key(&removed_pid)
+            || self.spawn_metadata.contains_key(&removed_pid)
+        {
+            self.remove_spawn_subtree_in_memory(removed_pid);
         }
-        self.service_groups.remove(service);
+
+        if let Some(children) = self.children_map.remove(&removed_pid) {
+            for child in children {
+                self.remove_spawn_subtree_in_memory(child);
+            }
+        }
+
+        let stale_roots: Vec<u32> = self
+            .spawn_metadata
+            .values()
+            .filter(|meta| meta.parent_pid == removed_pid)
+            .map(|meta| meta.pid)
+            .collect();
+        for stale_pid in stale_roots {
+            self.remove_spawn_subtree_in_memory(stale_pid);
+        }
+
+        if self.services.is_empty() {
+            self.parent_map.clear();
+            self.children_map.clear();
+            self.spawn_depth.clear();
+            self.spawn_metadata.clear();
+        }
+
+        let _ = self.service_groups.remove(service);
+
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, xml_to_string(self)?)?;
         Ok(())
@@ -734,7 +767,9 @@ impl PidFile {
 
 #[cfg(test)]
 mod pidfile_tests {
-    use std::{collections::HashMap, time::SystemTime};
+    use std::{collections::HashMap, env, fs, time::SystemTime};
+
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -800,6 +835,88 @@ mod pidfile_tests {
         );
         assert!(!pid_file.spawn_metadata.contains_key(&2));
         assert!(!pid_file.spawn_metadata.contains_key(&3));
+    }
+
+    #[test]
+    fn remove_service_prunes_spawn_metadata_for_service_pid() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home directory");
+
+        let original_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        let mut pid_file = PidFile {
+            services: HashMap::from([("svc".to_string(), 10)]),
+            service_groups: HashMap::from([("svc".to_string(), 10)]),
+            parent_map: HashMap::from([(11, 10), (12, 11)]),
+            children_map: HashMap::from([(10, vec![11]), (11, vec![12])]),
+            spawn_depth: HashMap::from([(11, 1), (12, 2)]),
+            spawn_metadata: HashMap::from([
+                (
+                    11,
+                    PersistedSpawnChild {
+                        pid: 11,
+                        name: "child".into(),
+                        command: "cmd".into(),
+                        started_at: SystemTime::now(),
+                        ttl_secs: None,
+                        depth: 1,
+                        parent_pid: 10,
+                        service_hash: None,
+                        cpu_percent: None,
+                        rss_bytes: None,
+                        last_exit: None,
+                    },
+                ),
+                (
+                    12,
+                    PersistedSpawnChild {
+                        pid: 12,
+                        name: "grandchild".into(),
+                        command: "cmd".into(),
+                        started_at: SystemTime::now(),
+                        ttl_secs: None,
+                        depth: 2,
+                        parent_pid: 11,
+                        service_hash: None,
+                        cpu_percent: None,
+                        rss_bytes: None,
+                        last_exit: None,
+                    },
+                ),
+            ]),
+        };
+
+        pid_file.save().expect("save pid file");
+        let mut loaded = PidFile::load().expect("load pid file");
+        let removed = loaded.remove("svc");
+        assert!(removed.is_ok());
+        assert!(!loaded.services.contains_key("svc"));
+        assert!(!loaded.service_groups.contains_key("svc"));
+        assert!(!loaded.parent_map.contains_key(&11));
+        assert!(!loaded.parent_map.contains_key(&12));
+        assert!(!loaded.children_map.contains_key(&10));
+        assert!(!loaded.children_map.contains_key(&11));
+        assert!(!loaded.spawn_depth.contains_key(&11));
+        assert!(!loaded.spawn_depth.contains_key(&12));
+        assert!(!loaded.spawn_metadata.contains_key(&11));
+        assert!(!loaded.spawn_metadata.contains_key(&12));
+
+        unsafe {
+            if let Some(home) = original_home {
+                env::set_var("HOME", home);
+            } else {
+                env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 }
 

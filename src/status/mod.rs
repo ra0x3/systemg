@@ -272,6 +272,15 @@ fn build_spawn_tree_from_pidfile(
         }
 
         let child_pid = metadata.pid;
+        if system.is_some()
+            && !matches!(
+                StatusManager::process_state(child_pid),
+                ProcessState::Running
+            )
+        {
+            continue;
+        }
+
         let mut child = SpawnedChild {
             name: metadata.name.clone(),
             pid: child_pid,
@@ -309,6 +318,15 @@ fn build_spawn_tree_from_pidfile(
 
     if is_root && let Some(hash) = service_hash {
         for metadata in pid_file.spawn_roots_for_service(hash) {
+            if system.is_some()
+                && !matches!(
+                    StatusManager::process_state(metadata.pid),
+                    ProcessState::Running
+                )
+            {
+                continue;
+            }
+
             let mut child = SpawnedChild {
                 name: metadata.name.clone(),
                 pid: metadata.pid,

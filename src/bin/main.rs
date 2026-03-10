@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_last_exit_shortened() {
+    fn test_format_last_exit_human_readable() {
         let exit_zero = Some(ExitMetadata {
             exit_code: Some(0),
             signal: None,
@@ -1248,10 +1248,31 @@ mod tests {
             signal: Some(9),
         });
 
-        assert_eq!(format_last_exit(exit_zero.as_ref(), None), "e0");
-        assert_eq!(format_last_exit(exit_one.as_ref(), None), "e1");
-        assert_eq!(format_last_exit(signal_kill.as_ref(), None), "s9");
+        assert_eq!(format_last_exit(exit_zero.as_ref(), None), "exit 0");
+        assert_eq!(format_last_exit(exit_one.as_ref(), None), "exit 1");
+        assert_eq!(format_last_exit(signal_kill.as_ref(), None), "exit ?");
         assert_eq!(format_last_exit(None, None), "-");
+    }
+
+    #[test]
+    fn test_last_exit_color_uses_exit_code() {
+        let success = ExitMetadata {
+            exit_code: Some(0),
+            signal: None,
+        };
+        let failure = ExitMetadata {
+            exit_code: Some(2),
+            signal: None,
+        };
+        let signaled = ExitMetadata {
+            exit_code: None,
+            signal: Some(9),
+        };
+
+        assert_eq!(last_exit_color(Some(&success), None), Some(GREEN_BOLD));
+        assert_eq!(last_exit_color(Some(&failure), None), Some(RED_BOLD));
+        assert_eq!(last_exit_color(Some(&signaled), None), Some(RED_BOLD));
+        assert_eq!(last_exit_color(None, None), None);
     }
 }
 
@@ -1382,15 +1403,24 @@ fn render_status(
     const MAX_UNIT_WIDTH: usize = 60;
     const MIN_CMD_WIDTH: usize = 15;
     const MAX_CMD_WIDTH: usize = 50;
-    const MIN_EXIT_WIDTH: usize = 10;
-    const MAX_EXIT_WIDTH: usize = 30;
-
     const KIND_WIDTH: usize = 6;
     const PID_WIDTH: usize = 7;
     const CPU_WIDTH: usize = 6;
     const RSS_WIDTH: usize = 8;
     const UPTIME_WIDTH: usize = 10;
     const HEALTH_WIDTH: usize = 8;
+    let exit_width = units
+        .iter()
+        .map(|unit| {
+            visible_length(&format_last_exit(
+                unit.last_exit.as_ref(),
+                unit.cron.as_ref(),
+            ))
+        })
+        .max()
+        .unwrap_or(1)
+        .max(visible_length("LAST_EXIT"));
+
     let max_state_len = units
         .iter()
         .map(|unit| visible_length(&unit_state_label(unit, opts.no_color)))
@@ -1418,26 +1448,24 @@ fn render_status(
         + CPU_WIDTH
         + RSS_WIDTH
         + UPTIME_WIDTH
+        + exit_width
         + HEALTH_WIDTH;
     let padding_and_separators = 11 * 3 + 2;
     let fixed_total = fixed_width + padding_and_separators;
 
     let remaining_space = target_table_width.saturating_sub(fixed_total);
 
-    let (unit_width, cmd_width, exit_width) =
-        if remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH + MIN_EXIT_WIDTH) {
-            (MIN_UNIT_WIDTH, MIN_CMD_WIDTH, MIN_EXIT_WIDTH)
-        } else {
-            let unit_alloc = (remaining_space as f64 * 0.4) as usize;
-            let cmd_alloc = (remaining_space as f64 * 0.4) as usize;
-            let exit_alloc = remaining_space - unit_alloc - cmd_alloc;
+    let (unit_width, cmd_width) = if remaining_space < (MIN_UNIT_WIDTH + MIN_CMD_WIDTH) {
+        (MIN_UNIT_WIDTH, MIN_CMD_WIDTH)
+    } else {
+        let unit_alloc = (remaining_space as f64 * 0.5) as usize;
+        let cmd_alloc = remaining_space.saturating_sub(unit_alloc);
 
-            (
-                unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
-                cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
-                exit_alloc.clamp(MIN_EXIT_WIDTH, MAX_EXIT_WIDTH),
-            )
-        };
+        (
+            unit_alloc.clamp(MIN_UNIT_WIDTH, MAX_UNIT_WIDTH),
+            cmd_alloc.clamp(MIN_CMD_WIDTH, MAX_CMD_WIDTH),
+        )
+    };
 
     // Create columns with calculated widths
     let columns_array = [
@@ -1579,10 +1607,10 @@ fn overall_health_color(health: OverallHealth) -> &'static str {
 
 fn unit_health_label(health: UnitHealth) -> &'static str {
     match health {
-        UnitHealth::Healthy => "HEALTHY",
-        UnitHealth::Degraded => "DEGRADED",
-        UnitHealth::Failing => "FAILING",
-        UnitHealth::Inactive => "INACTIVE",
+        UnitHealth::Healthy => "Healthy",
+        UnitHealth::Degraded => "Degraded",
+        UnitHealth::Failing => "Failing",
+        UnitHealth::Inactive => "Inactive",
     }
 }
 
@@ -1596,14 +1624,14 @@ fn health_label_extended(unit: &UnitStatus) -> String {
             CronExecutionStatus::Failed(reason)
                 if reason.starts_with("Failed to get PID") =>
             {
-                return "HEALTHY-".to_string(); // Healthy but couldn't track properly
+                return "Healthy-".to_string(); // Healthy but couldn't track properly
             }
             CronExecutionStatus::Success => {
                 // Check if it had a non-zero exit code that we're treating as success
                 if let Some(code) = last.exit_code
                     && code == 0
                 {
-                    return "HEALTHY+".to_string(); // Perfect health
+                    return "Healthy+".to_string(); // Perfect health
                 }
             }
             _ => {}
@@ -1792,7 +1820,7 @@ fn format_last_exit(
                     if time_str.is_empty() {
                         format!("exit {}", code)
                     } else {
-                        format!("e{} {}", code, time_str)
+                        format!("exit {}; {}", code, time_str)
                     }
                 } else if time_str.is_empty() {
                     "ok".to_string()
@@ -1805,7 +1833,7 @@ fn format_last_exit(
                     if time_str.is_empty() {
                         format!("exit {}", code)
                     } else {
-                        format!("e{} {}", code, time_str)
+                        format!("exit {}; {}", code, time_str)
                     }
                 } else if reason.is_empty() {
                     if time_str.is_empty() {
@@ -1843,11 +1871,45 @@ fn format_last_exit(
 
     match exit {
         Some(metadata) => match (metadata.exit_code, metadata.signal) {
-            (Some(code), _) => format!("e{}", code),
-            (None, Some(signal)) => format!("s{}", signal),
+            (Some(code), _) => format!("exit {}", code),
+            (None, Some(_)) => "exit ?".to_string(),
             _ => "?".to_string(),
         },
         None => "-".to_string(),
+    }
+}
+
+/// Chooses display color for `LAST_EXIT` based on exit outcome semantics.
+fn last_exit_color(
+    exit: Option<&ExitMetadata>,
+    cron: Option<&CronUnitStatus>,
+) -> Option<&'static str> {
+    if let Some(cron) = cron
+        && let Some(last) = &cron.last_run
+    {
+        return match &last.status {
+            Some(CronExecutionStatus::Success) => last
+                .exit_code
+                .map(|code| if code == 0 { GREEN_BOLD } else { RED_BOLD }),
+            Some(CronExecutionStatus::Failed(_)) => {
+                if let Some(code) = last.exit_code {
+                    Some(if code == 0 { GREEN_BOLD } else { RED_BOLD })
+                } else {
+                    Some(RED_BOLD)
+                }
+            }
+            Some(CronExecutionStatus::OverlapError) => Some(RED_BOLD),
+            None => None,
+        };
+    }
+
+    match exit {
+        Some(metadata) => match (metadata.exit_code, metadata.signal) {
+            (Some(code), _) => Some(if code == 0 { GREEN_BOLD } else { RED_BOLD }),
+            (None, Some(_)) => Some(RED_BOLD),
+            _ => None,
+        },
+        None => None,
     }
 }
 
@@ -1966,15 +2028,15 @@ fn format_breakdown_banner(
     let health_str = healths
         .iter()
         .map(|(health, count)| {
-            let color = if health.starts_with("HEALTHY") {
+            let color = if health.starts_with("Healthy") {
                 if health.ends_with('+') {
                     GREEN_BOLD
                 } else {
                     GREEN
                 }
-            } else if health.as_str() == "DEGRADED" {
+            } else if health.as_str() == "Degraded" {
                 ORANGE
-            } else if health.as_str() == "FAILING" {
+            } else if health.as_str() == "Failing" {
                 RED_BOLD
             } else {
                 GRAY
@@ -2033,7 +2095,14 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     let cpu_col = format_cpu_column(unit.metrics.as_ref());
     let rss_col = format_rss_column(unit.metrics.as_ref());
     let uptime = format_uptime_column(unit.uptime.as_ref());
-    let last_exit = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+    let last_exit_text = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+    let last_exit = if let Some(color) =
+        last_exit_color(unit.last_exit.as_ref(), unit.cron.as_ref())
+    {
+        colorize(&last_exit_text, color, no_color)
+    } else {
+        last_exit_text
+    };
     let command = unit
         .command
         .as_ref()
@@ -2041,7 +2110,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         .cloned()
         .unwrap_or_else(|| "-".to_string());
     let health_label_text = health_label_extended(unit);
-    let health_color = if health_label_text == "HEALTHY-" {
+    let health_color = if health_label_text == "Healthy-" {
         GREEN // Darker green for HEALTHY-
     } else {
         unit_health_color(unit.health)
@@ -2857,7 +2926,14 @@ fn render_inspect(
         "-".to_string()
     };
 
-    let exit_str = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+    let exit_text = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
+    let exit_str = if let Some(color) =
+        last_exit_color(unit.last_exit.as_ref(), unit.cron.as_ref())
+    {
+        colorize(&exit_text, color, opts.no_color)
+    } else {
+        exit_text
+    };
 
     let label_width = 10;
     let data_width = inner_width.saturating_sub(label_width + 6);
@@ -3273,17 +3349,34 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
         ProcessRefreshKind::everything(),
     );
 
-    let root_pid = root_runtime.pid;
-    if system.process(SysPid::from_u32(root_pid)).is_none() {
+    let tracked_root_pid = root_runtime.pid;
+    let root_pid = if system.process(SysPid::from_u32(tracked_root_pid)).is_some() {
+        tracked_root_pid
+    } else if let Some(live_descendant_pid) =
+        find_live_spawn_root_pid(&unit.spawned_children, &system)
+    {
+        let msg = format!(
+            "{}: {} -> {}",
+            colorize(
+                "Tracked root missing; falling back to descendant",
+                YELLOW_BOLD,
+                no_color
+            ),
+            tracked_root_pid,
+            live_descendant_pid
+        );
+        println!("{}", format_inspect_box_line(&msg, inner_width));
+        live_descendant_pid
+    } else {
         let msg = format!(
             "{}: {}",
             colorize("Root process no longer available", GRAY, no_color),
-            root_pid
+            tracked_root_pid
         );
         println!("{}", format_inspect_box_line(&msg, inner_width));
         println!("╚{}╝", border_line);
         return;
-    }
+    };
 
     let users = Users::new_with_refreshed_list();
     let total_memory = system.total_memory() as f64;
@@ -3507,6 +3600,22 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool) {
         println!("{}", format_row_cells(&values, &columns, no_color));
     }
     println!("{}", make_bottom_border(&columns));
+}
+
+/// Finds the first live spawned descendant PID to use as inspect-table fallback root.
+fn find_live_spawn_root_pid(
+    nodes: &[SpawnedProcessNode],
+    system: &System,
+) -> Option<u32> {
+    for node in nodes {
+        if system.process(SysPid::from_u32(node.child.pid)).is_some() {
+            return Some(node.child.pid);
+        }
+        if let Some(pid) = find_live_spawn_root_pid(&node.children, system) {
+            return Some(pid);
+        }
+    }
+    None
 }
 
 /// Walks the process tree rooted at `pid` and appends formatted table rows in tree order.

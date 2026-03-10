@@ -24,7 +24,10 @@ use crate::{
     logs::spawn_dynamic_child_log_writer,
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
-    status::{StatusCache, StatusRefresher, StatusSnapshot, collect_runtime_snapshot},
+    status::{
+        StatusCache, StatusError, StatusRefresher, StatusSnapshot,
+        collect_runtime_snapshot,
+    },
 };
 
 /// Supervisor errors.
@@ -42,6 +45,9 @@ pub enum SupervisorError {
     /// Metrics subsystem error.
     #[error(transparent)]
     Metrics(#[from] metrics::MetricsError),
+    /// Live status snapshot error.
+    #[error(transparent)]
+    Status(#[from] StatusError),
 }
 
 /// Daemon supervisor that handles CLI commands.
@@ -714,8 +720,9 @@ impl Supervisor {
                 }
             }
             ControlCommand::Inspect { unit, samples } => {
+                let snapshot = self.collect_live_snapshot()?;
+                self.status_cache.replace(snapshot.clone());
                 let limit = samples as usize;
-                let snapshot = self.status_cache.snapshot();
                 let matching_unit = snapshot
                     .units
                     .iter()
@@ -762,8 +769,9 @@ impl Supervisor {
                 Ok(ControlResponse::Message("Supervisor shutting down".into()))
             }
             ControlCommand::Status => {
-                self.refresh_status_cache();
-                Ok(ControlResponse::Status(self.status_cache.snapshot()))
+                let snapshot = self.collect_live_snapshot()?;
+                self.status_cache.replace(snapshot.clone());
+                Ok(ControlResponse::Status(snapshot))
             }
         }
     }
@@ -1023,20 +1031,26 @@ impl Supervisor {
     }
 
     fn refresh_status_cache(&mut self) {
+        match self.collect_live_snapshot() {
+            Ok(snapshot) => self.status_cache.replace(snapshot),
+            Err(err) => error!("failed to refresh status snapshot: {err}"),
+        }
+    }
+
+    /// Collects a fresh runtime snapshot directly from daemon state and process inspection.
+    fn collect_live_snapshot(&self) -> Result<StatusSnapshot, SupervisorError> {
         let config = self.daemon.config();
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
-        match collect_runtime_snapshot(
+        collect_runtime_snapshot(
             config,
             &pid_handle,
             &state_handle,
             Some(&self.metrics_store),
             Some(&self.spawn_manager),
-        ) {
-            Ok(snapshot) => self.status_cache.replace(snapshot),
-            Err(err) => error!("failed to refresh status snapshot: {err}"),
-        }
+        )
+        .map_err(SupervisorError::from)
     }
 
     fn shutdown_runtime(&mut self) -> Result<(), SupervisorError> {
