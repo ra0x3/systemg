@@ -8,17 +8,62 @@ title: Units
 Use `sysg start -- <command...>` to create and run a single managed unit without
 writing a full project config.
 
+When `--name` is omitted, systemg auto-generates a unit name.
+
 ## Common examples
 
+Keep a lightweight HTTP server alive.
+
 ```bash
-# Keep a lightweight HTTP server alive
-$ sysg start --daemonize --name docs-server -- python3 -m http.server 8080
+$ sysg start --daemonize -- python3 -m http.server 8080
+```
 
-# Tail a log file under supervision
-$ sysg start --daemonize --name api-tail -- tail -F /var/log/api.log
+Keep a one-off script running.
 
-# Run a periodic shell loop
-$ sysg start --daemonize --name heartbeat -- sh -lc 'while true; do date; sleep 30; done'
+```bash
+$ sysg start --daemonize -- ./scripts/dev-health-check.sh
+```
+
+Tail application logs under supervision.
+
+```bash
+$ sysg start --daemonize -- tail -F ./logs/app.log
+```
+
+Run a frontend dev server.
+
+```bash
+$ sysg start --daemonize -- npm run dev
+```
+
+Run a backend API in reload mode.
+
+```bash
+$ sysg start --daemonize -- uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Run a worker with explicit queue and concurrency settings.
+
+```bash
+$ sysg start --daemonize -- sh -lc 'QUEUE=critical CONCURRENCY=4 ./bin/worker'
+```
+
+Run a live TypeScript watcher and build loop.
+
+```bash
+$ sysg start --daemonize -- sh -lc 'pnpm install && pnpm run dev:watch'
+```
+
+Run a periodic heartbeat loop.
+
+```bash
+$ sysg start --daemonize -- sh -lc 'while true; do date; sleep 30; done'
+```
+
+Run a composed multi-step local pipeline.
+
+```bash
+$ sysg start --daemonize -- sh -lc 'pnpm db:migrate && pnpm run seed && pnpm run start:prod'
 ```
 
 ## Where unit files are stored
