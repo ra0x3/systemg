@@ -509,7 +509,8 @@ services:
         _ => 1,
     };
     assert_eq!(output.status.code(), Some(expected_exit));
-    // Skipped services have Inactive health, which doesn't affect overall health
+    // Skipped services are treated as Healthy to keep health labels within
+    // Healthy/Degraded/Failing.
     assert_eq!(payload["overall_health"].as_str(), Some("healthy"));
 
     let units = payload["units"].as_array().expect("units array");
@@ -518,7 +519,7 @@ services:
         .find(|entry| entry["name"].as_str() == Some("skipped_service"))
         .expect("skipped service unit present");
     assert_eq!(unit["lifecycle"].as_str(), Some("skipped"));
-    assert_eq!(unit["health"].as_str(), Some("inactive"));
+    assert_eq!(unit["health"].as_str(), Some("healthy"));
     assert!(
         unit.get("process").is_none() || unit["process"].is_null(),
         "skipped service should not report a running process"

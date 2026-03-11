@@ -1077,40 +1077,39 @@ fn derive_unit_health(
     }
 
     if let Some(cron_status) = cron {
-        if let Some(last_run) = cron_status.last_run.as_ref() {
-            if let Some(status) = &last_run.status {
-                return match status {
-                    CronExecutionStatus::Success => UnitHealth::Healthy,
-                    CronExecutionStatus::OverlapError => UnitHealth::Failing,
-                    CronExecutionStatus::Failed(reason) => {
-                        if reason.starts_with("Failed to get PID") {
-                            UnitHealth::Healthy
-                        } else if last_run.exit_code.is_some()
-                            || last_run.completed_at.is_some()
-                        {
-                            match last_run.exit_code {
-                                Some(0) => UnitHealth::Healthy,
-                                Some(_) => UnitHealth::Degraded,
-                                None => UnitHealth::Healthy,
-                            }
-                        } else {
-                            UnitHealth::Failing
-                        }
-                    }
-                };
-            }
+        let completed_runs: Vec<&CronExecutionSummary> = cron_status
+            .recent_runs
+            .iter()
+            .filter(|run| cron_run_is_complete(run))
+            .take(10)
+            .collect();
 
+        if completed_runs.is_empty() {
+            return UnitHealth::Degraded;
+        }
+
+        let failure_count = completed_runs
+            .iter()
+            .filter(|run| cron_run_is_failure(run))
+            .count();
+
+        if failure_count == 0 {
             return UnitHealth::Healthy;
         }
 
-        return UnitHealth::Degraded;
+        // A cron is degraded when 20% or more of recent runs fail (e.g. 2/10).
+        if failure_count * 5 >= completed_runs.len() {
+            return UnitHealth::Degraded;
+        }
+
+        return UnitHealth::Healthy;
     }
 
     match lifecycle {
         Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
         Some(ServiceLifecycleStatus::Running) => return UnitHealth::Healthy,
         Some(ServiceLifecycleStatus::Skipped) | Some(ServiceLifecycleStatus::Stopped) => {
-            return UnitHealth::Inactive;
+            return UnitHealth::Healthy;
         }
         Some(ServiceLifecycleStatus::ExitedSuccessfully) => return UnitHealth::Healthy,
         None => {}
@@ -1125,6 +1124,7 @@ fn derive_unit_health(
 pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
     if units
         .iter()
+        .filter(|unit| !matches!(unit.kind, UnitKind::Cron))
         .any(|unit| matches!(unit.health, UnitHealth::Failing))
     {
         return OverallHealth::Failing;
@@ -1132,12 +1132,50 @@ pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
 
     if units
         .iter()
+        .filter(|unit| !matches!(unit.kind, UnitKind::Cron))
+        .any(|unit| matches!(unit.health, UnitHealth::Degraded))
+    {
+        return OverallHealth::Degraded;
+    }
+
+    if units
+        .iter()
+        .filter(|unit| matches!(unit.kind, UnitKind::Cron))
+        .any(|unit| matches!(unit.health, UnitHealth::Failing))
+    {
+        return OverallHealth::Failing;
+    }
+
+    if units
+        .iter()
+        .filter(|unit| matches!(unit.kind, UnitKind::Cron))
         .any(|unit| matches!(unit.health, UnitHealth::Degraded))
     {
         return OverallHealth::Degraded;
     }
 
     OverallHealth::Healthy
+}
+
+fn cron_run_is_complete(run: &CronExecutionSummary) -> bool {
+    run.completed_at.is_some() || run.status.is_some() || run.exit_code.is_some()
+}
+
+fn cron_run_is_failure(run: &CronExecutionSummary) -> bool {
+    match &run.status {
+        Some(CronExecutionStatus::Success) => false,
+        Some(CronExecutionStatus::OverlapError) => true,
+        Some(CronExecutionStatus::Failed(reason)) => {
+            if reason.starts_with("Failed to get PID") {
+                false
+            } else if let Some(code) = run.exit_code {
+                code != 0
+            } else {
+                run.completed_at.is_none()
+            }
+        }
+        None => run.exit_code.is_some_and(|code| code != 0),
+    }
 }
 
 fn truncate_hash(hash: &str) -> String {
@@ -2337,8 +2375,78 @@ services:
         let cron_status = CronUnitStatus {
             timezone_label: "UTC".into(),
             timezone: Some("UTC".into()),
-            last_run: Some(summary),
-            recent_runs: Vec::new(),
+            last_run: Some(summary.clone()),
+            recent_runs: vec![summary],
+        };
+
+        let health = derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status));
+        assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn derive_unit_health_for_cron_with_two_failures_in_ten_is_degraded() {
+        let now = Utc::now();
+        let mut recent_runs = Vec::new();
+
+        for _ in 0..8 {
+            recent_runs.push(CronExecutionSummary {
+                started_at: now,
+                completed_at: Some(now),
+                status: Some(CronExecutionStatus::Success),
+                exit_code: Some(0),
+                metrics: vec![],
+            });
+        }
+
+        for _ in 0..2 {
+            recent_runs.push(CronExecutionSummary {
+                started_at: now,
+                completed_at: Some(now),
+                status: Some(CronExecutionStatus::Failed("exit status 1".into())),
+                exit_code: Some(1),
+                metrics: vec![],
+            });
+        }
+
+        let cron_status = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: recent_runs.first().cloned(),
+            recent_runs,
+        };
+
+        let health = derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status));
+        assert_eq!(health, UnitHealth::Degraded);
+    }
+
+    #[test]
+    fn derive_unit_health_for_cron_with_one_failure_in_ten_is_healthy() {
+        let now = Utc::now();
+        let mut recent_runs = Vec::new();
+
+        for _ in 0..9 {
+            recent_runs.push(CronExecutionSummary {
+                started_at: now,
+                completed_at: Some(now),
+                status: Some(CronExecutionStatus::Success),
+                exit_code: Some(0),
+                metrics: vec![],
+            });
+        }
+
+        recent_runs.push(CronExecutionSummary {
+            started_at: now,
+            completed_at: Some(now),
+            status: Some(CronExecutionStatus::Failed("exit status 1".into())),
+            exit_code: Some(1),
+            metrics: vec![],
+        });
+
+        let cron_status = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: recent_runs.first().cloned(),
+            recent_runs,
         };
 
         let health = derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status));

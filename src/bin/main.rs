@@ -1909,35 +1909,11 @@ fn unit_health_label(health: UnitHealth) -> &'static str {
         UnitHealth::Healthy => "Healthy",
         UnitHealth::Degraded => "Degraded",
         UnitHealth::Failing => "Failing",
-        UnitHealth::Inactive => "Inactive",
+        UnitHealth::Inactive => "Healthy",
     }
 }
 
 fn health_label_extended(unit: &UnitStatus) -> String {
-    // Special handling for crons with tracking issues or minor errors
-    if let Some(cron) = &unit.cron
-        && let Some(last) = &cron.last_run
-        && let Some(status) = &last.status
-    {
-        match status {
-            CronExecutionStatus::Failed(reason)
-                if reason.starts_with("Failed to get PID") =>
-            {
-                return "Healthy-".to_string(); // Healthy but couldn't track properly
-            }
-            CronExecutionStatus::Success => {
-                // Check if it had a non-zero exit code that we're treating as success
-                if let Some(code) = last.exit_code
-                    && code == 0
-                {
-                    return "Healthy+".to_string(); // Perfect health
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Default to the standard label
     unit_health_label(unit.health).to_string()
 }
 
@@ -1946,7 +1922,7 @@ fn unit_health_color(health: UnitHealth) -> &'static str {
         UnitHealth::Healthy => GREEN_BOLD,
         UnitHealth::Degraded => ORANGE,
         UnitHealth::Failing => RED_BOLD,
-        UnitHealth::Inactive => GRAY,
+        UnitHealth::Inactive => GREEN_BOLD,
     }
 }
 
@@ -2335,12 +2311,8 @@ fn format_breakdown_banner(
     let health_str = healths
         .iter()
         .map(|(health, count)| {
-            let color = if health.starts_with("Healthy") {
-                if health.ends_with('+') {
-                    GREEN_BOLD
-                } else {
-                    GREEN
-                }
+            let color = if health.as_str() == "Healthy" {
+                GREEN_BOLD
             } else if health.as_str() == "Degraded" {
                 ORANGE
             } else if health.as_str() == "Failing" {
@@ -2417,11 +2389,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         .cloned()
         .unwrap_or_else(|| "-".to_string());
     let health_label_text = health_label_extended(unit);
-    let health_color = if health_label_text == "Healthy-" {
-        GREEN // Darker green for HEALTHY-
-    } else {
-        unit_health_color(unit.health)
-    };
+    let health_color = unit_health_color(unit.health);
     let health_label = colorize(&health_label_text, health_color, no_color);
 
     let name_width = columns
