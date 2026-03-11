@@ -17,6 +17,7 @@ use nix::{
     sys::signal,
     unistd::{Pid, Uid},
 };
+use sha2::{Digest, Sha256};
 use sysinfo::{Pid as SysPid, ProcessRefreshKind, ProcessesToUpdate, System, Users};
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
@@ -98,16 +99,28 @@ fn main() -> Result<(), Box<dyn Error>> {
             config,
             daemonize,
             service,
+            command,
         } => {
+            let start_target = resolve_start_target(&config, service, command)?;
+
             if daemonize {
                 if supervisor_running() {
-                    // If supervisor is running and we have a specific service, send Start command
                     if args.drop_privileges {
                         warn!(
                             "--drop-privileges is managed by the running supervisor and has no effect for this start request"
                         );
                     }
-                    if let Some(service_name) = service {
+
+                    if start_target.ad_hoc {
+                        let config_override =
+                            Some(start_target.config_path.display().to_string());
+                        let command = ControlCommand::Restart {
+                            config: config_override,
+                            service: None,
+                        };
+                        send_control_command(command)?;
+                        info!("Ad-hoc command start request sent to running supervisor");
+                    } else if let Some(service_name) = start_target.service {
                         let command = ControlCommand::Start {
                             service: Some(service_name.clone()),
                         };
@@ -123,12 +136,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     return Ok(());
                 }
 
-                let config_path = resolve_config_path(&config)?;
-                info!("Starting systemg supervisor with config {:?}", config_path);
-                start_supervisor_daemon(config_path, service)?;
+                info!(
+                    "Starting systemg supervisor with config {:?}",
+                    start_target.config_path
+                );
+                start_supervisor_daemon(start_target.config_path, start_target.service)?;
             } else {
                 register_signal_handler()?;
-                start_foreground(&config, service)?;
+                start_foreground(start_target.config_path, start_target.service)?;
             }
         }
         Commands::Stop { service, config } => {
@@ -1052,6 +1067,7 @@ mod tests {
             config: "systemg.yaml".to_string(),
             daemonize: false,
             service: None,
+            command: vec![],
         }));
         assert!(drop_privileges_applies_to_command(&Commands::Restart {
             config: "systemg.yaml".to_string(),
@@ -4764,11 +4780,10 @@ fn init_logging(args: &Cli, use_file: bool) {
 }
 
 fn start_foreground(
-    config_path: &str,
+    config_path: PathBuf,
     service: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
-    let resolved_path = resolve_config_path(config_path)?;
-    let mut supervisor = Supervisor::new(resolved_path, false, service)?;
+    let mut supervisor = Supervisor::new(config_path, false, service)?;
     supervisor.run()?;
     Ok(())
 }
@@ -4791,6 +4806,120 @@ fn build_daemon(config_path: &str) -> Result<Daemon, Box<dyn Error>> {
     let config = load_config(Some(config_path))?;
     let daemon = Daemon::from_config(config, false)?;
     Ok(daemon)
+}
+
+struct StartTarget {
+    config_path: PathBuf,
+    service: Option<String>,
+    ad_hoc: bool,
+}
+
+fn resolve_start_target(
+    config: &str,
+    service: Option<String>,
+    command: Vec<String>,
+) -> Result<StartTarget, Box<dyn Error>> {
+    if command.is_empty() {
+        return Ok(StartTarget {
+            config_path: resolve_config_path(config)?,
+            service,
+            ad_hoc: false,
+        });
+    }
+
+    let config_path = write_ad_hoc_config(&command, service.as_deref())?;
+    Ok(StartTarget {
+        config_path,
+        service: None,
+        ad_hoc: true,
+    })
+}
+
+fn write_ad_hoc_config(
+    command: &[String],
+    requested_name: Option<&str>,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let service_name = requested_name
+        .map(sanitize_service_name)
+        .unwrap_or_else(|| {
+            let base = command
+                .first()
+                .map(|value| sanitize_service_name(value))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "adhoc".to_string());
+            let hash = short_command_hash(command);
+            format!("{base}-{hash}")
+        });
+
+    let shell_command = render_shell_command(command);
+    let hash = short_command_hash(command);
+    let ad_hoc_dir = runtime::state_dir().join("adhoc");
+    fs::create_dir_all(&ad_hoc_dir)?;
+
+    let config_path = ad_hoc_dir.join(format!("{service_name}-{hash}.yaml"));
+    let yaml = format!(
+        "version: \"1\"\nservices:\n  {name}:\n    command: {command}\n",
+        name = service_name,
+        command = yaml_single_quoted(&shell_command)
+    );
+    fs::write(&config_path, yaml)?;
+    Ok(config_path)
+}
+
+fn short_command_hash(command: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    for part in command {
+        hasher.update(part.as_bytes());
+        hasher.update([0u8]);
+    }
+    let digest = hasher.finalize();
+    format!("{:x}", digest)[..12].to_string()
+}
+
+fn sanitize_service_name(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('-');
+        }
+    }
+
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "adhoc".to_string()
+    } else {
+        trimmed.to_ascii_lowercase()
+    }
+}
+
+fn render_shell_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| shell_escape_arg(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_escape_arg(input: &str) -> String {
+    if input.is_empty() {
+        return "''".to_string();
+    }
+
+    if input
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "_-./:@%+=".contains(ch))
+    {
+        return input.to_string();
+    }
+
+    let escaped = input.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
+}
+
+fn yaml_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn resolve_config_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {

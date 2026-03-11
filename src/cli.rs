@@ -149,6 +149,10 @@ pub enum Commands {
         /// Optionally start only the named service.
         #[arg(short, long)]
         service: Option<String>,
+
+        /// Ad-hoc command and arguments to supervise without a manifest.
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
     },
 
     /// Stop the currently running process manager.
@@ -334,6 +338,21 @@ mod tests {
     #[test]
     fn status_rejects_watch() {
         assert!(Cli::try_parse_from(["sysg", "status", "--watch", "5"]).is_err());
+    }
+
+    #[test]
+    fn start_accepts_trailing_command() {
+        let cli =
+            Cli::try_parse_from(["sysg", "start", "--daemonize", "sleep", "5"]).unwrap();
+        match cli.command {
+            Commands::Start {
+                daemonize, command, ..
+            } => {
+                assert!(daemonize);
+                assert_eq!(command, vec!["sleep".to_string(), "5".to_string()]);
+            }
+            _ => panic!("expected start command"),
+        }
     }
 
     #[test]

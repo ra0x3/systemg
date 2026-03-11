@@ -11,6 +11,7 @@ use assert_cmd::Command;
 use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
 use common::{is_process_alive, wait_for_path};
+use systemg::daemon::PidFile;
 use tempfile::tempdir;
 
 #[cfg(unix)]
@@ -227,6 +228,59 @@ fn inspect_requires_service_flag_not_positional_arg() {
         stderr.contains("unexpected argument") && stderr.contains("--service"),
         "stderr should direct usage to --service: {stderr}"
     );
+}
+
+#[test]
+fn start_daemonize_accepts_adhoc_command_without_config() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("start")
+        .arg("--daemonize")
+        .arg("sleep")
+        .arg("30")
+        .assert()
+        .success();
+
+    thread::sleep(Duration::from_secs(1));
+
+    let ad_hoc_dir = home.join(".local/share/systemg/adhoc");
+    assert!(ad_hoc_dir.exists(), "ad-hoc config directory should exist");
+
+    let mut yaml_files = fs::read_dir(&ad_hoc_dir)
+        .expect("failed to read ad-hoc directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("yaml"))
+        .collect::<Vec<_>>();
+    yaml_files.sort();
+    assert!(
+        !yaml_files.is_empty(),
+        "expected at least one generated ad-hoc config"
+    );
+
+    let generated_yaml =
+        fs::read_to_string(&yaml_files[0]).expect("failed to read generated ad-hoc yaml");
+    assert!(
+        generated_yaml.contains("command: 'sleep 30'"),
+        "generated ad-hoc config should include command; got:\n{}",
+        generated_yaml
+    );
+
+    let pid_file = PidFile::load().expect("pid file should load");
+    assert!(
+        !pid_file.services().is_empty(),
+        "expected at least one supervised service in pid file"
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("stop")
+        .assert()
+        .success();
 }
 
 #[test]
