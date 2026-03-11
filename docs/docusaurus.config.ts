@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'systemg',
-  tagline: 'Run multi-service applications with one command',
+  tagline: 'A general-purpose program composer.',
   favicon: 'https://i.imgur.com/hqwS335.png',
 
   // Set the production url of your site here

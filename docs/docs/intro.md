@@ -5,7 +5,7 @@ title: Introduction
 
 # systemg
 
-Run multi-service applications with one command.
+A general-purpose program composer.
 
 ## What systemg does
 
@@ -17,20 +17,26 @@ services:
   postgres:
     command: "postgres -D /var/lib/postgresql/data"
   redis:
-    command: "redis-server"
+    command: "redis-cli ping"
   api:
     command: "python app.py"
     depends_on: ["postgres", "redis"]
   worker:
     command: "celery worker -A tasks"
     depends_on: ["redis"]
+  backup:
+    command: "pg_dump mydb > /backups/db-$(date +%Y%m%d).sql"
+    cron: "0 2 * * *"
+    timezone: "America/New_York"
+    on_success: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup completed successfully\"}'"
+    on_failure: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
 ```
 
 Run `sysg start` and your entire stack is running. Run `sysg stop` and everything shuts down cleanly.
 
 ## Built for production
 
-systemg handles the complexity of process management so you don't have to. Services that depend on databases wait for them to start. Crashed processes restart automatically with exponential backoff. Each service gets isolated logging. Zero external dependencies—just a single binary.
+systemg handles the complexity of process management so you don't have to. Services that depend on databases wait for them to start. Crashed processes restart automatically with configurable backoff. Each service gets isolated logging. Zero external dependencies—just a single binary.
 
 ## Next steps
 
