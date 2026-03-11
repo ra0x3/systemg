@@ -7,7 +7,7 @@ title: start
 
 Launch managed processes in one of three modes:
 - manifest services (`sysg start`)
-- ad-hoc units (`sysg start <command...>`)
+- units (`sysg start <command...>`)
 - child units (`sysg start --child --parent-pid <pid> -- <command...>`)
 
 ```sh
@@ -34,7 +34,7 @@ $ sysg start --service api
 
 ### `--name`
 
-Optional name for ad-hoc units or child-start units.
+Optional name for units or child-start units.
 
 ```sh
 $ sysg start --name cleanup -- ./cleanup.sh
@@ -135,11 +135,15 @@ See detailed output during startup:
 $ sysg start --log-level debug
 ```
 
-### Ad-hoc supervision (no config file)
+### Unit mode (no config file)
 
 ```sh
 $ sysg start --daemonize -- sleep 30
 ```
+
+If the supervisor is already running, this command stages a unit config in
+`~/.local/share/systemg/units/` and prints an explicit restart command.
+It does not restart the supervisor implicitly.
 
 ### Child mode for orchestrators (replacement for `spawn`)
 
@@ -150,7 +154,7 @@ $ sysg start --parent-pid 4242 --name worker-1 --ttl 900 -- python worker.py
 ## What happens
 
 1. Manifest mode starts services in dependency order
-2. Ad-hoc mode creates a single managed unit from the command
+2. Unit mode creates a single managed unit from the command
 3. Child mode attaches a managed child to the parent process tree
 4. Logs are written to `~/.local/share/systemg/logs/`
 5. PIDs are tracked for other commands

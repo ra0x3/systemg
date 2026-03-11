@@ -15,6 +15,10 @@ Minimal service configuration.
 
 Simple FastAPI CRUD service for testing systemg service management.
 
+## [Units](units)
+
+Practical command-based unit examples, staged under `~/.local/share/systemg/units/`.
+
 ## [Orchestrator](orchestrator)
 
 Multi-agent task execution with Redis coordination and DAG scheduling.

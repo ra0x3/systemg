@@ -4,11 +4,11 @@ use std::{
     fs, io,
     io::Write,
     os::unix::io::IntoRawFd,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
@@ -39,6 +39,10 @@ use systemg::{
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+const UNIT_CONFIG_MAX_FILES: usize = 200;
+const UNIT_CONFIG_MAX_AGE_DAYS: u64 = 30;
+const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
@@ -129,14 +133,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
 
                     if start_target.ad_hoc {
-                        let config_override =
-                            Some(start_target.config_path.display().to_string());
-                        let command = ControlCommand::Restart {
-                            config: config_override,
-                            service: None,
-                        };
-                        send_control_command(command)?;
-                        info!("Ad-hoc command start request sent to running supervisor");
+                        info!(
+                            "Staged unit config at {:?}. Running supervisor was left unchanged.",
+                            start_target.config_path
+                        );
+                        println!(
+                            "Unit staged at {}. Run `sysg restart --daemonize --config {}` to apply it.",
+                            start_target.config_path.display(),
+                            start_target.config_path.display()
+                        );
                     } else if let Some(service_name) = start_target.service {
                         let command = ControlCommand::Start {
                             service: Some(service_name.clone()),
@@ -1407,6 +1412,56 @@ mod tests {
         assert_eq!(last_exit_color(Some(&failure), None), Some(RED_BOLD));
         assert_eq!(last_exit_color(Some(&signaled), None), Some(RED_BOLD));
         assert_eq!(last_exit_color(None, None), None);
+    }
+
+    #[test]
+    fn prune_unit_configs_respects_max_files() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let units_dir = temp.path();
+        let now = SystemTime::now();
+
+        for idx in 0..3 {
+            let path = units_dir.join(format!("unit-{idx}.yaml"));
+            fs::write(path, "version: \"1\"\nservices: {}\n").expect("write unit file");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        prune_unit_configs_with_limits(
+            units_dir,
+            now + Duration::from_secs(1),
+            2,
+            Duration::from_secs(60),
+        )
+        .expect("prune configs");
+
+        let yaml_count = fs::read_dir(units_dir)
+            .expect("read units dir")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|ext| ext.to_str()) == Some("yaml")
+            })
+            .count();
+        assert_eq!(yaml_count, 2);
+    }
+
+    #[test]
+    fn prune_unit_configs_respects_max_age() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let units_dir = temp.path();
+        let now = SystemTime::now();
+
+        let path = units_dir.join("old.yaml");
+        fs::write(&path, "version: \"1\"\nservices: {}\n").expect("write unit file");
+
+        prune_unit_configs_with_limits(
+            units_dir,
+            now + Duration::from_secs(5),
+            10,
+            Duration::from_secs(1),
+        )
+        .expect("prune configs");
+
+        assert!(!path.exists(), "file older than max age should be pruned");
     }
 }
 
@@ -4903,7 +4958,7 @@ fn resolve_start_target(
         if requested_name.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "--name requires an ad-hoc command or child mode",
+                "--name requires a unit command or child mode",
             )
             .into());
         }
@@ -4917,7 +4972,7 @@ fn resolve_start_target(
     if service.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "--service cannot be used with ad-hoc commands; use --name for ad-hoc units",
+            "--service cannot be used with unit commands; use --name for units",
         )
         .into());
     }
@@ -4941,24 +4996,78 @@ fn write_ad_hoc_config(
                 .first()
                 .map(|value| sanitize_service_name(value))
                 .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "adhoc".to_string());
+                .unwrap_or_else(|| "unit".to_string());
             let hash = short_command_hash(command);
             format!("{base}-{hash}")
         });
 
     let shell_command = render_shell_command(command);
     let hash = short_command_hash(command);
-    let ad_hoc_dir = runtime::state_dir().join("adhoc");
-    fs::create_dir_all(&ad_hoc_dir)?;
+    let units_dir = runtime::state_dir().join("units");
+    fs::create_dir_all(&units_dir)?;
 
-    let config_path = ad_hoc_dir.join(format!("{service_name}-{hash}.yaml"));
+    let config_path = units_dir.join(format!("{service_name}-{hash}.yaml"));
     let yaml = format!(
         "version: \"1\"\nservices:\n  {name}:\n    command: {command}\n",
         name = service_name,
         command = yaml_single_quoted(&shell_command)
     );
     fs::write(&config_path, yaml)?;
+    if let Err(err) = prune_unit_configs(&units_dir) {
+        warn!("Failed to prune unit configs in {:?}: {err}", units_dir);
+    }
     Ok(config_path)
+}
+
+fn prune_unit_configs(units_dir: &Path) -> io::Result<()> {
+    let max_age = Duration::from_secs(UNIT_CONFIG_MAX_AGE_DAYS * SECONDS_PER_DAY);
+    prune_unit_configs_with_limits(
+        units_dir,
+        SystemTime::now(),
+        UNIT_CONFIG_MAX_FILES,
+        max_age,
+    )
+}
+
+fn prune_unit_configs_with_limits(
+    units_dir: &Path,
+    now: SystemTime,
+    max_files: usize,
+    max_age: Duration,
+) -> io::Result<()> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(units_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        entries.push((path, modified));
+    }
+
+    let mut fresh_entries = Vec::new();
+    for (path, modified) in entries {
+        let is_stale = now
+            .duration_since(modified)
+            .map(|age| age > max_age)
+            .unwrap_or(false);
+        if is_stale {
+            let _ = fs::remove_file(&path);
+        } else {
+            fresh_entries.push((path, modified));
+        }
+    }
+
+    fresh_entries.sort_by(|a, b| b.1.cmp(&a.1));
+    for (path, _) in fresh_entries.into_iter().skip(max_files) {
+        let _ = fs::remove_file(path);
+    }
+
+    Ok(())
 }
 
 fn default_child_name(command: &[String]) -> String {
@@ -4993,7 +5102,7 @@ fn sanitize_service_name(input: &str) -> String {
 
     let trimmed = sanitized.trim_matches('-');
     if trimmed.is_empty() {
-        "adhoc".to_string()
+        "unit".to_string()
     } else {
         trimmed.to_ascii_lowercase()
     }

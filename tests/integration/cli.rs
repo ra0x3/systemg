@@ -231,7 +231,7 @@ fn inspect_requires_service_flag_not_positional_arg() {
 }
 
 #[test]
-fn start_daemonize_accepts_adhoc_command_without_config() {
+fn start_daemonize_accepts_unit_command_without_config() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -248,11 +248,11 @@ fn start_daemonize_accepts_adhoc_command_without_config() {
 
     thread::sleep(Duration::from_secs(1));
 
-    let ad_hoc_dir = home.join(".local/share/systemg/adhoc");
-    assert!(ad_hoc_dir.exists(), "ad-hoc config directory should exist");
+    let units_dir = home.join(".local/share/systemg/units");
+    assert!(units_dir.exists(), "units config directory should exist");
 
-    let mut yaml_files = fs::read_dir(&ad_hoc_dir)
-        .expect("failed to read ad-hoc directory")
+    let mut yaml_files = fs::read_dir(&units_dir)
+        .expect("failed to read units directory")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("yaml"))
@@ -260,14 +260,14 @@ fn start_daemonize_accepts_adhoc_command_without_config() {
     yaml_files.sort();
     assert!(
         !yaml_files.is_empty(),
-        "expected at least one generated ad-hoc config"
+        "expected at least one generated unit config"
     );
 
     let generated_yaml =
-        fs::read_to_string(&yaml_files[0]).expect("failed to read generated ad-hoc yaml");
+        fs::read_to_string(&yaml_files[0]).expect("failed to read generated unit yaml");
     assert!(
         generated_yaml.contains("command: 'sleep 30'"),
-        "generated ad-hoc config should include command; got:\n{}",
+        "generated unit config should include command; got:\n{}",
         generated_yaml
     );
 
