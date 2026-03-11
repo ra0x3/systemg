@@ -150,6 +150,22 @@ pub enum Commands {
         #[arg(short, long)]
         service: Option<String>,
 
+        /// Name for ad-hoc units or child-start requests.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Time-to-live in seconds for child-start requests.
+        #[arg(long)]
+        ttl: Option<u64>,
+
+        /// Parent process ID for child-start requests.
+        #[arg(long)]
+        parent_pid: Option<u32>,
+
+        /// Explicitly run in child-start mode (requires --parent-pid).
+        #[arg(long)]
+        child: bool,
+
         /// Ad-hoc command and arguments to supervise without a manifest.
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,
@@ -261,7 +277,8 @@ pub enum Commands {
     /// Purge all systemg state and runtime files.
     Purge,
 
-    /// Spawn a dynamic child process from a parent service.
+    /// DEPRECATED: Spawn a dynamic child process from a parent service.
+    #[command(hide = true)]
     Spawn {
         /// Name for the spawned child process.
         #[arg(long)]
@@ -350,6 +367,41 @@ mod tests {
             } => {
                 assert!(daemonize);
                 assert_eq!(command, vec!["sleep".to_string(), "5".to_string()]);
+            }
+            _ => panic!("expected start command"),
+        }
+    }
+
+    #[test]
+    fn start_accepts_child_mode_flags() {
+        let cli = Cli::try_parse_from([
+            "sysg",
+            "start",
+            "--child",
+            "--parent-pid",
+            "4242",
+            "--name",
+            "worker-1",
+            "--ttl",
+            "30",
+            "python",
+            "worker.py",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Start {
+                child,
+                parent_pid,
+                name,
+                ttl,
+                command,
+                ..
+            } => {
+                assert!(child);
+                assert_eq!(parent_pid, Some(4242));
+                assert_eq!(name.as_deref(), Some("worker-1"));
+                assert_eq!(ttl, Some(30));
+                assert_eq!(command, vec!["python".to_string(), "worker.py".to_string()]);
             }
             _ => panic!("expected start command"),
         }

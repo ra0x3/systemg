@@ -7,6 +7,10 @@ title: spawn
 
 Dynamically create child processes from parent services.
 
+:::warning Deprecated
+`sysg spawn` is deprecated. Use `sysg start --parent-pid <pid> --name <name> -- <command...>`.
+:::
+
 ```sh
 $ sysg spawn --name worker_1 -- python worker.py
 ```
@@ -22,6 +26,13 @@ $ sysg spawn --name worker_1 -- python worker.py
 | `--log-level` | Override the logging verbosity for the spawned process |
 
 ## Examples
+
+### Preferred replacement with `start`
+
+```sh
+$ sysg start --parent-pid 12345 --name worker_1 -- python worker.py
+$ 12345  # Returns PID
+```
 
 ### Spawn a worker process
 

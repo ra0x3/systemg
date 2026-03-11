@@ -5,20 +5,23 @@ title: Start vs Spawn
 
 # Start vs Spawn
 
-Two ways to create processes in systemg.
+`start` is now the primary process-creation command.
+
+:::warning Deprecated
+`sysg spawn` is deprecated. Use `sysg start --parent-pid ...` for child-process workflows.
+:::
 
 ## Quick comparison
 
-| | `start` | `spawn` |
-|---|---|---|
-| **Configuration** | Required in YAML | No config needed |
-| **Lifecycle** | Persistent service | Ephemeral process |
-| **Restarts** | Automatic | Never |
-| **Use case** | Core services | Dynamic workers |
+| | `start` (manifest/ad-hoc) | `start` (child mode) | `spawn` (deprecated) |
+|---|---|---|---|
+| **Flags** | `sysg start [--config ...] [-- command...]` | `sysg start --parent-pid <pid> [--ttl ...] -- <cmd...>` | `sysg spawn ...` |
+| **Lifecycle** | Top-level managed unit(s) | Parent-attached child unit | Parent-attached child unit |
+| **Use case** | Core services and ad-hoc units | Dynamic child workers | Legacy compatibility |
 
-## `start` - Launch configured services
+## `start` - Unified command
 
-Services defined in `systemg.yaml`:
+Manifest services:
 
 ```yaml
 services:
@@ -36,46 +39,40 @@ Run with:
 $ sysg start
 ```
 
-Services run continuously, restart on failure, and stop together.
+Ad-hoc single command:
 
-## `spawn` - Create dynamic processes
-
-Parent service enables spawning:
-
-```yaml
-services:
-  orchestrator:
-    command: "porki --role orchestrator --instructions instructions/INSTRUCTIONS.md"
-    spawn:
-      mode: dynamic
-      limit: 10
+```sh
+$ sysg start --name quick-task -- ./task.sh
 ```
 
-Parent creates children at runtime:
+Child-mode replacement for `spawn`:
+
+```sh
+$ sysg start --parent-pid 12345 --name worker_1 --ttl 3600 -- python job.py
+```
+
+## Legacy `spawn` mapping
+
+Existing invocations:
 
 ```sh
 $ sysg spawn --name worker_1 -- python job.py
 ```
 
-Children terminate on completion or TTL expiry. No automatic restarts.
+Equivalent `start` command:
 
-## When to use each
+```sh
+$ sysg start --parent-pid <parent_pid> --name worker_1 -- python job.py
+```
 
-### Use `start` for:
-- Web servers
-- Databases
-- Message queues
-- Background workers
-- Any persistent service
+## Recommended naming
 
-### Use `spawn` for:
-- Job processing
-- Batch operations
-- Temporary workers
-- Dynamic scaling
-- One-off tasks
+Use the term **child mode** for the former `spawn` workflow:
+- `start` in child mode (`--parent-pid`)
+- `start` in ad-hoc mode (command without `--parent-pid`)
+- `start` in manifest mode (no command)
 
-## Example: Job queue
+## Example: Job queue with child mode
 
 ```yaml
 services:
@@ -99,13 +96,13 @@ import os
 import subprocess
 
 while job := queue.pop():
-    subprocess.run(["sysg", "spawn", "--name", f"job_{job.id}",
-                    "--parent-pid", str(os.getpid()),
+    subprocess.run(["sysg", "start", "--parent-pid", str(os.getpid()),
+                    "--name", f"job_{job.id}",
                     "--ttl", "3600", "--", "python", "worker.py", job.id])
 ```
 
 ## See also
 
 - [`start`](start) - Launch services
-- [`spawn`](spawn) - Create processes
+- [`spawn`](spawn) - Deprecated command reference
 - [Configuration](../configuration) - Service definitions

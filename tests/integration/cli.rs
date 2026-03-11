@@ -304,3 +304,31 @@ fn drop_privileges_warns_for_non_spawn_commands() {
         "expected drop-privileges warning in stderr: {stderr}"
     );
 }
+
+#[test]
+fn spawn_command_prints_deprecation_warning() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let home = temp.path().join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("spawn")
+        .arg("--name")
+        .arg("worker-1")
+        .arg("--")
+        .arg("sleep")
+        .arg("1")
+        .output()
+        .expect("failed to invoke sysg spawn");
+
+    assert!(
+        !output.status.success(),
+        "spawn should fail without a running supervisor in this test"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("deprecated"),
+        "spawn stderr should include deprecation warning: {stderr}"
+    );
+}

@@ -14,9 +14,13 @@ $ sysg restart                   # Restart services
 $ sysg status                    # Check health
 $ sysg logs                      # View output
 $ sysg inspect -s api             # View metrics
-$ sysg spawn --name w1 -- cmd    # Create child
+$ sysg start --parent-pid 123 --name w1 -- cmd   # Create child
 $ sysg purge                     # Clear all state
 ```
+
+:::warning Deprecated
+`sysg spawn` is deprecated. Use `sysg start --parent-pid ...` for child-process workflows.
+:::
 
 All commands accept `--log-level` (`debug`, `info`, `warn`, `error`).
 

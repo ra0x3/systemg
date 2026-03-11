@@ -2,14 +2,14 @@
 
 ## Background
 - The orchestrator runtime is provided by the published `porki` package; this example focuses on instruction files, systemg wiring, and operational guidance.
-- The target architecture promotes an always-on orchestrator that spawns agents via `sysg spawn`, keeps authoritative state in Redis, and coordinates LLM-driven work decomposition.
+- The target architecture promotes an always-on orchestrator that spawns agents via `sysg start --parent-pid ...`, keeps authoritative state in Redis, and coordinates LLM-driven work decomposition.
 - Markdown (`instructions/INSTRUCTIONS.md`, heartbeat files) remains the human-facing control plane, mirroring practices in other agent platforms such as OpenClaw.
 
 ## Roles & Responsibilities
 - **Orchestrator (`--role orchestrator`)**
   - Watches `examples/orchestrator/instructions/INSTRUCTIONS.md` for agent declarations and global directives.
   - Validates/updates the goal DAG in Redis by prompting the LLM and enforcing schema invariants.
-  - Spawns/retiring agents exclusively via `sysg spawn`, piping role-specific CLI arguments.
+  - Spawns/retiring agents exclusively via `sysg start --parent-pid ...`, piping role-specific CLI arguments.
   - Serves as validator: rejects malformed graphs, resolves conflicts, and guards against cycles.
 - **Agent (`--role agent`)**
   - Reads dedicated instruction and heartbeat paths supplied by the orchestrator.
@@ -55,8 +55,8 @@
 - All writes pass through Lua/transaction helpers to keep node+state consistent and to enforce DAG invariants.
 
 ## Spawn Taxonomy
-- `sysg spawn`: launches processes with systemg supervision. For long-lived agents, orchestrator passes `--name agent-<name>` plus agent-specific flags and records the returned PID.
-- Short-lived commands (LLM tools, auxiliary scripts) can be run with `sysg spawn --ttl <seconds>` for automatic cleanup, or directly via subprocess for immediate execution with stdout capture.
+- `sysg start --parent-pid`: launches child processes with systemg supervision. For long-lived agents, orchestrator passes `--name agent-<name>` plus agent-specific flags and records the returned PID.
+- Short-lived commands (LLM tools, auxiliary scripts) can be run with `sysg start --parent-pid <pid> --ttl <seconds> -- ...` for automatic cleanup, or directly via subprocess for immediate execution with stdout capture.
 - Every spawn includes `--parent-pid <orchestrator_pid>` to anchor the process tree.
 - Handles expose `.pid`, `.wait(timeout=...)`, `.stdout_text()`, and `.stderr_text()` so the orchestrator can gather results or enforce timeouts.
 - Agents use subprocess sparingly—primarily for tool commands—while LLM calls go through an in-process client.
@@ -83,13 +83,13 @@
 - The orchestrator and other agents treat Redis task state as the source of truth; they never depend on another agent's memory snapshot.
 
 ## LLM Invocation Strategy
-- Agents and orchestrator call the local `claude` CLI (optionally via `sysg spawn --ttl`), capturing stdout and enforcing JSON schemas for DAG generation, task selection, and execution summaries.
+- Agents and orchestrator call the local `claude` CLI (optionally via `sysg start --parent-pid <pid> --ttl ...`), capturing stdout and enforcing JSON schemas for DAG generation, task selection, and execution summaries.
 - The CLI client surfaces non-zero exit codes and rejects malformed JSON payloads so orchestrator/agents can escalate.
 - Operators configure the CLI path with `--claude-cli` (default `claude`) and may supply extra arguments or `--claude-use-sysg` to delegate process management to systemg.
-- Tool executions that manipulate the filesystem or external services can use `sysg spawn --ttl` for managed execution with automatic cleanup.
+- Tool executions that manipulate the filesystem or external services can use `sysg start --parent-pid <pid> --ttl ...` for managed execution with automatic cleanup.
 
 ## Agent Lifecycle & Discovery
-- Orchestrator issues `sysg spawn` for each agent declaration and expects registration within `REGISTRATION_TIMEOUT` seconds.
+- Orchestrator issues `sysg start --parent-pid ...` for each agent declaration and expects registration within `REGISTRATION_TIMEOUT` seconds.
 - Agent boot sequence:
   - Hydrate memory from Redis.
   - Write `agent:<name>:registered` hash (`pid`, `capabilities`, `timestamp`).

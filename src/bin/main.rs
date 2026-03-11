@@ -99,9 +99,26 @@ fn main() -> Result<(), Box<dyn Error>> {
             config,
             daemonize,
             service,
+            name,
+            ttl,
+            parent_pid,
+            child,
             command,
         } => {
-            let start_target = resolve_start_target(&config, service, command)?;
+            if let Some(child_start) = resolve_child_start(
+                child,
+                parent_pid,
+                ttl,
+                name.clone(),
+                &command,
+                args.log_level.map(|level| level.as_str().to_string()),
+            )? {
+                run_child_start(child_start)?;
+                return Ok(());
+            }
+
+            let start_target =
+                resolve_start_target(&config, service, name.as_deref(), command)?;
 
             if daemonize {
                 if supervisor_running() {
@@ -496,33 +513,17 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             log_level,
             command,
         } => {
-            let parent_pid = parent_pid.unwrap_or_else(|| unsafe { getppid() } as u32);
-
-            let spawn_cmd = ControlCommand::Spawn {
-                parent_pid,
-                name: name.clone(),
+            eprintln!(
+                "Warning: `sysg spawn` is deprecated. Use `sysg start --parent-pid <pid> --name <name> [--ttl <seconds>] -- <command...>`."
+            );
+            let child_start = ChildStartRequest {
+                parent_pid: parent_pid.unwrap_or_else(|| unsafe { getppid() } as u32),
+                name,
                 command,
                 ttl,
-                log_level: log_level.map(|l| l.as_str().to_string()),
+                log_level: log_level.map(|level| level.as_str().to_string()),
             };
-
-            match ipc::send_command(&spawn_cmd) {
-                Ok(ControlResponse::Spawned { pid }) => {
-                    println!("{}", pid);
-                }
-                Ok(ControlResponse::Error(msg)) => {
-                    error!("Failed to spawn child: {}", msg);
-                    std::process::exit(1);
-                }
-                Ok(_) => {
-                    error!("Unexpected response from supervisor");
-                    std::process::exit(1);
-                }
-                Err(err) => {
-                    error!("Failed to communicate with supervisor: {}", err);
-                    std::process::exit(1);
-                }
-            }
+            run_child_start(child_start)?;
         }
     }
 
@@ -1067,6 +1068,10 @@ mod tests {
             config: "systemg.yaml".to_string(),
             daemonize: false,
             service: None,
+            name: None,
+            ttl: None,
+            parent_pid: None,
+            child: false,
             command: vec![],
         }));
         assert!(drop_privileges_applies_to_command(&Commands::Restart {
@@ -1108,6 +1113,39 @@ mod tests {
         let target_width = target_table_width(120);
         shrink_status_widths_to_fit(&mut widths, target_width);
         assert!(status_row_width(&widths) <= target_width);
+    }
+
+    #[test]
+    fn child_mode_requires_command() {
+        let result = resolve_child_start(
+            true,
+            Some(1234),
+            None,
+            Some("worker".to_string()),
+            &[],
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn child_mode_infers_from_parent_pid() {
+        let result = resolve_child_start(
+            false,
+            Some(1234),
+            Some(60),
+            Some("worker".to_string()),
+            &["sleep".to_string(), "1".to_string()],
+            Some("debug".to_string()),
+        )
+        .expect("resolve child start")
+        .expect("child mode should be inferred");
+
+        assert_eq!(result.parent_pid, 1234);
+        assert_eq!(result.name, "worker");
+        assert_eq!(result.ttl, Some(60));
+        assert_eq!(result.command, vec!["sleep".to_string(), "1".to_string()]);
+        assert_eq!(result.log_level.as_deref(), Some("debug"));
     }
 
     #[test]
@@ -4814,12 +4852,93 @@ struct StartTarget {
     ad_hoc: bool,
 }
 
+struct ChildStartRequest {
+    parent_pid: u32,
+    name: String,
+    command: Vec<String>,
+    ttl: Option<u64>,
+    log_level: Option<String>,
+}
+
+fn resolve_child_start(
+    child: bool,
+    parent_pid: Option<u32>,
+    ttl: Option<u64>,
+    name: Option<String>,
+    command: &[String],
+    log_level: Option<String>,
+) -> Result<Option<ChildStartRequest>, Box<dyn Error>> {
+    let child_mode = child || parent_pid.is_some() || ttl.is_some();
+    if !child_mode {
+        return Ok(None);
+    }
+
+    if command.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "child start mode requires a command; use `sysg start --parent-pid <pid> --name <name> -- <command...>`",
+        )
+        .into());
+    }
+
+    if child && parent_pid.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--child requires --parent-pid",
+        )
+        .into());
+    }
+
+    let parent_pid = parent_pid.unwrap_or_else(|| unsafe { getppid() } as u32);
+    let name = name.unwrap_or_else(|| default_child_name(command));
+    Ok(Some(ChildStartRequest {
+        parent_pid,
+        name: sanitize_service_name(&name),
+        command: command.to_vec(),
+        ttl,
+        log_level,
+    }))
+}
+
+fn run_child_start(request: ChildStartRequest) -> Result<(), Box<dyn Error>> {
+    let spawn_cmd = ControlCommand::Spawn {
+        parent_pid: request.parent_pid,
+        name: request.name,
+        command: request.command,
+        ttl: request.ttl,
+        log_level: request.log_level,
+    };
+
+    match ipc::send_command(&spawn_cmd) {
+        Ok(ControlResponse::Spawned { pid }) => {
+            println!("{}", pid);
+            Ok(())
+        }
+        Ok(ControlResponse::Error(msg)) => {
+            Err(io::Error::other(format!("Failed to start child process: {msg}")).into())
+        }
+        Ok(_) => Err(io::Error::other("Unexpected response from supervisor").into()),
+        Err(err) => Err(io::Error::other(format!(
+            "Failed to communicate with supervisor: {err}"
+        ))
+        .into()),
+    }
+}
+
 fn resolve_start_target(
     config: &str,
     service: Option<String>,
+    requested_name: Option<&str>,
     command: Vec<String>,
 ) -> Result<StartTarget, Box<dyn Error>> {
     if command.is_empty() {
+        if requested_name.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--name requires an ad-hoc command or child mode",
+            )
+            .into());
+        }
         return Ok(StartTarget {
             config_path: resolve_config_path(config)?,
             service,
@@ -4827,7 +4946,15 @@ fn resolve_start_target(
         });
     }
 
-    let config_path = write_ad_hoc_config(&command, service.as_deref())?;
+    if service.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--service cannot be used with ad-hoc commands; use --name for ad-hoc units",
+        )
+        .into());
+    }
+
+    let config_path = write_ad_hoc_config(&command, requested_name)?;
     Ok(StartTarget {
         config_path,
         service: None,
@@ -4864,6 +4991,16 @@ fn write_ad_hoc_config(
     );
     fs::write(&config_path, yaml)?;
     Ok(config_path)
+}
+
+fn default_child_name(command: &[String]) -> String {
+    let base = command
+        .first()
+        .map(|value| sanitize_service_name(value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "child".to_string());
+    let hash = short_command_hash(command);
+    format!("{base}-{hash}")
 }
 
 fn short_command_hash(command: &[String]) -> String {
