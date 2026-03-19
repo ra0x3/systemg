@@ -3,6 +3,7 @@
 #![warn(unused_crate_dependencies)]
 #[cfg(test)]
 use assert_cmd as _;
+use crossterm as _;
 use ctrlc as _;
 #[cfg(target_os = "linux")]
 use openssl_sys as _;

@@ -12,6 +12,10 @@ use std::{
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    terminal,
+};
 use libc::{SIGKILL, SIGTERM, getpgrp, getppid, killpg};
 use nix::{
     sys::signal,
@@ -292,7 +296,12 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 loop {
                     match fetch_status_snapshot(&effective_config) {
                         Ok(snapshot) => {
-                            if let Err(e) = render_status(&snapshot, &render_opts, true) {
+                            if let Err(e) = render_status(
+                                &snapshot,
+                                &render_opts,
+                                true,
+                                &effective_config,
+                            ) {
                                 eprintln!("Error rendering status: {}", e);
                                 thread::sleep(sleep_interval);
                                 continue;
@@ -312,7 +321,10 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
             } else {
                 let snapshot = fetch_status_snapshot(&effective_config)?;
-                let health = render_status(&snapshot, &render_opts, false)?;
+
+                let health =
+                    render_status(&snapshot, &render_opts, false, &effective_config)?;
+
                 let exit_code = match health {
                     OverallHealth::Healthy => 0,
                     OverallHealth::Degraded => 1,
@@ -346,7 +358,6 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 None => 5,
             };
 
-            // Calculate samples limit based on window
             let samples_limit = if stream_seconds < 3600 {
                 stream_seconds as usize // For short windows, 1 sample per second
             } else {
@@ -398,7 +409,6 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             kind,
             stream,
         } => {
-            // Try to determine the actual config path, falling back to hint if needed
             let effective_config = match load_config(Some(&config)) {
                 Ok(_) => config.clone(),
                 Err(_) => {
@@ -1773,7 +1783,345 @@ fn compute_status_preferred_widths(
     widths
 }
 
+/// Renders the status table in interactive mode with keyboard navigation.
+fn render_status_interactive(
+    snapshot: &StatusSnapshot,
+    opts: &StatusRenderOptions,
+    config_path: &str,
+) -> Result<OverallHealth, Box<dyn Error>> {
+    let mut selected_row: usize = 0;
+    let mut units: Vec<UnitStatus> = snapshot
+        .units
+        .iter()
+        .filter(|unit| opts.include_orphans || unit.kind != UnitKind::Orphaned)
+        .cloned()
+        .collect();
+
+    if let Some(filter) = opts.service_filter {
+        units.retain(|unit| unit.name == filter || unit.hash == filter);
+    }
+
+    if units.is_empty() {
+        println!("No matching units found.");
+        return Ok(OverallHealth::Degraded);
+    }
+
+    let health = compute_overall_health(&units);
+
+    let is_tty = unsafe {
+        libc::isatty(libc::STDIN_FILENO) == 1 && libc::isatty(libc::STDOUT_FILENO) == 1
+    };
+
+    if !is_tty {
+        return render_status_non_interactive(snapshot, opts, false);
+    }
+
+    render_status_table_with_selection(snapshot, &units, opts, selected_row, health)?;
+
+    terminal::enable_raw_mode()?;
+
+    let result = (|| -> Result<OverallHealth, Box<dyn Error>> {
+        loop {
+            if event::poll(Duration::from_millis(50))?
+                && let Event::Key(key_event) = event::read()?
+            {
+                match key_event {
+                    KeyEvent {
+                        code: KeyCode::Tab, ..
+                    } if key_event.modifiers == KeyModifiers::NONE
+                        || key_event.modifiers == KeyModifiers::empty() =>
+                    {
+                        if selected_row < units.len() - 1 {
+                            selected_row += 1;
+                            terminal::disable_raw_mode()?;
+                            print!("\x1B[2J\x1B[H");
+                            render_status_table_with_selection(
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                health,
+                            )?;
+                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Down,
+                        ..
+                    } => {
+                        if selected_row < units.len() - 1 {
+                            selected_row += 1;
+                            terminal::disable_raw_mode()?;
+                            print!("\x1B[2J\x1B[H");
+                            render_status_table_with_selection(
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                health,
+                            )?;
+                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::BackTab,
+                        ..
+                    }
+                    | KeyEvent {
+                        code: KeyCode::Tab,
+                        modifiers: KeyModifiers::SHIFT,
+                        ..
+                    } => {
+                        let new_row = selected_row.saturating_sub(1);
+                        if new_row != selected_row {
+                            selected_row = new_row;
+                            terminal::disable_raw_mode()?;
+                            print!("\x1B[2J\x1B[H");
+                            render_status_table_with_selection(
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                health,
+                            )?;
+                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Up, ..
+                    } => {
+                        let new_row = selected_row.saturating_sub(1);
+                        if new_row != selected_row {
+                            selected_row = new_row;
+                            terminal::disable_raw_mode()?;
+                            print!("\x1B[2J\x1B[H");
+                            render_status_table_with_selection(
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                health,
+                            )?;
+                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Enter,
+                        ..
+                    } => {
+                        if !units.is_empty() {
+                            let selected_unit = &units[selected_row];
+                            terminal::disable_raw_mode()?;
+
+                            let current_exe = std::env::current_exe()
+                                .unwrap_or_else(|_| PathBuf::from("sysg"));
+
+                            let _ = process::Command::new(&current_exe)
+                                .arg("inspect")
+                                .arg("--config")
+                                .arg(config_path)
+                                .arg("--service")
+                                .arg(&selected_unit.name)
+                                .stdin(process::Stdio::inherit())
+                                .stdout(process::Stdio::inherit())
+                                .stderr(process::Stdio::inherit())
+                                .status();
+
+                            println!("\n\nPress any key to return to status view...");
+
+                            terminal::enable_raw_mode()?;
+                            let _ = event::read();
+                            terminal::disable_raw_mode()?;
+
+                            print!("\x1B[2J\x1B[H");
+                            render_status_table_with_selection(
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                health,
+                            )?;
+                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('q'),
+                        ..
+                    }
+                    | KeyEvent {
+                        code: KeyCode::Esc, ..
+                    } => {
+                        return Ok(health);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    })();
+
+    terminal::disable_raw_mode()?;
+    result
+}
+
+/// Renders the status table with a selected row highlighted.
+fn render_status_table_with_selection(
+    snapshot: &StatusSnapshot,
+    units: &[UnitStatus],
+    opts: &StatusRenderOptions,
+    selected_row: usize,
+    health: OverallHealth,
+) -> Result<(), Box<dyn Error>> {
+    let timestamp = snapshot
+        .captured_at
+        .with_timezone(&Local)
+        .format("%Y-%m-%d %H:%M:%S %Z");
+
+    let terminal_width = detect_target_table_width(120);
+    let mut widths = compute_status_preferred_widths(units, opts.no_color);
+    shrink_status_widths_to_fit(&mut widths, terminal_width);
+
+    let columns_array = [
+        Column {
+            title: "UNIT",
+            width: widths[STATUS_COL_UNIT],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_UNIT],
+        },
+        Column {
+            title: "KIND",
+            width: widths[STATUS_COL_KIND],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_KIND],
+        },
+        Column {
+            title: "STATE",
+            width: widths[STATUS_COL_STATE],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_STATE],
+        },
+        Column {
+            title: "USER",
+            width: widths[STATUS_COL_USER],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_USER],
+        },
+        Column {
+            title: "PID",
+            width: widths[STATUS_COL_PID],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_PID],
+        },
+        Column {
+            title: "CPU",
+            width: widths[STATUS_COL_CPU],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_CPU],
+        },
+        Column {
+            title: "RSS",
+            width: widths[STATUS_COL_RSS],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_RSS],
+        },
+        Column {
+            title: "UPTIME",
+            width: widths[STATUS_COL_UPTIME],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_UPTIME],
+        },
+        Column {
+            title: "CMD",
+            width: widths[STATUS_COL_CMD],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_CMD],
+        },
+        Column {
+            title: "LAST_EXIT",
+            width: widths[STATUS_COL_LAST_EXIT],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_LAST_EXIT],
+        },
+        Column {
+            title: "HEALTH",
+            width: widths[STATUS_COL_HEALTH],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_HEALTH],
+        },
+    ];
+
+    let columns = &columns_array;
+    println!("{}", make_top_border(columns));
+    println!(
+        "{}",
+        format_banner(
+            &format!(
+                "Status captured at {} (schema {})",
+                timestamp, snapshot.schema_version
+            ),
+            columns,
+        )
+    );
+    println!("{}", format_banner("", columns));
+    println!(
+        "{}",
+        format_banner(
+            &format!(
+                "Overall health: {}",
+                colorize(
+                    overall_health_label(health),
+                    overall_health_color(health),
+                    opts.no_color
+                )
+            ),
+            columns,
+        )
+    );
+
+    let (state_counts, health_counts) = count_states_and_health(units);
+    println!("{}", format_banner("", columns));
+    println!(
+        "{}",
+        format_breakdown_banner(&state_counts, &health_counts, columns, opts.no_color)
+    );
+    println!("{}", format_banner("", columns));
+
+    println!("{}", make_separator_border(columns));
+    println!("{}", format_header_row(columns));
+    println!("{}", make_separator_border(columns));
+
+    for (index, unit) in units.iter().enumerate() {
+        if index == selected_row {
+            print!("\x1b[47m\x1b[30m");
+            let row_content = format_unit_row(unit, columns, true);
+            print!("{}", row_content);
+            println!("\x1b[0m");
+        } else {
+            let row_content = format_unit_row(unit, columns, opts.no_color);
+            println!("{}", row_content);
+        }
+
+        if !unit.spawned_children.is_empty() {
+            render_spawn_rows(&unit.spawned_children, columns, opts.no_color);
+        }
+    }
+
+    println!("{}", make_separator_border(columns));
+    println!("{}", make_bottom_border(columns));
+
+    println!(
+        "\nTab/↓\x1b[41;97m Next \x1b[0m  Shift+Tab/↑\x1b[41;97m Prev \x1b[0m  Enter\x1b[41;97m Inspect \x1b[0m  q/ESC\x1b[41;97m Quit \x1b[0m"
+    );
+
+    Ok(())
+}
+
+/// Main status rendering function that delegates to interactive or non-interactive mode.
+/// Uses interactive mode by default when stdout/stdin are TTYs, otherwise falls back to non-interactive.
 fn render_status(
+    snapshot: &StatusSnapshot,
+    opts: &StatusRenderOptions,
+    watch_mode: bool,
+    config_path: &str,
+) -> Result<OverallHealth, Box<dyn Error>> {
+    if watch_mode || opts.json {
+        render_status_non_interactive(snapshot, opts, watch_mode)
+    } else {
+        render_status_interactive(snapshot, opts, config_path)
+    }
+}
+
+/// Renders the status table in non-interactive mode using standard terminal output.
+#[allow(dead_code)]
+fn render_status_non_interactive(
     snapshot: &StatusSnapshot,
     opts: &StatusRenderOptions,
     watch_mode: bool,
@@ -1821,7 +2169,6 @@ fn render_status(
     let mut widths = compute_status_preferred_widths(&units, opts.no_color);
     shrink_status_widths_to_fit(&mut widths, terminal_width);
 
-    // Create columns with fitted widths
     let columns_array = [
         Column {
             title: "UNIT",
@@ -1922,7 +2269,6 @@ fn render_status(
 
     for unit in &units {
         println!("{}", format_unit_row(unit, columns, opts.no_color));
-        // Print spawned children in tree format
         if !unit.spawned_children.is_empty() {
             render_spawn_rows(&unit.spawned_children, columns, opts.no_color);
         }
@@ -2006,30 +2352,21 @@ fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
         if let Some(last) = cron.last_run.as_ref() {
             if let Some(status) = &last.status {
                 return match status {
-                    CronExecutionStatus::Success => {
-                        // Check exit code to determine if it was a full or partial success
-                        match last.exit_code {
-                            Some(0) => colorize("Idle", GRAY, no_color),
-                            Some(_) => colorize("OkWithErr", DARK_GREEN, no_color),
-                            None => colorize("Idle", GRAY, no_color),
-                        }
-                    }
+                    CronExecutionStatus::Success => match last.exit_code {
+                        Some(0) => colorize("Idle", GRAY, no_color),
+                        Some(_) => colorize("OkWithErr", DARK_GREEN, no_color),
+                        None => colorize("Idle", GRAY, no_color),
+                    },
                     CronExecutionStatus::Failed(reason) => {
-                        // Special case: "Failed to get PID" is a tracking error, not a real failure
-                        // The job likely ran but systemg couldn't track it properly
                         if reason.contains("Failed to get PID") {
                             colorize("Idle", GRAY, no_color)
                         } else if let Some(exit_code) = last.exit_code {
-                            // Job completed with an exit code
                             if exit_code == 0 {
-                                // Marked as failed but exited successfully - treat as partial success
                                 colorize("PartialSuccess", DARK_GREEN, no_color)
                             } else {
-                                // Real failure with non-zero exit
                                 colorize("Failed", RED, no_color)
                             }
                         } else {
-                            // Failed without completing
                             colorize("Failed", RED, no_color)
                         }
                     }
@@ -2673,7 +3010,6 @@ fn format_row(values: &[String; 11], columns: &[Column]) -> String {
 fn ansi_pad(value: &str, width: usize, align: Alignment) -> String {
     let len = visible_length(value);
     if len > width {
-        // Truncate with ellipsis while preserving wrapping ANSI color.
         return ellipsize_ansi_aware(value, width);
     }
 
@@ -3181,12 +3517,9 @@ fn render_inspect(
     let unit = payload.unit.as_ref().unwrap();
     let health = overall_health_from_unit(unit);
 
-    // For cron units, get metrics from the last execution if available
     let filtered_samples = if unit.kind == UnitKind::Cron {
-        // Try to get metrics from the last completed cron run
         if let Some(cron_status) = &unit.cron {
             if let Some(last_run) = cron_status.recent_runs.first() {
-                // Use metrics from the last run if available
                 if !last_run.metrics.is_empty() {
                     filter_samples(
                         &last_run.metrics,
@@ -3194,18 +3527,15 @@ fn render_inspect(
                         opts.samples_limit,
                     )
                 } else {
-                    // No metrics available from last run
                     vec![]
                 }
             } else {
-                // No runs yet
                 vec![]
             }
         } else {
             vec![]
         }
     } else {
-        // For regular services, use live samples
         filter_samples(
             &payload.samples,
             Some(opts.window_seconds),
@@ -3275,8 +3605,6 @@ fn render_inspect(
     let uptime_label = colorize("Uptime", DIM_WHITE, opts.no_color);
     let exit_label = colorize("Exit", DIM_WHITE, opts.no_color);
 
-    // Calculate the space available for the two-column format
-    // We need to split the data_width between two info blocks with a separator
     let half_width = (data_width - 3) / 2; // -3 for " │ " separator
     let second_half_width = data_width - half_width - 3; // Remaining space for second column
 
@@ -5158,18 +5486,13 @@ fn resolve_config_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn supervisor_running() -> bool {
-    // Check PID first (more reliable than socket existence)
     match ipc::read_supervisor_pid() {
         Ok(Some(pid)) => {
             let target = Pid::from_raw(pid);
             match signal::kill(target, None) {
-                Ok(_) => {
-                    // Process is alive
-                    true
-                }
+                Ok(_) => true,
                 Err(err) => {
                     if err == nix::Error::from(nix::errno::Errno::ESRCH) {
-                        // Process is dead - clean up stale artifacts
                         let _ = ipc::cleanup_runtime();
                         false
                     } else {
@@ -5180,7 +5503,6 @@ fn supervisor_running() -> bool {
             }
         }
         Ok(None) | Err(_) => {
-            // No PID file - check if stale socket exists and clean it up
             if let Ok(path) = ipc::socket_path()
                 && path.exists()
             {

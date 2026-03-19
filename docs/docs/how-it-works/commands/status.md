@@ -5,11 +5,21 @@ title: status
 
 # status
 
-Check the health of running services.
+Check the health of running services with an interactive table interface.
 
 ```sh
 $ sysg status
 ```
+
+## Interactive Mode
+
+By default, `sysg status` displays an interactive table where you can:
+- **Tab** or **↓** (Down arrow) - Move to the next service
+- **Shift+Tab** or **↑** (Up arrow) - Move to the previous service
+- **Enter** - Open the inspect view for the selected service
+- **q** or **ESC** - Exit the status view
+
+The selected row is highlighted with a white background for easy visibility.
 
 ## Options
 
@@ -19,9 +29,9 @@ $ sysg status
 | `--service` | Show specific service details |
 | `--all` | Show all services including orphaned state (services not in current config) |
 | `--sys` | Opt into privileged system mode. Requires running as root |
-| `--json` | Emit machine-readable JSON output instead of a table |
+| `--json` | Emit machine-readable JSON output instead of a table (disables interactive mode) |
 | `--no-color` | Disable ANSI colors in output |
-| `--stream` | Continuously refresh status at the provided interval (e.g., `5`, `1s`, `2m`) |
+| `--stream` | Continuously refresh status at the provided interval (e.g., `5`, `1s`, `2m`) (disables interactive mode) |
 | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples
