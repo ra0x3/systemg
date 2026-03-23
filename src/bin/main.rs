@@ -2074,17 +2074,12 @@ fn render_status_interactive(
 
 /// Renders the status table with a selected row highlighted.
 fn render_status_table_with_selection(
-    snapshot: &StatusSnapshot,
+    _snapshot: &StatusSnapshot,
     units: &[UnitStatus],
     opts: &StatusRenderOptions,
     selected_row: usize,
     health: OverallHealth,
 ) -> Result<(), Box<dyn Error>> {
-    let timestamp = snapshot
-        .captured_at
-        .with_timezone(&Local)
-        .format("%Y-%m-%d %H:%M:%S %Z");
-
     let terminal_width = detect_target_table_width(120);
     let mut widths = compute_status_preferred_widths(units, opts.no_color);
     shrink_status_widths_to_fit(&mut widths, terminal_width);
@@ -2148,23 +2143,15 @@ fn render_status_table_with_selection(
     ];
 
     let columns = &columns_array;
-    println!("{}", make_top_border(columns));
+    let (state_counts, health_counts) = count_states_and_health(units);
+    println!("{}", make_overview_top_border(columns));
+    println!("{}", format_overview_line(" Overview", columns));
+    println!("{}", make_overview_separator_border(columns));
     println!(
         "{}",
-        format_banner(
+        format_overview_line(
             &format!(
-                "Status captured at {} (schema {})",
-                timestamp, snapshot.schema_version
-            ),
-            columns,
-        )
-    );
-    println!("{}", format_banner("", columns));
-    println!(
-        "{}",
-        format_banner(
-            &format!(
-                "Overall health: {}",
+                " Overall Health: {}",
                 colorize(
                     overall_health_label(health),
                     overall_health_color(health),
@@ -2174,14 +2161,16 @@ fn render_status_table_with_selection(
             columns,
         )
     );
-
-    let (state_counts, health_counts) = count_states_and_health(units);
-    println!("{}", format_banner("", columns));
     println!(
         "{}",
-        format_breakdown_banner(&state_counts, &health_counts, columns, opts.no_color)
+        format_overview_line(
+            &format!(
+                " {}",
+                format_flattened_breakdown(&state_counts, &health_counts, opts.no_color)
+            ),
+            columns,
+        )
     );
-    println!("{}", format_banner("", columns));
 
     println!("{}", make_separator_border(columns));
     println!("{}", format_header_row(columns));
@@ -2269,11 +2258,6 @@ fn render_status_non_interactive(
         let _ = io::stdout().flush();
     }
 
-    let timestamp = snapshot
-        .captured_at
-        .with_timezone(&Local)
-        .format("%Y-%m-%d %H:%M:%S %Z");
-
     let terminal_width = detect_target_table_width(120);
     let mut widths = compute_status_preferred_widths(&units, opts.no_color);
     shrink_status_widths_to_fit(&mut widths, terminal_width);
@@ -2337,23 +2321,15 @@ fn render_status_non_interactive(
     ];
 
     let columns = &columns_array;
-    println!("{}", make_top_border(columns));
+    let (state_counts, health_counts) = count_states_and_health(&units);
+    println!("{}", make_overview_top_border(columns));
+    println!("{}", format_overview_line(" Overview", columns));
+    println!("{}", make_overview_separator_border(columns));
     println!(
         "{}",
-        format_banner(
+        format_overview_line(
             &format!(
-                "Status captured at {} (schema {})",
-                timestamp, snapshot.schema_version
-            ),
-            columns,
-        )
-    );
-    println!("{}", format_banner("", columns));
-    println!(
-        "{}",
-        format_banner(
-            &format!(
-                "Overall health: {}",
+                " Overall Health: {}",
                 colorize(
                     overall_health_label(health),
                     overall_health_color(health),
@@ -2363,14 +2339,16 @@ fn render_status_non_interactive(
             columns,
         )
     );
-
-    let (state_counts, health_counts) = count_states_and_health(&units);
-    println!("{}", format_banner("", columns));
     println!(
         "{}",
-        format_breakdown_banner(&state_counts, &health_counts, columns, opts.no_color)
+        format_overview_line(
+            &format!(
+                " {}",
+                format_flattened_breakdown(&state_counts, &health_counts, opts.no_color)
+            ),
+            columns,
+        )
     );
-    println!("{}", format_banner("", columns));
 
     println!("{}", make_separator_border(columns));
     println!("{}", format_header_row(columns));
@@ -2724,6 +2702,22 @@ fn make_top_border(columns: &[Column]) -> String {
     format!("╭{}╮", "─".repeat(inner_width))
 }
 
+fn make_overview_top_border(columns: &[Column]) -> String {
+    let inner_width = total_inner_width(columns);
+    format!("╔{}╗", "═".repeat(inner_width))
+}
+
+fn make_overview_separator_border(columns: &[Column]) -> String {
+    let inner_width = total_inner_width(columns);
+    format!("╟{}╢", "─".repeat(inner_width))
+}
+
+fn format_overview_line(text: &str, columns: &[Column]) -> String {
+    let inner_width = total_inner_width(columns);
+    let content_width = inner_width.saturating_sub(2);
+    format!("║ {} ║", ansi_pad(text, content_width, Alignment::Left))
+}
+
 fn make_bottom_border(columns: &[Column]) -> String {
     let inner_width = total_inner_width(columns);
     format!("╰{}╯", "─".repeat(inner_width))
@@ -2783,6 +2777,7 @@ fn count_states_and_health(
     (state_counts, health_counts)
 }
 
+#[allow(dead_code)]
 fn format_breakdown_banner(
     state_counts: &HashMap<String, usize>,
     health_counts: &HashMap<String, usize>,
@@ -2834,6 +2829,51 @@ fn format_breakdown_banner(
         health_str
     };
     format_banner(&breakdown, columns)
+}
+
+fn format_flattened_breakdown(
+    state_counts: &HashMap<String, usize>,
+    health_counts: &HashMap<String, usize>,
+    no_color: bool,
+) -> String {
+    let mut states: Vec<_> = state_counts.iter().collect();
+    states.sort_by_key(|(k, _)| k.as_str());
+    let state_str = states
+        .iter()
+        .map(|(state, count)| {
+            let color = match state.as_str() {
+                "Running" => BRIGHT_GREEN,
+                "Ok" => GREEN,
+                "NotOk" => RED,
+                "Zombie" | "Missing" => RED_BOLD,
+                "Stopped" | "Skipped" | "Idle" => GRAY,
+                _ => "",
+            };
+            format!("{} {}", colorize(state, color, no_color), count)
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+
+    let mut healths: Vec<_> = health_counts.iter().collect();
+    healths.sort_by_key(|(k, _)| k.as_str());
+    let health_str = healths
+        .iter()
+        .map(|(health, count)| {
+            let color = if health.as_str() == "Healthy" {
+                GREEN_BOLD
+            } else if health.as_str() == "Degraded" {
+                ORANGE
+            } else if health.as_str() == "Failing" {
+                RED_BOLD
+            } else {
+                GRAY
+            };
+            format!("{} {}", colorize(health, color, no_color), count)
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+
+    format!("States: {}  |  Health: {}", state_str, health_str)
 }
 
 fn format_header_row(columns: &[Column]) -> String {
