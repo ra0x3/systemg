@@ -24,9 +24,21 @@ pub fn render_metrics_chart(
     samples: &[MetricSample],
     config: &ChartConfig,
 ) -> Result<(), Box<dyn Error>> {
+    for line in render_metrics_chart_lines(samples, config)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Render metrics charts into lines for embedding in higher-level layouts.
+pub fn render_metrics_chart_lines(
+    samples: &[MetricSample],
+    config: &ChartConfig,
+) -> Result<Vec<String>, Box<dyn Error>> {
     if samples.is_empty() {
-        println!("No data available for the specified time window.");
-        return Ok(());
+        return Ok(vec![
+            "No data available for the specified time window.".to_string(),
+        ]);
     }
 
     let cpu_values: Vec<f64> = samples.iter().map(|s| s.cpu_percent as f64).collect();
@@ -66,7 +78,7 @@ pub fn render_metrics_chart(
         .format("%H:%M:%S")
         .to_string();
 
-    println!();
+    let mut output = vec![String::new()];
 
     let x_axis_label = format!(
         "X-axis: Time ({first_time} -> {last_time}) | Window: {}",
@@ -123,17 +135,17 @@ pub fn render_metrics_chart(
     let rendered_rows = layout_cards_with_wrapping(&cards, available_columns);
     for (idx, row) in rendered_rows.iter().enumerate() {
         for line in row {
-            println!("{line}");
+            output.push(line.clone());
         }
-        println!();
-        println!("{x_axis_label}");
+        output.push(String::new());
+        output.push(x_axis_label.clone());
         if idx + 1 < rendered_rows.len() {
-            println!();
+            output.push(String::new());
         }
     }
 
-    println!();
-    println!("Summary Statistics:");
+    output.push(String::new());
+    output.push("Summary Statistics:".to_string());
 
     let cpu_avg = if !cpu_values.is_empty() {
         cpu_values.iter().sum::<f64>() / cpu_values.len() as f64
@@ -154,21 +166,21 @@ pub fn render_metrics_chart(
         .fold(f64::NEG_INFINITY, f64::max);
     let mem_min = mem_gb_values.iter().cloned().fold(f64::INFINITY, f64::min);
 
-    println!(
+    output.push(format!(
         "  CPU:     min={:.1}% avg={:.1}% max={:.1}%",
         if cpu_min.is_finite() { cpu_min } else { 0.0 },
         cpu_avg,
         if cpu_max.is_finite() { cpu_max } else { 0.0 }
-    );
-    println!(
+    ));
+    output.push(format!(
         "  Memory:  min={:.4}GB avg={:.4}GB max={:.4}GB",
         if mem_min.is_finite() { mem_min } else { 0.0 },
         mem_avg,
         if mem_max.is_finite() { mem_max } else { 0.0 }
-    );
-    println!("  Samples: {}", samples.len());
+    ));
+    output.push(format!("  Samples: {}", samples.len()));
 
-    Ok(())
+    Ok(output)
 }
 
 struct ChartCardSpec {

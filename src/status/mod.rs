@@ -585,6 +585,12 @@ pub struct CronExecutionSummary {
     pub status: Option<CronExecutionStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<MetricSample>,
 }
@@ -1054,6 +1060,9 @@ fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary 
         completed_at: record.completed_at.map(DateTime::<Utc>::from),
         status: record.status.clone(),
         exit_code: record.exit_code,
+        pid: record.pid,
+        user: record.user.clone(),
+        command: record.command.clone(),
         metrics: record.metrics.clone(),
     }
 }
@@ -1965,6 +1974,9 @@ mod tests {
             completed_at: Some(SystemTime::now()),
             status: Some(CronExecutionStatus::Success),
             exit_code: Some(0),
+            pid: None,
+            user: None,
+            command: None,
             metrics: vec![],
         };
 
@@ -1980,6 +1992,9 @@ mod tests {
             completed_at: Some(SystemTime::now()),
             status: Some(CronExecutionStatus::Failed("boom".into())),
             exit_code: Some(2),
+            pid: None,
+            user: None,
+            command: None,
             metrics: vec![],
         };
 
@@ -2369,6 +2384,9 @@ services:
             completed_at: Some(Utc::now()),
             status: Some(CronExecutionStatus::Success),
             exit_code: Some(0),
+            pid: None,
+            user: None,
+            command: None,
             metrics: vec![],
         };
 
@@ -2394,6 +2412,9 @@ services:
                 completed_at: Some(now),
                 status: Some(CronExecutionStatus::Success),
                 exit_code: Some(0),
+                pid: None,
+                user: None,
+                command: None,
                 metrics: vec![],
             });
         }
@@ -2404,6 +2425,9 @@ services:
                 completed_at: Some(now),
                 status: Some(CronExecutionStatus::Failed("exit status 1".into())),
                 exit_code: Some(1),
+                pid: None,
+                user: None,
+                command: None,
                 metrics: vec![],
             });
         }
@@ -2430,6 +2454,9 @@ services:
                 completed_at: Some(now),
                 status: Some(CronExecutionStatus::Success),
                 exit_code: Some(0),
+                pid: None,
+                user: None,
+                command: None,
                 metrics: vec![],
             });
         }
@@ -2439,6 +2466,9 @@ services:
             completed_at: Some(now),
             status: Some(CronExecutionStatus::Failed("exit status 1".into())),
             exit_code: Some(1),
+            pid: None,
+            user: None,
+            command: None,
             metrics: vec![],
         });
 

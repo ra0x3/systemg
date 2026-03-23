@@ -9,6 +9,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use nix::unistd::{Uid, User};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -77,6 +78,17 @@ struct SpawnParams {
 struct CronCompletionOutcome {
     status: CronExecutionStatus,
     exit_code: Option<i32>,
+}
+
+fn fallback_cron_user(service_config: &crate::config::ServiceConfig) -> Option<String> {
+    if let Some(user) = service_config.user.as_ref().filter(|user| !user.is_empty()) {
+        return Some(user.clone());
+    }
+
+    User::from_uid(Uid::current())
+        .ok()
+        .flatten()
+        .map(|user| user.name)
 }
 
 impl Supervisor {
@@ -296,6 +308,8 @@ impl Supervisor {
                                 cfg.services.get(&job_name).cloned()
                             {
                                 info!("Running cron job '{}'", job_name);
+                                let command = Some(service_config.command.clone());
+                                let user = fallback_cron_user(&service_config);
 
                                 // Spawn a thread to run and monitor the cron job
                                 let cron_manager_clone = cron_manager.clone();
@@ -320,6 +334,13 @@ impl Supervisor {
                                                 Ok(
                                                     ServiceReadyState::CompletedSuccess,
                                                 ) => {
+                                                    cron_manager_clone
+                                                        .annotate_job_execution(
+                                                            &job_name_clone,
+                                                            None,
+                                                            user.clone(),
+                                                            command.clone(),
+                                                        );
                                                     info!(
                                                         "Cron job '{}' completed successfully",
                                                         job_name_clone
@@ -370,6 +391,13 @@ impl Supervisor {
                                                             if let Some(pid) = pid_file
                                                                 .get(&job_name_clone)
                                                             {
+                                                                cron_manager_clone
+                                                                    .annotate_job_execution(
+                                                                        &job_name_clone,
+                                                                        Some(pid),
+                                                                        user.clone(),
+                                                                        command.clone(),
+                                                                    );
                                                                 // Wait for the process to complete
                                                                 let result = Self::wait_for_cron_completion(
                                                                     pid,
@@ -490,6 +518,13 @@ impl Supervisor {
                                                                         "Cron job '{}' already completed before PID tracking",
                                                                         job_name_clone
                                                                     );
+                                                                    cron_manager_clone
+                                                                        .annotate_job_execution(
+                                                                            &job_name_clone,
+                                                                            None,
+                                                                            user.clone(),
+                                                                            command.clone(),
+                                                                        );
                                                                     // Job completed successfully before we could track it
                                                                     let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
                                                                         guard.snapshot_unit(&service_hash).unwrap_or_default()
@@ -541,6 +576,13 @@ impl Supervisor {
                                                                 "Failed to reload PID file for cron job '{}': {}",
                                                                 job_name_clone, e
                                                             );
+                                                            cron_manager_clone
+                                                                .annotate_job_execution(
+                                                                    &job_name_clone,
+                                                                    None,
+                                                                    user.clone(),
+                                                                    command.clone(),
+                                                                );
                                                             // No metrics available since process didn't start
                                                             cron_manager_clone.mark_job_completed(
                                                                 &job_name_clone,
@@ -561,6 +603,13 @@ impl Supervisor {
                                                         "Failed to start cron job '{}': {}",
                                                         job_name_clone, e
                                                     );
+                                                    cron_manager_clone
+                                                        .annotate_job_execution(
+                                                            &job_name_clone,
+                                                            None,
+                                                            user.clone(),
+                                                            command.clone(),
+                                                        );
                                                     // No metrics available since process didn't start properly
                                                     cron_manager_clone
                                                         .mark_job_completed(
@@ -578,6 +627,12 @@ impl Supervisor {
                                             error!(
                                                 "Failed to create daemon for cron job '{}': {}",
                                                 job_name_clone, e
+                                            );
+                                            cron_manager_clone.annotate_job_execution(
+                                                &job_name_clone,
+                                                None,
+                                                user.clone(),
+                                                command.clone(),
                                             );
                                             // No metrics available since daemon creation failed
                                             cron_manager_clone.mark_job_completed(

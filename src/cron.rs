@@ -259,6 +259,15 @@ pub struct CronExecutionRecord {
     pub status: Option<CronExecutionStatus>,
     /// Exit code of the process (None if no exit code available).
     pub exit_code: Option<i32>,
+    /// PID of the spawned cron process when one was observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// User that executed the cron process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Command line used for the cron execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// Metrics collected during this execution (for resource usage display).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<crate::metrics::MetricSample>,
@@ -546,6 +555,9 @@ impl CronManager {
                         completed_at: Some(now),
                         status: Some(CronExecutionStatus::OverlapError),
                         exit_code: None,
+                        pid: None,
+                        user: None,
+                        command: None,
                         metrics: vec![],
                     };
                     job.add_execution_record(record);
@@ -561,6 +573,9 @@ impl CronManager {
                         completed_at: None,
                         status: None,
                         exit_code: None,
+                        pid: None,
+                        user: None,
+                        command: None,
                         metrics: vec![],
                     };
                     job.add_execution_record(record);
@@ -593,6 +608,31 @@ impl CronManager {
             }
 
             debug!("Cron job '{}' completed", service_name);
+            self.persist_job_state(job);
+        }
+    }
+
+    /// Annotate the most recent execution record with runtime metadata captured after spawn.
+    pub fn annotate_job_execution(
+        &self,
+        service_name: &str,
+        pid: Option<u32>,
+        user: Option<String>,
+        command: Option<String>,
+    ) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs.iter_mut().find(|j| j.service_name == service_name)
+            && let Some(record) = job.execution_history.back_mut()
+        {
+            if pid.is_some() {
+                record.pid = pid;
+            }
+            if user.is_some() {
+                record.user = user;
+            }
+            if command.is_some() {
+                record.command = command;
+            }
             self.persist_job_state(job);
         }
     }
@@ -995,6 +1035,12 @@ mod tests {
             Some(0),
             vec![],
         );
+        manager.annotate_job_execution(
+            "persisted_service",
+            Some(4242),
+            Some("postgres".to_string()),
+            Some("/bin/true".to_string()),
+        );
 
         let service_hash = compute_test_hash(&cron_config);
         let state = CronStateFile::load().expect("load cron state");
@@ -1004,6 +1050,9 @@ mod tests {
         let record = persisted.execution_history.back().unwrap();
         assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
         assert_eq!(record.exit_code, Some(0));
+        assert_eq!(record.pid, Some(4242));
+        assert_eq!(record.user.as_deref(), Some("postgres"));
+        assert_eq!(record.command.as_deref(), Some("/bin/true"));
 
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
@@ -1127,6 +1176,9 @@ mod tests {
             completed_at: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(12)),
             status: Some(CronExecutionStatus::Success),
             exit_code: Some(0),
+            pid: None,
+            user: None,
+            command: None,
             metrics: vec![],
         });
 

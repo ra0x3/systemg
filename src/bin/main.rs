@@ -47,6 +47,7 @@ use tracing_subscriber::EnvFilter;
 const UNIT_CONFIG_MAX_FILES: usize = 200;
 const UNIT_CONFIG_MAX_AGE_DAYS: u64 = 30;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
@@ -752,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn peripheral_spawn_rows_render_selected_columns_in_gray() {
+    fn spawned_rows_darken_by_depth() {
         let columns = vec![
             Column {
                 title: "UNIT",
@@ -828,18 +829,100 @@ mod tests {
         };
 
         let row = format_spawned_child_row(&child, &columns, false, "└─ ");
-        assert!(row.contains(&format!("{GRAY}└─ /opt/homebrew/bin/claude{RESET}")));
-        assert!(row.contains(&format!("{GRAY}rashad{RESET}")));
-        assert!(row.contains(&format!("{GRAY}62751{RESET}")));
-        assert!(row.contains(&format!("{GRAY}0.0%{RESET}")));
-        assert!(row.contains(&format!("{GRAY}117.7MB{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}└─ /opt/homebrew/bin/claude{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}rashad{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}62751{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}0.0%{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}117.7MB{RESET}")));
         assert!(row.contains(&format!(
-            "{GRAY}/opt/homebrew/bin/claude --dangerously-skip-permissions{RESET}"
+            "{DARK_GRAY}/opt/homebrew/bin/claude --dangerously-skip-permissions{RESET}"
         )));
-        assert!(row.contains(&format!("{GRAY}-{RESET}")));
-        assert!(row.contains(&format!("{MAGENTA}peri{RESET}")));
-        assert!(row.contains(&format!("{BRIGHT_GREEN}Running{RESET}")));
-        assert!(row.contains(&format!("{GREEN_BOLD}Healthy{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}-{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}peri{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}Running{RESET}")));
+        assert!(row.contains(&format!("{DARK_GRAY}Healthy{RESET}")));
+    }
+
+    #[test]
+    fn deeper_spawn_rows_use_darker_shades() {
+        let columns = vec![
+            Column {
+                title: "UNIT",
+                width: 32,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "KIND",
+                width: 6,
+                align: Alignment::Center,
+            },
+            Column {
+                title: "STATE",
+                width: 7,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "USER",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "PID",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "CPU",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "RSS",
+                width: 8,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "UPTIME",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "CMD",
+                width: 24,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "LAST_EXIT",
+                width: 10,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "HEALTH",
+                width: 8,
+                align: Alignment::Left,
+            },
+        ];
+
+        let mut shallow = SpawnedChild {
+            name: "worker".to_string(),
+            pid: 10,
+            parent_pid: 1,
+            command: "worker".to_string(),
+            started_at: SystemTime::now(),
+            ttl: None,
+            depth: 1,
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+            user: Some("ubuntu".to_string()),
+            kind: SpawnedChildKind::Spawned,
+        };
+        let shallow_row = format_spawned_child_row(&shallow, &columns, false, "└─ ");
+        shallow.depth = 4;
+        let deep_row = format_spawned_child_row(&shallow, &columns, false, "└─ ");
+
+        assert!(shallow_row.contains(&format!("{DIM_WHITE}└─ worker{RESET}")));
+        assert!(deep_row.contains(&format!("{DARK_GRAY}└─ worker{RESET}")));
     }
 
     #[test]
@@ -1218,6 +1301,7 @@ mod tests {
         let rows = vec![InspectProcessRow {
             tree_label: "└─ very-long-process-name-with-depth".to_string(),
             is_root: true,
+            depth: 0,
             pid: 12345,
             ppid: Some(1234),
             user: "engineer".to_string(),
@@ -1242,6 +1326,7 @@ mod tests {
         let rows = vec![InspectProcessRow {
             tree_label: "└─ very-long-process-name-with-depth".to_string(),
             is_root: true,
+            depth: 0,
             pid: 12345,
             ppid: Some(1234),
             user: "engineer".to_string(),
@@ -1290,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_process_descendant_rows_gray_proc_and_cmd_only() {
+    fn inspect_process_descendant_rows_darken_by_depth() {
         let mut user_colors = HashMap::new();
         let user_color = "\x1b[38;5;39m";
         user_colors.insert("ubuntu".to_string(), user_color);
@@ -1298,6 +1383,7 @@ mod tests {
         let root = InspectProcessRow {
             tree_label: "sh".to_string(),
             is_root: true,
+            depth: 0,
             pid: 1,
             ppid: None,
             user: "ubuntu".to_string(),
@@ -1315,6 +1401,7 @@ mod tests {
         let child = InspectProcessRow {
             tree_label: "└─ worker".to_string(),
             is_root: false,
+            depth: 2,
             pid: 2,
             ppid: Some(1),
             user: "ubuntu".to_string(),
@@ -1335,24 +1422,44 @@ mod tests {
 
         assert!(!root_values[INSPECT_COL_PROC].contains(GRAY));
         assert!(!root_values[INSPECT_COL_CMD].contains(GRAY));
+        assert!(root_values[INSPECT_COL_USER].contains(user_color));
+        assert!(root_values[INSPECT_COL_VIRT].contains(GREEN));
         assert!(child_values[INSPECT_COL_PROC].contains(GRAY));
         assert!(child_values[INSPECT_COL_CMD].contains(GRAY));
-        assert!(child_values[INSPECT_COL_USER].contains(user_color));
-        assert!(child_values[INSPECT_COL_VIRT].contains(GREEN));
+        assert!(child_values[INSPECT_COL_USER].contains(GRAY));
+        assert!(child_values[INSPECT_COL_VIRT].contains(GRAY));
     }
 
     #[test]
     fn inspect_cron_widths_fit_target_table_width() {
         let rows = vec![InspectCronRunRow {
-            started: "2026-03-10 14:03:00".to_string(),
-            status: "Failed".to_string(),
-            duration: "12h".to_string(),
-            exit_code: "123".to_string(),
+            run: "10".to_string(),
+            time: "2026-03-10 14:03:00".to_string(),
+            user: "postgres".to_string(),
+            pid: "12345".to_string(),
+            command: "sh scripts/migrate-provider-data.sh --delete".to_string(),
         }];
         let mut widths = compute_inspect_cron_preferred_widths(&rows);
         let target_width = target_table_width(120);
         shrink_inspect_cron_widths_to_fit(&mut widths, target_width);
         assert!(inspect_cron_row_width(&widths) <= target_width);
+    }
+
+    #[test]
+    fn inspect_cron_width_shrink_prioritizes_command_column() {
+        let rows = vec![InspectCronRunRow {
+            run: "10".to_string(),
+            time: "2026-03-10 14:03:00".to_string(),
+            user: "postgres".to_string(),
+            pid: "12345".to_string(),
+            command: "sh scripts/migrate-provider-data.sh --delete --sink rds --force"
+                .to_string(),
+        }];
+        let mut widths = compute_inspect_cron_preferred_widths(&rows);
+        let original_cmd = widths[4];
+        shrink_inspect_cron_widths_to_fit(&mut widths, 60);
+        assert!(widths[4] < original_cmd);
+        assert!(widths[2] >= INSPECT_CRON_SOFT_MIN_WIDTHS[2]);
     }
 
     #[test]
@@ -1503,7 +1610,9 @@ const CYAN: &str = "\x1b[36m";
 const YELLOW: &str = "\x1b[33m";
 const ORANGE: &str = "\x1b[38;5;208m";
 const GRAY: &str = "\x1b[90m";
-const MAGENTA: &str = "\x1b[35m";
+const MID_GRAY: &str = "\x1b[38;5;245m";
+const DARK_GRAY: &str = "\x1b[38;5;242m";
+const DEEP_GRAY: &str = "\x1b[38;5;239m";
 const WHITE: &str = "\x1b[37m";
 const BRIGHT_WHITE: &str = "\x1b[97m";
 const DIM_WHITE: &str = "\x1b[2;37m";
@@ -2807,6 +2916,25 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     format_row(&values, columns)
 }
 
+fn depth_tint_color(depth: usize) -> &'static str {
+    match depth {
+        0 => WHITE,
+        1 => DIM_WHITE,
+        2 => GRAY,
+        3 => MID_GRAY,
+        4 => DARK_GRAY,
+        _ => DEEP_GRAY,
+    }
+}
+
+fn tint_value_for_depth(value: String, depth: usize, no_color: bool) -> String {
+    if no_color || depth == 0 {
+        value
+    } else {
+        colorize(&value, depth_tint_color(depth), no_color)
+    }
+}
+
 fn render_spawn_rows(nodes: &[SpawnedProcessNode], columns: &[Column], no_color: bool) {
     visit_spawn_tree(nodes, "", &mut |child, prefix, _| {
         println!(
@@ -2876,7 +3004,6 @@ fn format_spawned_child_row(
     no_color: bool,
     prefix: &str,
 ) -> String {
-    let is_peripheral = matches!(child.kind, SpawnedChildKind::Peripheral);
     let name_width = columns.first().map(|col| col.width).unwrap_or(4);
     let child_name = truncate_nested_unit_label(prefix, &child.name, name_width);
     let user = child
@@ -2898,23 +3025,16 @@ fn format_spawned_child_row(
         let succeeded = exit.exit_code.map(|code| code == 0).unwrap_or(false)
             && exit.signal.is_none();
 
-        let state_label = if succeeded {
-            colorize("Exited", YELLOW_BOLD, no_color)
-        } else {
-            colorize("Exited", RED_BOLD, no_color)
-        };
+        let health = if succeeded { "Healthy" } else { "Failing" };
 
-        let health = if succeeded {
-            colorize("Healthy", GREEN_BOLD, no_color)
-        } else {
-            colorize("Failing", RED_BOLD, no_color)
-        };
-
-        (state_label, health)
+        (
+            tint_value_for_depth("Exited".to_string(), child.depth, no_color),
+            tint_value_for_depth(health.to_string(), child.depth, no_color),
+        )
     } else {
         (
-            colorize("Running", BRIGHT_GREEN, no_color),
-            colorize("Healthy", GREEN_BOLD, no_color),
+            tint_value_for_depth("Running".to_string(), child.depth, no_color),
+            tint_value_for_depth("Healthy".to_string(), child.depth, no_color),
         )
     };
 
@@ -2941,33 +3061,29 @@ fn format_spawned_child_row(
     };
 
     let kind_label = match child.kind {
-        SpawnedChildKind::Spawned => colorize("spwn", MAGENTA, no_color),
-        SpawnedChildKind::Peripheral => colorize("peri", MAGENTA, no_color),
+        SpawnedChildKind::Spawned => {
+            tint_value_for_depth("spwn".to_string(), child.depth, no_color)
+        }
+        SpawnedChildKind::Peripheral => {
+            tint_value_for_depth("peri".to_string(), child.depth, no_color)
+        }
     };
 
     let values = [
-        style_peripheral_column(child_name, is_peripheral, no_color),
+        tint_value_for_depth(child_name, child.depth, no_color),
         kind_label,
         state,
-        style_peripheral_column(user, is_peripheral, no_color),
-        style_peripheral_column(pid, is_peripheral, no_color),
-        style_peripheral_column(cpu_col, is_peripheral, no_color),
-        style_peripheral_column(rss_col, is_peripheral, no_color),
-        style_peripheral_column(uptime, is_peripheral, no_color),
-        style_peripheral_column(command, is_peripheral, no_color),
-        style_peripheral_column(last_exit, is_peripheral, no_color),
+        tint_value_for_depth(user, child.depth, no_color),
+        tint_value_for_depth(pid, child.depth, no_color),
+        tint_value_for_depth(cpu_col, child.depth, no_color),
+        tint_value_for_depth(rss_col, child.depth, no_color),
+        tint_value_for_depth(uptime, child.depth, no_color),
+        tint_value_for_depth(command, child.depth, no_color),
+        tint_value_for_depth(last_exit, child.depth, no_color),
         health_label,
     ];
 
     format_row(&values, columns)
-}
-
-fn style_peripheral_column(value: String, is_peripheral: bool, no_color: bool) -> String {
-    if is_peripheral {
-        colorize(&value, GRAY, no_color)
-    } else {
-        value
-    }
 }
 
 fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
@@ -3316,10 +3432,45 @@ fn format_command_value_lines(
         .collect()
 }
 
+#[allow(dead_code)]
 /// Formats a single inspect box row with consistent width relative to the border.
 fn format_inspect_box_line(content: &str, inner_width: usize) -> String {
     let content_width = inner_width.saturating_sub(3);
     format!("║  {} ║", ansi_pad(content, content_width, Alignment::Left))
+}
+
+fn format_inspect_outer_line(content: &str, outer_inner_width: usize) -> String {
+    let content_width = outer_inner_width.saturating_sub(3);
+    format!("║  {} ║", ansi_pad(content, content_width, Alignment::Left))
+}
+
+fn strip_table_edges(line: &str) -> String {
+    let mut chars = line.chars();
+    let _ = chars.next();
+    let mut trimmed: String = chars.collect();
+    let _ = trimmed.pop();
+    trimmed
+}
+
+fn render_section_table_lines(
+    columns: &[Column],
+    rows: &[Vec<String>],
+    title: Option<String>,
+    no_color: bool,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(strip_table_edges(&make_top_border(columns)));
+    if let Some(title) = title {
+        lines.push(strip_table_edges(&format_banner(&title, columns)));
+    }
+    lines.push(strip_table_edges(&make_separator_border(columns)));
+    lines.push(strip_table_edges(&format_header_row(columns)));
+    lines.push(strip_table_edges(&make_separator_border(columns)));
+    for row in rows {
+        lines.push(strip_table_edges(&format_row_cells(row, columns, no_color)));
+    }
+    lines.push(strip_table_edges(&make_bottom_border(columns)));
+    lines
 }
 
 fn assign_user_colors(users: &[String]) -> HashMap<String, &'static str> {
@@ -3347,6 +3498,7 @@ fn assign_user_colors(users: &[String]) -> HashMap<String, &'static str> {
 }
 
 /// Renders system resource bars (CPU and memory) in a boxed format for inspect output.
+#[allow(dead_code)]
 fn render_htop_bars_boxed(
     _metrics: Option<&UnitMetricsSummary>,
     no_color: bool,
@@ -3411,6 +3563,71 @@ fn render_htop_bars_boxed(
         );
         println!("{}", format_inspect_box_line(&swap_line, inner_width));
     }
+}
+
+fn collect_htop_bar_lines(
+    _metrics: Option<&UnitMetricsSummary>,
+    no_color: bool,
+) -> Vec<String> {
+    let mut system = System::new();
+    system.refresh_cpu_all();
+    system.refresh_memory();
+    let total_mem = system.total_memory();
+    let used_mem = system.used_memory();
+    let total_swap = system.total_swap();
+    let used_swap = system.used_swap();
+
+    let mem_percentage = if total_mem > 0 {
+        (used_mem as f64 / total_mem as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let swap_percentage = if total_swap > 0 {
+        (used_swap as f64 / total_swap as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let bar_width = 40;
+    let mut lines = Vec::new();
+
+    for (i, cpu) in system.cpus().iter().enumerate() {
+        let cpu_usage = cpu.cpu_usage();
+        let filled = ((cpu_usage / 100.0) * bar_width as f32) as usize;
+        let bar = render_usage_bar(filled, bar_width, cpu_usage as f64, no_color);
+
+        let label = if i < 10 {
+            format!("{:2}", i)
+        } else {
+            format!("{}", i)
+        };
+
+        lines.push(format!("{:3}[{}] {:5.1}%", label, bar, cpu_usage));
+    }
+
+    let mem_filled = ((mem_percentage / 100.0) * bar_width as f64) as usize;
+    let mem_bar = render_usage_bar(mem_filled, bar_width, mem_percentage, no_color);
+    lines.push(format!(
+        "Mem[{}] {:5.2}/{:.2}G",
+        mem_bar,
+        used_mem as f64 / 1024.0 / 1024.0 / 1024.0,
+        total_mem as f64 / 1024.0 / 1024.0 / 1024.0
+    ));
+
+    if total_swap > 0 {
+        let swap_filled = ((swap_percentage / 100.0) * bar_width as f64) as usize;
+        let swap_bar =
+            render_usage_bar(swap_filled, bar_width, swap_percentage, no_color);
+        lines.push(format!(
+            "Swp[{}] {:5.2}/{:.2}G",
+            swap_bar,
+            used_swap as f64 / 1024.0 / 1024.0 / 1024.0,
+            total_swap as f64 / 1024.0 / 1024.0 / 1024.0
+        ));
+    }
+
+    lines
 }
 
 #[allow(dead_code)]
@@ -3551,41 +3768,32 @@ fn render_inspect(
         println!("{}", serde_json::to_string_pretty(&json_payload)?);
         return Ok(health);
     }
-
     let table_width = compute_inspect_process_table_width(unit);
-    let inner_width = table_width.saturating_sub(2);
-    let border_line = "═".repeat(inner_width);
-
-    println!();
-    println!("╔{}╗", border_line);
-    let unit_line = colorize(&format!("Unit: {}", unit.name), CYAN, opts.no_color);
-    println!("{}", format_inspect_box_line(&unit_line, inner_width));
-    println!("╠{}╣", border_line);
+    let outer_inner_width = table_width.saturating_sub(2);
+    let outer_border_line = "═".repeat(outer_inner_width);
+    let content_width = outer_inner_width.saturating_sub(3);
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
 
     let kind_str = match unit.kind {
         UnitKind::Service => colorize("service", CYAN, opts.no_color),
         UnitKind::Cron => colorize("cron", YELLOW, opts.no_color),
         UnitKind::Orphaned => colorize("orphaned", GRAY, opts.no_color),
     };
-
     let health_str = colorize(
         overall_health_label(health),
         overall_health_color(health),
         opts.no_color,
     );
-
     let pid_str = if let Some(process) = &unit.process {
         colorize(&process.pid.to_string(), BRIGHT_WHITE, opts.no_color)
     } else {
         colorize("-", GRAY, opts.no_color)
     };
-
     let uptime_str = if let Some(uptime) = unit.uptime.as_ref() {
         format!("{} ({}s)", uptime.human, uptime.seconds)
     } else {
         "-".to_string()
     };
-
     let exit_text = format_last_exit(unit.last_exit.as_ref(), unit.cron.as_ref());
     let exit_str = if let Some(color) =
         last_exit_color(unit.last_exit.as_ref(), unit.cron.as_ref())
@@ -3594,106 +3802,114 @@ fn render_inspect(
     } else {
         exit_text
     };
-
     let label_width = 10;
-    let data_width = inner_width.saturating_sub(label_width + 6);
-
+    let data_width = content_width.saturating_sub(label_width + 2);
     let status_label = colorize("Status", DIM_CYAN, opts.no_color);
     let kind_label = colorize("Kind", DIM_WHITE, opts.no_color);
     let health_label = colorize("Health", DIM_WHITE, opts.no_color);
     let pid_label = colorize("PID", DIM_WHITE, opts.no_color);
     let uptime_label = colorize("Uptime", DIM_WHITE, opts.no_color);
     let exit_label = colorize("Exit", DIM_WHITE, opts.no_color);
-
-    let half_width = (data_width - 3) / 2; // -3 for " │ " separator
-    let second_half_width = data_width - half_width - 3; // Remaining space for second column
-
-    let kind_info = format!("{}: {}", kind_label, kind_str);
-    let health_info = format!("{}: {}", health_label, health_str);
-    let kind_padded = pad_ansi_str(&kind_info, half_width);
-    let health_padded = pad_ansi_str(&health_info, second_half_width);
-    let status_line = format!("{} │ {}", kind_padded, health_padded);
-
-    let pid_info = format!("{}: {}", pid_label, pid_str);
-    let uptime_info = format!("{}: {}", uptime_label, uptime_str);
-    let pid_padded = pad_ansi_str(&pid_info, half_width);
-    let uptime_padded = pad_ansi_str(&uptime_info, second_half_width);
-    let runtime_line = format!("{} │ {}", pid_padded, uptime_padded);
-
-    let exit_line = format!("{}: {}", exit_label, exit_str);
-
-    let status_label_padded = pad_ansi_str(&status_label, label_width);
-    let status_line_padded = pad_ansi_str(&status_line, data_width);
-    println!("║  {} │ {} ║", status_label_padded, status_line_padded);
-
+    let half_width = (data_width.saturating_sub(3)) / 2;
+    let second_half_width = data_width.saturating_sub(half_width + 3);
     let empty_label = pad_ansi_str("", label_width);
-    let runtime_line_padded = pad_ansi_str(&runtime_line, data_width);
-    println!("║  {} │ {} ║", empty_label, runtime_line_padded);
-
-    let exit_line_padded = pad_ansi_str(&exit_line, data_width);
-    println!("║  {} │ {} ║", empty_label, exit_line_padded);
+    let mut overview_lines = vec![
+        colorize(&format!("Unit: {}", unit.name), CYAN, opts.no_color),
+        format!(
+            "{} │ {}",
+            pad_ansi_str(&status_label, label_width),
+            pad_ansi_str(
+                &format!(
+                    "{} │ {}",
+                    pad_ansi_str(&format!("{}: {}", kind_label, kind_str), half_width),
+                    pad_ansi_str(
+                        &format!("{}: {}", health_label, health_str),
+                        second_half_width
+                    )
+                ),
+                data_width
+            )
+        ),
+        format!(
+            "{} │ {}",
+            empty_label,
+            pad_ansi_str(
+                &format!(
+                    "{} │ {}",
+                    pad_ansi_str(&format!("{}: {}", pid_label, pid_str), half_width),
+                    pad_ansi_str(
+                        &format!("{}: {}", uptime_label, uptime_str),
+                        second_half_width
+                    )
+                ),
+                data_width
+            )
+        ),
+        format!(
+            "{} │ {}",
+            empty_label,
+            pad_ansi_str(&format!("{}: {}", exit_label, exit_str), data_width)
+        ),
+    ];
 
     if unit.command.is_some() || unit.runtime_command.is_some() {
-        println!("╠{}╣", border_line);
         if let Some(command) = &unit.command {
             let cmd_label = colorize("Command", WHITE, opts.no_color);
             let cmd_label_padded = pad_ansi_str(&cmd_label, label_width);
-            let cmd_lines = format_command_value_lines(
+            for (idx, cmd_line) in format_command_value_lines(
                 "Configured",
                 command,
                 data_width,
                 opts.no_color,
-            );
-            for (idx, cmd_line) in cmd_lines.iter().enumerate() {
+            )
+            .iter()
+            .enumerate()
+            {
                 let label = if idx == 0 {
                     &cmd_label_padded
                 } else {
                     &empty_label
                 };
-                let cmd_line_padded = pad_ansi_str(cmd_line, data_width);
-                println!("║  {} │ {} ║", label, cmd_line_padded);
+                overview_lines.push(format!(
+                    "{} │ {}",
+                    label,
+                    pad_ansi_str(cmd_line, data_width)
+                ));
             }
         }
         if let Some(runtime_command) = &unit.runtime_command {
             let prefix_str = if unit.command.is_some() {
-                String::from("")
+                String::new()
             } else {
                 colorize("Command", WHITE, opts.no_color)
             };
             let prefix_padded = pad_ansi_str(&prefix_str, label_width);
-            let runtime_lines = format_command_value_lines(
+            for (idx, runtime_line) in format_command_value_lines(
                 "Runtime",
                 runtime_command,
                 data_width,
                 opts.no_color,
-            );
-            for (idx, runtime_line) in runtime_lines.iter().enumerate() {
+            )
+            .iter()
+            .enumerate()
+            {
                 let label = if idx == 0 {
                     &prefix_padded
                 } else {
                     &empty_label
                 };
-                let runtime_line_padded = pad_ansi_str(runtime_line, data_width);
-                println!("║  {} │ {} ║", label, runtime_line_padded);
+                overview_lines.push(format!(
+                    "{} │ {}",
+                    label,
+                    pad_ansi_str(runtime_line, data_width)
+                ));
             }
         }
     }
-
-    println!("╚{}╝", border_line);
-    println!();
+    sections.push(("Overview".to_string(), overview_lines));
 
     if !unit.spawned_children.is_empty() {
-        let total_children = count_spawn_nodes(&unit.spawned_children);
-        let title = format!(
-            "{} ({} total)",
-            colorize("Process Tree", CYAN, opts.no_color),
-            colorize(&total_children.to_string(), BRIGHT_WHITE, opts.no_color)
-        );
-
-        println!("╔{}╗", border_line);
-        println!("{}", format_inspect_box_line(&title, inner_width));
-        println!("╠{}╣", border_line);
-
+        let mut lines = Vec::new();
         visit_spawn_tree(&unit.spawned_children, "", &mut |child, prefix, _| {
             let uptime = child
                 .started_at
@@ -3709,7 +3925,7 @@ fn render_inspect(
             } else {
                 String::new()
             };
-            let tree_line = format!(
+            lines.push(format!(
                 "{}{} [{}: {}, {}: {}{}]",
                 colorize(prefix, DIM_WHITE, opts.no_color),
                 colorize(&child.name, WHITE, opts.no_color),
@@ -3718,18 +3934,22 @@ fn render_inspect(
                 colorize("Up", DIM_WHITE, opts.no_color),
                 colorize(&uptime, GRAY, opts.no_color),
                 depth_info
-            );
-            println!("{}", format_inspect_box_line(&tree_line, inner_width));
+            ));
         });
-
-        println!("╚{}╝", border_line);
-        println!();
+        sections.push((
+            format!(
+                "Process Tree ({} total)",
+                colorize(
+                    &count_spawn_nodes(&unit.spawned_children).to_string(),
+                    BRIGHT_WHITE,
+                    opts.no_color
+                )
+            ),
+            lines,
+        ));
     }
 
-    println!("╔{}╗", border_line);
-    let metrics_title = colorize("Resource Metrics", CYAN, opts.no_color);
-    println!("{}", format_inspect_box_line(&metrics_title, inner_width));
-    println!("╠{}╣", border_line);
+    let mut resource_metrics_lines = Vec::new();
     if let Some(metrics) = unit.metrics.as_ref() {
         let cpu_color = if metrics.latest_cpu_percent > 80.0 {
             RED
@@ -3738,14 +3958,12 @@ fn render_inspect(
         } else {
             GREEN
         };
-
         let mem_color = if metrics.latest_rss_bytes > 8 * 1024 * 1024 * 1024 {
             YELLOW
         } else {
             WHITE
         };
-
-        let latest_line = format!(
+        resource_metrics_lines.push(format!(
             "{}: {} CPU | {} RSS",
             colorize("Latest", DIM_WHITE, opts.no_color),
             colorize(
@@ -3758,8 +3976,8 @@ fn render_inspect(
                 mem_color,
                 opts.no_color
             )
-        );
-        let average_line = format!(
+        ));
+        resource_metrics_lines.push(format!(
             "{}: {} CPU | {} RSS",
             colorize("Average", DIM_WHITE, opts.no_color),
             colorize(
@@ -3772,8 +3990,8 @@ fn render_inspect(
                 WHITE,
                 opts.no_color
             )
-        );
-        let max_line = format!(
+        ));
+        resource_metrics_lines.push(format!(
             "{}: {} CPU | {} RSS",
             colorize("Maximum", DIM_WHITE, opts.no_color),
             colorize(
@@ -3786,99 +4004,89 @@ fn render_inspect(
                 WHITE,
                 opts.no_color
             )
-        );
-        let samples_line = format!(
+        ));
+        resource_metrics_lines.push(format!(
             "{}: {}",
             colorize("Samples", DIM_WHITE, opts.no_color),
             colorize(&metrics.samples.to_string(), BRIGHT_WHITE, opts.no_color)
-        );
-
-        println!("{}", format_inspect_box_line(&latest_line, inner_width));
-        println!("{}", format_inspect_box_line(&average_line, inner_width));
-        println!("{}", format_inspect_box_line(&max_line, inner_width));
-        println!("{}", format_inspect_box_line(&samples_line, inner_width));
+        ));
     } else if unit.kind == UnitKind::Cron {
-        let msg = colorize("Awaiting next cron execution", GRAY, opts.no_color);
-        println!("{}", format_inspect_box_line(&msg, inner_width));
+        resource_metrics_lines.push(colorize(
+            "Awaiting next cron execution",
+            GRAY,
+            opts.no_color,
+        ));
     } else if unit.process.is_some() {
-        let msg = colorize(
+        resource_metrics_lines.push(colorize(
             "Collector initializing (may take a few seconds)",
             GRAY,
             opts.no_color,
-        );
-        println!("{}", format_inspect_box_line(&msg, inner_width));
+        ));
     } else {
-        let msg = colorize("Not available (service not running)", GRAY, opts.no_color);
-        println!("{}", format_inspect_box_line(&msg, inner_width));
+        resource_metrics_lines.push(colorize(
+            "Not available (service not running)",
+            GRAY,
+            opts.no_color,
+        ));
     }
+    sections.push(("Resource Metrics".to_string(), resource_metrics_lines));
 
-    println!("╚{}╝", border_line);
-    println!();
-
-    println!("╔{}╗", border_line);
-    let sys_title = colorize("System Resources", CYAN, opts.no_color);
-    println!("{}", format_inspect_box_line(&sys_title, inner_width));
-    println!("╠{}╣", border_line);
-
-    render_htop_bars_boxed(unit.metrics.as_ref(), opts.no_color, inner_width);
-
-    println!("╚{}╝", border_line);
-    println!();
+    sections.push((
+        "System Resources".to_string(),
+        collect_htop_bar_lines(unit.metrics.as_ref(), opts.no_color),
+    ));
 
     if !filtered_samples.is_empty() {
-        println!("╔{}╗", border_line);
-        let charts_title = colorize("Time Series Charts", CYAN, opts.no_color);
-        println!("{}", format_inspect_box_line(&charts_title, inner_width));
-        println!("╠{}╣", border_line);
-
+        let mut chart_lines = Vec::new();
         if unit.kind == UnitKind::Cron
             && let Some(cron_status) = &unit.cron
             && let Some(last_run) = cron_status.recent_runs.first()
         {
-            let run_time = last_run
-                .started_at
-                .with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string();
-            let data_line = format!(
+            chart_lines.push(format!(
                 "{}: {}",
                 colorize("Data from last run", DIM_WHITE, opts.no_color),
-                colorize(&run_time, GRAY, opts.no_color)
-            );
-            println!("{}", format_inspect_box_line(&data_line, inner_width));
-            println!("{}", format_inspect_box_line("", inner_width));
+                colorize(
+                    &last_run
+                        .started_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string(),
+                    GRAY,
+                    opts.no_color
+                )
+            ));
+            chart_lines.push(String::new());
         }
-
-        println!("╚{}╝", border_line);
-        println!();
 
         let chart_config = ChartConfig {
             no_color: opts.no_color,
             window_desc: opts.window_desc.clone(),
-            max_width: Some(table_width),
+            max_width: Some(content_width),
         };
-
-        if let Err(e) = charting::render_metrics_chart(&filtered_samples, &chart_config) {
-            warn!("Failed to render chart: {}", e);
+        match charting::render_metrics_chart_lines(&filtered_samples, &chart_config) {
+            Ok(lines) => chart_lines.extend(lines),
+            Err(e) => {
+                warn!("Failed to render chart: {}", e);
+                chart_lines.push(colorize("Failed to render chart", GRAY, opts.no_color));
+            }
         }
-    } else if !opts.json {
-        println!("╔{}╗", border_line);
-        let charts_title = colorize("Time Series Charts", CYAN, opts.no_color);
-        println!("{}", format_inspect_box_line(&charts_title, inner_width));
-        println!("╠{}╣", border_line);
-        let msg = colorize(
-            "No metrics available for the specified window",
-            GRAY,
-            opts.no_color,
-        );
-        println!("{}", format_inspect_box_line(&msg, inner_width));
-        println!("╚{}╝", border_line);
-        println!();
+        sections.push(("Time Series Charts".to_string(), chart_lines));
+    } else {
+        sections.push((
+            "Time Series Charts".to_string(),
+            vec![colorize(
+                "No metrics available for the specified window",
+                GRAY,
+                opts.no_color,
+            )],
+        ));
     }
 
     if unit.kind != UnitKind::Cron {
-        println!();
-        render_inspect_process_table(unit, opts.no_color, table_width);
+        sections.push((
+            "Process Details Table".to_string(),
+            collect_inspect_process_table_lines(unit, opts.no_color, content_width),
+        ));
     }
 
     if unit.kind == UnitKind::Cron
@@ -3888,44 +4096,26 @@ fn render_inspect(
         let rows: Vec<InspectCronRunRow> = cron_status
             .recent_runs
             .iter()
-            .take(10)
-            .map(|run| {
-                let started = run
+            .take(INSPECT_CRON_HISTORY_LIMIT)
+            .enumerate()
+            .map(|(index, run)| InspectCronRunRow {
+                run: (index + 1).to_string(),
+                time: run
                     .started_at
                     .with_timezone(&Local)
                     .format("%Y-%m-%d %H:%M:%S")
-                    .to_string();
-
-                let (status_label, _) =
-                    cron_run_status_label_and_color(run.status.as_ref());
-                let duration = if let Some(completed) = run.completed_at {
-                    let dur = completed.signed_duration_since(run.started_at);
-                    if dur.num_seconds() < 60 {
-                        format!("{}s", dur.num_seconds())
-                    } else if dur.num_minutes() < 60 {
-                        format!("{}m", dur.num_minutes())
-                    } else {
-                        format!("{}h", dur.num_hours())
-                    }
-                } else {
-                    "-".to_string()
-                };
-                let exit_code = run
-                    .exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "-".to_string());
-
-                InspectCronRunRow {
-                    started,
-                    status: status_label.to_string(),
-                    duration,
-                    exit_code,
-                }
+                    .to_string(),
+                user: run.user.clone().unwrap_or_else(|| "-".to_string()),
+                pid: run
+                    .pid
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                command: run.command.clone().unwrap_or_else(|| "-".to_string()),
             })
             .collect();
 
         let mut widths = compute_inspect_cron_preferred_widths(&rows);
-        shrink_inspect_cron_widths_to_fit(&mut widths, table_width);
+        shrink_inspect_cron_widths_to_fit(&mut widths, content_width);
         let columns = [
             Column {
                 title: INSPECT_CRON_COLUMN_TITLES[0],
@@ -3947,38 +4137,51 @@ fn render_inspect(
                 width: widths[3],
                 align: INSPECT_CRON_COLUMN_ALIGNS[3],
             },
+            Column {
+                title: INSPECT_CRON_COLUMN_TITLES[4],
+                width: widths[4],
+                align: INSPECT_CRON_COLUMN_ALIGNS[4],
+            },
         ];
+        let row_values: Vec<Vec<String>> = rows
+            .iter()
+            .map(|row| {
+                vec![
+                    row.run.clone(),
+                    row.time.clone(),
+                    row.user.clone(),
+                    row.pid.clone(),
+                    row.command.clone(),
+                ]
+            })
+            .collect();
+        sections.push((
+            format!("Cron Run History (last {})", INSPECT_CRON_HISTORY_LIMIT),
+            render_section_table_lines(&columns, &row_values, None, opts.no_color),
+        ));
+    }
 
-        println!();
-        println!("{}", make_top_border(&columns));
+    println!();
+    println!("╔{}╗", outer_border_line);
+    for (index, (title, lines)) in sections.iter().enumerate() {
+        if index > 0 {
+            println!("╠{}╣", outer_border_line);
+        }
         println!(
             "{}",
-            format_banner(
-                &format!(
-                    "{} (last 10)",
-                    colorize("Recent Cron Runs", CYAN, opts.no_color)
-                ),
-                &columns,
+            format_inspect_outer_line(
+                &colorize(title, CYAN, opts.no_color),
+                outer_inner_width
             )
         );
-        println!("{}", make_separator_border(&columns));
-        println!("{}", format_header_row(&columns));
-        println!("{}", make_separator_border(&columns));
-
-        for (run_row, run) in rows.iter().zip(cron_status.recent_runs.iter().take(10)) {
-            let (_, status_color) = cron_run_status_label_and_color(run.status.as_ref());
-            let status_colored = colorize(&run_row.status, status_color, opts.no_color);
-            let values = vec![
-                run_row.started.clone(),
-                status_colored,
-                run_row.duration.clone(),
-                run_row.exit_code.clone(),
-            ];
-            println!("{}", format_row_cells(&values, &columns, opts.no_color));
+        if !lines.is_empty() {
+            println!("╟{}╢", "─".repeat(outer_inner_width));
+            for line in lines {
+                println!("{}", format_inspect_outer_line(line, outer_inner_width));
+            }
         }
-
-        println!("{}", make_bottom_border(&columns));
     }
+    println!("╚{}╝", outer_border_line);
 
     Ok(health)
 }
@@ -3987,6 +4190,7 @@ fn render_inspect(
 struct InspectProcessRow {
     tree_label: String,
     is_root: bool,
+    depth: usize,
     pid: u32,
     ppid: Option<u32>,
     user: String,
@@ -4003,10 +4207,11 @@ struct InspectProcessRow {
 }
 
 struct InspectCronRunRow {
-    started: String,
-    status: String,
-    duration: String,
-    exit_code: String,
+    run: String,
+    time: String,
+    user: String,
+    pid: String,
+    command: String,
 }
 
 #[derive(Default)]
@@ -4069,17 +4274,19 @@ const INSPECT_PROCESS_SHRINK_PRIORITY: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
     [0, 13, 3, 12, 6, 7, 8, 9, 4, 5, 2, 11, 10, 1];
 const INSPECT_PROC_CMD_MAX_DIFF: usize = 4;
 
-const INSPECT_CRON_COLUMN_COUNT: usize = 4;
+const INSPECT_CRON_COLUMN_COUNT: usize = 5;
 const INSPECT_CRON_COLUMN_TITLES: [&str; INSPECT_CRON_COLUMN_COUNT] =
-    ["STARTED", "STATUS", "DURATION", "EXIT CODE"];
+    ["RUN", "TIME", "USER", "PID", "CMD"];
 const INSPECT_CRON_COLUMN_ALIGNS: [Alignment; INSPECT_CRON_COLUMN_COUNT] = [
     Alignment::Left,
+    Alignment::Left,
+    Alignment::Left,
     Alignment::Right,
-    Alignment::Right,
-    Alignment::Right,
+    Alignment::Left,
 ];
-const INSPECT_CRON_SOFT_MIN_WIDTHS: [usize; INSPECT_CRON_COLUMN_COUNT] = [19, 7, 8, 9];
-const INSPECT_CRON_SHRINK_PRIORITY: [usize; INSPECT_CRON_COLUMN_COUNT] = [0, 2, 3, 1];
+const INSPECT_CRON_SOFT_MIN_WIDTHS: [usize; INSPECT_CRON_COLUMN_COUNT] =
+    [3, 19, 4, 3, 18];
+const INSPECT_CRON_SHRINK_PRIORITY: [usize; INSPECT_CRON_COLUMN_COUNT] = [4, 2, 1, 0, 3];
 
 fn inspect_process_content_budget(terminal_width: usize) -> usize {
     terminal_width.saturating_sub((3 * INSPECT_PROCESS_COLUMN_COUNT) + 1)
@@ -4290,10 +4497,11 @@ fn compute_inspect_cron_preferred_widths(
 ) -> [usize; INSPECT_CRON_COLUMN_COUNT] {
     let mut widths = INSPECT_CRON_COLUMN_TITLES.map(visible_length);
     for row in rows {
-        widths[0] = widths[0].max(visible_length(&row.started));
-        widths[1] = widths[1].max(visible_length(&row.status));
-        widths[2] = widths[2].max(visible_length(&row.duration));
-        widths[3] = widths[3].max(visible_length(&row.exit_code));
+        widths[0] = widths[0].max(visible_length(&row.run));
+        widths[1] = widths[1].max(visible_length(&row.time));
+        widths[2] = widths[2].max(visible_length(&row.user));
+        widths[3] = widths[3].max(visible_length(&row.pid));
+        widths[4] = widths[4].max(visible_length(&row.command));
     }
     widths
 }
@@ -4356,26 +4564,16 @@ fn compute_inspect_process_table_width(unit: &UnitStatus) -> usize {
     inspect_process_row_width(&widths)
 }
 
-fn cron_run_status_label_and_color(
-    status: Option<&CronExecutionStatus>,
-) -> (&'static str, &'static str) {
-    match status {
-        Some(CronExecutionStatus::Success) => ("Success", GREEN),
-        Some(CronExecutionStatus::Failed(_)) => ("Failed", RED),
-        Some(CronExecutionStatus::OverlapError) => ("Overlap", YELLOW_BOLD),
-        None => ("Running", BRIGHT_GREEN),
-    }
-}
-
 fn inspect_process_row_values(
     row: &InspectProcessRow,
     user_colors: &HashMap<String, &'static str>,
     no_color: bool,
 ) -> Vec<String> {
+    let virt_plain = format_bytes(row.virt_bytes);
     let virt_colored = if no_color {
         format_bytes(row.virt_bytes)
     } else {
-        format!("{}{}{}", GREEN, format_bytes(row.virt_bytes), RESET)
+        format!("{}{}{}", GREEN, virt_plain, RESET)
     };
 
     let user_colored = if no_color || row.user == "-" {
@@ -4385,59 +4583,122 @@ fn inspect_process_row_values(
         format!("{}{}{}", color, row.user, RESET)
     };
 
-    let proc_value = if row.is_root || no_color {
-        row.tree_label.clone()
-    } else {
-        colorize(&row.tree_label, GRAY, no_color)
-    };
+    let values = vec![
+        if row.is_root {
+            row.tree_label.clone()
+        } else {
+            tint_value_for_depth(row.tree_label.clone(), row.depth, no_color)
+        },
+        if row.is_root {
+            row.pid.to_string()
+        } else {
+            tint_value_for_depth(row.pid.to_string(), row.depth, no_color)
+        },
+        if row.is_root {
+            row.ppid
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        } else {
+            tint_value_for_depth(
+                row.ppid
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                row.depth,
+                no_color,
+            )
+        },
+        if row.is_root {
+            user_colored
+        } else {
+            tint_value_for_depth(row.user.clone(), row.depth, no_color)
+        },
+        if row.is_root {
+            row.pri
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        } else {
+            tint_value_for_depth(
+                row.pri
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                row.depth,
+                no_color,
+            )
+        },
+        if row.is_root {
+            row.nice
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        } else {
+            tint_value_for_depth(
+                row.nice
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                row.depth,
+                no_color,
+            )
+        },
+        if row.is_root {
+            virt_colored
+        } else {
+            tint_value_for_depth(virt_plain, row.depth, no_color)
+        },
+        if row.is_root {
+            format_bytes(row.res_bytes)
+        } else {
+            tint_value_for_depth(format_bytes(row.res_bytes), row.depth, no_color)
+        },
+        if row.is_root {
+            row.shared_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "-".to_string())
+        } else {
+            tint_value_for_depth(
+                row.shared_bytes
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "-".to_string()),
+                row.depth,
+                no_color,
+            )
+        },
+        if row.is_root {
+            row.state.clone()
+        } else {
+            tint_value_for_depth(row.state.clone(), row.depth, no_color)
+        },
+        if row.is_root {
+            format!("{:.1}", row.cpu_percent)
+        } else {
+            tint_value_for_depth(format!("{:.1}", row.cpu_percent), row.depth, no_color)
+        },
+        if row.is_root {
+            format!("{:.1}", row.mem_percent)
+        } else {
+            tint_value_for_depth(format!("{:.1}", row.mem_percent), row.depth, no_color)
+        },
+        if row.is_root {
+            row.cpu_time.clone()
+        } else {
+            tint_value_for_depth(row.cpu_time.clone(), row.depth, no_color)
+        },
+        if row.is_root {
+            row.command.clone()
+        } else {
+            tint_value_for_depth(row.command.clone(), row.depth, no_color)
+        },
+    ];
 
-    let cmd_value = if row.is_root || no_color {
-        row.command.clone()
-    } else {
-        colorize(&row.command, GRAY, no_color)
-    };
-
-    vec![
-        proc_value,
-        row.pid.to_string(),
-        row.ppid
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        user_colored,
-        row.pri
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        row.nice
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        virt_colored,
-        format_bytes(row.res_bytes),
-        row.shared_bytes
-            .map(format_bytes)
-            .unwrap_or_else(|| "-".to_string()),
-        row.state.clone(),
-        format!("{:.1}", row.cpu_percent),
-        format!("{:.1}", row.mem_percent),
-        row.cpu_time.clone(),
-        cmd_value,
-    ]
+    values
 }
 
 /// Renders a process table for the inspected unit and all discovered descendants.
-fn render_inspect_process_table(unit: &UnitStatus, no_color: bool, table_width: usize) {
-    let inner_width = table_width.saturating_sub(2).max(1);
-    let border_line = "═".repeat(inner_width);
-
-    println!("╔{}╗", border_line);
-    let table_title = colorize("Process Details Table", CYAN, no_color);
-    println!("{}", format_inspect_box_line(&table_title, inner_width));
-    println!("╠{}╣", border_line);
-
+fn collect_inspect_process_table_lines(
+    unit: &UnitStatus,
+    no_color: bool,
+    table_width: usize,
+) -> Vec<String> {
     let Some(root_runtime) = unit.process.as_ref() else {
-        let msg = colorize("Unit is not currently running", GRAY, no_color);
-        println!("{}", format_inspect_box_line(&msg, inner_width));
-        println!("╚{}╝", border_line);
-        return;
+        return vec![colorize("Unit is not currently running", GRAY, no_color)];
     };
 
     let mut system = System::new();
@@ -4463,18 +4724,40 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool, table_width: 
             tracked_root_pid,
             live_descendant_pid
         );
-        println!("{}", format_inspect_box_line(&msg, inner_width));
-        live_descendant_pid
+        let mut lines = vec![msg];
+        lines.extend(collect_inspect_process_table_lines_from_root(
+            unit,
+            no_color,
+            table_width,
+            &system,
+            live_descendant_pid,
+        ));
+        return lines;
     } else {
-        let msg = format!(
+        return vec![format!(
             "{}: {}",
             colorize("Root process no longer available", GRAY, no_color),
             tracked_root_pid
-        );
-        println!("{}", format_inspect_box_line(&msg, inner_width));
-        println!("╚{}╝", border_line);
-        return;
+        )];
     };
+
+    collect_inspect_process_table_lines_from_root(
+        unit,
+        no_color,
+        table_width,
+        &system,
+        root_pid,
+    )
+}
+
+fn collect_inspect_process_table_lines_from_root(
+    _unit: &UnitStatus,
+    no_color: bool,
+    table_width: usize,
+    system: &System,
+    root_pid: u32,
+) -> Vec<String> {
+    let mut lines = Vec::new();
 
     let users = Users::new_with_refreshed_list();
     let total_memory = system.total_memory() as f64;
@@ -4493,7 +4776,7 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool, table_width: 
     }
 
     let context = InspectProcessContext {
-        system: &system,
+        system,
         users: &users,
         children_by_parent: &children_by_parent,
         total_memory,
@@ -4513,10 +4796,11 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool, table_width: 
     let user_colors = assign_user_colors(&distinct_users);
 
     if rows.is_empty() {
-        let msg = colorize("No running process rows collected", GRAY, no_color);
-        println!("{}", format_inspect_box_line(&msg, inner_width));
-        println!("╚{}╝", border_line);
-        return;
+        return vec![colorize(
+            "No running process rows collected",
+            GRAY,
+            no_color,
+        )];
     }
 
     let mut widths = compute_inspect_process_preferred_widths(&rows);
@@ -4600,17 +4884,19 @@ fn render_inspect_process_table(unit: &UnitStatus, no_color: bool, table_width: 
         colorize("Process hierarchy", DIM_WHITE, no_color),
         colorize(&root_pid.to_string(), BRIGHT_WHITE, no_color)
     );
-    println!("{}", format_inspect_box_line(&hierarchy_msg, inner_width));
-    println!("╚{}╝", border_line);
-    println!();
-    println!("{}", make_top_border(&columns));
-    println!("{}", format_header_row(&columns));
-    println!("{}", make_separator_border(&columns));
+    lines.push(hierarchy_msg);
+    lines.push(String::new());
+    lines.push(strip_table_edges(&make_top_border(&columns)));
+    lines.push(strip_table_edges(&format_header_row(&columns)));
+    lines.push(strip_table_edges(&make_separator_border(&columns)));
     for row in &rows {
         let values = inspect_process_row_values(row, &user_colors, no_color);
-        println!("{}", format_row_cells(&values, &columns, no_color));
+        lines.push(strip_table_edges(&format_row_cells(
+            &values, &columns, no_color,
+        )));
     }
-    println!("{}", make_bottom_border(&columns));
+    lines.push(strip_table_edges(&make_bottom_border(&columns)));
+    lines
 }
 
 /// Finds the first live spawned descendant PID to use as inspect-table fallback root.
@@ -4675,6 +4961,7 @@ fn append_inspect_process_rows(
     rows.push(InspectProcessRow {
         tree_label,
         is_root,
+        depth: child_indent.len() / 3,
         pid,
         ppid,
         user,
