@@ -64,7 +64,10 @@ System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/
 $ sysg start                     # Default config (systemg.yaml)
 $ sysg start --config my.yaml    # Custom config
 $ sysg start --daemonize         # Background supervisor
+$ sysg start --stderr            # Pipe stderr to stdout (foreground only)
 ```
+
+> **💡 Tip:** The `--stderr` flag redirects stderr from all supervised processes to stdout with `[service_name:stderr]` prefix. Useful for debugging and CI/CD pipelines.
 
 Commands: `sysg stop`, `sysg restart`, `sysg status`, `sysg logs`
 

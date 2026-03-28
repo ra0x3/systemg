@@ -63,6 +63,7 @@ pub struct Supervisor {
     metrics_store: MetricsHandle,
     metrics_collector: Option<MetricsCollector>,
     spawn_manager: DynamicSpawnManager,
+    pipe_stderr: bool,
 }
 
 /// Parameters for spawning a child process.
@@ -131,7 +132,14 @@ impl Supervisor {
             metrics_store,
             metrics_collector: None,
             spawn_manager,
+            pipe_stderr: false,
         })
+    }
+
+    /// Sets whether to pipe stderr from services to stdout.
+    pub fn set_pipe_stderr(&mut self, pipe_stderr: bool) {
+        self.pipe_stderr = pipe_stderr;
+        self.daemon.set_pipe_stderr(pipe_stderr);
     }
 
     /// Runs the event loop.

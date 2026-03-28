@@ -1299,6 +1299,8 @@ struct DaemonContext {
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
     /// Flag indicating whether the monitoring loop should remain active.
     running: Arc<AtomicBool>,
+    /// Pipe stderr to stdout.
+    pipe_stderr: Arc<AtomicBool>,
     /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
     #[cfg(target_os = "linux")]
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -1403,6 +1405,8 @@ pub struct Daemon {
     /// Linux thread cancellation.
     #[cfg(target_os = "linux")]
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Pipe stderr to stdout.
+    pipe_stderr: Arc<AtomicBool>,
 }
 
 impl Daemon {
@@ -1419,6 +1423,7 @@ impl Daemon {
             manual_stop_flags: Arc::clone(&self.manual_stop_flags),
             restart_suppressed: Arc::clone(&self.restart_suppressed),
             running: Arc::clone(&self.running),
+            pipe_stderr: Arc::clone(&self.pipe_stderr),
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::clone(&self.thread_cancellation_tokens),
         }
@@ -1700,6 +1705,7 @@ impl Daemon {
             restart_suppressed: Arc::new(Mutex::new(HashSet::new())),
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
+            pipe_stderr: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1711,6 +1717,11 @@ impl Daemon {
         let pid_file = Arc::new(Mutex::new(PidFile::load()?));
         let state_file = Arc::new(Mutex::new(ServiceStateFile::load()?));
         Ok(Self::new(config, pid_file, state_file, detach_children))
+    }
+
+    /// Sets whether to pipe stderr from services to stdout.
+    pub fn set_pipe_stderr(&mut self, pipe_stderr: bool) {
+        self.pipe_stderr.store(pipe_stderr, Ordering::SeqCst);
     }
 
     /// Returns a reference to the configuration.
@@ -1852,6 +1863,7 @@ impl Daemon {
         working_dir: PathBuf,
         processes: Arc<Mutex<HashMap<String, Child>>>,
         detach_children: bool,
+        pipe_stderr: bool,
     ) -> Result<(u32, Option<libc::pid_t>), ProcessManagerError> {
         let command = &service_config.command;
         debug!("Launching service: '{service_name}' with command: `{command}`");
@@ -1936,7 +1948,29 @@ impl Daemon {
                     spawn_log_writer(service_name, out, "stdout");
                 }
                 if let Some(err) = stderr {
-                    spawn_log_writer(service_name, err, "stderr");
+                    if pipe_stderr {
+                        // When pipe_stderr is true, write stderr directly to parent's stdout
+                        use std::{
+                            io::{self, BufRead, BufReader, Write},
+                            thread,
+                        };
+
+                        let service_name_clone = service_name.to_string();
+                        thread::spawn(move || {
+                            let reader = BufReader::new(err);
+                            let mut stdout = io::stdout();
+                            for line in reader.lines().map_while(Result::ok) {
+                                let _ = writeln!(
+                                    stdout,
+                                    "[{}:stderr] {}",
+                                    service_name_clone, line
+                                );
+                                let _ = stdout.flush();
+                            }
+                        });
+                    } else {
+                        spawn_log_writer(service_name, err, "stderr");
+                    }
                 }
 
                 processes.lock()?.insert(service_name.to_string(), child);
@@ -3250,6 +3284,7 @@ impl Daemon {
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
+        let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -3260,6 +3295,7 @@ impl Daemon {
                 working_dir.clone(),
                 processes.clone(),
                 detach_children,
+                pipe_stderr,
             ) {
                 Ok((pid, pgid)) => {
                     let mut pid_guard = pid_file.lock()?;
@@ -3382,6 +3418,7 @@ impl Daemon {
         let pid_file = Arc::clone(&self.pid_file);
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
+        let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
 
         // Create a cancellation token for this service thread
         let cancellation_token = self
@@ -3399,6 +3436,7 @@ impl Daemon {
                 working_dir.clone(),
                 processes.clone(),
                 detach_children,
+                pipe_stderr,
             );
 
             match launch_result {
@@ -4109,6 +4147,7 @@ impl Daemon {
                 ctx.project_root.clone(),
                 Arc::clone(&ctx.processes),
                 ctx.detach_children,
+                ctx.pipe_stderr.load(Ordering::SeqCst),
             );
 
             match restart_result {

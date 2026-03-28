@@ -166,6 +166,21 @@ pub enum Commands {
         #[arg(long)]
         child: bool,
 
+        /// Pipe stderr output from supervised processes to stdout.
+        ///
+        /// When enabled, stderr from all supervised processes will be redirected to
+        /// the stdout of the sysg start command with the format: [service_name:stderr] <line>
+        ///
+        /// This is useful for:
+        /// • Debugging services during development
+        /// • Capturing all error output in CI/CD pipelines
+        /// • Monitoring service errors in real-time
+        ///
+        /// Note: This only affects foreground mode. In daemonized mode, stderr is still
+        /// written to log files.
+        #[arg(long)]
+        stderr: bool,
+
         /// Ad-hoc command and arguments to supervise without a manifest.
         #[arg(trailing_var_arg = true)]
         command: Vec<String>,

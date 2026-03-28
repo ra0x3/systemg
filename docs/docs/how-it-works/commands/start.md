@@ -89,6 +89,23 @@ services without an explicit `user` run as `nobody`.
 $ sudo sysg start --sys --drop-privileges
 ```
 
+### `--stderr`
+
+Pipe stderr output from supervised processes to stdout. In foreground mode, stderr from all services is redirected to stdout with `[service_name:stderr]` prefix.
+
+```sh
+$ sysg start --stderr
+```
+
+:::info
+The `--stderr` flag is particularly useful for:
+- **Development**: See error output immediately while debugging
+- **CI/CD Pipelines**: Capture all output in a single stream
+- **Real-time Monitoring**: Watch for errors as they happen
+
+Note: This flag only affects foreground mode. In daemonized mode, stderr is still written to log files in `~/.local/share/systemg/logs/`.
+:::
+
 ### `--log-level`
 
 Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
@@ -133,6 +150,20 @@ See detailed output during startup:
 
 ```sh
 $ sysg start --log-level debug
+```
+
+### Capture stderr in foreground
+
+Useful for development and debugging:
+
+```sh
+$ sysg start --stderr
+```
+
+Output will show stderr lines with service prefix:
+```
+[api:stderr] Error: Database connection failed
+[worker:stderr] Warning: Queue full, retrying...
 ```
 
 ### Unit mode (no config file)

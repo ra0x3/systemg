@@ -112,6 +112,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             ttl,
             parent_pid,
             child,
+            stderr,
             command,
         } => {
             if let Some(child_start) = resolve_child_start(
@@ -167,10 +168,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     "Starting systemg supervisor with config {:?}",
                     start_target.config_path
                 );
-                start_supervisor_daemon(start_target.config_path, start_target.service)?;
+                start_supervisor_daemon(
+                    start_target.config_path,
+                    start_target.service,
+                    stderr,
+                )?;
             } else {
                 register_signal_handler()?;
-                start_foreground(start_target.config_path, start_target.service)?;
+                start_foreground(start_target.config_path, start_target.service, stderr)?;
             }
         }
         Commands::Stop { service, config } => {
@@ -248,7 +253,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 send_control_command(command)?;
             } else if daemonize {
                 let config_path = resolve_config_path(&config)?;
-                start_supervisor_daemon(config_path, None)?;
+                start_supervisor_daemon(config_path, None, false)?;
             } else {
                 warn!(
                     "No running supervisor detected; executing restart in local one-shot mode. \
@@ -1170,6 +1175,7 @@ mod tests {
             ttl: None,
             parent_pid: None,
             child: false,
+            stderr: false,
             command: vec![],
         }));
         assert!(drop_privileges_applies_to_command(&Commands::Restart {
@@ -5498,8 +5504,10 @@ fn init_logging(args: &Cli, use_file: bool) {
 fn start_foreground(
     config_path: PathBuf,
     service: Option<String>,
+    pipe_stderr: bool,
 ) -> Result<(), Box<dyn Error>> {
     let mut supervisor = Supervisor::new(config_path, false, service)?;
+    supervisor.set_pipe_stderr(pipe_stderr);
     supervisor.run()?;
     Ok(())
 }
@@ -5507,10 +5515,12 @@ fn start_foreground(
 fn start_supervisor_daemon(
     config_path: PathBuf,
     service: Option<String>,
+    pipe_stderr: bool,
 ) -> Result<(), Box<dyn Error>> {
     daemonize_systemg()?;
 
     let mut supervisor = Supervisor::new(config_path, false, service)?;
+    supervisor.set_pipe_stderr(pipe_stderr);
     if let Err(err) = supervisor.run() {
         error!("Supervisor exited with error: {err}");
     }
