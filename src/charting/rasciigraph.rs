@@ -6,9 +6,13 @@ use std::vec::Vec;
 /// Configuration for ASCII graph plotting
 #[derive(Default)]
 pub struct Config {
+    /// Width of the graph for data point interpolation.
     width: u32,
+    /// Height of the graph in terminal rows.
     height: u32,
+    /// Offset for Y-axis labels from the left edge.
     offset: u32,
+    /// Caption text displayed below the graph.
     caption: String,
     /// Number of decimal places for Y-axis labels
     y_precision: Option<i32>,

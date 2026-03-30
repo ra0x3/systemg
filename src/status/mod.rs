@@ -75,8 +75,11 @@ pub enum StatusError {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OverallHealth {
+    /// All services are running as expected.
     Healthy,
+    /// Some services are not functioning properly, but system is operational.
     Degraded,
+    /// Critical services are failing, system health is compromised.
     Failing,
 }
 
@@ -84,8 +87,11 @@ pub enum OverallHealth {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitKind {
+    /// Regular service managed by the supervisor.
     Service,
+    /// Cron-scheduled job that runs at specified intervals.
     Cron,
+    /// Orphaned process from a removed or renamed service.
     Orphaned,
 }
 
@@ -93,9 +99,13 @@ pub enum UnitKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitHealth {
+    /// Unit is operating normally.
     Healthy,
+    /// Unit is operational but experiencing issues.
     Degraded,
+    /// Unit is not functioning properly.
     Failing,
+    /// Unit is currently inactive or stopped.
     Inactive,
 }
 
@@ -1283,12 +1293,16 @@ pub fn format_elapsed(total_seconds: u64) -> String {
     }
 }
 
+/// Represents the state of a process in the system.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessState {
+    /// Process is currently running.
     Running,
+    /// Process has terminated but not been reaped by its parent.
     Zombie,
+    /// Process is not found in the process table.
     Missing,
 }
 

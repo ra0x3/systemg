@@ -10,7 +10,7 @@ use tracing::level_filters::LevelFilter;
 pub struct LogLevelArg(LevelFilter);
 
 impl LogLevelArg {
-    /// String representation suitable for `RUST_LOG`.
+    /// Returns the string representation suitable for `RUST_LOG`.
     pub fn as_str(&self) -> &'static str {
         match self.0 {
             LevelFilter::OFF => "off",
@@ -79,7 +79,7 @@ pub enum LogKind {
 }
 
 impl LogKind {
-    /// String representation for file paths and display.
+    /// Returns the string representation for file paths and display.
     pub fn as_str(&self) -> &'static str {
         match self {
             LogKind::Stdout => "stdout",

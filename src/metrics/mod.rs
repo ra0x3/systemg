@@ -31,31 +31,47 @@ const DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 /// Sample collected for a managed unit at a specific timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricSample {
+    /// Timestamp when this sample was collected.
     pub timestamp: DateTime<Utc>,
+    /// CPU usage percentage (0-100+ for multi-core).
     pub cpu_percent: f32,
+    /// Resident set size in bytes.
     pub rss_bytes: u64,
+    /// Total bytes read from disk.
     pub io_read_bytes: u64,
+    /// Total bytes written to disk.
     pub io_write_bytes: u64,
+    /// Total bytes received from network.
     pub net_rx_bytes: u64,
+    /// Total bytes transmitted to network.
     pub net_tx_bytes: u64,
 }
 
 /// Summary statistics derived from recent samples.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSummary {
+    /// Most recent CPU usage percentage.
     pub latest_cpu_percent: f32,
+    /// Average CPU usage across all samples.
     pub average_cpu_percent: f32,
+    /// Maximum CPU usage observed.
     pub max_cpu_percent: f32,
+    /// Most recent resident set size in bytes.
     pub latest_rss_bytes: u64,
+    /// Total number of samples used for statistics.
     pub samples: usize,
 }
 
 /// Configuration for runtime metrics collection.
 #[derive(Debug, Clone)]
 pub struct MetricsSettings {
+    /// How long to retain metrics in memory.
     pub retention: Duration,
+    /// Interval between metric samples.
     pub sample_interval: Duration,
+    /// Maximum memory used for metrics storage.
     pub max_memory_bytes: usize,
+    /// Optional spillover configuration for disk persistence.
     pub spillover: Option<SpilloverSettings>,
 }
 
@@ -73,17 +89,24 @@ impl Default for MetricsSettings {
 /// Spillover configuration used to persist evicted samples to disk.
 #[derive(Debug, Clone)]
 pub struct SpilloverSettings {
+    /// Directory where spillover segments are written.
     pub directory: PathBuf,
+    /// Maximum total bytes allowed for spillover storage.
     pub max_bytes: u64,
+    /// Target size for individual spillover segment files.
     pub segment_bytes: u64,
 }
 
+/// Errors that can occur during metrics operations.
 #[derive(Debug, Error)]
 pub enum MetricsError {
+    /// Failed to create spillover directory.
     #[error("failed to create spillover directory: {0}")]
     CreateDir(std::io::Error),
+    /// Failed to write spillover segment to disk.
     #[error("failed to write spillover segment: {0}")]
     SpilloverWrite(std::io::Error),
+    /// Failed to serialize spillover record.
     #[error("failed to serialise spillover record: {0}")]
     SpilloverSerialize(serde_json::Error),
 }
@@ -440,6 +463,7 @@ struct SpilloverRecord<'a> {
     sample: &'a MetricSample,
 }
 
+/// Creates a new shared, thread-safe metrics store with the given settings.
 pub fn shared_store(settings: MetricsSettings) -> Result<MetricsHandle, MetricsError> {
     Ok(Arc::new(RwLock::new(MetricsStore::new(settings)?)))
 }
@@ -447,14 +471,18 @@ pub fn shared_store(settings: MetricsSettings) -> Result<MetricsHandle, MetricsE
 /// Unit metadata used by the collector to emit samples.
 #[derive(Debug)]
 pub struct UnitTarget {
+    /// Unique hash identifying the unit.
     pub hash: String,
+    /// Process ID if the unit has a running process.
     pub pid: Option<u32>,
 }
 
 /// Result of sampling a unit in the collector.
 #[derive(Debug)]
 pub struct CollectedSample {
+    /// Hash of the unit that was sampled.
     pub hash: String,
+    /// Collected metric sample data.
     pub sample: MetricSample,
 }
 

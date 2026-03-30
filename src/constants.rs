@@ -5,10 +5,6 @@
 
 use std::{cmp::Ordering, str::FromStr, time::Duration};
 
-// ============================================================================
-// Lock Management and Ordering
-// ============================================================================
-
 /// Typed lock abstraction for enforcing proper lock acquisition order in the daemon.
 ///
 /// This enum ensures that locks are always acquired in a consistent order to prevent
@@ -100,10 +96,6 @@ impl Ord for DaemonLock {
     }
 }
 
-// ============================================================================
-// File System Constants
-// ============================================================================
-
 /// Name of the PID file stored in the state directory.
 /// Contains mappings of service names to process IDs.
 pub const PID_FILE_NAME: &str = "pid.xml";
@@ -115,19 +107,11 @@ pub const PID_LOCK_SUFFIX: &str = ".lock";
 /// Contains the current state and metadata for all managed services.
 pub const STATE_FILE_NAME: &str = "state.xml";
 
-// ============================================================================
-// Shell Execution Constants
-// ============================================================================
-
 /// Default shell used for executing service commands and hooks.
 pub const DEFAULT_SHELL: &str = "sh";
 
 /// Shell argument flag for executing command strings.
 pub const SHELL_COMMAND_FLAG: &str = "-c";
-
-// ============================================================================
-// Process Management Timing
-// ============================================================================
 
 /// Number of checks to perform when waiting for a process to become ready.
 /// Used in conjunction with PROCESS_CHECK_INTERVAL.
@@ -149,10 +133,6 @@ pub const POST_RESTART_VERIFY_ATTEMPTS: usize = 2;
 /// Delay between post-restart verification attempts.
 pub const POST_RESTART_VERIFY_DELAY: Duration = Duration::from_millis(200);
 
-// ============================================================================
-// Logging and Output Constants
-// ============================================================================
-
 /// Maximum number of log lines to display in status output.
 /// Prevents overwhelming the terminal with excessive log data.
 pub const MAX_STATUS_LOG_LINES: usize = 50;
@@ -160,21 +140,9 @@ pub const MAX_STATUS_LOG_LINES: usize = 50;
 /// Buffer size for log output streams (stdout/stderr).
 pub const LOG_BUFFER_SIZE: usize = 8192;
 
-// ============================================================================
-// Hook Execution Constants
-// ============================================================================
-
 /// Format string for hook labels combining stage and outcome.
 /// Example: "pre_start.pending", "post_start.success"
 pub const HOOK_LABEL_FORMAT: &str = "{}.{}";
-
-// ============================================================================
-// Linux-specific Constants
-// ============================================================================
-
-// ============================================================================
-// Error Messages and Formats
-// ============================================================================
 
 /// Error message for malformed environment file lines.
 pub const ENV_FILE_MALFORMED_MSG: &str =
@@ -194,10 +162,6 @@ pub const INSUFFICIENT_SIGNAL_PERMISSIONS_MSG: &str =
 /// Error message for process tree termination failures.
 pub const PROCESS_TREE_TERM_FAILURE_MSG: &str =
     "Failed to terminate process tree rooted at PID {} for '{}'";
-
-// ============================================================================
-// Service Management Constants
-// ============================================================================
 
 /// Deployment strategies for service restarts.
 ///

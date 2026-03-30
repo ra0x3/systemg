@@ -5,6 +5,10 @@ use std::sync::{Mutex, OnceLock};
 /// to prevent race conditions between parallel test executions.
 pub static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// Acquires the global environment lock for safe environment variable modifications in tests.
+///
+/// This function should be called by any test that modifies environment variables
+/// to prevent race conditions in parallel test execution.
 pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK
         .get_or_init(|| Mutex::new(()))
