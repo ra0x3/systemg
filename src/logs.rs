@@ -9,7 +9,7 @@ use std::{
     collections::BTreeSet,
     env,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -183,6 +183,14 @@ fn resolve_tail_targets(
     Ok((stdout_path, stderr_path))
 }
 
+fn write_forwarded_console_line(
+    mut writer: impl Write,
+    prefix: &str,
+    line: &str,
+) -> std::io::Result<()> {
+    writeln!(writer, "{prefix}{line}")
+}
+
 /// Creates the log directory if it doesn't exist and spawns a thread to write logs to file.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
     let path = get_log_path(service, kind);
@@ -202,7 +210,20 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
 
         let reader = BufReader::new(reader);
         for line in reader.lines().map_while(Result::ok) {
-            debug!("[{service_label}] {line}");
+            if std::io::stderr().is_terminal() {
+                if let Err(err) = write_forwarded_console_line(
+                    std::io::stderr(),
+                    &format!("[{service_label}] "),
+                    &line,
+                ) {
+                    eprintln!(
+                        "Warning: Failed to write forwarded log for [{}]: {}",
+                        service_label, err
+                    );
+                }
+            } else {
+                debug!("[{service_label}] {line}");
+            }
             let _ = writeln!(file, "{line}");
         }
     });
@@ -746,5 +767,19 @@ mod tests {
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn forwarded_console_line_preserves_ansi_bytes() {
+        let mut output = Vec::new();
+        let line = "\u{1b}[34mDEBUG\u{1b}[0m child log";
+
+        write_forwarded_console_line(&mut output, "[svc] ", line)
+            .expect("console line should write");
+
+        assert_eq!(
+            String::from_utf8(output).expect("valid utf8"),
+            format!("[svc] {line}\n")
+        );
     }
 }
