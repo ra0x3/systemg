@@ -128,6 +128,20 @@ fn touch_log_file(path: &Path) {
     let _ = OpenOptions::new().create(true).append(true).open(path);
 }
 
+fn truncate_log_file(path: &Path) -> Result<(), LogsManagerError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn process_fds_present(pid: u32) -> bool {
     let stdout_fd_path = format!("/proc/{pid}/fd/1");
@@ -344,6 +358,43 @@ impl LogManager {
             kind,
             TailMode::OneShot,
         )
+    }
+
+    /// Clears stdout and stderr logs for a specific service.
+    pub fn clear_service_logs(&self, service_name: &str) -> Result<(), LogsManagerError> {
+        let stdout_path = resolve_log_path(service_name, "stdout");
+        let stderr_path = resolve_log_path(service_name, "stderr");
+
+        truncate_log_file(&stdout_path)?;
+        truncate_log_file(&stderr_path)?;
+
+        Ok(())
+    }
+
+    /// Clears all known service and supervisor log files.
+    pub fn clear_all_logs(&self) -> Result<(), LogsManagerError> {
+        let log_dir = runtime::log_dir();
+        fs::create_dir_all(&log_dir)?;
+
+        for entry in fs::read_dir(&log_dir)? {
+            let path = entry?.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if file_name == "supervisor.log"
+                || file_name.ends_with("_stdout.log")
+                || file_name.ends_with("_stderr.log")
+            {
+                truncate_log_file(&path)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Platform-specific implementation for showing logs.

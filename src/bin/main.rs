@@ -410,6 +410,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
         }
         Commands::Logs {
             config,
+            clear,
             service,
             lines,
             kind,
@@ -428,6 +429,21 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
             let manager = LogManager::new(pid.clone());
+
+            if clear {
+                match service.as_deref() {
+                    Some(service_name) => {
+                        info!("Clearing logs for service: {service_name}");
+                        manager.clear_service_logs(service_name)?;
+                    }
+                    None => {
+                        info!("Clearing logs for all services");
+                        manager.clear_all_logs()?;
+                    }
+                }
+                return Ok(());
+            }
+
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
                 match service.as_ref() {
                     Some(service_name) => {

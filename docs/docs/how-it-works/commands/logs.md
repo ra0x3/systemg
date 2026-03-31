@@ -16,6 +16,7 @@ $ sysg logs
 | Option | Description |
 |--------|------------|
 | `--config` | Path to configuration file |
+| `--clear` | Reset log files instead of displaying them |
 | `--service` | The name of the service whose logs should be displayed (optional) |
 | `--lines` | Number of lines to show (default: 50) |
 | `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stderr) |
@@ -36,6 +37,22 @@ $ sysg logs
 ```sh
 $ sysg logs --service api
 ```
+
+### Clear logs for a specific service
+
+```sh
+$ sysg logs --service api --clear
+```
+
+This truncates `api`'s current `stdout` and `stderr` log files in place and does not print logs.
+
+### Clear logs for all services
+
+```sh
+$ sysg logs --clear
+```
+
+This truncates all service log files, plus `supervisor.log`, in place and does not print logs.
 
 ### View stderr logs
 

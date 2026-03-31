@@ -272,6 +272,10 @@ pub enum Commands {
         #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
 
+        /// Clear log files instead of displaying them.
+        #[arg(long)]
+        clear: bool,
+
         /// The name of the service whose logs should be displayed (optional).
         #[arg(short, long)]
         service: Option<String>,
@@ -362,6 +366,31 @@ mod tests {
         match cli.command {
             Commands::Logs { stream, .. } => {
                 assert_eq!(stream.as_deref(), Some("1s"))
+            }
+            _ => panic!("expected logs command"),
+        }
+    }
+
+    #[test]
+    fn logs_accepts_clear_for_service() {
+        let cli = Cli::try_parse_from(["sysg", "logs", "--service", "demo", "--clear"])
+            .unwrap();
+        match cli.command {
+            Commands::Logs { clear, service, .. } => {
+                assert!(clear);
+                assert_eq!(service.as_deref(), Some("demo"));
+            }
+            _ => panic!("expected logs command"),
+        }
+    }
+
+    #[test]
+    fn logs_accepts_clear_without_service() {
+        let cli = Cli::try_parse_from(["sysg", "logs", "--clear"]).unwrap();
+        match cli.command {
+            Commands::Logs { clear, service, .. } => {
+                assert!(clear);
+                assert_eq!(service, None);
             }
             _ => panic!("expected logs command"),
         }
