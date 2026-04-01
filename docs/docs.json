@@ -1,0 +1,125 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "systemg",
+  "description": "A general-purpose program composer.",
+  "colors": {
+    "primary": "#497bd8",
+    "light": "#679bfc",
+    "dark": "#4463a0"
+  },
+  "favicon": "https://i.imgur.com/hqwS335.png",
+  "logo": {
+    "light": "https://i.imgur.com/BwszZ66.png",
+    "dark": "https://i.imgur.com/BwszZ66.png",
+    "href": "https://docs.sysg.dev"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Documentation",
+        "href": "/intro"
+      },
+      {
+        "label": "GitHub",
+        "href": "https://github.com/ra0x3/systemg"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Quickstart",
+      "href": "/quickstart"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/ra0x3/systemg",
+      "website": "https://docs.sysg.dev"
+    },
+    "links": [
+      {
+        "header": "Docs",
+        "items": [
+          {
+            "label": "Introduction",
+            "href": "/intro"
+          },
+          {
+            "label": "Quickstart",
+            "href": "/quickstart"
+          },
+          {
+            "label": "Examples",
+            "href": "/examples"
+          }
+        ]
+      },
+      {
+        "header": "More",
+        "items": [
+          {
+            "label": "GitHub",
+            "href": "https://github.com/ra0x3/systemg"
+          },
+          {
+            "label": "docs.sysg.dev",
+            "href": "https://docs.sysg.dev"
+          }
+        ]
+      }
+    ]
+  },
+  "navigation": {
+    "pages": [
+      "index",
+      "intro",
+      "installation",
+      "quickstart",
+      {
+        "group": "How It Works",
+        "pages": [
+          "how-it-works/index",
+          "how-it-works/configuration",
+          "how-it-works/cron",
+          "how-it-works/webhooks",
+          "how-it-works/state",
+          "how-it-works/logs",
+          "how-it-works/privileged-mode",
+          {
+            "group": "Commands",
+            "pages": [
+              "how-it-works/commands/index",
+              "how-it-works/commands/start",
+              "how-it-works/commands/stop",
+              "how-it-works/commands/restart",
+              "how-it-works/commands/logs",
+              "how-it-works/commands/status",
+              "how-it-works/commands/inspect",
+              "how-it-works/commands/purge",
+              "how-it-works/commands/spawn",
+              "how-it-works/commands/start-vs-spawn"
+            ]
+          }
+        ]
+      },
+      "security",
+      "philosophy",
+      {
+        "group": "Examples",
+        "pages": [
+          "examples/index",
+          "examples/hello-world",
+          "examples/crud",
+          "examples/units",
+          "examples/orchestrator"
+        ]
+      }
+    ]
+  },
+  "redirects": [
+    {
+      "source": "/docs/:slug*",
+      "destination": "/:slug*"
+    }
+  ]
+}

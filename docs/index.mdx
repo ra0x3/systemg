@@ -1,0 +1,66 @@
+---
+title: systemg
+description: A general-purpose program composer.
+---
+
+# systemg
+
+A general-purpose program composer.
+
+systemg runs your service graph from a single YAML file.
+
+<CodeGroup>
+
+```bash Install
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+```
+
+```bash Verify
+sysg --version
+```
+
+</CodeGroup>
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/quickstart">
+    Launch your first service graph in minutes.
+  </Card>
+  <Card title="Examples" href="/examples">
+    Start from working examples for real-world service layouts.
+  </Card>
+</CardGroup>
+
+## What systemg does
+
+Suppose you're building an API that needs PostgreSQL, Redis, and a background
+worker. Instead of starting each service manually in different terminals, you
+define them once in a YAML file. systemg starts everything in the right order,
+restarts crashed services, and provides unified logging.
+
+```yaml
+version: "1"
+services:
+  postgres:
+    command: "postgres -D /var/lib/postgresql/data"
+  redis:
+    command: "redis-cli ping"
+  api:
+    command: "python app.py"
+    depends_on: ["postgres", "redis"]
+  worker:
+    command: "celery worker -A tasks"
+    depends_on: ["redis"]
+  backup:
+    command: "pg_dump mydb > /backups/db-$(date +%Y%m%d).sql"
+    cron: "0 2 * * *"
+    timezone: "America/New_York"
+    on_success: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup completed successfully\"}'"
+    on_failure: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
+```
+
+## Built for production
+
+- Start services in dependency order.
+- Restart failed processes with configurable backoff.
+- Keep service logs isolated and predictable.
+- Run everything from a single binary.

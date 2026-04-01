@@ -1,0 +1,86 @@
+---
+title: status
+---
+
+# status
+
+Check the health of running services with an interactive table interface.
+
+```sh
+$ sysg status
+```
+
+## Interactive Mode
+
+By default, `sysg status` displays an interactive table where you can:
+- **Tab** or **↓** (Down arrow) - Move to the next service
+- **Shift+Tab** or **↑** (Up arrow) - Move to the previous service
+- **Enter** - Open the inspect view for the selected service
+- **q** or **ESC** - Exit the status view
+
+The selected row is highlighted with a white background for easy visibility.
+
+## Options
+
+| Option | Description |
+|--------|------------|
+| `--config` | Path to configuration file |
+| `--service` | Show specific service details |
+| `--all` | Show all services including orphaned state (services not in current config) |
+| `--sys` | Opt into privileged system mode. Requires running as root |
+| `--json` | Emit machine-readable JSON output instead of a table (disables interactive mode) |
+| `--no-color` | Disable ANSI colors in output |
+| `--stream` | Continuously refresh status at the provided interval (e.g., `5`, `1s`, `2m`) (disables interactive mode) |
+| `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+
+## Examples
+
+### View all services
+
+```sh
+$ sysg status
+```
+
+```
+SERVICE    STATUS    PID     UPTIME  CPU%  MEM%
+postgres   running   14823   2h3m    0.1   2.3
+redis      running   14824   2h3m    0.0   0.8
+api        running   14826   2h3m    1.2   4.5
+worker     running   14827   2h3m    0.3   3.1
+```
+
+### View specific service
+
+```sh
+$ sysg status --service api
+```
+
+```
+Service: api
+Status: running
+PID: 14826
+Uptime: 2h3m
+CPU: 1.2%
+Memory: 4.5%
+Command: python app.py
+```
+
+### Stream status updates
+
+```sh
+$ sysg status --stream 5
+```
+
+## Output fields
+
+- **SERVICE** - Service name from configuration
+- **STATUS** - `running`, `stopped`, or `failed`
+- **PID** - Process ID
+- **UPTIME** - Time since service started
+- **CPU%** - Current CPU usage
+- **MEM%** - Current memory usage
+
+## See also
+
+- [`logs`](logs) - View service output
+- [`restart`](restart) - Restart services

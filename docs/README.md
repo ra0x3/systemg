@@ -1,41 +1,24 @@
-# Website
+# Documentation
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+This directory contains the Mintlify documentation site for `docs.sysg.dev`.
 
-### Installation
+## Structure
 
-```
-$ yarn
-```
+- `docs.json`: Mintlify site configuration, navigation, branding, and theme.
+- `index.mdx`: Landing page for the docs site.
+- `*.mdx`, `how-it-works/`, `examples/`: Documentation content.
 
-### Local Development
+## Hosting
 
-```
-$ yarn start
-```
+The documentation is intended to be served by Mintlify from this `docs/`
+subdirectory of the repository.
 
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
+## Theme
 
-### Build
+The current Mintlify theme preserves the existing project blue palette centered
+on `#497bd8`.
 
-```
-$ yarn build
-```
+## Content Scope
 
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-### Deployment
-
-Using SSH:
-
-```
-$ USE_SSH=true yarn deploy
-```
-
-Not using SSH:
-
-```
-$ GIT_USER=<Your GitHub username> yarn deploy
-```
-
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+The old Docusaurus blog has been intentionally removed as part of the Mintlify
+migration.
