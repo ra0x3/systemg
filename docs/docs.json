@@ -8,17 +8,11 @@
     "light": "#679bfc",
     "dark": "#4463a0"
   },
-  "favicon": "https://i.imgur.com/hqwS335.png",
-  "logo": {
-    "light": "https://i.imgur.com/BwszZ66.png",
-    "dark": "https://i.imgur.com/BwszZ66.png",
-    "href": "https://docs.sysg.dev"
-  },
   "navbar": {
     "links": [
       {
         "label": "Documentation",
-        "href": "/intro"
+        "href": "https://sysg.dev/intro"
       },
       {
         "label": "GitHub",
@@ -28,13 +22,13 @@
     "primary": {
       "type": "button",
       "label": "Quickstart",
-      "href": "/quickstart"
+      "href": "https://sysg.dev/quickstart"
     }
   },
   "footer": {
     "socials": {
       "github": "https://github.com/ra0x3/systemg",
-      "website": "https://docs.sysg.dev"
+      "website": "https://sysg.dev"
     },
     "links": [
       {
@@ -42,15 +36,15 @@
         "items": [
           {
             "label": "Introduction",
-            "href": "/intro"
+            "href": "https://sysg.dev/intro"
           },
           {
             "label": "Quickstart",
-            "href": "/quickstart"
+            "href": "https://sysg.dev/quickstart"
           },
           {
             "label": "Examples",
-            "href": "/examples"
+            "href": "https://sysg.dev/examples"
           }
         ]
       },
@@ -63,7 +57,7 @@
           },
           {
             "label": "docs.sysg.dev",
-            "href": "https://docs.sysg.dev"
+            "href": "https://sysg.dev"
           }
         ]
       }

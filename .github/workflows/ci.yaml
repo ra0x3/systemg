@@ -134,11 +134,12 @@ jobs:
           node-version: "20.17.0"
 
       - name: Install Mintlify CLI
-        run: npm install --global mint
+        # Pin Mintlify to keep docs validation reproducible across CI runs.
+        run: npm install --global mintlify@4.0.373
 
       - name: Validate Docs
         working-directory: docs
-        run: mint validate
+        run: mintlify broken-links
 
   rustdoc:
     name: Rust Doc
