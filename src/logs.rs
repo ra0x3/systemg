@@ -9,13 +9,14 @@ use std::{
     fs::{self, OpenOptions},
     io::{IsTerminal, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc, mpsc::RecvTimeoutError},
     thread,
+    time::Duration,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     os::unix::{
-        io::{FromRawFd, IntoRawFd},
+        io::{AsRawFd, FromRawFd, IntoRawFd},
         net::UnixStream,
     },
     process::{Command, Stdio},
@@ -104,6 +105,35 @@ fn subscribe_live_log(service: &str, kind: &str) -> mpsc::Receiver<Vec<u8>> {
         entry.subscribers.push(tx);
     }
     rx
+}
+
+/// Returns whether the client side of a Unix socket has disconnected.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn socket_peer_disconnected(stream: &UnixStream) -> bool {
+    let fd = stream.as_raw_fd();
+    let mut byte = 0_u8;
+    let result = unsafe {
+        libc::recv(
+            fd,
+            &mut byte as *mut u8 as *mut libc::c_void,
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+
+    if result == 0 {
+        return true;
+    }
+
+    if result < 0 {
+        let err = std::io::Error::last_os_error();
+        return !matches!(
+            err.raw_os_error(),
+            Some(code) if code == libc::EAGAIN || code == libc::EWOULDBLOCK
+        );
+    }
+
+    false
 }
 
 /// Normalizes this item.
@@ -630,9 +660,30 @@ impl LogManager {
                 }
                 if matches!(mode, TailMode::Follow) {
                     let receiver = subscribe_live_log(service_name, kind_name);
-                    while let Ok(chunk) = receiver.recv() {
-                        socket.write_all(&chunk)?;
-                        socket.flush()?;
+                    loop {
+                        match receiver.recv_timeout(Duration::from_millis(250)) {
+                            Ok(chunk) => match socket.write_all(&chunk) {
+                                Ok(()) => {
+                                    socket.flush()?;
+                                }
+                                Err(err)
+                                    if matches!(
+                                        err.kind(),
+                                        std::io::ErrorKind::BrokenPipe
+                                            | std::io::ErrorKind::ConnectionReset
+                                    ) =>
+                                {
+                                    break;
+                                }
+                                Err(err) => return Err(err.into()),
+                            },
+                            Err(RecvTimeoutError::Timeout) => {
+                                if socket_peer_disconnected(&socket) {
+                                    break;
+                                }
+                            }
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        }
                     }
                 }
                 return Ok(());

@@ -648,12 +648,41 @@ impl Supervisor {
                             follow,
                         } = command
                         {
-                            if let Err(err) = self.handle_logs_command(
-                                service, lines, &kind, follow, &stream,
-                            ) {
-                                error!("Supervisor logs command failed: {err}");
-                                let _ = writeln!(stream, "{err}");
-                            }
+                            let snapshot = match self.collect_live_snapshot() {
+                                Ok(snapshot) => {
+                                    self.status_cache.replace(snapshot.clone());
+                                    snapshot
+                                }
+                                Err(err) => {
+                                    error!("Supervisor logs command failed: {err}");
+                                    let _ = writeln!(stream, "{err}");
+                                    continue;
+                                }
+                            };
+                            let pid_file = self.daemon.pid_file_handle();
+                            let mut log_stream = match stream.try_clone() {
+                                Ok(stream) => stream,
+                                Err(err) => {
+                                    error!(
+                                        "Failed to clone supervisor log stream: {err}"
+                                    );
+                                    continue;
+                                }
+                            };
+                            thread::spawn(move || {
+                                if let Err(err) = Supervisor::handle_logs_command(
+                                    snapshot,
+                                    pid_file,
+                                    service,
+                                    lines,
+                                    &kind,
+                                    follow,
+                                    &log_stream,
+                                ) {
+                                    error!("Supervisor logs command failed: {err}");
+                                    let _ = writeln!(log_stream, "{err}");
+                                }
+                            });
                             continue;
                         }
                         match self.handle_command(command) {
@@ -698,16 +727,14 @@ impl Supervisor {
 
     /// Streams logs through the supervisor-owned control socket.
     fn handle_logs_command(
-        &mut self,
+        snapshot: crate::status::StatusSnapshot,
+        pid_file: std::sync::Arc<std::sync::Mutex<crate::daemon::PidFile>>,
         service: Option<String>,
         lines: usize,
         kind: &str,
         follow: bool,
         stream: &std::os::unix::net::UnixStream,
     ) -> Result<(), SupervisorError> {
-        let snapshot = self.collect_live_snapshot()?;
-        self.status_cache.replace(snapshot.clone());
-        let pid_file = self.daemon.pid_file_handle();
         let manager = LogManager::new(pid_file);
         let requested_kind = Some(kind);
 

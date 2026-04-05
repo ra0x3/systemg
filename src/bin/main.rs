@@ -16,7 +16,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     terminal,
 };
-use libc::{SIGKILL, SIGTERM, getpgrp, getppid, killpg};
+use libc::{SIGKILL, SIGTERM, getppid};
 use nix::{
     sys::signal,
     unistd::{Pid, Uid},
@@ -1775,6 +1775,106 @@ fn force_kill(pid: libc::pid_t) {
     let _ = wait_for_supervisor_exit(pid, Duration::from_secs(2));
 }
 
+/// Returns whether the tracked root PID is still alive.
+fn tracked_service_alive(pid: libc::pid_t) -> bool {
+    let target = Pid::from_raw(pid);
+    match signal::kill(target, None) {
+        Ok(_) => true,
+        Err(err) => err != nix::Error::from(nix::errno::Errno::ESRCH),
+    }
+}
+
+/// Waits for a tracked service root PID to exit.
+fn wait_for_tracked_service_exit(pid: libc::pid_t, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !tracked_service_alive(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    !tracked_service_alive(pid)
+}
+
+/// Sends a signal to a tracked service using its process group when available and falling back
+/// to the root PID when group signaling is not possible.
+fn signal_tracked_service(
+    service: &str,
+    pid: libc::pid_t,
+    pgid: Option<libc::pid_t>,
+    signal: libc::c_int,
+) {
+    let mut delivered = false;
+
+    if let Some(group_id) = pgid {
+        unsafe {
+            if libc::killpg(group_id, signal) == 0 {
+                delivered = true;
+            } else {
+                let err = std::io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(code) if code == libc::ESRCH => {
+                        delivered = true;
+                    }
+                    Some(code) if code == libc::EPERM => {}
+                    _ => eprintln!(
+                        "systemg: failed to send signal {signal} to '{service}' (pgid {group_id}): {err}"
+                    ),
+                }
+            }
+        }
+    }
+
+    if delivered {
+        return;
+    }
+
+    unsafe {
+        if libc::kill(pid, signal) == -1 {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(code) if code == libc::ESRCH => {}
+                _ => eprintln!(
+                    "systemg: failed to send signal {signal} to '{service}' (pid {pid}): {err}"
+                ),
+            }
+        }
+    }
+}
+
+/// Terminates tracked services from the pid file during foreground Ctrl-C shutdown.
+fn terminate_tracked_services_on_shutdown() {
+    let mut tracked: Vec<(String, libc::pid_t, Option<libc::pid_t>)> = Vec::new();
+    if let Ok(pid_file) = PidFile::load() {
+        for (service, pid) in pid_file.services() {
+            tracked.push((
+                service.clone(),
+                *pid as libc::pid_t,
+                pid_file.pgid_for(service).map(|group| group as libc::pid_t),
+            ));
+        }
+    }
+
+    for (service, pid, pgid) in &tracked {
+        signal_tracked_service(service, *pid, *pgid, libc::SIGTERM);
+    }
+
+    for (service, pid, pgid) in &tracked {
+        if wait_for_tracked_service_exit(*pid, Duration::from_secs(2)) {
+            continue;
+        }
+        signal_tracked_service(service, *pid, *pgid, libc::SIGKILL);
+    }
+
+    for (service, pid, _) in &tracked {
+        if !wait_for_tracked_service_exit(*pid, Duration::from_secs(2)) {
+            eprintln!(
+                "systemg: service '{service}' (pid {pid}) survived foreground shutdown"
+            );
+        }
+    }
+}
+
 /// Handles process exited.
 fn process_exited(pid: libc::pid_t) -> bool {
     let proc_root = PathBuf::from(format!("/proc/{pid}"));
@@ -2280,55 +2380,8 @@ fn daemonize_systemg() -> std::io::Result<()> {
 fn register_signal_handler() -> Result<(), Box<dyn Error>> {
     ctrlc::set_handler(move || {
         println!("systemg is shutting down... terminating child services");
-
-        let mut service_pids: Vec<(String, libc::pid_t)> = Vec::new();
-        if let Ok(pid_file) = PidFile::load() {
-            for (service, pid) in pid_file.services() {
-                service_pids.push((service.clone(), *pid as libc::pid_t));
-            }
-        }
-
-        for (service, pgid) in &service_pids {
-            unsafe {
-                if libc::killpg(*pgid, libc::SIGTERM) == -1 {
-                    let err = std::io::Error::last_os_error();
-                    match err.raw_os_error() {
-                        Some(code) if code == libc::ESRCH => {}
-                        Some(code) if code == libc::EPERM => {
-                            let _ = libc::kill(*pgid, libc::SIGTERM);
-                        }
-                        _ => eprintln!(
-                            "systemg: failed to send SIGTERM to '{service}' (pgid {pgid}): {err}"
-                        ),
-                    }
-                }
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(150));
-
-        for (service, pgid) in &service_pids {
-            unsafe {
-                if libc::killpg(*pgid, libc::SIGKILL) == -1 {
-                    let err = std::io::Error::last_os_error();
-                    match err.raw_os_error() {
-                        Some(code) if code == libc::ESRCH => {}
-                        Some(code) if code == libc::EPERM => {
-                            let _ = libc::kill(*pgid, libc::SIGKILL);
-                        }
-                        _ => eprintln!(
-                            "systemg: failed to send SIGKILL to '{service}' (pgid {pgid}): {err}"
-                        ),
-                    }
-                }
-            }
-        }
-
-        unsafe {
-            let pgid = getpgrp();
-            killpg(pgid, SIGKILL);
-        }
-
+        terminate_tracked_services_on_shutdown();
+        let _ = ipc::cleanup_runtime();
         std::process::exit(0);
     })?;
 
