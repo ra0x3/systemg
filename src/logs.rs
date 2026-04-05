@@ -3,16 +3,22 @@
 //! This module treats stderr as the primary log stream. Service output to stderr is logged
 //! at debug level while stdout is logged at warn level to ensure stderr messages have priority
 //! in the supervisor's log output.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::process::Command;
 use std::{
     collections::BTreeSet,
     env,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, IsTerminal, Read, Write},
+    io::{IsTerminal, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::{
+    os::unix::{
+        io::{FromRawFd, IntoRawFd},
+        net::UnixStream,
+    },
+    process::{Command, Stdio},
 };
 
 use tracing::debug;
@@ -29,6 +35,75 @@ fn canonical_log_path(service: &str, kind: &str) -> PathBuf {
     let mut path = runtime::log_dir();
     path.push(format!("{service}_{kind}.log"));
     path
+}
+
+const LIVE_LOG_BUFFER_LIMIT: usize = 256 * 1024;
+
+/// Holds recent log bytes and active subscribers for a single service stream.
+struct LiveLogEntry {
+    buffer: Vec<u8>,
+    subscribers: Vec<mpsc::Sender<Vec<u8>>>,
+}
+
+impl LiveLogEntry {
+    /// Creates an empty live log entry.
+    fn new() -> Self {
+        Self {
+            buffer: Vec::new(),
+            subscribers: Vec::new(),
+        }
+    }
+
+    /// Appends bytes and trims the in-memory buffer to the configured cap.
+    fn append(&mut self, chunk: &[u8]) {
+        self.buffer.extend_from_slice(chunk);
+        if self.buffer.len() > LIVE_LOG_BUFFER_LIMIT {
+            let overflow = self.buffer.len() - LIVE_LOG_BUFFER_LIMIT;
+            self.buffer.drain(..overflow);
+        }
+        self.subscribers
+            .retain(|subscriber| subscriber.send(chunk.to_vec()).is_ok());
+    }
+}
+
+type LiveLogKey = (String, String);
+
+/// Returns the global live log registry shared by supervisor-side log readers.
+fn live_log_registry()
+-> &'static Mutex<std::collections::HashMap<LiveLogKey, LiveLogEntry>> {
+    static REGISTRY: OnceLock<
+        Mutex<std::collections::HashMap<LiveLogKey, LiveLogEntry>>,
+    > = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Appends new live log bytes for a service stream and notifies subscribers.
+fn append_live_log_chunk(service: &str, kind: &str, chunk: &[u8]) {
+    let key = (service.to_string(), kind.to_string());
+    if let Ok(mut registry) = live_log_registry().lock() {
+        let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
+        entry.append(chunk);
+    }
+}
+
+/// Returns the buffered live log bytes for a service stream, if any.
+fn snapshot_live_log(service: &str, kind: &str) -> Option<Vec<u8>> {
+    let key = (service.to_string(), kind.to_string());
+    live_log_registry()
+        .lock()
+        .ok()
+        .and_then(|registry| registry.get(&key).map(|entry| entry.buffer.clone()))
+}
+
+/// Registers a subscriber for future live log chunks on a service stream.
+fn subscribe_live_log(service: &str, kind: &str) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    let key = (service.to_string(), kind.to_string());
+    if let Ok(mut registry) = live_log_registry().lock() {
+        let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
+        entry.subscribers.push(tx);
+    }
+    rx
 }
 
 /// Normalizes this item.
@@ -192,6 +267,45 @@ fn resolve_tail_targets(
     Ok((stdout_path, stderr_path))
 }
 
+/// Writes the standard service log header into the provided writer.
+fn write_log_header(
+    mut writer: impl Write,
+    service_name: &str,
+    pid: Option<u32>,
+) -> Result<(), LogsManagerError> {
+    write!(
+        writer,
+        "\n+{:-^33}+\n\
+         | {:^31} |\n\
+         +{:-^33}+\n\n",
+        "-",
+        LogManager::format_log_title(service_name, pid),
+        "-"
+    )?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Returns the last `lines` newline-delimited slices from a raw byte buffer.
+fn tail_log_bytes(bytes: &[u8], lines: usize) -> Vec<u8> {
+    if lines == 0 || bytes.is_empty() {
+        return Vec::new();
+    }
+
+    let newline_positions: Vec<usize> = bytes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
+        .collect();
+
+    if newline_positions.len() < lines {
+        return bytes.to_vec();
+    }
+
+    let start = newline_positions[newline_positions.len() - lines] + 1;
+    bytes[start..].to_vec()
+}
+
 /// Writes forwarded console line.
 fn write_forwarded_console_line(
     mut writer: impl Write,
@@ -201,40 +315,156 @@ fn write_forwarded_console_line(
     writeln!(writer, "{prefix}{line}")
 }
 
+/// Forwards a completed byte line to stderr or the debug logger.
+fn forward_prefixed_line(service_label: &str, line: &[u8], echo_to_terminal: bool) {
+    let line = String::from_utf8_lossy(line);
+    if echo_to_terminal {
+        if let Err(err) = write_forwarded_console_line(
+            std::io::stderr(),
+            &format!("[{service_label}] "),
+            &line,
+        ) {
+            eprintln!(
+                "Warning: Failed to write forwarded log for [{}]: {}",
+                service_label, err
+            );
+        }
+    } else {
+        debug!("[{service_label}] {line}");
+    }
+}
+
+/// Flushes all complete lines from a buffered byte stream to the configured console/debug sink.
+fn flush_forwarded_lines(
+    pending: &mut Vec<u8>,
+    service_label: &str,
+    echo_to_terminal: bool,
+) {
+    while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
+        let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
+        if matches!(line.last(), Some(b'\n')) {
+            line.pop();
+        }
+        if matches!(line.last(), Some(b'\r')) {
+            line.pop();
+        }
+        forward_prefixed_line(service_label, &line, echo_to_terminal);
+    }
+}
+
+/// Flushes any trailing unterminated line to the configured console/debug sink.
+fn flush_remaining_forwarded_line(
+    pending: &mut Vec<u8>,
+    service_label: &str,
+    echo_to_terminal: bool,
+) {
+    if pending.is_empty() {
+        return;
+    }
+
+    let line = std::mem::take(pending);
+    forward_prefixed_line(service_label, &line, echo_to_terminal);
+}
+
+/// Copies a service output stream into the service log file while forwarding completed lines.
+fn stream_service_log(
+    path: &Path,
+    service_label: &str,
+    kind: &str,
+    mut reader: impl Read,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut buffer = [0_u8; 8192];
+    let mut pending = Vec::new();
+    let echo_to_terminal = std::io::stderr().is_terminal();
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let chunk = &buffer[..bytes_read];
+        file.write_all(chunk)?;
+        append_live_log_chunk(service_label, kind, chunk);
+        pending.extend_from_slice(chunk);
+        flush_forwarded_lines(&mut pending, service_label, echo_to_terminal);
+    }
+
+    flush_remaining_forwarded_line(&mut pending, service_label, echo_to_terminal);
+    file.flush()
+}
+
+/// Copies a spawned-child output stream into its log file while optionally echoing completed lines.
+fn stream_dynamic_child_log(
+    path: &Path,
+    owner_label: Option<&str>,
+    child_label: &str,
+    mut reader: impl Read,
+    echo_to_console: bool,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut buffer = [0_u8; 8192];
+    let mut pending = Vec::new();
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let chunk = &buffer[..bytes_read];
+        file.write_all(chunk)?;
+
+        if echo_to_console {
+            pending.extend_from_slice(chunk);
+            while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
+                let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
+                if matches!(line.last(), Some(b'\n')) {
+                    line.pop();
+                }
+                if matches!(line.last(), Some(b'\r')) {
+                    line.pop();
+                }
+                let owner = owner_label.unwrap_or("spawn");
+                println!(
+                    "[{}:{}] {}",
+                    owner,
+                    child_label,
+                    String::from_utf8_lossy(&line)
+                );
+            }
+        }
+    }
+
+    if echo_to_console && !pending.is_empty() {
+        let owner = owner_label.unwrap_or("spawn");
+        println!(
+            "[{}:{}] {}",
+            owner,
+            child_label,
+            String::from_utf8_lossy(&pending)
+        );
+    }
+
+    file.flush()
+}
+
 /// Creates the log directory if it doesn't exist and spawns a thread to write logs to file.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
     let path = get_log_path(service, kind);
     let service_label = service.to_string();
+    let kind_label = kind.to_string();
     thread::spawn(move || {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).ok();
-        }
-        let file = match OpenOptions::new().create(true).append(true).open(&path) {
-            Ok(f) => f,
-            Err(err) => {
-                eprintln!("Warning: Unable to open log file at {:?}: {}", path, err);
-                return;
-            }
-        };
-        let mut file = file;
-
-        let reader = BufReader::new(reader);
-        for line in reader.lines().map_while(Result::ok) {
-            if std::io::stderr().is_terminal() {
-                if let Err(err) = write_forwarded_console_line(
-                    std::io::stderr(),
-                    &format!("[{service_label}] "),
-                    &line,
-                ) {
-                    eprintln!(
-                        "Warning: Failed to write forwarded log for [{}]: {}",
-                        service_label, err
-                    );
-                }
-            } else {
-                debug!("[{service_label}] {line}");
-            }
-            let _ = writeln!(file, "{line}");
+        if let Err(err) = stream_service_log(&path, &service_label, &kind_label, reader) {
+            eprintln!("Warning: Unable to write log file at {:?}: {}", path, err);
         }
     });
 }
@@ -280,35 +510,14 @@ pub fn spawn_dynamic_child_log_writer(
     let child_label = child_name.to_string();
 
     thread::spawn(move || {
-        if let Some(parent) = path.parent()
-            && let Err(err) = fs::create_dir_all(parent)
-        {
-            eprintln!(
-                "Warning: Unable to create spawn log directory {:?}: {}",
-                parent, err
-            );
-            return;
-        }
-
-        let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
-            Ok(f) => f,
-            Err(err) => {
-                eprintln!("Warning: Unable to open spawn log file {:?}: {}", path, err);
-                return;
-            }
-        };
-
-        let reader = BufReader::new(reader);
-        for line in reader.lines().map_while(Result::ok) {
-            if echo_to_console {
-                let owner = owner_label.as_deref().unwrap_or("spawn");
-                println!("[{}:{}] {}", owner, child_label, line);
-            }
-
-            if let Err(err) = writeln!(file, "{line}") {
-                eprintln!("Warning: Failed to write spawn log {:?}: {}", path, err);
-                break;
-            }
+        if let Err(err) = stream_dynamic_child_log(
+            &path,
+            owner_label.as_deref(),
+            &child_label,
+            reader,
+            echo_to_console,
+        ) {
+            eprintln!("Warning: Unable to write spawn log {:?}: {}", path, err);
         }
     });
 }
@@ -389,6 +598,47 @@ impl LogManager {
             kind,
             TailMode::OneShot,
         )
+    }
+
+    /// Streams service logs through an existing Unix socket connection.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn stream_log_to_socket(
+        &self,
+        service_name: &str,
+        pid: Option<u32>,
+        lines: usize,
+        kind: Option<&str>,
+        follow: bool,
+        stream: &UnixStream,
+    ) -> Result<(), LogsManagerError> {
+        let mode = if follow {
+            TailMode::Follow
+        } else {
+            TailMode::OneShot
+        };
+        if matches!(kind, Some("stdout") | Some("stderr")) {
+            let kind_name = kind.unwrap_or("stdout");
+            if let Some(snapshot) = snapshot_live_log(service_name, kind_name)
+                && !snapshot.is_empty()
+            {
+                write_log_header(stream.try_clone()?, service_name, pid)?;
+                let mut socket = stream.try_clone()?;
+                let tail = tail_log_bytes(&snapshot, lines);
+                if !tail.is_empty() {
+                    socket.write_all(&tail)?;
+                    socket.flush()?;
+                }
+                if matches!(mode, TailMode::Follow) {
+                    let receiver = subscribe_live_log(service_name, kind_name);
+                    while let Ok(chunk) = receiver.recv() {
+                        socket.write_all(&chunk)?;
+                        socket.flush()?;
+                    }
+                }
+                return Ok(());
+            }
+        }
+        self.stream_logs_platform_with_mode(service_name, pid, lines, kind, mode, stream)
     }
 
     /// Clears stdout and stderr logs for a specific service.
@@ -475,6 +725,51 @@ impl LogManager {
         Ok(())
     }
 
+    /// Linux implementation for streaming logs through a Unix socket.
+    #[cfg(target_os = "linux")]
+    fn stream_logs_platform_with_mode(
+        &self,
+        service_name: &str,
+        pid: Option<u32>,
+        lines: usize,
+        kind: Option<&str>,
+        mode: TailMode,
+        stream: &UnixStream,
+    ) -> Result<(), LogsManagerError> {
+        write_log_header(stream.try_clone()?, service_name, pid)?;
+
+        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
+
+        debug!("Streaming logs via supervisor tail for '{}'", service_name);
+
+        let mut cmd = Command::new("tail");
+        if let Some(pid_value) = pid
+            && !process_fds_present(pid_value)
+        {
+            debug!(
+                "Falling back to log files for '{}' because /proc/{pid_value} fds are unavailable",
+                service_name
+            );
+        }
+        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
+
+        let stdout_stream = stream.try_clone()?;
+        let stderr_stream = stream.try_clone()?;
+        let stdout_fd = stdout_stream.into_raw_fd();
+        let stderr_fd = stderr_stream.into_raw_fd();
+        unsafe {
+            cmd.stdout(Stdio::from_raw_fd(stdout_fd));
+            cmd.stderr(Stdio::from_raw_fd(stderr_fd));
+        }
+
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(LogsManagerError::TailCommandFailed(status.code()));
+        }
+
+        Ok(())
+    }
+
     /// macOS implementation for showing logs using log files.
     #[cfg(target_os = "macos")]
     fn show_logs_platform_with_mode(
@@ -502,6 +797,43 @@ impl LogManager {
         mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
         cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
+
+        let status = cmd.status()?;
+        if !status.success() {
+            return Err(LogsManagerError::TailCommandFailed(status.code()));
+        }
+
+        Ok(())
+    }
+
+    /// macOS implementation for streaming logs through a Unix socket.
+    #[cfg(target_os = "macos")]
+    fn stream_logs_platform_with_mode(
+        &self,
+        service_name: &str,
+        pid: Option<u32>,
+        lines: usize,
+        kind: Option<&str>,
+        mode: TailMode,
+        stream: &UnixStream,
+    ) -> Result<(), LogsManagerError> {
+        write_log_header(stream.try_clone()?, service_name, pid)?;
+
+        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
+
+        debug!("Streaming logs via supervisor tail for '{}'", service_name);
+
+        let mut cmd = Command::new("tail");
+        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
+
+        let stdout_stream = stream.try_clone()?;
+        let stderr_stream = stream.try_clone()?;
+        let stdout_fd = stdout_stream.into_raw_fd();
+        let stderr_fd = stderr_stream.into_raw_fd();
+        unsafe {
+            cmd.stdout(Stdio::from_raw_fd(stdout_fd));
+            cmd.stderr(Stdio::from_raw_fd(stderr_fd));
+        }
 
         let status = cmd.status()?;
         if !status.success() {
@@ -769,6 +1101,78 @@ mod tests {
             fs::read_to_string(&log_path).expect("spawn log should be written");
         assert!(contents.contains("hello"));
         assert!(contents.contains("world"));
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn spawn_log_writer_persists_unterminated_output() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        super::spawn_log_writer("svc", Cursor::new(b"partial line".to_vec()), "stdout");
+
+        thread::sleep(Duration::from_millis(100));
+
+        let log_path = get_log_path("svc", "stdout");
+        let contents = fs::read(&log_path).expect("service log should be written");
+        assert_eq!(contents, b"partial line");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn spawn_log_writer_persists_non_utf8_output() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        super::spawn_log_writer("svc", Cursor::new(vec![0xff, b'a', b'\n']), "stderr");
+
+        thread::sleep(Duration::from_millis(100));
+
+        let log_path = get_log_path("svc", "stderr");
+        let contents = fs::read(&log_path).expect("service log should be written");
+        assert_eq!(contents, vec![0xff, b'a', b'\n']);
 
         unsafe {
             if let Some(home) = original_home {

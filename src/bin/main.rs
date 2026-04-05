@@ -445,6 +445,18 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 return Ok(());
             }
 
+            let stream_logs_via_supervisor =
+                |follow: bool| -> Result<(), Box<dyn Error>> {
+                    let command = ControlCommand::Logs {
+                        service: service.clone(),
+                        lines,
+                        kind: kind.as_str().to_string(),
+                        follow,
+                    };
+                    ipc::stream_command_output(&command, io::stdout())
+                        .map_err(|err| Box::new(err) as Box<dyn Error>)
+                };
+
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
                 let snapshot = fetch_status_snapshot(&effective_config)?;
 
@@ -489,11 +501,23 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 loop {
                     print!("\x1B[2J\x1B[H");
                     let _ = io::stdout().flush();
-                    render_logs_once(true)?;
+                    match stream_logs_via_supervisor(false) {
+                        Ok(()) => {}
+                        Err(err) => match err.downcast_ref::<ControlError>() {
+                            Some(ControlError::NotAvailable) => render_logs_once(true)?,
+                            _ => return Err(err),
+                        },
+                    }
                     thread::sleep(sleep_interval);
                 }
             } else {
-                render_logs_once(false)?;
+                match stream_logs_via_supervisor(true) {
+                    Ok(()) => {}
+                    Err(err) => match err.downcast_ref::<ControlError>() {
+                        Some(ControlError::NotAvailable) => render_logs_once(false)?,
+                        _ => return Err(err),
+                    },
+                }
             }
         }
         Commands::Purge => {
@@ -2287,10 +2311,14 @@ fn register_signal_handler() -> Result<(), Box<dyn Error>> {
             unsafe {
                 if libc::killpg(*pgid, libc::SIGKILL) == -1 {
                     let err = std::io::Error::last_os_error();
-                    if !matches!(err.raw_os_error(), Some(code) if code == libc::ESRCH) {
-                        eprintln!(
+                    match err.raw_os_error() {
+                        Some(code) if code == libc::ESRCH => {}
+                        Some(code) if code == libc::EPERM => {
+                            let _ = libc::kill(*pgid, libc::SIGKILL);
+                        }
+                        _ => eprintln!(
                             "systemg: failed to send SIGKILL to '{service}' (pgid {pgid}): {err}"
-                        );
+                        ),
                     }
                 }
             }

@@ -450,12 +450,45 @@ pub struct HealthCheckConfig {
 }
 
 /// Represents environment variables for a service.
-#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EnvConfig {
     /// Optional path to an environment file.
     pub file: Option<String>,
     /// Key-value pairs of environment variables.
     pub vars: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+/// Deserializes supported `env` block shapes before normalizing them into `EnvConfig`.
+struct RawEnvConfig {
+    /// Optional path to an environment file.
+    file: Option<String>,
+    /// Explicit nested environment variables.
+    vars: Option<HashMap<String, String>>,
+    /// Direct key/value pairs provided alongside `file` or instead of `vars`.
+    #[serde(flatten)]
+    entries: HashMap<String, String>,
+}
+
+impl<'de> Deserialize<'de> for EnvConfig {
+    /// Deserializes an environment block, accepting either nested `vars` or direct key/value
+    /// entries under `env`.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawEnvConfig::deserialize(deserializer)?;
+        let mut vars = raw.entries;
+
+        if let Some(explicit_vars) = raw.vars {
+            vars.extend(explicit_vars);
+        }
+
+        Ok(Self {
+            file: raw.file,
+            vars: if vars.is_empty() { None } else { Some(vars) },
+        })
+    }
 }
 
 impl EnvConfig {
@@ -1050,6 +1083,47 @@ services:
     }
 
     #[test]
+    fn test_env_config_deserializes_direct_inline_vars() {
+        let env: EnvConfig = serde_yaml::from_str(
+            r#"
+file: ".env"
+RUST_LOG: "debug"
+ESPER_ENGINE_SERVICE_URL: "http://127.0.0.1:4100"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(env.file.as_deref(), Some(".env"));
+        let vars = env.vars.unwrap();
+        assert_eq!(vars.get("RUST_LOG"), Some(&"debug".to_string()));
+        assert_eq!(
+            vars.get("ESPER_ENGINE_SERVICE_URL"),
+            Some(&"http://127.0.0.1:4100".to_string())
+        );
+    }
+
+    #[test]
+    fn test_env_config_deserializes_nested_and_direct_vars() {
+        let env: EnvConfig = serde_yaml::from_str(
+            r#"
+file: ".env"
+vars:
+  POSTGRES_URI: "postgres://localhost/db"
+RUST_LOG: "debug"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(env.file.as_deref(), Some(".env"));
+        let vars = env.vars.unwrap();
+        assert_eq!(
+            vars.get("POSTGRES_URI"),
+            Some(&"postgres://localhost/db".to_string())
+        );
+        assert_eq!(vars.get("RUST_LOG"), Some(&"debug".to_string()));
+    }
+
+    #[test]
     fn test_load_config_with_root_env() {
         let dir = tempdir().unwrap();
         let root_env_path = dir.path().join("root.env");
@@ -1082,6 +1156,67 @@ services:
             let vars = env.vars.as_ref().unwrap();
             assert_eq!(vars.get("GLOBAL_VAR"), Some(&"global_value".to_string()));
         }
+    }
+
+    #[test]
+    fn test_load_config_with_direct_service_env_vars() {
+        let dir = tempdir().unwrap();
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).unwrap();
+        writeln!(
+            yaml_file,
+            r#"
+version: "1"
+services:
+  service1:
+    command: "echo ok"
+    env:
+      RUST_LOG: "debug"
+      API_URL: "http://127.0.0.1:4100"
+"#
+        )
+        .unwrap();
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+        let service = &config.services["service1"];
+        let env = service.env.as_ref().unwrap();
+        let vars = env.vars.as_ref().unwrap();
+        assert_eq!(vars.get("RUST_LOG"), Some(&"debug".to_string()));
+        assert_eq!(
+            vars.get("API_URL"),
+            Some(&"http://127.0.0.1:4100".to_string())
+        );
+    }
+
+    #[test]
+    fn test_load_config_merges_root_and_service_direct_env_vars() {
+        let dir = tempdir().unwrap();
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).unwrap();
+        writeln!(
+            yaml_file,
+            r#"
+version: "1"
+env:
+  REDIS_URI: "redis://127.0.0.1:6379"
+services:
+  service1:
+    command: "echo ok"
+    env:
+      RUST_LOG: "debug"
+"#
+        )
+        .unwrap();
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+        let service = &config.services["service1"];
+        let env = service.env.as_ref().unwrap();
+        let vars = env.vars.as_ref().unwrap();
+        assert_eq!(
+            vars.get("REDIS_URI"),
+            Some(&"redis://127.0.0.1:6379".to_string())
+        );
+        assert_eq!(vars.get("RUST_LOG"), Some(&"debug".to_string()));
     }
 
     #[test]

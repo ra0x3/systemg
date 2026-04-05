@@ -2,6 +2,7 @@
 use std::os::unix::process::ExitStatusExt;
 use std::{
     fs, io,
+    io::Write,
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     sync::Arc,
@@ -20,9 +21,9 @@ use crate::{
         Daemon, PersistedSpawnChild, ServiceLifecycleStatus, ServiceReadyState,
         ServiceStateFile,
     },
-    error::ProcessManagerError,
+    error::{LogsManagerError, ProcessManagerError},
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
-    logs::spawn_dynamic_child_log_writer,
+    logs::{LogManager, resolve_log_path, spawn_dynamic_child_log_writer},
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
@@ -49,6 +50,9 @@ pub enum SupervisorError {
     /// Live status snapshot error.
     #[error(transparent)]
     Status(#[from] StatusError),
+    /// Log streaming error.
+    #[error(transparent)]
+    Logs(#[from] LogsManagerError),
 }
 
 /// Daemon supervisor that handles CLI commands.
@@ -637,6 +641,21 @@ impl Supervisor {
                     Ok(command) => {
                         let should_shutdown = matches!(command, ControlCommand::Shutdown);
                         debug!("Supervisor received command: {:?}", command);
+                        if let ControlCommand::Logs {
+                            service,
+                            lines,
+                            kind,
+                            follow,
+                        } = command
+                        {
+                            if let Err(err) = self.handle_logs_command(
+                                service, lines, &kind, follow, &stream,
+                            ) {
+                                error!("Supervisor logs command failed: {err}");
+                                let _ = writeln!(stream, "{err}");
+                            }
+                            continue;
+                        }
                         match self.handle_command(command) {
                             Ok(response) => {
                                 if let Err(err) =
@@ -674,6 +693,104 @@ impl Supervisor {
         }
 
         self.shutdown_runtime()?;
+        Ok(())
+    }
+
+    /// Streams logs through the supervisor-owned control socket.
+    fn handle_logs_command(
+        &mut self,
+        service: Option<String>,
+        lines: usize,
+        kind: &str,
+        follow: bool,
+        stream: &std::os::unix::net::UnixStream,
+    ) -> Result<(), SupervisorError> {
+        let snapshot = self.collect_live_snapshot()?;
+        self.status_cache.replace(snapshot.clone());
+        let pid_file = self.daemon.pid_file_handle();
+        let manager = LogManager::new(pid_file);
+        let requested_kind = Some(kind);
+
+        if let Some(service_name) = service {
+            let matching_unit = snapshot
+                .units
+                .iter()
+                .find(|unit| unit.name == service_name || unit.hash == service_name);
+
+            if let Some(unit) = matching_unit {
+                let pid = unit.process.as_ref().and_then(|process| {
+                    if matches!(process.state, crate::status::ProcessState::Running) {
+                        Some(process.pid)
+                    } else {
+                        None
+                    }
+                });
+                return manager
+                    .stream_log_to_socket(
+                        &unit.name,
+                        pid,
+                        lines,
+                        requested_kind,
+                        follow,
+                        stream,
+                    )
+                    .map_err(SupervisorError::from);
+            }
+
+            let stdout_exists = resolve_log_path(&service_name, "stdout").exists();
+            let stderr_exists = resolve_log_path(&service_name, "stderr").exists();
+            if stdout_exists || stderr_exists {
+                return manager
+                    .stream_log_to_socket(
+                        &service_name,
+                        None,
+                        lines,
+                        requested_kind,
+                        follow,
+                        stream,
+                    )
+                    .map_err(SupervisorError::from);
+            }
+
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Service '{service_name}' not found"),
+            )
+            .into());
+        }
+
+        let mut unit_names: Vec<String> = snapshot
+            .units
+            .iter()
+            .filter(|unit| !matches!(unit.kind, crate::status::UnitKind::Orphaned))
+            .map(|unit| unit.name.clone())
+            .collect();
+        unit_names.sort_unstable();
+        unit_names.dedup();
+
+        for service_name in unit_names {
+            let pid = snapshot
+                .units
+                .iter()
+                .find(|unit| unit.name == service_name)
+                .and_then(|unit| unit.process.as_ref())
+                .and_then(|process| {
+                    if matches!(process.state, crate::status::ProcessState::Running) {
+                        Some(process.pid)
+                    } else {
+                        None
+                    }
+                });
+            manager.stream_log_to_socket(
+                &service_name,
+                pid,
+                lines,
+                requested_kind,
+                false,
+                stream,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -771,6 +888,9 @@ impl Supervisor {
                     samples: metrics_samples,
                 })))
             }
+            ControlCommand::Logs { .. } => Ok(ControlResponse::Error(
+                "logs command is streamed separately".into(),
+            )),
             ControlCommand::Spawn {
                 parent_pid,
                 name,

@@ -67,6 +67,17 @@ pub enum ControlCommand {
         /// Maximum number of samples to return.
         samples: u32,
     },
+    /// Stream logs for one or all services through the supervisor.
+    Logs {
+        /// Optional service name to stream. If None, streams all managed services.
+        service: Option<String>,
+        /// Number of lines to include initially.
+        lines: usize,
+        /// Log kind to stream.
+        kind: String,
+        /// Whether to follow the log stream until the client disconnects.
+        follow: bool,
+    },
     /// Spawn a dynamic child process.
     Spawn {
         /// Parent process PID (from Unix socket peer credentials).
@@ -165,6 +176,34 @@ pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, Control
     }
 
     Ok(response)
+}
+
+/// Sends a command to the supervisor and copies the raw response bytes into the provided writer.
+pub fn stream_command_output(
+    command: &ControlCommand,
+    mut writer: impl Write,
+) -> Result<(), ControlError> {
+    let path = socket_path()?;
+    if !path.exists() {
+        return Err(ControlError::NotAvailable);
+    }
+
+    let mut stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+            return Err(ControlError::NotAvailable);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let payload = serde_json::to_vec(command)?;
+    stream.write_all(&payload)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+
+    let mut reader = BufReader::new(stream);
+    io::copy(&mut reader, &mut writer)?;
+    writer.flush()?;
+    Ok(())
 }
 
 /// Utility to read a command from a `UnixStream`. Used by the supervisor event loop.
