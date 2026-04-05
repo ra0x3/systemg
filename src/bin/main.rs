@@ -1743,6 +1743,11 @@ fn render_all_logs_from_snapshot(
     Ok(())
 }
 
+fn clear_terminal_output() -> io::Result<()> {
+    print!("\x1B[2J\x1B[H");
+    io::stdout().flush()
+}
+
 fn target_table_width(terminal_width: usize) -> usize {
     terminal_width.saturating_mul(3).saturating_div(4).max(1)
 }
@@ -2019,7 +2024,7 @@ fn render_status_interactive(
                         if selected_row < units.len() - 1 {
                             selected_row += 1;
                             terminal::disable_raw_mode()?;
-                            print!("\x1B[2J\x1B[H");
+                            clear_terminal_output()?;
                             render_status_table_with_selection(
                                 snapshot,
                                 &units,
@@ -2037,7 +2042,7 @@ fn render_status_interactive(
                         if selected_row < units.len() - 1 {
                             selected_row += 1;
                             terminal::disable_raw_mode()?;
-                            print!("\x1B[2J\x1B[H");
+                            clear_terminal_output()?;
                             render_status_table_with_selection(
                                 snapshot,
                                 &units,
@@ -2061,7 +2066,7 @@ fn render_status_interactive(
                         if new_row != selected_row {
                             selected_row = new_row;
                             terminal::disable_raw_mode()?;
-                            print!("\x1B[2J\x1B[H");
+                            clear_terminal_output()?;
                             render_status_table_with_selection(
                                 snapshot,
                                 &units,
@@ -2079,7 +2084,7 @@ fn render_status_interactive(
                         if new_row != selected_row {
                             selected_row = new_row;
                             terminal::disable_raw_mode()?;
-                            print!("\x1B[2J\x1B[H");
+                            clear_terminal_output()?;
                             render_status_table_with_selection(
                                 snapshot,
                                 &units,
@@ -2118,7 +2123,7 @@ fn render_status_interactive(
                             let _ = event::read();
                             terminal::disable_raw_mode()?;
 
-                            print!("\x1B[2J\x1B[H");
+                            clear_terminal_output()?;
                             render_status_table_with_selection(
                                 snapshot,
                                 &units,
@@ -2136,6 +2141,7 @@ fn render_status_interactive(
                     | KeyEvent {
                         code: KeyCode::Esc, ..
                     } => {
+                        clear_terminal_output()?;
                         return Ok(health);
                     }
                     _ => {}
