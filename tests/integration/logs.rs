@@ -7,13 +7,18 @@ use std::env;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::process::Command as StdCommand;
 
 #[cfg(target_os = "linux")]
 use assert_cmd::Command;
 #[cfg(target_os = "linux")]
 use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
-use systemg::daemon::PidFile;
+use systemg::{
+    config::load_config,
+    daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
+};
 #[cfg(target_os = "linux")]
 use tempfile::tempdir;
 
@@ -50,6 +55,81 @@ fn logs_streams_when_pid_has_no_fds() {
         .stdout(predicates::str::contains("arb_rs"))
         .stdout(predicates::str::contains("streamed stdout line"));
 
+    unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn logs_uses_snapshot_runtime_when_pid_file_is_missing_service() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/sleep 30"
+"#,
+    )
+    .expect("write config");
+
+    let config =
+        load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
+    let hash = config
+        .services
+        .get("demo")
+        .expect("demo service")
+        .compute_hash();
+
+    let mut child = StdCommand::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::Running,
+            Some(child.id()),
+            None,
+            None,
+        )
+        .expect("persist state");
+
+    let mut pid_file = PidFile::load().expect("load pid file");
+    let _ = pid_file.remove("demo");
+
+    let log_dir = home.join(".local/share/systemg/logs");
+    fs::create_dir_all(&log_dir).expect("make log dir");
+    fs::write(log_dir.join("demo_stdout.log"), "snapshot log line\n")
+        .expect("write stdout log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    cmd.env("SYSTEMG_TAIL_MODE", "oneshot")
+        .arg("logs")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--service")
+        .arg("demo")
+        .arg("--kind")
+        .arg("stdout")
+        .arg("--lines")
+        .arg("1")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(&format!("demo ({})", child.id())))
+        .stdout(predicates::str::contains("snapshot log line"))
+        .stdout(predicates::str::contains("offline").not());
+
+    let _ = child.kill();
+    let _ = child.wait();
     unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
 }
 

@@ -445,73 +445,29 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             }
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
+                let snapshot = fetch_status_snapshot(&effective_config)?;
+
                 match service.as_ref() {
                     Some(service_name) => {
                         info!("Fetching logs for service: {service_name}");
-                        let process_pid = pid.lock().unwrap().pid_for(service_name);
-
-                        if let Some(process_pid) = process_pid {
-                            if snapshot_mode {
-                                manager.show_log_snapshot(
-                                    service_name,
-                                    process_pid,
-                                    lines,
-                                    Some(kind.as_str()),
-                                )?;
-                            } else {
-                                manager.show_log(
-                                    service_name,
-                                    process_pid,
-                                    lines,
-                                    Some(kind.as_str()),
-                                )?;
-                            }
-                        } else {
-                            let cron_state = CronStateFile::load().unwrap_or_default();
-                            let stdout_exists =
-                                resolve_log_path(service_name, "stdout").exists();
-                            let stderr_exists =
-                                resolve_log_path(service_name, "stderr").exists();
-
-                            if cron_state.jobs().contains_key(service_name)
-                                || stdout_exists
-                                || stderr_exists
-                            {
-                                if snapshot_mode {
-                                    manager.show_inactive_log_snapshot(
-                                        service_name,
-                                        lines,
-                                        Some(kind.as_str()),
-                                    )?;
-                                } else {
-                                    manager.show_inactive_log(
-                                        service_name,
-                                        lines,
-                                        Some(kind.as_str()),
-                                    )?;
-                                }
-                            } else {
-                                warn!(
-                                    "Service '{service_name}' is not currently running"
-                                );
-                            }
-                        }
+                        render_service_logs_from_snapshot(
+                            &manager,
+                            &snapshot,
+                            service_name,
+                            lines,
+                            kind.as_str(),
+                            snapshot_mode,
+                        )?;
                     }
                     None => {
                         info!("Fetching logs for all services");
-                        if snapshot_mode {
-                            manager.show_logs_snapshot(
-                                lines,
-                                Some(kind.as_str()),
-                                Some(&effective_config),
-                            )?;
-                        } else {
-                            manager.show_logs(
-                                lines,
-                                Some(kind.as_str()),
-                                Some(&effective_config),
-                            )?;
-                        }
+                        render_all_logs_from_snapshot(
+                            &manager,
+                            &snapshot,
+                            lines,
+                            kind.as_str(),
+                            snapshot_mode,
+                        )?;
                     }
                 }
                 Ok(())
@@ -1687,6 +1643,104 @@ fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Er
         }
         Err(err) => Err(Box::new(err)),
     }
+}
+
+fn live_unit_pid(unit: &UnitStatus) -> Option<u32> {
+    unit.process.as_ref().and_then(|process| {
+        if matches!(process.state, ProcessState::Running) {
+            Some(process.pid)
+        } else {
+            None
+        }
+    })
+}
+
+fn render_service_logs_from_snapshot(
+    manager: &LogManager,
+    snapshot: &StatusSnapshot,
+    service_name: &str,
+    lines: usize,
+    kind: &str,
+    snapshot_mode: bool,
+) -> Result<(), Box<dyn Error>> {
+    let unit = snapshot
+        .units
+        .iter()
+        .find(|unit| unit.name == service_name || unit.hash == service_name);
+
+    if let Some(unit) = unit {
+        if let Some(process_pid) = live_unit_pid(unit) {
+            if snapshot_mode {
+                manager.show_log_snapshot(
+                    service_name,
+                    process_pid,
+                    lines,
+                    Some(kind),
+                )?;
+            } else {
+                manager.show_log(service_name, process_pid, lines, Some(kind))?;
+            }
+            return Ok(());
+        }
+
+        if snapshot_mode {
+            manager.show_inactive_log_snapshot(service_name, lines, Some(kind))?;
+        } else {
+            manager.show_inactive_log(service_name, lines, Some(kind))?;
+        }
+        return Ok(());
+    }
+
+    let cron_state = CronStateFile::load().unwrap_or_default();
+    let stdout_exists = resolve_log_path(service_name, "stdout").exists();
+    let stderr_exists = resolve_log_path(service_name, "stderr").exists();
+
+    if cron_state.jobs().contains_key(service_name) || stdout_exists || stderr_exists {
+        if snapshot_mode {
+            manager.show_inactive_log_snapshot(service_name, lines, Some(kind))?;
+        } else {
+            manager.show_inactive_log(service_name, lines, Some(kind))?;
+        }
+    } else {
+        warn!("Service '{service_name}' is not currently running");
+    }
+
+    Ok(())
+}
+
+fn render_all_logs_from_snapshot(
+    manager: &LogManager,
+    snapshot: &StatusSnapshot,
+    lines: usize,
+    kind: &str,
+    snapshot_mode: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut unit_names: Vec<&str> = snapshot
+        .units
+        .iter()
+        .filter(|unit| !matches!(unit.kind, UnitKind::Orphaned))
+        .map(|unit| unit.name.as_str())
+        .collect();
+    unit_names.sort_unstable();
+    unit_names.dedup();
+
+    if unit_names.is_empty() {
+        println!("No active services");
+        return Ok(());
+    }
+
+    for service_name in unit_names {
+        render_service_logs_from_snapshot(
+            manager,
+            snapshot,
+            service_name,
+            lines,
+            kind,
+            snapshot_mode,
+        )?;
+    }
+
+    Ok(())
 }
 
 fn target_table_width(terminal_width: usize) -> usize {
