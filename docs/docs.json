@@ -3,6 +3,11 @@
   "theme": "mint",
   "name": "systemg",
   "description": "A general-purpose program composer.",
+  "favicon": "/img/favicon/favicon.ico",
+  "logo": {
+    "light": "/img/full-logo-colored-cropped.webp",
+    "dark": "/img/full-logo-colored-cropped.webp"
+  },
   "colors": {
     "primary": "#497bd8",
     "light": "#679bfc",

@@ -15,6 +15,8 @@ use assert_cmd::Command;
 #[cfg(target_os = "linux")]
 use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
+use predicates::prelude::PredicateBooleanExt;
+#[cfg(target_os = "linux")]
 use systemg::{
     config::load_config,
     daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
@@ -31,6 +33,18 @@ fn logs_streams_when_pid_has_no_fds() {
     fs::create_dir_all(&home).expect("failed to create home dir");
     let _home = HomeEnvGuard::set(&home);
 
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  arb_rs:
+    command: "/bin/sleep 30"
+"#,
+    )
+    .expect("write config");
+
     let log_dir = home.join(".local/share/systemg/logs");
     fs::create_dir_all(&log_dir).expect("make log dir");
     let stdout_path = log_dir.join("arb_rs_stdout.log");
@@ -44,6 +58,8 @@ fn logs_streams_when_pid_has_no_fds() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     cmd.env("SYSTEMG_TAIL_MODE", "oneshot")
         .arg("logs")
+        .arg("--config")
+        .arg(&config_path)
         .arg("--service")
         .arg("arb_rs")
         .arg("--kind")
@@ -124,7 +140,7 @@ services:
         .arg("1")
         .assert()
         .success()
-        .stdout(predicates::str::contains(&format!("demo ({})", child.id())))
+        .stdout(predicates::str::contains(format!("demo ({})", child.id())))
         .stdout(predicates::str::contains("snapshot log line"))
         .stdout(predicates::str::contains("offline").not());
 

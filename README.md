@@ -1,6 +1,14 @@
 # systemg
 
-Process supervisor with dependencies, health checks, and rolling deployments. Built on systemd/cgroups.
+A general-purpose program orchestrator.
+
+<br/><br/>
+
+<div align="center" >
+  <img src="https://i.imgur.com/13cCBze.png" alt="systemg" width="320" />
+</div>
+
+<br/><br/>
 
 <div align="center">
 
