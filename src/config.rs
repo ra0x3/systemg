@@ -56,6 +56,7 @@ pub struct MetricsConfig {
 }
 
 impl Default for MetricsConfig {
+    /// Returns the default this item.
     fn default() -> Self {
         Self {
             retention_minutes: METRICS_DEFAULT_RETENTION_MINUTES,
@@ -244,21 +245,25 @@ pub enum LimitValue {
 }
 
 impl<'de> Deserialize<'de> for LimitValue {
+    /// Handles deserialize.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
+        /// Represents limit visitor.
         struct LimitVisitor;
 
         impl<'de> serde::de::Visitor<'de> for LimitVisitor {
             type Value = LimitValue;
 
+            /// Handles expecting.
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str(
                     "a non-negative integer, an optional size suffix (e.g. 512M), or 'unlimited'",
                 )
             }
 
+            /// Visits u64.
             fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -266,6 +271,7 @@ impl<'de> Deserialize<'de> for LimitValue {
                 Ok(LimitValue::Fixed(value))
             }
 
+            /// Visits str.
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -279,6 +285,7 @@ impl<'de> Deserialize<'de> for LimitValue {
                 }
             }
 
+            /// Visits i64.
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -298,11 +305,13 @@ impl<'de> Deserialize<'de> for LimitValue {
 }
 
 #[derive(Debug)]
+/// Defines limit parse error values.
 enum LimitParseError {
     Unlimited,
     Invalid(String),
 }
 
+/// Parses limit.
 fn parse_limit(input: &str) -> Result<u64, LimitParseError> {
     let trimmed = input.trim();
     if trimmed.eq_ignore_ascii_case("unlimited") {
@@ -344,6 +353,7 @@ fn parse_limit(input: &str) -> Result<u64, LimitParseError> {
 }
 
 impl std::fmt::Display for LimitParseError {
+    /// Handles fmt.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LimitParseError::Unlimited => write!(f, "value represents unlimited"),
@@ -384,18 +394,11 @@ impl ServiceConfig {
     /// # Returns
     /// A 16-character hexadecimal string representing the first 64 bits of the SHA256 hash.
     pub fn compute_hash(&self) -> String {
-        // Serialize the config to JSON with sorted keys for deterministic output
         let json = serde_json::to_string(self)
             .expect("ServiceConfig should always be serializable");
-
-        // Compute SHA256 hash
         let mut hasher = Sha256::new();
         hasher.update(json.as_bytes());
         let result = hasher.finalize();
-
-        // Take first 64 bits (8 bytes) and convert to hex
-        // This gives us a 16-character hash which is sufficient for uniqueness
-        // while being more readable than the full 64-character SHA256
         format!(
             "{:016x}",
             u64::from_be_bytes(result[0..8].try_into().unwrap())
@@ -480,13 +483,9 @@ impl EnvConfig {
             (None, Some(s)) => Some(s.clone()),
             (Some(root_cfg), Some(service_cfg)) => {
                 let mut merged_vars = root_cfg.vars.clone().unwrap_or_default();
-
-                // Service-level vars override root-level vars
                 if let Some(service_vars) = &service_cfg.vars {
                     merged_vars.extend(service_vars.clone());
                 }
-
-                // Service-level file takes precedence over root-level file
                 let file = service_cfg.file.clone().or_else(|| root_cfg.file.clone());
 
                 Some(EnvConfig {
@@ -735,15 +734,11 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     config.project_dir = Some(base_path.to_string_lossy().to_string());
-
-    // Load root-level env file if present
     if let Some(env_config) = &config.env
         && let Some(resolved_path) = env_config.path(&base_path)
     {
         load_env_file(&resolved_path.to_string_lossy())?;
     }
-
-    // Load root-level env vars if present
     if let Some(env_config) = &config.env
         && let Some(vars) = &env_config.vars
     {
@@ -753,10 +748,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
             }
         }
     }
-
-    // Merge root-level env with service-level env and load service-specific env
     for service in config.services.values_mut() {
-        // Merge root env with service env (service takes precedence)
         let merged_env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
 
         if let Some(env_config) = &merged_env
@@ -768,8 +760,6 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         if let Some(env_config) = &merged_env
             && let Some(vars) = &env_config.vars
         {
-            // Inline environment variables take precedence over values loaded from env files
-            // when expanding the YAML template.
             for (key, value) in vars {
                 unsafe {
                     env::set_var(key, value);
@@ -786,8 +776,6 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         .map_err(ProcessManagerError::ConfigParseError)?;
 
     config.project_dir = Some(base_path.to_string_lossy().to_string());
-
-    // Apply the env merge again after re-parsing
     for service in config.services.values_mut() {
         service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
     }
@@ -1033,11 +1021,7 @@ services:
         };
 
         let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();
-
-        // Service file should take precedence
         assert_eq!(result.file, Some("service.env".into()));
-
-        // Service vars should override root vars
         let vars = result.vars.unwrap();
         assert_eq!(vars.get("SHARED_VAR"), Some(&"service_value".to_string()));
         assert_eq!(vars.get("ROOT_ONLY"), Some(&"root_only_value".to_string()));
@@ -1060,11 +1044,7 @@ services:
         };
 
         let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();
-
-        // Service file should take precedence
         assert_eq!(result.file, Some("service.env".into()));
-
-        // Root vars should be preserved
         let vars = result.vars.unwrap();
         assert_eq!(vars.get("ROOT_VAR"), Some(&"root_value".to_string()));
     }
@@ -1096,8 +1076,6 @@ services:
         .unwrap();
 
         let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
-
-        // Both services should have the root env
         for service_name in ["service1", "service2"] {
             let service = &config.services[service_name];
             let env = service.env.as_ref().unwrap();
@@ -1143,8 +1121,6 @@ services:
         .unwrap();
 
         let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
-
-        // Service1 should have merged env with service overrides
         let service1 = &config.services["service1"];
         let env1 = service1.env.as_ref().unwrap();
         assert_eq!(env1.file, Some("service.env".into()));
@@ -1152,8 +1128,6 @@ services:
         assert_eq!(vars1.get("SHARED"), Some(&"service_value".to_string()));
         assert_eq!(vars1.get("ROOT_ONLY"), Some(&"root".to_string()));
         assert_eq!(vars1.get("SERVICE_ONLY"), Some(&"service".to_string()));
-
-        // Service2 should have only root env
         let service2 = &config.services["service2"];
         let env2 = service2.env.as_ref().unwrap();
         assert_eq!(env2.file, Some("root.env".into()));
@@ -1214,7 +1188,6 @@ services:
 
     #[test]
     fn hash_computation_is_stable() {
-        // Same config should always produce the same hash
         let config1 = ServiceConfig {
             command: "test command".to_string(),
             env: None,
@@ -1323,9 +1296,6 @@ services:
 
     #[test]
     fn service_rename_preserves_hash() {
-        // The hash should NOT depend on the service name
-        // This test verifies that renaming a service doesn't change its hash
-
         let config = ServiceConfig {
             command: "echo hello".to_string(),
             env: None,
@@ -1348,12 +1318,7 @@ services:
             skip: None,
             spawn: None,
         };
-
-        // The same config used with different service names should have the same hash
         let hash = config.compute_hash();
-
-        // Verify that the hash is based on config content, not name
-        // (Since ServiceConfig doesn't contain the name field, this is guaranteed)
         assert_eq!(hash.len(), 16);
 
         let renamed_config = config.clone();

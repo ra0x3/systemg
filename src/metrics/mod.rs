@@ -76,6 +76,7 @@ pub struct MetricsSettings {
 }
 
 impl Default for MetricsSettings {
+    /// Returns the default this item.
     fn default() -> Self {
         Self {
             retention: Duration::from_secs(DEFAULT_RETENTION_MINUTES * 60),
@@ -112,6 +113,7 @@ pub enum MetricsError {
 }
 
 #[derive(Debug, Clone, Default)]
+/// Represents unit metrics.
 struct UnitMetrics {
     samples: VecDeque<MetricSample>,
     estimated_bytes: usize,
@@ -130,6 +132,7 @@ pub struct MetricsStore {
 }
 
 impl MetricsStore {
+    /// Handles new.
     pub fn new(settings: MetricsSettings) -> Result<MetricsStore, MetricsError> {
         let spillover = match settings.spillover.clone() {
             Some(spill) => Some(MetricsSpillover::new(&spill)?),
@@ -207,14 +210,17 @@ impl MetricsStore {
         Ok(())
     }
 
+    /// Handles retention.
     pub fn retention(&self) -> Duration {
         self.settings.retention
     }
 
+    /// Samples interval.
     pub fn sample_interval(&self) -> Duration {
         self.settings.sample_interval
     }
 
+    /// Handles enforce memory budget.
     fn enforce_memory_budget(&mut self) -> Result<(), MetricsError> {
         if self.total_estimated_bytes <= self.settings.max_memory_bytes {
             return Ok(());
@@ -316,12 +322,14 @@ struct MetricsSpillover {
 }
 
 #[derive(Debug)]
+/// Represents segment meta.
 struct SegmentMeta {
     path: PathBuf,
     bytes: u64,
 }
 
 #[derive(Debug)]
+/// Represents segment writer.
 struct SegmentWriter {
     file: fs::File,
     path: PathBuf,
@@ -329,6 +337,7 @@ struct SegmentWriter {
 }
 
 impl MetricsSpillover {
+    /// Handles new.
     fn new(settings: &SpilloverSettings) -> Result<Self, MetricsError> {
         if !settings.directory.exists() {
             fs::create_dir_all(&settings.directory).map_err(MetricsError::CreateDir)?;
@@ -363,6 +372,7 @@ impl MetricsSpillover {
         })
     }
 
+    /// Handles persist.
     fn persist(
         &mut self,
         unit_hash: &str,
@@ -399,6 +409,7 @@ impl MetricsSpillover {
         Ok(())
     }
 
+    /// Ensures writer.
     fn ensure_writer(&mut self) -> Result<&mut SegmentWriter, MetricsError> {
         if self.current.is_none() {
             let timestamp = SystemTime::now()
@@ -422,6 +433,7 @@ impl MetricsSpillover {
         Ok(self.current.as_mut().unwrap())
     }
 
+    /// Handles rotate segment.
     fn rotate_segment(&mut self) -> Result<(), MetricsError> {
         if let Some(current) = self.current.take()
             && let Some(meta) = self.segments.back_mut()
@@ -431,6 +443,7 @@ impl MetricsSpillover {
         Ok(())
     }
 
+    /// Handles enforce budget.
     fn enforce_budget(&mut self) -> Result<(), MetricsError> {
         while self.total_bytes > self.max_bytes {
             if let Some(meta) = self.segments.pop_front() {
@@ -458,6 +471,7 @@ impl MetricsSpillover {
 }
 
 #[derive(Serialize)]
+/// Represents spillover record.
 struct SpilloverRecord<'a> {
     unit_hash: &'a str,
     sample: &'a MetricSample,
@@ -494,6 +508,7 @@ pub struct MetricsCollector {
 
 impl MetricsCollector {
     #[allow(clippy::too_many_arguments)]
+    /// Handles spawn.
     pub fn spawn(
         store: MetricsHandle,
         config: Arc<Config>,
@@ -563,6 +578,7 @@ impl MetricsCollector {
         }
     }
 
+    /// Stops this item.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
@@ -572,6 +588,7 @@ impl MetricsCollector {
 }
 
 impl Drop for MetricsCollector {
+    /// Handles drop.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
@@ -580,6 +597,7 @@ impl Drop for MetricsCollector {
     }
 }
 
+/// Gathers unit targets.
 fn gather_unit_targets(
     config: &Config,
     pid_file: &Arc<Mutex<PidFile>>,
@@ -617,6 +635,7 @@ fn gather_unit_targets(
     targets
 }
 
+/// Samples process.
 fn sample_process(system: &mut System, pid: u32) -> MetricSample {
     let pid_sys = Pid::from_u32(pid);
     let refresh_kind = ProcessRefreshKind::everything();
@@ -642,6 +661,7 @@ fn sample_process(system: &mut System, pid: u32) -> MetricSample {
     }
 }
 
+/// Builds the placeholder process sample.
 fn missing_process_sample() -> MetricSample {
     MetricSample {
         timestamp: Utc::now(),

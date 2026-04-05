@@ -31,6 +31,7 @@ pub fn supervisor_pid_path() -> Result<PathBuf, ControlError> {
     Ok(runtime_dir()?.join("sysg.pid"))
 }
 
+/// Handles config hint path.
 fn config_hint_path() -> Result<PathBuf, ControlError> {
     Ok(runtime_dir()?.join("config_hint"))
 }

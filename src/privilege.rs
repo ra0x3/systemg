@@ -46,6 +46,7 @@ pub struct UserContext {
 }
 
 impl UserContext {
+    /// Handles new.
     fn new() -> Self {
         Self {
             uid: None,
@@ -212,6 +213,7 @@ impl PrivilegeContext {
         Ok(())
     }
 
+    /// Handles apply limits.
     fn apply_limits(&self) -> io::Result<()> {
         let Some(limits) = &self.limits else {
             return Ok(());
@@ -233,6 +235,7 @@ impl PrivilegeContext {
         Ok(())
     }
 
+    /// Handles apply nice.
     fn apply_nice(&self) -> io::Result<()> {
         let Some(limits) = &self.limits else {
             return Ok(());
@@ -246,6 +249,7 @@ impl PrivilegeContext {
         Ok(())
     }
 
+    /// Handles apply cpu affinity.
     fn apply_cpu_affinity(&self) -> io::Result<()> {
         let Some(limits) = &self.limits else {
             return Ok(());
@@ -310,6 +314,7 @@ impl PrivilegeContext {
     }
 
     #[cfg(target_os = "linux")]
+    /// Handles apply capabilities pre user.
     fn apply_capabilities_pre_user(&self) -> io::Result<()> {
         if !getuid().is_root() {
             return Ok(());
@@ -320,9 +325,6 @@ impl PrivilegeContext {
                 caps::clear(None, set).map_err(caps_err)?;
             }
 
-            // Some container kernels disallow bounding/ambient mutations even
-            // for root (EINVAL/EPERM). Keep service startup resilient in those
-            // environments while still clearing the core capability sets.
             clear_cap_set_best_effort(CapSet::Bounding);
             clear_cap_set_best_effort(CapSet::Ambient);
             return Ok(());
@@ -345,6 +347,7 @@ impl PrivilegeContext {
     }
 
     #[cfg(not(target_os = "linux"))]
+    /// Handles apply capabilities pre user.
     fn apply_capabilities_pre_user(&self) -> io::Result<()> {
         if !self.capabilities.is_empty() {
             warn!("Capabilities requested but unsupported on this platform");
@@ -353,6 +356,7 @@ impl PrivilegeContext {
     }
 
     #[cfg(target_os = "linux")]
+    /// Handles apply capabilities post user.
     fn apply_capabilities_post_user(&self) -> io::Result<()> {
         if self.user.uid.is_none() && !getuid().is_root() {
             return Ok(());
@@ -369,10 +373,12 @@ impl PrivilegeContext {
     }
 
     #[cfg(not(target_os = "linux"))]
+    /// Handles apply capabilities post user.
     fn apply_capabilities_post_user(&self) -> io::Result<()> {
         Ok(())
     }
 
+    /// Handles apply isolation.
     fn apply_isolation(&self) -> io::Result<()> {
         let Some(isolation) = &self.isolation else {
             return Ok(());
@@ -515,6 +521,9 @@ impl PrivilegeContext {
 }
 
 #[cfg(target_os = "linux")]
+/// Clears a capability set when supported by the running kernel, suppressing
+/// `EINVAL` and `EPERM` so container-constrained environments can still start
+/// services after the core capability sets have been cleared.
 fn clear_cap_set_best_effort(set: CapSet) {
     if let Err(err) = caps::clear(None, set) {
         match caps_errno(&err) {
@@ -531,6 +540,7 @@ fn clear_cap_set_best_effort(set: CapSet) {
     }
 }
 
+/// Sets rlimit.
 fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
     let rlim = match value {
         LimitValue::Fixed(v) => rlimit {
@@ -554,6 +564,7 @@ fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+/// Parses caps.
 fn parse_caps(names: &[String]) -> io::Result<HashSet<Capability>> {
     let mut caps_set = HashSet::with_capacity(names.len());
     for name in names {
@@ -569,11 +580,13 @@ fn parse_caps(names: &[String]) -> io::Result<HashSet<Capability>> {
 }
 
 #[cfg(target_os = "linux")]
+/// Handles caps err.
 fn caps_err(err: CapsError) -> io::Error {
     io::Error::other(err.to_string())
 }
 
 #[cfg(target_os = "linux")]
+/// Handles caps errno.
 fn caps_errno(err: &CapsError) -> Option<Errno> {
     err.to_string()
         .split(':')
@@ -584,6 +597,7 @@ fn caps_errno(err: &CapsError) -> Option<Errno> {
 }
 
 #[cfg(target_os = "linux")]
+/// Handles apply cgroup settings.
 fn apply_cgroup_settings(
     service_hash: &str,
     cfg: &CgroupConfig,
@@ -616,6 +630,7 @@ fn apply_cgroup_settings(
 }
 
 #[cfg(target_os = "linux")]
+/// Sanitizes for fs.
 fn sanitize_for_fs(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -679,12 +694,14 @@ mod tests {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+/// Provides linux tests support.
 mod linux_tests {
     use tempfile::tempdir;
 
     use super::*;
 
     #[test]
+    /// Handles apply cgroup settings writes files to custom root.
     fn apply_cgroup_settings_writes_files_to_custom_root() {
         let root = tempdir().expect("tempdir");
         let cfg = CgroupConfig {
@@ -715,6 +732,7 @@ mod linux_tests {
     }
 
     #[test]
+    /// Handles apply isolation returns ok without capabilities.
     fn apply_isolation_returns_ok_without_capabilities() {
         let ctx = PrivilegeContext {
             isolation: Some(IsolationConfig {

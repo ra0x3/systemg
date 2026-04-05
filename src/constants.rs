@@ -85,12 +85,14 @@ impl DaemonLock {
 }
 
 impl PartialOrd for DaemonLock {
+    /// Handles partial cmp.
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for DaemonLock {
+    /// Handles cmp.
     fn cmp(&self, other: &Self) -> Ordering {
         self.priority().cmp(&other.priority())
     }
@@ -191,6 +193,7 @@ impl DeploymentStrategy {
 impl FromStr for DeploymentStrategy {
     type Err = String;
 
+    /// Handles from str.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "rolling" => Ok(Self::Rolling),
@@ -201,6 +204,7 @@ impl FromStr for DeploymentStrategy {
 }
 
 impl Default for DeploymentStrategy {
+    /// Returns the default this item.
     fn default() -> Self {
         Self::Immediate
     }

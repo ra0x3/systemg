@@ -26,11 +26,13 @@ use crate::{
 /// Maximum number of execution history entries to keep per cron job.
 const MAX_EXECUTION_HISTORY: usize = 10;
 
+/// Provides systemtime serde support.
 mod systemtime_serde {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serde::{Deserialize, Deserializer, Serializer};
 
+    /// Serializes this item.
     pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -41,6 +43,7 @@ mod systemtime_serde {
         serializer.serialize_u64(duration.as_secs())
     }
 
+    /// Handles deserialize.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
     where
         D: Deserializer<'de>,
@@ -50,11 +53,13 @@ mod systemtime_serde {
     }
 }
 
+/// Provides systemtime serde opt support.
 mod systemtime_serde_opt {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serde::{Deserialize, Deserializer, Serializer};
 
+    /// Serializes this item.
     pub fn serialize<S>(
         time: &Option<SystemTime>,
         serializer: S,
@@ -73,12 +78,12 @@ mod systemtime_serde_opt {
         }
     }
 
+    /// Handles deserialize.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let secs = u64::deserialize(deserializer)?;
-        // 0 represents None for XML compatibility
         if secs == 0 {
             Ok(None)
         } else {
@@ -100,6 +105,7 @@ pub enum CronExecutionStatus {
 
 #[derive(Deserialize)]
 #[serde(untagged)]
+/// Defines failed reason value values.
 enum FailedReasonValue {
     Plain(String),
     Text {
@@ -119,15 +125,18 @@ impl FailedReasonValue {
 }
 
 impl<'de> Deserialize<'de> for CronExecutionStatus {
+    /// Handles deserialize.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
+        /// Represents cron execution status visitor.
         struct CronExecutionStatusVisitor;
 
         impl<'de> Visitor<'de> for CronExecutionStatusVisitor {
             type Value = CronExecutionStatus;
 
+            /// Handles expecting.
             fn expecting(
                 &self,
                 formatter: &mut std::fmt::Formatter<'_>,
@@ -135,6 +144,7 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 formatter.write_str("a cron execution status in enum-tag or text form")
             }
 
+            /// Visits str.
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -150,6 +160,7 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 }
             }
 
+            /// Visits string.
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -157,6 +168,7 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 self.visit_str(&value)
             }
 
+            /// Visits enum.
             fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
             where
                 A: EnumAccess<'de>,
@@ -182,6 +194,7 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 }
             }
 
+            /// Visits map.
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
@@ -382,6 +395,7 @@ pub struct CronManager {
 }
 
 impl Default for CronManager {
+    /// Returns the default this item.
     fn default() -> Self {
         let state_file =
             CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
@@ -734,6 +748,7 @@ pub struct CronStateFile {
     jobs: std::collections::BTreeMap<String, PersistedCronJobState>,
 }
 
+/// Serializes cron jobs.
 fn serialize_cron_jobs<S>(
     map: &std::collections::BTreeMap<String, PersistedCronJobState>,
     s: S,
@@ -752,6 +767,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize cron jobs.
 fn deserialize_cron_jobs<'de, D>(
     d: D,
 ) -> Result<std::collections::BTreeMap<String, PersistedCronJobState>, D::Error>
@@ -814,6 +830,7 @@ impl CronStateFile {
         &self.jobs
     }
 
+    /// Prunes jobs not in.
     pub(crate) fn prune_jobs_not_in(&mut self, valid_hashes: &HashSet<String>) -> bool {
         let original_len = self.jobs.len();
         self.jobs.retain(|hash, _| valid_hashes.contains(hash));
@@ -839,6 +856,7 @@ pub struct PersistedCronJobState {
 }
 
 impl Default for PersistedCronJobState {
+    /// Returns the default this item.
     fn default() -> Self {
         Self {
             last_execution: None,

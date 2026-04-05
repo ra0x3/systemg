@@ -76,11 +76,13 @@ struct SpawnParams {
 }
 
 #[derive(Debug, Clone)]
+/// Represents cron completion outcome.
 struct CronCompletionOutcome {
     status: CronExecutionStatus,
     exit_code: Option<i32>,
 }
 
+/// Handles fallback cron user.
 fn fallback_cron_user(service_config: &crate::config::ServiceConfig) -> Option<String> {
     if let Some(user) = service_config.user.as_ref().filter(|user| !user.is_empty()) {
         return Some(user.clone());
@@ -171,11 +173,8 @@ impl Supervisor {
 
         let listener = UnixListener::bind(&socket_path)?;
         ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
-
-        // Only start non-cron services
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
         for (service_name, service_config) in &config.services {
-            // Skip if service_filter is set and doesn't match
             if let Some(ref filter) = self.service_filter
                 && service_name != filter
             {
@@ -233,8 +232,6 @@ impl Supervisor {
                         }
                     }
                 }
-
-                // Only start services that are not cron jobs
                 self.daemon.start_service(service_name, service_config)?;
 
                 if let Some(ref spawn) = service_config.spawn
@@ -247,10 +244,6 @@ impl Supervisor {
                 }
             }
         }
-
-        // Ensure the background monitor thread is watching any long-lived
-        // processes we just started so that exits are reaped and lifecycle
-        // state stays accurate.
         self.daemon.ensure_monitoring()?;
 
         let config_handle = self.daemon.config();
@@ -295,8 +288,6 @@ impl Supervisor {
             pid_handle,
             state_handle,
         ));
-
-        // Spawn cron checker thread
         let cron_manager = self.cron_manager.clone();
         let config_path = self.config_path.clone();
         let detach_children = self.detach_children;
@@ -318,8 +309,6 @@ impl Supervisor {
                                 info!("Running cron job '{}'", job_name);
                                 let command = Some(service_config.command.clone());
                                 let user = fallback_cron_user(&service_config);
-
-                                // Spawn a thread to run and monitor the cron job
                                 let cron_manager_clone = cron_manager.clone();
                                 let job_name_clone = job_name.clone();
                                 let cfg_clone = cfg.clone();
@@ -328,8 +317,6 @@ impl Supervisor {
 
                                 thread::spawn(move || {
                                     use crate::daemon::PidFile;
-
-                                    // Run the cron job and wait for completion
                                     match Daemon::from_config(
                                         cfg_clone.clone(),
                                         detach_children,
@@ -371,8 +358,6 @@ impl Supervisor {
                                                             Some(0),
                                                             metrics,
                                                         );
-
-                                                    // Persist exit state to ServiceStateFile for status display
                                                     if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
                                                         && let Ok(mut state_file) =
                                                             ServiceStateFile::load()
@@ -388,12 +373,9 @@ impl Supervisor {
                                                     }
                                                 }
                                                 Ok(ServiceReadyState::Running) => {
-                                                    // Give the process a moment to register in the PID file
                                                     thread::sleep(Duration::from_millis(
                                                         50,
                                                     ));
-
-                                                    // Reload the PID file to get the process ID
                                                     match PidFile::reload() {
                                                         Ok(pid_file) => {
                                                             if let Some(pid) = pid_file
@@ -406,7 +388,6 @@ impl Supervisor {
                                                                         user.clone(),
                                                                         command.clone(),
                                                                     );
-                                                                // Wait for the process to complete
                                                                 let result = Self::wait_for_cron_completion(
                                                                     pid,
                                                                     &job_name_clone,
@@ -446,8 +427,6 @@ impl Supervisor {
                                                                             exit_code,
                                                                             metrics,
                                                                         );
-
-                                                                        // Persist exit state to ServiceStateFile for status display
                                                                         if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
                                                                             && let Ok(mut state_file) = ServiceStateFile::load()
                                                                         {
@@ -485,8 +464,6 @@ impl Supervisor {
                                                                             None,
                                                                             metrics,
                                                                         );
-
-                                                                        // Persist error state to ServiceStateFile
                                                                         if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
                                                                             && let Ok(mut state_file) = ServiceStateFile::load()
                                                                             && let Err(err) = state_file.set(
@@ -501,16 +478,11 @@ impl Supervisor {
                                                                         }
                                                                     }
                                                                 }
-
-                                                                // Clean up the PID file entry without changing lifecycle status
-                                                                // (state has already been persisted above)
                                                                 if let Ok(mut pid_file) = PidFile::load()
                                                                     && let Err(err) = pid_file.remove(&job_name_clone) {
                                                                     debug!("Failed to remove cron job '{}' from PID file: {}", job_name_clone, err);
                                                                 }
                                                             } else {
-                                                                // PID not found - check if the job already completed successfully
-                                                                // This can happen when a cron job completes very quickly
                                                                 let already_completed = if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
                                                                     && let Ok(state_file) = ServiceStateFile::load()
                                                                     && let Some(entry) = state_file.get(&service_hash)
@@ -533,7 +505,6 @@ impl Supervisor {
                                                                             user.clone(),
                                                                             command.clone(),
                                                                         );
-                                                                    // Job completed successfully before we could track it
                                                                     let metrics = if let Ok(guard) = metrics_store_clone.try_read() {
                                                                         guard.snapshot_unit(&service_hash).unwrap_or_default()
                                                                     } else {
@@ -551,7 +522,6 @@ impl Supervisor {
                                                                         "Failed to find PID for cron job '{}' in PID file and job has not completed",
                                                                         job_name_clone
                                                                     );
-                                                                    // No metrics available since process didn't start
                                                                     cron_manager_clone.mark_job_completed(
                                                                         &job_name_clone,
                                                                         CronExecutionStatus::Failed(
@@ -561,8 +531,6 @@ impl Supervisor {
                                                                         None,
                                                                         vec![],
                                                                     );
-
-                                                                    // Persist error state to ServiceStateFile
                                                                     if let Some(service_hash) = daemon.get_service_hash(&job_name_clone)
                                                                         && let Ok(mut state_file) =
                                                                             ServiceStateFile::load()
@@ -591,7 +559,6 @@ impl Supervisor {
                                                                     user.clone(),
                                                                     command.clone(),
                                                                 );
-                                                            // No metrics available since process didn't start
                                                             cron_manager_clone.mark_job_completed(
                                                                 &job_name_clone,
                                                                 CronExecutionStatus::Failed(
@@ -618,7 +585,6 @@ impl Supervisor {
                                                             user.clone(),
                                                             command.clone(),
                                                         );
-                                                    // No metrics available since process didn't start properly
                                                     cron_manager_clone
                                                         .mark_job_completed(
                                                             &job_name_clone,
@@ -642,7 +608,6 @@ impl Supervisor {
                                                 user.clone(),
                                                 command.clone(),
                                             );
-                                            // No metrics available since daemon creation failed
                                             cron_manager_clone.mark_job_completed(
                                                 &job_name_clone,
                                                 CronExecutionStatus::Failed(
@@ -712,6 +677,7 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Handles handle command.
     fn handle_command(
         &mut self,
         command: ControlCommand,
@@ -719,7 +685,6 @@ impl Supervisor {
         match command {
             ControlCommand::Start { service } => {
                 if let Some(service_name) = service {
-                    // Start a single service
                     let config = self.daemon.config();
                     if let Some(service_config) = config.services.get(&service_name) {
                         self.daemon.start_service(&service_name, service_config)?;
@@ -743,7 +708,6 @@ impl Supervisor {
                         )))
                     }
                 } else {
-                    // Start all services
                     self.daemon.start_services_blocking()?;
                     self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services started".into()))
@@ -839,6 +803,7 @@ impl Supervisor {
         }
     }
 
+    /// Handles handle spawn.
     fn handle_spawn(&mut self, params: SpawnParams) -> Result<u32, SupervisorError> {
         let spawn_auth = self
             .spawn_manager
@@ -999,6 +964,7 @@ impl Supervisor {
         Ok(child_pid)
     }
 
+    /// Reloads config.
     fn reload_config(&mut self, path: &Path) -> Result<(), SupervisorError> {
         let resolved = if path.is_absolute() {
             path.to_path_buf()
@@ -1079,6 +1045,7 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Restarts single service.
     fn restart_single_service(&self, name: &str) -> Result<(), SupervisorError> {
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
         let Some(service_config) = config.services.get(name) else {
@@ -1093,6 +1060,7 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Handles refresh status cache.
     fn refresh_status_cache(&mut self) {
         match self.collect_live_snapshot() {
             Ok(snapshot) => self.status_cache.replace(snapshot),
@@ -1116,6 +1084,7 @@ impl Supervisor {
         .map_err(SupervisorError::from)
     }
 
+    /// Handles shutdown runtime.
     fn shutdown_runtime(&mut self) -> Result<(), SupervisorError> {
         if let Some(collector) = self.metrics_collector.take() {
             collector.stop();
@@ -1232,7 +1201,6 @@ impl Supervisor {
                     thread::sleep(POLL_INTERVAL);
                 }
                 Err(nix::errno::Errno::ECHILD) => {
-                    // Already reaped elsewhere; assume success.
                     debug!(
                         "Cron job '{}' already reaped before wait, assuming success",
                         job_name

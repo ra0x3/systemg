@@ -6,6 +6,7 @@ use chrono::Local;
 
 use crate::metrics::MetricSample;
 
+/// Provides rasciigraph support.
 pub mod rasciigraph;
 use self::rasciigraph::{Config, plot};
 
@@ -183,12 +184,14 @@ pub fn render_metrics_chart_lines(
     Ok(output)
 }
 
+/// Represents chart card spec.
 struct ChartCardSpec {
     title: String,
     legend: String,
     y_axis_label: String,
 }
 
+/// Builds chart card.
 fn build_chart_card(
     spec: ChartCardSpec,
     graph: &str,
@@ -211,6 +214,7 @@ fn build_chart_card(
     lines
 }
 
+/// Adds right axis percentage labels.
 fn add_right_axis_percentage_labels(
     graph: &str,
     raw_max: f64,
@@ -251,6 +255,7 @@ fn add_right_axis_percentage_labels(
     out.join("\n")
 }
 
+/// Extracts axis rows.
 fn extract_axis_rows(graph: &str) -> Vec<(f64, usize)> {
     graph
         .lines()
@@ -262,6 +267,7 @@ fn extract_axis_rows(graph: &str) -> Vec<(f64, usize)> {
         .collect()
 }
 
+/// Lays out cards with wrapping.
 fn layout_cards_with_wrapping(
     cards: &[Vec<String>],
     max_width: usize,
@@ -303,6 +309,7 @@ fn layout_cards_with_wrapping(
     output
 }
 
+/// Renders card row.
 fn render_card_row(cards: &[&Vec<String>], gap: usize) -> Vec<String> {
     let row_height = cards.iter().map(|card| card.len()).max().unwrap_or(0);
     let card_widths: Vec<usize> = cards.iter().map(|card| card_width(card)).collect();
@@ -328,6 +335,7 @@ fn render_card_row(cards: &[&Vec<String>], gap: usize) -> Vec<String> {
     row_lines
 }
 
+/// Handles card width.
 fn card_width(card: &[String]) -> usize {
     card.iter()
         .map(|line| visible_width(line))
@@ -335,6 +343,7 @@ fn card_width(card: &[String]) -> usize {
         .unwrap_or(0)
 }
 
+/// Handles terminal columns.
 fn terminal_columns() -> usize {
     env::var("COLUMNS")
         .ok()
@@ -343,6 +352,7 @@ fn terminal_columns() -> usize {
         .unwrap_or(120)
 }
 
+/// Handles effective chart columns.
 fn effective_chart_columns(config: &ChartConfig) -> usize {
     match config.max_width {
         Some(width) => width.max(1),
@@ -350,6 +360,7 @@ fn effective_chart_columns(config: &ChartConfig) -> usize {
     }
 }
 
+/// Computes chart width.
 fn compute_chart_width(columns: usize) -> usize {
     let min_width = 24usize;
     let preferred = 40usize;
@@ -367,6 +378,7 @@ fn compute_chart_width(columns: usize) -> usize {
     per_chart.clamp(min_width, preferred)
 }
 
+/// Returns the visible width.
 fn visible_width(s: &str) -> usize {
     let mut width = 0usize;
     let mut chars = s.chars().peekable();
@@ -392,12 +404,10 @@ fn resample_to_width(data: &[f64], target_width: usize) -> Vec<f64> {
     }
 
     if data.len() == 1 {
-        // If we have only one sample, repeat it
         return vec![data[0]; target_width];
     }
 
     if data.len() >= target_width {
-        // If we have more samples than needed, downsample
         let step = data.len() as f64 / target_width as f64;
         return (0..target_width)
             .map(|i| {
@@ -406,8 +416,6 @@ fn resample_to_width(data: &[f64], target_width: usize) -> Vec<f64> {
             })
             .collect();
     }
-
-    // If we have fewer samples, interpolate
     let mut result = Vec::with_capacity(target_width);
     let scale = (data.len() - 1) as f64 / (target_width - 1) as f64;
 
@@ -433,8 +441,6 @@ pub fn parse_window_duration(window: &str) -> Result<u64, String> {
     if window.is_empty() {
         return Err("Window duration cannot be empty".to_string());
     }
-
-    // Extract numeric part and unit
     let (num_str, unit) = window
         .chars()
         .position(|c| c.is_alphabetic())
@@ -515,19 +521,12 @@ mod tests {
 
     #[test]
     fn test_resample_to_width() {
-        // Test with single value
         assert_eq!(resample_to_width(&[5.0], 3), vec![5.0, 5.0, 5.0]);
-
-        // Test with exact match
         assert_eq!(resample_to_width(&[1.0, 2.0, 3.0], 3), vec![1.0, 2.0, 3.0]);
-
-        // Test upsampling
         let upsampled = resample_to_width(&[0.0, 10.0], 5);
         assert_eq!(upsampled.len(), 5);
         assert_eq!(upsampled[0], 0.0);
         assert_eq!(upsampled[4], 10.0);
-
-        // Test downsampling
         let downsampled = resample_to_width(&[1.0, 2.0, 3.0, 4.0, 5.0], 3);
         assert_eq!(downsampled.len(), 3);
     }

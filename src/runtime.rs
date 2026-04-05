@@ -21,6 +21,7 @@ pub enum RuntimeMode {
 }
 
 #[derive(Debug, Clone)]
+/// Represents runtime context.
 struct RuntimeContext {
     mode: RuntimeMode,
     state_dir: PathBuf,
@@ -32,11 +33,13 @@ struct RuntimeContext {
 
 static CONTEXT: OnceLock<RwLock<RuntimeContext>> = OnceLock::new();
 
+/// Handles context lock.
 fn context_lock() -> &'static RwLock<RuntimeContext> {
     CONTEXT.get_or_init(|| RwLock::new(RuntimeContext::from_mode(RuntimeMode::User)))
 }
 
 impl RuntimeContext {
+    /// Handles from mode.
     fn from_mode(mode: RuntimeMode) -> Self {
         match mode {
             RuntimeMode::User => Self::user_directories(),
@@ -44,6 +47,7 @@ impl RuntimeContext {
         }
     }
 
+    /// Handles user directories.
     fn user_directories() -> Self {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
@@ -51,6 +55,7 @@ impl RuntimeContext {
         Self::from_user_home(home)
     }
 
+    /// Handles from user home.
     fn from_user_home(home: PathBuf) -> Self {
         let state_dir = home.join(".local/share/systemg");
         let log_dir = state_dir.join("logs");
@@ -66,6 +71,7 @@ impl RuntimeContext {
         }
     }
 
+    /// Handles system directories.
     fn system_directories() -> Self {
         let state_dir = PathBuf::from("/var/lib/systemg");
         let log_dir = PathBuf::from("/var/log/systemg");
@@ -218,6 +224,7 @@ pub fn capture_socket_activation() {
 }
 
 #[cfg(not(unix))]
+/// Captures socket activation.
 pub fn capture_socket_activation() {
     clear_activation_fds();
 }

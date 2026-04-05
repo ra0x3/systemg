@@ -26,6 +26,7 @@ impl LogLevelArg {
 impl FromStr for LogLevelArg {
     type Err = String;
 
+    /// Handles from str.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
@@ -90,6 +91,7 @@ impl LogKind {
 }
 
 impl fmt::Display for LogKind {
+    /// Handles fmt.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
     }
@@ -98,6 +100,7 @@ impl fmt::Display for LogKind {
 impl FromStr for LogKind {
     type Err = String;
 
+    /// Handles from str.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_lowercase().as_str() {
             "stdout" => Ok(LogKind::Stdout),

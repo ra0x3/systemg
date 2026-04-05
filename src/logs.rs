@@ -31,6 +31,7 @@ fn canonical_log_path(service: &str, kind: &str) -> PathBuf {
     path
 }
 
+/// Normalizes this item.
 fn normalize(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -38,6 +39,7 @@ fn normalize(name: &str) -> String {
         .collect()
 }
 
+/// Locates existing log.
 fn locate_existing_log(service: &str, kind: &str) -> Option<PathBuf> {
     let canonical = canonical_log_path(service, kind);
     let directory = canonical.parent()?;
@@ -79,12 +81,14 @@ pub fn resolve_log_path(service: &str, kind: &str) -> PathBuf {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Defines tail mode values.
 enum TailMode {
     Follow,
     OneShot,
 }
 
 impl TailMode {
+    /// Handles current.
     fn current() -> Self {
         match env::var("SYSTEMG_TAIL_MODE") {
             Ok(value) if value.eq_ignore_ascii_case("oneshot") => TailMode::OneShot,
@@ -93,6 +97,7 @@ impl TailMode {
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// Handles configure command.
     fn configure_command(
         self,
         cmd: &mut Command,
@@ -120,6 +125,7 @@ impl TailMode {
     }
 }
 
+/// Touches log file.
 fn touch_log_file(path: &Path) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -128,6 +134,7 @@ fn touch_log_file(path: &Path) {
     let _ = OpenOptions::new().create(true).append(true).open(path);
 }
 
+/// Truncates log file.
 fn truncate_log_file(path: &Path) -> Result<(), LogsManagerError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -143,6 +150,7 @@ fn truncate_log_file(path: &Path) -> Result<(), LogsManagerError> {
 }
 
 #[cfg(target_os = "linux")]
+/// Handles process fds present.
 fn process_fds_present(pid: u32) -> bool {
     let stdout_fd_path = format!("/proc/{pid}/fd/1");
     let stderr_fd_path = format!("/proc/{pid}/fd/2");
@@ -151,6 +159,7 @@ fn process_fds_present(pid: u32) -> bool {
     stdout_fd.exists() || stderr_fd.exists()
 }
 
+/// Resolves tail targets.
 fn resolve_tail_targets(
     service_name: &str,
     pid: Option<u32>,
@@ -183,6 +192,7 @@ fn resolve_tail_targets(
     Ok((stdout_path, stderr_path))
 }
 
+/// Writes forwarded console line.
 fn write_forwarded_console_line(
     mut writer: impl Write,
     prefix: &str,
@@ -521,6 +531,7 @@ impl LogManager {
         self.show_logs_with_mode(lines, kind, config_path, TailMode::OneShot)
     }
 
+    /// Shows logs with mode.
     fn show_logs_with_mode(
         &self,
         lines: usize,
@@ -630,6 +641,7 @@ impl LogManager {
         Ok(())
     }
 
+    /// Formats log title.
     fn format_log_title(service_name: &str, pid: Option<u32>) -> String {
         match pid {
             Some(pid) => format!("{service_name} ({pid})"),

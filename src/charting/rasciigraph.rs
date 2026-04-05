@@ -269,6 +269,7 @@ pub fn plot_many(mut series: Vec<Vec<f64>>, mut config: Config) -> String {
     res
 }
 
+/// Handles interpolate.
 fn interpolate(series: &[f64], count: u32) -> Vec<f64> {
     let mut result = Vec::new();
     let spring_factor = (series.len() - 1) as f64 / f64::from(count - 1);
@@ -288,10 +289,12 @@ fn interpolate(series: &[f64], count: u32) -> Vec<f64> {
     result
 }
 
+/// Handles linear interpolate.
 fn linear_interpolate(before: f64, after: f64, at_point: f64) -> f64 {
     before + (after - before) * at_point
 }
 
+/// Handles min max.
 fn min_max(series: &[f64]) -> (f64, f64) {
     let min = series
         .iter()

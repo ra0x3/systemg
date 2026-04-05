@@ -43,11 +43,13 @@ use crate::{
     spawn::SpawnedExit,
 };
 
+/// Provides systemtime serde support.
 mod systemtime_serde {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use serde::{Deserialize, Deserializer, Serializer};
 
+    /// Serializes this item.
     pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -58,6 +60,7 @@ mod systemtime_serde {
         serializer.serialize_u64(duration.as_secs())
     }
 
+    /// Handles deserialize.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
     where
         D: Deserializer<'de>,
@@ -211,6 +214,7 @@ pub struct PidFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Represents persisted spawn child.
 pub(crate) struct PersistedSpawnChild {
     pub(crate) pid: u32,
     pub(crate) name: String,
@@ -231,6 +235,7 @@ pub(crate) struct PersistedSpawnChild {
     pub(crate) last_exit: Option<SpawnedExit>,
 }
 
+/// Serializes services.
 fn serialize_services<S>(map: &HashMap<String, u32>, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -246,6 +251,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize services.
 fn deserialize_services<'de, D>(d: D) -> Result<HashMap<String, u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -254,6 +260,7 @@ where
     Ok(entries.into_iter().map(|e| (e.name, e.pid)).collect())
 }
 
+/// Serializes groups.
 fn serialize_groups<S>(map: &HashMap<String, i32>, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -269,6 +276,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize groups.
 fn deserialize_groups<'de, D>(d: D) -> Result<HashMap<String, i32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -277,6 +285,7 @@ where
     Ok(entries.into_iter().map(|e| (e.name, e.pgid)).collect())
 }
 
+/// Serializes parent map.
 fn serialize_parent_map<S>(map: &HashMap<u32, u32>, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -292,6 +301,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize parent map.
 fn deserialize_parent_map<'de, D>(d: D) -> Result<HashMap<u32, u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -300,6 +310,7 @@ where
     Ok(entries.into_iter().map(|e| (e.child, e.parent)).collect())
 }
 
+/// Serializes children map.
 fn serialize_children_map<S>(
     map: &HashMap<u32, Vec<u32>>,
     s: S,
@@ -318,6 +329,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize children map.
 fn deserialize_children_map<'de, D>(d: D) -> Result<HashMap<u32, Vec<u32>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -329,6 +341,7 @@ where
         .collect())
 }
 
+/// Serializes depth.
 fn serialize_depth<S>(map: &HashMap<u32, usize>, s: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -341,6 +354,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize depth.
 fn deserialize_depth<'de, D>(d: D) -> Result<HashMap<u32, usize>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -349,6 +363,7 @@ where
     Ok(entries.into_iter().map(|e| (e.pid, e.depth)).collect())
 }
 
+/// Serializes metadata.
 fn serialize_metadata<S>(
     map: &HashMap<u32, PersistedSpawnChild>,
     s: S,
@@ -367,6 +382,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize metadata.
 fn deserialize_metadata<'de, D>(
     d: D,
 ) -> Result<HashMap<u32, PersistedSpawnChild>, D::Error>
@@ -378,10 +394,12 @@ where
 }
 
 impl PidFile {
+    /// Handles path.
     fn path() -> PathBuf {
         runtime::state_dir().join(PID_FILE_NAME)
     }
 
+    /// Handles lock path.
     fn lock_path() -> PathBuf {
         runtime::state_dir().join(format!("{}{}", PID_FILE_NAME, PID_LOCK_SUFFIX))
     }
@@ -587,6 +605,7 @@ impl PidFile {
         Ok(())
     }
 
+    /// Records spawn exit.
     pub(crate) fn record_spawn_exit(
         &mut self,
         child_pid: u32,
@@ -635,6 +654,7 @@ impl PidFile {
         Ok(())
     }
 
+    /// Removes spawn subtree.
     pub(crate) fn remove_spawn_subtree(
         &mut self,
         root_pid: u32,
@@ -713,10 +733,12 @@ impl PidFile {
             .unwrap_or_default()
     }
 
+    /// Returns spawn metadata.
     pub(crate) fn get_spawn_metadata(&self, pid: u32) -> Option<&PersistedSpawnChild> {
         self.spawn_metadata.get(&pid)
     }
 
+    /// Handles spawn children for parent.
     pub(crate) fn spawn_children_for_parent(
         &self,
         parent_pid: u32,
@@ -727,6 +749,7 @@ impl PidFile {
             .collect()
     }
 
+    /// Handles spawn roots for service.
     pub(crate) fn spawn_roots_for_service(
         &self,
         service_hash: &str,
@@ -774,6 +797,7 @@ mod pidfile_tests {
     use super::*;
 
     #[test]
+    /// Removes spawn subtree in memory prunes all descendants.
     fn remove_spawn_subtree_in_memory_prunes_all_descendants() {
         let mut pid_file = PidFile {
             services: HashMap::new(),
@@ -838,6 +862,7 @@ mod pidfile_tests {
     }
 
     #[test]
+    /// Removes service prunes spawn metadata for service pid.
     fn remove_service_prunes_spawn_metadata_for_service_pid() {
         let _guard = crate::test_utils::env_lock();
         let temp = tempdir().expect("tempdir");
@@ -969,6 +994,7 @@ pub struct ServiceStateFile {
     services: HashMap<String, ServiceStateEntry>,
 }
 
+/// Serializes state entries.
 fn serialize_state_entries<S>(
     map: &HashMap<String, ServiceStateEntry>,
     s: S,
@@ -987,6 +1013,7 @@ where
     seq.end()
 }
 
+/// Handles deserialize state entries.
 fn deserialize_state_entries<'de, D>(
     d: D,
 ) -> Result<HashMap<String, ServiceStateEntry>, D::Error>
@@ -998,6 +1025,7 @@ where
 }
 
 impl ServiceStateFile {
+    /// Handles path.
     fn path() -> PathBuf {
         runtime::state_dir().join(STATE_FILE_NAME)
     }
@@ -1206,6 +1234,7 @@ struct DetachedService {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// Represents blue green state.
 struct BlueGreenState {
     /// Index of the currently active slot (0 or 1).
     active_slot_index: usize,
@@ -1222,6 +1251,7 @@ struct OrderedLockGuard<'a, T> {
 }
 
 impl<'a, T> Drop for OrderedLockGuard<'a, T> {
+    /// Handles drop.
     fn drop(&mut self) {
         HELD_LOCKS.with(|held| {
             held.borrow_mut().remove(&self.lock_type);
@@ -1232,12 +1262,14 @@ impl<'a, T> Drop for OrderedLockGuard<'a, T> {
 impl<'a, T> std::ops::Deref for OrderedLockGuard<'a, T> {
     type Target = T;
 
+    /// Handles deref.
     fn deref(&self) -> &Self::Target {
         &self.guard
     }
 }
 
 impl<'a, T> std::ops::DerefMut for OrderedLockGuard<'a, T> {
+    /// Handles deref mut.
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
     }
@@ -1949,7 +1981,6 @@ impl Daemon {
                 }
                 if let Some(err) = stderr {
                     if pipe_stderr {
-                        // When pipe_stderr is true, write stderr directly to parent's stdout
                         use std::{
                             io::{self, BufRead, BufReader, Write},
                             thread,
@@ -3241,7 +3272,9 @@ impl Daemon {
         Ok(())
     }
 
-    /// Terminates the detached instance once the replacement is known healthy.
+    /// Terminates the detached instance once the replacement is known healthy
+    /// and waits for the old child handle long enough to reap it when
+    /// possible.
     fn terminate_service(
         &self,
         service_name: &str,
@@ -3250,7 +3283,6 @@ impl Daemon {
         let pid = detached.pid;
         Self::terminate_process_tree(service_name, pid, detached.pgid)?;
 
-        // Best-effort wait to reap the child and avoid zombies.
         if let Err(err) = detached.child.wait() {
             warn!(
                 "Failed to wait on previous instance of '{service_name}' after termination: {err}"
@@ -3264,16 +3296,15 @@ impl Daemon {
         Ok(())
     }
 
-    /// Starts service (Unix/macOS).
-    ///
-    /// Thread can exit after spawn - child runs independently.
+    /// Starts a service on Unix and macOS using the shared startup path, then
+    /// waits for the launch thread to report the initial PID registration
+    /// result before performing readiness checks.
     #[cfg(not(target_os = "linux"))]
     pub fn start_service(
         &self,
         name: &str,
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        // Use common startup logic
         if let Some(state) = self.start_service_common(name, service)? {
             return Ok(state);
         }
@@ -3309,7 +3340,6 @@ impl Daemon {
             }
         });
 
-        // Wait for the thread to complete and propagate any errors
         let launch_result = handle.join().map_err(|e| {
             error!("Failed to join service thread for '{name}': {e:?}");
             ProcessManagerError::ServiceStartError {
@@ -3395,9 +3425,9 @@ impl Daemon {
         }
     }
 
-    /// Starts service (Linux).
-    ///
-    /// Uses PR_SET_PDEATHSIG - parent thread must stay alive or child gets SIGTERM.
+    /// Starts a service on Linux using the shared startup path and keeps the
+    /// launcher thread alive so `PR_SET_PDEATHSIG` remains tied to a live
+    /// parent until cancellation.
     #[cfg(target_os = "linux")]
     pub fn start_service(
         &self,
@@ -3406,7 +3436,6 @@ impl Daemon {
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         use std::{sync::mpsc, thread};
 
-        // Use common startup logic
         if let Some(state) = self.start_service_common(name, service)? {
             return Ok(state);
         }
@@ -3420,13 +3449,11 @@ impl Daemon {
         let working_dir = self.project_root.clone();
         let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
 
-        // Create a cancellation token for this service thread
         let cancellation_token = self
             .context()
             .create_cancellation_token(&service_name_for_token);
 
         let (tx, rx) = mpsc::channel();
-        // Spawn the thread, but DO NOT join it.
         thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
 
@@ -3468,7 +3495,6 @@ impl Daemon {
                         return;
                     }
 
-                    // Keep the thread alive but check for cancellation periodically
                     while !cancellation_token.load(Ordering::SeqCst) {
                         std::thread::sleep(std::time::Duration::from_secs(1));
                     }
@@ -3567,8 +3593,11 @@ impl Daemon {
         }
     }
 
-    /// Shared stop implementation that accepts explicit handles, making it reusable from helpers
-    /// that already hold references to the daemon's shared state.
+    /// Shared stop implementation that accepts explicit handles, making it
+    /// reusable from helpers that already hold references to the daemon's
+    /// shared state. It resolves both PID and process-group metadata before
+    /// tearing down the process tree so leaked descendants can still be
+    /// terminated when the root leader has already disappeared.
     fn stop_service_with_handles(
         service_name: &str,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
@@ -3576,7 +3605,6 @@ impl Daemon {
         state_file: &Arc<Mutex<ServiceStateFile>>,
         config: &Arc<Config>,
     ) -> Result<(), ProcessManagerError> {
-        // First, get the PID and process group without removing handles yet.
         let (pid, service_group_id) = {
             let mut processes_guard = processes.lock()?;
             if let Some(child) = processes_guard.get_mut(service_name) {
@@ -3595,7 +3623,6 @@ impl Daemon {
                 let mut group_id =
                     guard.pgid_for(service_name).map(|id| id as libc::pid_t);
 
-                // If we have a PID but no stored pgid, try to get it from the process
                 if stored_pid.is_some() && group_id.is_none() {
                     group_id = stored_pid.and_then(Self::process_group_for_pid);
                 }
@@ -3604,7 +3631,6 @@ impl Daemon {
             }
         };
 
-        // Terminate the process tree
         if let Some(process_id) = pid {
             match Self::terminate_process_tree(service_name, process_id, service_group_id)
             {
@@ -3625,8 +3651,6 @@ impl Daemon {
                 },
             }
         } else if let Some(group_id) = service_group_id {
-            // Root PID can disappear before stop (leader exits), but its process group may still
-            // contain leaked workers. Best-effort terminate the full group in that case.
             let result = unsafe { libc::killpg(group_id, libc::SIGTERM) };
             if result < 0 {
                 let err = std::io::Error::last_os_error();
@@ -3648,7 +3672,6 @@ impl Daemon {
             }
         }
 
-        // Now remove the child handle and wait on it
         let child_handle = {
             let mut processes_guard = processes.lock()?;
             processes_guard.remove(service_name)
@@ -3705,8 +3728,6 @@ impl Daemon {
             let mut suppressed_guard = self.restart_suppressed.lock()?;
             suppressed_guard.insert(service_name.to_string());
         }
-
-        // Cancel the Linux service thread if it exists
         #[cfg(target_os = "linux")]
         self.context().cancel_service_thread(service_name);
 
@@ -3800,13 +3821,10 @@ impl Daemon {
                     warn!(
                         "Failed to clear PID entry for dependent '{service}' after '{root}' failure: {err}"
                     );
-                } else {
-                    // Save the PID file after removing the dependent service
-                    if let Err(err) = guard.save() {
-                        warn!(
-                            "Failed to save PID file after removing dependent '{service}': {err}"
-                        );
-                    }
+                } else if let Err(err) = guard.save() {
+                    warn!(
+                        "Failed to save PID file after removing dependent '{service}': {err}"
+                    );
                 }
             }
 
@@ -3927,9 +3945,6 @@ impl Daemon {
                     } else {
                         HookOutcome::Error
                     };
-
-                    // Only run OnStop hooks if the service wasn't manually stopped
-                    // (manual stops already run the hook in stop_service_with_intent)
                     if !manually_stopped
                         && let Some(service) = ctx.config.services.get(&name)
                     {
@@ -3996,10 +4011,7 @@ impl Daemon {
                             counts.remove(&name);
                         }
                     } else if !exit_success {
-                        // Service failed - always mark it as failed for dependency handling
                         failed_services.push(name.clone());
-
-                        // Check if service should be restarted based on its restart_policy
                         let should_restart = ctx
                             .config
                             .services
@@ -4084,8 +4096,6 @@ impl Daemon {
         let service_clone = service.clone();
         let hooks = service.hooks.clone();
         let max_restarts = service.max_restarts;
-
-        // Check restart count before attempting restart
         {
             let mut counts = ctx.restart_counts.lock().unwrap();
             let count = counts.entry(name.clone()).or_insert(0);
@@ -4211,7 +4221,6 @@ impl Daemon {
                         &ctx.pid_file,
                     ) {
                         Ok(ServiceReadyState::Running) => {
-                            // Reset restart counter after successful restart
                             if let Ok(mut counts) = ctx.lock_restart_counts() {
                                 counts.insert(name.clone(), 0);
                             }
@@ -4384,11 +4393,9 @@ impl Daemon {
 }
 
 impl Drop for Daemon {
+    /// Handles drop.
     fn drop(&mut self) {
-        // Ensure monitoring is stopped
         self.shutdown_monitor();
-
-        // Cancel all Linux service threads
         #[cfg(target_os = "linux")]
         self.context().cancel_all_service_threads();
     }
@@ -4447,8 +4454,6 @@ mod tests {
             env: None,
             metrics: crate::config::MetricsConfig::default(),
         };
-
-        // Validate order to mirror load_config behavior.
         config.service_start_order().unwrap();
 
         Daemon::new(config, pid_file, state_file, false)
@@ -4538,8 +4543,6 @@ fi
 
             let daemon = create_daemon(dir, services);
             daemon.start_services().unwrap();
-
-            // Ensure the initial instance is running.
             thread::sleep(Duration::from_millis(100));
 
             fs::write(dir.join("mode.txt"), "restart\n").unwrap();
@@ -4711,23 +4714,13 @@ fi
     #[test]
     fn concurrent_pid_file_operations_no_lost_updates() {
         with_temp_home(|_| {
-            // Initialize PID file with a baseline service
             let mut initial = PidFile::default();
             initial.insert("baseline", 1000).unwrap();
-
-            // Number of concurrent operations
             let num_threads = 10;
             let mut handles = vec![];
-
-            // Spawn threads that concurrently add services (simulating cron jobs starting)
             for i in 0..num_threads {
                 let handle = thread::spawn(move || {
-                    // Small stagger to reduce file corruption but still trigger lost updates
                     thread::sleep(Duration::from_micros(i as u64 * 100));
-
-                    // Simulate the pattern used in supervisor.rs for cron cleanup
-                    // Load -> Modify -> Save (no locking)
-                    // Retry on file corruption to focus on demonstrating lost updates
                     for retry in 0..3 {
                         match PidFile::load() {
                             Ok(mut pid_file) => {
@@ -4748,22 +4741,16 @@ fi
                 });
                 handles.push(handle);
             }
-
-            // Also spawn threads that remove services (simulating concurrent cleanup)
-            // to further stress the race condition
             for i in 0..5 {
                 let handle = thread::spawn(move || {
-                    // Small delay to let some inserts happen first
                     thread::sleep(Duration::from_millis(2));
 
                     for retry in 0..3 {
                         match PidFile::load() {
                             Ok(mut pid_file) => {
                                 if i % 2 == 0 {
-                                    // Try to remove the baseline service
                                     let _ = pid_file.remove("baseline");
                                 } else {
-                                    // Try to add another service
                                     let _ = pid_file
                                         .insert(&format!("extra_{}", i), 3000 + i);
                                 }
@@ -4779,17 +4766,10 @@ fi
                 });
                 handles.push(handle);
             }
-
-            // Wait for all threads to complete
             for handle in handles {
                 handle.join().unwrap();
             }
-
-            // Verify the final state
             let final_pid_file = PidFile::load().expect("Failed to load final PID file");
-
-            // With proper file locking, all cron_job_X services should be present
-            // Without locking, some will be lost due to concurrent overwrites
             let mut missing = vec![];
             for i in 0..num_threads {
                 let service_name = format!("cron_job_{}", i);
@@ -4797,9 +4777,6 @@ fi
                     missing.push(service_name);
                 }
             }
-
-            // This assertion will FAIL without proper file locking
-            // because concurrent load-modify-save operations will overwrite each other
             assert!(
                 missing.is_empty(),
                 "Lost updates detected! Missing services: {:?}. \
@@ -4821,8 +4798,6 @@ fi
             daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(100));
-
-            // Verify service is running
             assert!(
                 daemon
                     .processes
@@ -4838,11 +4813,7 @@ fi
                     .get("test_service")
                     .is_some()
             );
-
-            // Stop individual service
             daemon.stop_service("test_service").unwrap();
-
-            // Verify service is removed from tracking
             assert!(
                 !daemon
                     .processes
@@ -4865,7 +4836,6 @@ fi
     fn stop_service_handles_termination_failure() {
         with_temp_home(|dir| {
             let mut services = HashMap::new();
-            // Use a command that ignores SIGTERM for testing
             services.insert(
                 "stubborn_service".into(),
                 make_service("sh -c 'trap \"\" TERM; sleep 10'", &[]),
@@ -4875,8 +4845,6 @@ fi
             daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(100));
-
-            // Service should be running
             assert!(
                 daemon
                     .processes
@@ -4884,11 +4852,7 @@ fi
                     .unwrap()
                     .contains_key("stubborn_service")
             );
-
-            // Stop should eventually succeed (via SIGKILL escalation)
             daemon.stop_service("stubborn_service").unwrap();
-
-            // Service should be removed even after termination difficulties
             assert!(
                 !daemon
                     .processes
@@ -4909,14 +4873,10 @@ fi
             services.insert("test_service".into(), service.clone());
 
             let daemon = create_daemon(dir, services);
-
-            // Start service
             let result = daemon.start_service("test_service", &service).unwrap();
             assert!(matches!(result, ServiceReadyState::CompletedSuccess));
 
             thread::sleep(Duration::from_millis(100));
-
-            // Stop service
             daemon.stop_service("test_service").unwrap();
             assert!(
                 !daemon
@@ -4925,8 +4885,6 @@ fi
                     .unwrap()
                     .contains_key("test_service")
             );
-
-            // Start service again
             let result = daemon.start_service("test_service", &service).unwrap();
             assert!(matches!(result, ServiceReadyState::CompletedSuccess));
         });
@@ -4945,11 +4903,7 @@ fi
             daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(50));
-
-            // Manual stop should set flag
             daemon.stop_service("test_service").unwrap();
-
-            // Verify manual stop flag is set
             assert!(
                 daemon
                     .manual_stop_flags
@@ -4957,8 +4911,6 @@ fi
                     .unwrap()
                     .contains("test_service")
             );
-
-            // Verify restart is suppressed
             assert!(
                 daemon
                     .restart_suppressed
@@ -4968,8 +4920,6 @@ fi
             );
 
             thread::sleep(Duration::from_millis(200));
-
-            // Service should not have restarted
             assert!(
                 !daemon
                     .processes
@@ -4988,8 +4938,6 @@ fi
 
             let config1 = daemon.config();
             let config2 = daemon.config();
-
-            // Both should be the same Arc
             assert!(Arc::ptr_eq(&config1, &config2));
         });
     }
@@ -5024,13 +4972,9 @@ fi
             daemon.start_services().unwrap();
 
             thread::sleep(Duration::from_millis(100));
-
-            // Stop service
             daemon.stop_service("hooked_service").unwrap();
 
             thread::sleep(Duration::from_millis(100));
-
-            // Hook should run exactly once
             let content = fs::read_to_string(&hook_log).unwrap_or_default();
             assert_eq!(content.matches("STOP_SUCCESS").count(), 1);
         });
@@ -5039,7 +4983,6 @@ fi
     #[test]
     fn terminate_process_tree_kills_all_descendants() {
         with_temp_home(|_| {
-            // Create a parent process that spawns children
             let mut cmd = Command::new(DEFAULT_SHELL);
             cmd.arg("-c");
             cmd.arg("sh -c 'sleep 60' & sh -c 'sleep 60' & sleep 60");
@@ -5051,20 +4994,14 @@ fi
             let parent_pid = parent.id();
 
             thread::sleep(Duration::from_millis(100));
-
-            // Collect all descendants before termination
             let descendants_before = Daemon::collect_descendants(parent_pid);
             assert!(
                 !descendants_before.is_empty(),
                 "Should have child processes"
             );
-
-            // Terminate the process tree
             match Daemon::terminate_process_tree("test", parent_pid, None) {
                 Ok(_) => {
                     thread::sleep(Duration::from_millis(200));
-
-                    // All processes should be gone
                     for pid in descendants_before {
                         assert!(
                             !Daemon::signal_pid("test", pid, None).unwrap(),
@@ -5074,14 +5011,9 @@ fi
                     }
                 }
                 Err(ProcessManagerError::ServiceStopError { source, .. })
-                    if source.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    // Timeout is acceptable in tests - just skip verification
-                }
+                    if source.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(e) => panic!("Unexpected error: {:?}", e),
             }
-
-            // Clean up
             let _ = parent.wait();
         });
     }

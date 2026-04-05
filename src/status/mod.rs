@@ -123,6 +123,7 @@ pub struct StatusSnapshot {
 }
 
 impl StatusSnapshot {
+    /// Handles new.
     fn new(units: Vec<UnitStatus>) -> Self {
         let overall_health = compute_overall_health(&units);
         Self {
@@ -153,11 +154,13 @@ pub struct SpawnedProcessNode {
 }
 
 impl SpawnedProcessNode {
+    /// Handles new.
     pub fn new(child: SpawnedChild, children: Vec<SpawnedProcessNode>) -> Self {
         Self { child, children }
     }
 }
 
+/// Collects tracked pids.
 fn collect_tracked_pids(nodes: &[SpawnedProcessNode], seen: &mut HashSet<u32>) {
     for node in nodes {
         if seen.insert(node.child.pid) {
@@ -166,6 +169,7 @@ fn collect_tracked_pids(nodes: &[SpawnedProcessNode], seen: &mut HashSet<u32>) {
     }
 }
 
+/// Retains unique.
 fn retain_unique(node: &mut SpawnedProcessNode, seen: &mut HashSet<u32>) -> bool {
     if !seen.insert(node.child.pid) {
         return false;
@@ -181,6 +185,7 @@ fn retain_unique(node: &mut SpawnedProcessNode, seen: &mut HashSet<u32>) -> bool
     true
 }
 
+/// Appends unique nodes.
 fn append_unique_nodes(
     target: &mut Vec<SpawnedProcessNode>,
     mut nodes: Vec<SpawnedProcessNode>,
@@ -194,6 +199,7 @@ fn append_unique_nodes(
 }
 
 #[cfg(target_os = "linux")]
+/// Reads proc task children.
 fn read_proc_task_children(pid: u32) -> Option<Vec<u32>> {
     let path = format!("/proc/{pid}/task/{pid}/children");
     let contents = fs::read_to_string(path).ok()?;
@@ -205,6 +211,7 @@ fn read_proc_task_children(pid: u32) -> Option<Vec<u32>> {
     Some(child_pids)
 }
 
+/// Builds spawn tree.
 fn build_spawn_tree(
     manager: &DynamicSpawnManager,
     parent_pid: u32,
@@ -232,6 +239,7 @@ fn build_spawn_tree(
         .collect()
 }
 
+/// Augments spawn tree with system descendants.
 fn augment_spawn_tree_with_system_descendants(
     node: &mut SpawnedProcessNode,
     system: Option<&System>,
@@ -247,6 +255,7 @@ fn augment_spawn_tree_with_system_descendants(
     append_unique_nodes(&mut node.children, system_nodes, seen);
 }
 
+/// Builds spawn tree from pidfile.
 fn build_spawn_tree_from_pidfile(
     pid_file: &PidFile,
     parent_pid: u32,
@@ -372,6 +381,7 @@ fn build_spawn_tree_from_pidfile(
     nodes
 }
 
+/// Builds spawn tree from system.
 fn build_spawn_tree_from_system(
     system: Option<&System>,
     parent_pid: u32,
@@ -478,10 +488,12 @@ fn build_spawn_tree_from_system(
     nodes
 }
 
+/// Handles process started at.
 fn process_started_at(_system: &System, _process: &sysinfo::Process) -> SystemTime {
     SystemTime::now()
 }
 
+/// Samples process metrics.
 fn sample_process_metrics(
     system: Option<&System>,
     pid: u32,
@@ -535,6 +547,7 @@ pub struct UnitMetricsSummary {
 }
 
 impl From<MetricsSummary> for UnitMetricsSummary {
+    /// Handles from.
     fn from(summary: MetricsSummary) -> Self {
         Self {
             latest_cpu_percent: summary.latest_cpu_percent,
@@ -612,6 +625,7 @@ pub struct StatusCache {
 }
 
 impl StatusCache {
+    /// Handles new.
     pub fn new(initial: StatusSnapshot) -> Self {
         Self {
             inner: Arc::new(RwLock::new(initial)),
@@ -641,6 +655,7 @@ pub struct StatusRefresher {
 }
 
 impl StatusRefresher {
+    /// Handles spawn.
     pub fn spawn<F>(cache: StatusCache, interval: Duration, mut builder: F) -> Self
     where
         F: FnMut() -> Result<StatusSnapshot, StatusError> + Send + 'static,
@@ -678,6 +693,7 @@ impl StatusRefresher {
         }
     }
 
+    /// Stops this item.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
@@ -687,6 +703,7 @@ impl StatusRefresher {
 }
 
 impl Drop for StatusRefresher {
+    /// Handles drop.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
@@ -762,6 +779,7 @@ pub fn collect_disk_snapshot(
     ))
 }
 
+/// Prunes orphaned cron jobs.
 fn prune_orphaned_cron_jobs(
     cron_state: &mut CronStateFile,
     valid_hashes: &HashSet<String>,
@@ -777,6 +795,7 @@ fn prune_orphaned_cron_jobs(
     Ok(())
 }
 
+/// Builds snapshot.
 fn build_snapshot(
     config: Option<&Config>,
     pid_file: &PidFile,
@@ -871,7 +890,6 @@ fn build_snapshot(
             }
         }
 
-        // For configured services with no state (e.g., after purge), default to Stopped
         if lifecycle.is_none() && actual_name.is_some() && kind != UnitKind::Orphaned {
             lifecycle = Some(ServiceLifecycleStatus::Stopped);
         }
@@ -1064,6 +1082,7 @@ fn build_snapshot(
     StatusSnapshot::new(units)
 }
 
+/// Handles cron record to summary.
 fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary {
     CronExecutionSummary {
         started_at: DateTime::<Utc>::from(record.started_at),
@@ -1077,6 +1096,9 @@ fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary 
     }
 }
 
+/// Derives the health classification for a unit from its lifecycle, runtime
+/// process state, and recent cron execution history. Cron units degrade once
+/// at least twenty percent of recent completed runs have failed.
 fn derive_unit_health(
     kind: UnitKind,
     lifecycle: Option<ServiceLifecycleStatus>,
@@ -1116,7 +1138,6 @@ fn derive_unit_health(
             return UnitHealth::Healthy;
         }
 
-        // A cron is degraded when 20% or more of recent runs fail (e.g. 2/10).
         if failure_count * 5 >= completed_runs.len() {
             return UnitHealth::Degraded;
         }
@@ -1140,6 +1161,7 @@ fn derive_unit_health(
     }
 }
 
+/// Computes overall health.
 pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
     if units
         .iter()
@@ -1176,10 +1198,12 @@ pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
     OverallHealth::Healthy
 }
 
+/// Handles cron run is complete.
 fn cron_run_is_complete(run: &CronExecutionSummary) -> bool {
     run.completed_at.is_some() || run.status.is_some() || run.exit_code.is_some()
 }
 
+/// Handles cron run is failure.
 fn cron_run_is_failure(run: &CronExecutionSummary) -> bool {
     match &run.status {
         Some(CronExecutionStatus::Success) => false,
@@ -1197,11 +1221,13 @@ fn cron_run_is_failure(run: &CronExecutionSummary) -> bool {
     }
 }
 
+/// Truncates hash.
 fn truncate_hash(hash: &str) -> String {
     let prefix_length = hash.len().min(12);
     hash[..prefix_length].to_string()
 }
 
+/// Computes uptime.
 fn compute_uptime(pid: u32) -> Option<UptimeInfo> {
     #[cfg(target_os = "linux")]
     {
@@ -1250,6 +1276,7 @@ fn compute_uptime(pid: u32) -> Option<UptimeInfo> {
     }
 }
 
+/// Parses elapsed seconds.
 fn parse_elapsed_seconds(uptime_str: &str) -> Option<u64> {
     let trimmed = uptime_str.trim();
     if trimmed.is_empty() {
@@ -1283,6 +1310,7 @@ fn parse_elapsed_seconds(uptime_str: &str) -> Option<u64> {
     Some(total_seconds)
 }
 
+/// Formats elapsed.
 pub fn format_elapsed(total_seconds: u64) -> String {
     match total_seconds {
         0..=59 => format!("{} secs ago", total_seconds),
@@ -1326,6 +1354,7 @@ impl StatusManager {
         }
     }
 
+    /// Clears service pid.
     fn clear_service_pid(&self, service_name: &str, service_hash: &str) {
         if let Ok(mut guard) = self.pid_file.lock() {
             let _ = guard.remove(service_name);
@@ -1359,6 +1388,7 @@ impl StatusManager {
         }
     }
 
+    /// Marks service running.
     fn mark_service_running(&self, service_name: &str, service_hash: &str, pid: u32) {
         if let Ok(mut state_guard) = self.state_file.lock() {
             if let Err(err) = state_guard.set(
@@ -1382,6 +1412,7 @@ impl StatusManager {
         }
     }
 
+    /// Handles process state.
     fn process_state(pid: u32) -> ProcessState {
         #[cfg(target_os = "linux")]
         {
@@ -1416,6 +1447,7 @@ impl StatusManager {
     }
 
     #[cfg(target_os = "linux")]
+    /// Reads proc state.
     fn read_proc_state(pid: u32) -> Option<char> {
         let stat_path_str = format!("/proc/{pid}/stat");
         let stat_path = Path::new(&stat_path_str);
@@ -1554,6 +1586,7 @@ impl StatusManager {
         ""
     }
 
+    /// Shows status with cron info.
     fn show_status_with_cron_info(
         &self,
         service_name: &str,
@@ -1769,6 +1802,7 @@ impl StatusManager {
         self.show_statuses_all()
     }
 
+    /// Handles print cron history.
     fn print_cron_history(service_name: &str, job_state: &PersistedCronJobState) {
         let label = if job_state.timezone_label.trim().is_empty() {
             "UTC".to_string()
@@ -1794,6 +1828,7 @@ impl StatusManager {
         println!();
     }
 
+    /// Formats cron status.
     fn format_cron_status(record: &CronExecutionRecord) -> String {
         match record.status.as_ref() {
             Some(CronExecutionStatus::Success) => {
@@ -1820,6 +1855,7 @@ impl StatusManager {
         }
     }
 
+    /// Formats cron timestamp.
     fn format_cron_timestamp(
         time: std::time::SystemTime,
         tz_hint: Option<&str>,

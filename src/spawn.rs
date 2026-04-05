@@ -134,11 +134,13 @@ pub enum SpawnedChildKind {
 }
 
 impl Default for SpawnedChildKind {
+    /// Returns the default this item.
     fn default() -> Self {
         Self::Spawned
     }
 }
 
+/// Returns whether spawned kind.
 fn is_spawned_kind(kind: &SpawnedChildKind) -> bool {
     matches!(kind, SpawnedChildKind::Spawned)
 }
@@ -508,6 +510,7 @@ impl DynamicSpawnManager {
         }
     }
 
+    /// Resolves root service name.
     fn resolve_root_service_name(&self, mut pid: u32) -> Option<String> {
         loop {
             {
@@ -556,6 +559,7 @@ fn parse_memory_limit(input: &str) -> Option<u64> {
 }
 
 impl Default for DynamicSpawnManager {
+    /// Returns the default this item.
     fn default() -> Self {
         Self::new()
     }
