@@ -49,6 +49,41 @@ const UNIT_CONFIG_MAX_AGE_DAYS: u64 = 30;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspectStreamAction {
+    Refresh,
+    Exit,
+}
+
+fn inspect_stream_event_action(event: Event) -> Option<InspectStreamAction> {
+    match event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Esc, ..
+        }) => Some(InspectStreamAction::Exit),
+        _ => None,
+    }
+}
+
+fn wait_for_inspect_stream_action(
+    sleep_interval: Duration,
+) -> Result<InspectStreamAction, Box<dyn Error>> {
+    let deadline = Instant::now() + sleep_interval;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(InspectStreamAction::Refresh);
+        }
+
+        let poll_timeout = remaining.min(Duration::from_millis(50));
+        if event::poll(poll_timeout)?
+            && let Some(action) = inspect_stream_event_action(event::read()?)
+        {
+            return Ok(action);
+        }
+    }
+}
+
 /// Runs the `sysg` command-line entrypoint.
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
@@ -380,7 +415,44 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             };
 
             if stream.is_some() {
+                let is_tty = unsafe {
+                    libc::isatty(libc::STDIN_FILENO) == 1
+                        && libc::isatty(libc::STDOUT_FILENO) == 1
+                };
                 let sleep_interval = Duration::from_secs(stream_seconds);
+
+                if is_tty {
+                    terminal::enable_raw_mode()?;
+
+                    let result = (|| -> Result<(), Box<dyn Error>> {
+                        loop {
+                            let payload = fetch_inspect(
+                                &effective_config,
+                                &service,
+                                samples_limit,
+                            )?;
+                            if payload.unit.is_none() {
+                                eprintln!("Service '{service}' not found.");
+                                process::exit(2);
+                            }
+
+                            clear_terminal_output()?;
+                            let _ = render_inspect(&payload, &render_opts)?;
+
+                            if wait_for_inspect_stream_action(sleep_interval)?
+                                == InspectStreamAction::Exit
+                            {
+                                clear_terminal_output()?;
+                                return Ok(());
+                            }
+                        }
+                    })();
+
+                    terminal::disable_raw_mode()?;
+                    result?;
+                    return Ok(());
+                }
+
                 loop {
                     let payload =
                         fetch_inspect(&effective_config, &service, samples_limit)?;
@@ -388,8 +460,8 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                         eprintln!("Service '{service}' not found.");
                         process::exit(2);
                     }
-                    print!("\x1B[2J\x1B[H");
-                    let _ = io::stdout().flush();
+
+                    clear_terminal_output()?;
                     let _ = render_inspect(&payload, &render_opts)?;
                     thread::sleep(sleep_interval);
                 }
@@ -1584,6 +1656,26 @@ mod tests {
         .expect("prune configs");
 
         assert!(!path.exists(), "file older than max age should be pruned");
+    }
+
+    #[test]
+    fn inspect_stream_event_action_exits_on_escape() {
+        let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(action, Some(InspectStreamAction::Exit));
+    }
+
+    #[test]
+    fn inspect_stream_event_action_ignores_other_keys() {
+        let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(action, None);
     }
 }
 
