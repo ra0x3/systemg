@@ -22,9 +22,29 @@ use std::{
     process::{Command, Stdio},
 };
 
+use terminal_size::Width;
 use tracing::debug;
 
 use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError, runtime};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// High-level bucket for all-services log rendering.
+pub enum LogSection {
+    /// Services that are currently running.
+    Running,
+    /// Services that are currently offline.
+    Offline,
+}
+
+impl LogSection {
+    /// Returns the stable display label for this section.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "Running Services",
+            Self::Offline => "Offline Services",
+        }
+    }
+}
 
 /// Returns the path to the log file for a given service and kind (stdout or stderr).
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
@@ -303,17 +323,75 @@ fn write_log_header(
     service_name: &str,
     pid: Option<u32>,
 ) -> Result<(), LogsManagerError> {
-    write!(
-        writer,
-        "\n+{:-^33}+\n\
-         | {:^31} |\n\
-         +{:-^33}+\n\n",
-        "-",
-        LogManager::format_log_title(service_name, pid),
-        "-"
-    )?;
+    write_boxed_log_title(
+        &mut writer,
+        &LogManager::format_log_title(service_name, pid),
+    )
+}
+
+/// Writes a section header used by the all-services log view.
+pub fn write_log_section_header(
+    mut writer: impl Write,
+    section: LogSection,
+) -> Result<(), LogsManagerError> {
+    write_boxed_log_title(&mut writer, section.label())?;
     writer.flush()?;
     Ok(())
+}
+
+/// Returns the current terminal width or a stable fallback when no TTY size is
+/// available.
+fn detect_log_terminal_width(default_width: usize) -> usize {
+    terminal_size::terminal_size()
+        .map(|(Width(width), _)| width as usize)
+        .unwrap_or(default_width)
+        .max(24)
+}
+
+/// Truncates a title to fit inside a full-width bordered log banner.
+fn truncate_log_title(title: &str, max_width: usize) -> String {
+    let title_width = title.chars().count();
+    if title_width <= max_width {
+        return title.to_string();
+    }
+
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let visible_width = max_width.saturating_sub(3);
+    let mut truncated = title.chars().take(visible_width).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+/// Writes a centered boxed title spanning the current terminal width.
+fn write_boxed_log_title(
+    mut writer: impl Write,
+    title: &str,
+) -> Result<(), LogsManagerError> {
+    let terminal_width = detect_log_terminal_width(100);
+    write!(writer, "{}", format_boxed_log_title(title, terminal_width))?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// Formats a centered boxed title spanning the provided width.
+fn format_boxed_log_title(title: &str, terminal_width: usize) -> String {
+    let inner_width = terminal_width.saturating_sub(2).max(1);
+    let title = truncate_log_title(title, inner_width);
+    let title_width = title.chars().count();
+    let left_padding = inner_width.saturating_sub(title_width) / 2;
+    let right_padding = inner_width.saturating_sub(title_width + left_padding);
+
+    format!(
+        "\n┌{}┐\n│{}{}{}│\n└{}┘\n\n",
+        "─".repeat(inner_width),
+        " ".repeat(left_padding),
+        title,
+        " ".repeat(right_padding),
+        "─".repeat(inner_width)
+    )
 }
 
 /// Returns the last `lines` newline-delimited slices from a raw byte buffer.
@@ -1027,8 +1105,8 @@ impl LogManager {
     /// Formats log title.
     fn format_log_title(service_name: &str, pid: Option<u32>) -> String {
         match pid {
-            Some(pid) => format!("{service_name} ({pid})"),
-            None => format!("{service_name} (offline)"),
+            Some(pid) => format!("{service_name} [pid {pid}]"),
+            None => format!("{service_name} [offline]"),
         }
     }
 

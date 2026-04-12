@@ -23,7 +23,10 @@ use crate::{
     },
     error::{LogsManagerError, ProcessManagerError},
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
-    logs::{LogManager, resolve_log_path, spawn_dynamic_child_log_writer},
+    logs::{
+        LogManager, LogSection, resolve_log_path, spawn_dynamic_child_log_writer,
+        write_log_section_header,
+    },
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
@@ -786,36 +789,53 @@ impl Supervisor {
             .into());
         }
 
-        let mut unit_names: Vec<String> = snapshot
+        let mut running_units = Vec::new();
+        let mut offline_units = Vec::new();
+        for unit in snapshot
             .units
             .iter()
             .filter(|unit| !matches!(unit.kind, crate::status::UnitKind::Orphaned))
-            .map(|unit| unit.name.clone())
-            .collect();
-        unit_names.sort_unstable();
-        unit_names.dedup();
+        {
+            let pid = unit.process.as_ref().and_then(|process| {
+                if matches!(process.state, crate::status::ProcessState::Running) {
+                    Some(process.pid)
+                } else {
+                    None
+                }
+            });
 
-        for service_name in unit_names {
-            let pid = snapshot
-                .units
-                .iter()
-                .find(|unit| unit.name == service_name)
-                .and_then(|unit| unit.process.as_ref())
-                .and_then(|process| {
-                    if matches!(process.state, crate::status::ProcessState::Running) {
-                        Some(process.pid)
-                    } else {
-                        None
-                    }
-                });
-            manager.stream_log_to_socket(
-                &service_name,
-                pid,
-                lines,
-                requested_kind,
-                false,
-                stream,
-            )?;
+            if pid.is_some() {
+                running_units.push((unit.name.clone(), pid));
+            } else {
+                offline_units.push((unit.name.clone(), pid));
+            }
+        }
+
+        running_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        running_units.dedup_by(|left, right| left.0 == right.0);
+        offline_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        offline_units.dedup_by(|left, right| left.0 == right.0);
+
+        for (section, units) in [
+            (LogSection::Running, running_units),
+            (LogSection::Offline, offline_units),
+        ] {
+            if units.is_empty() {
+                continue;
+            }
+
+            write_log_section_header(stream.try_clone()?, section)?;
+
+            for (service_name, pid) in units {
+                manager.stream_log_to_socket(
+                    &service_name,
+                    pid,
+                    lines,
+                    requested_kind,
+                    false,
+                    stream,
+                )?;
+            }
         }
 
         Ok(())

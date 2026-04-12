@@ -140,9 +140,115 @@ services:
         .arg("1")
         .assert()
         .success()
-        .stdout(predicates::str::contains(format!("demo ({})", child.id())))
+        .stdout(predicates::str::contains(format!(
+            "demo [pid {}]",
+            child.id()
+        )))
         .stdout(predicates::str::contains("snapshot log line"))
         .stdout(predicates::str::contains("offline").not());
+
+    let _ = child.kill();
+    let _ = child.wait();
+    unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn logs_without_service_groups_running_before_offline() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  beta:
+    command: "/bin/sleep 30"
+  alpha:
+    command: "/bin/echo alpha"
+"#,
+    )
+    .expect("write config");
+
+    let config =
+        load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
+    let beta_hash = config
+        .services
+        .get("beta")
+        .expect("beta service")
+        .compute_hash();
+
+    let mut child = StdCommand::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &beta_hash,
+            ServiceLifecycleStatus::Running,
+            Some(child.id()),
+            None,
+            None,
+        )
+        .expect("persist state");
+
+    let log_dir = home.join(".local/share/systemg/logs");
+    fs::create_dir_all(&log_dir).expect("make log dir");
+    fs::write(log_dir.join("beta_stdout.log"), "beta line\n").expect("write beta log");
+    fs::write(log_dir.join("alpha_stdout.log"), "alpha line\n").expect("write alpha log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    let output = cmd
+        .env("SYSTEMG_TAIL_MODE", "oneshot")
+        .arg("logs")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--kind")
+        .arg("stdout")
+        .arg("--lines")
+        .arg("1")
+        .output()
+        .expect("run sysg logs");
+
+    assert!(
+        output.status.success(),
+        "sysg logs should succeed, stderr was: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let running_idx = stdout.find("Running Services").expect("running section");
+    let offline_idx = stdout.find("Offline Services").expect("offline section");
+    let beta_idx = stdout.find("beta [pid ").expect("running service heading");
+    let alpha_idx = stdout
+        .find("alpha [offline]")
+        .expect("offline service heading");
+
+    assert!(
+        running_idx < offline_idx,
+        "running section should come first"
+    );
+    assert!(
+        running_idx < beta_idx,
+        "running service should appear in running section"
+    );
+    assert!(
+        offline_idx < alpha_idx,
+        "offline service should appear in offline section"
+    );
+    assert!(
+        beta_idx < alpha_idx,
+        "running service output should appear before offline service output"
+    );
+    assert!(stdout.contains("beta line"));
+    assert!(stdout.contains("alpha line"));
 
     let _ = child.kill();
     let _ = child.wait();

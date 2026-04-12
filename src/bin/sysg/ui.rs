@@ -100,6 +100,39 @@ fn live_unit_pid(unit: &UnitStatus) -> Option<u32> {
     })
 }
 
+/// Groups unit names for the all-services log view so running services appear
+/// before inactive ones while preserving alphabetical order within each group.
+fn grouped_log_units(snapshot: &StatusSnapshot) -> Vec<(LogSection, Vec<&str>)> {
+    let mut running = Vec::new();
+    let mut offline = Vec::new();
+
+    for unit in snapshot
+        .units
+        .iter()
+        .filter(|unit| !matches!(unit.kind, UnitKind::Orphaned))
+    {
+        if live_unit_pid(unit).is_some() {
+            running.push(unit.name.as_str());
+        } else {
+            offline.push(unit.name.as_str());
+        }
+    }
+
+    running.sort_unstable();
+    running.dedup();
+    offline.sort_unstable();
+    offline.dedup();
+
+    let mut groups = Vec::new();
+    if !running.is_empty() {
+        groups.push((LogSection::Running, running));
+    }
+    if !offline.is_empty() {
+        groups.push((LogSection::Offline, offline));
+    }
+    groups
+}
+
 /// Renders logs for a single unit using the same status snapshot data that
 /// powers `sysg status` and `sysg inspect`.
 fn render_service_logs_from_snapshot(
@@ -164,29 +197,25 @@ fn render_all_logs_from_snapshot(
     kind: &str,
     snapshot_mode: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let mut unit_names: Vec<&str> = snapshot
-        .units
-        .iter()
-        .filter(|unit| !matches!(unit.kind, UnitKind::Orphaned))
-        .map(|unit| unit.name.as_str())
-        .collect();
-    unit_names.sort_unstable();
-    unit_names.dedup();
+    let grouped_units = grouped_log_units(snapshot);
 
-    if unit_names.is_empty() {
+    if grouped_units.is_empty() {
         println!("No active services");
         return Ok(());
     }
 
-    for service_name in unit_names {
-        render_service_logs_from_snapshot(
-            manager,
-            snapshot,
-            service_name,
-            lines,
-            kind,
-            snapshot_mode,
-        )?;
+    for (section, service_names) in grouped_units {
+        write_log_section_header(io::stdout(), section)?;
+        for service_name in service_names {
+            render_service_logs_from_snapshot(
+                manager,
+                snapshot,
+                service_name,
+                lines,
+                kind,
+                snapshot_mode,
+            )?;
+        }
     }
 
     Ok(())

@@ -172,7 +172,7 @@ pub enum Commands {
         /// Pipe stderr output from supervised processes to stdout.
         ///
         /// When enabled, stderr from all supervised processes will be redirected to
-        /// the stdout of the sysg start command with the format: [service_name:stderr] <line>
+        /// the stdout of the sysg start command with the format: \[service_name:stderr\] \<line\>
         ///
         /// This is useful for:
         /// • Debugging services during development

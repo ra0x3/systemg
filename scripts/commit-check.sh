@@ -75,6 +75,11 @@ run_labeled \
   "cd \"${REPO_ROOT}\" && cargo clippy --all-targets --all-features -- -D warnings"
 
 run_labeled \
+  "rust:docs" \
+  "${BLUE}" \
+  "cd \"${REPO_ROOT}\" && cargo rustdoc --lib -- -D missing_docs"
+
+run_labeled \
   "docs:mintlify" \
   "${BLUE}" \
   "cd \"${REPO_ROOT}/docs\" && mintlify broken-links"

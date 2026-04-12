@@ -30,7 +30,7 @@ use systemg::{
     cron::{CronExecutionStatus, CronStateFile},
     daemon::{Daemon, PidFile, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
-    logs::{LogManager, resolve_log_path},
+    logs::{LogManager, LogSection, resolve_log_path, write_log_section_header},
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
     spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
