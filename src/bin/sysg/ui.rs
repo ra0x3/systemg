@@ -2368,9 +2368,28 @@ fn render_inspect(
     payload: &InspectPayload,
     opts: &InspectRenderOptions,
 ) -> Result<OverallHealth, Box<dyn Error>> {
+    let (health, lines) = collect_inspect_lines(payload, opts)?;
+    print_rendered_lines(&lines)?;
+    Ok(health)
+}
+
+fn print_rendered_lines(lines: &[String]) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    for line in lines {
+        writeln!(stdout, "{line}")?;
+    }
+    stdout.flush()
+}
+
+fn collect_inspect_lines(
+    payload: &InspectPayload,
+    opts: &InspectRenderOptions,
+) -> Result<(OverallHealth, Vec<String>), Box<dyn Error>> {
     if payload.unit.is_none() {
-        println!("No unit matching the requested identifier.");
-        return Ok(OverallHealth::Failing);
+        return Ok((
+            OverallHealth::Failing,
+            vec!["No unit matching the requested identifier.".to_string()],
+        ));
     }
 
     let unit = payload.unit.as_ref().unwrap();
@@ -2407,8 +2426,7 @@ fn render_inspect(
             unit: Some(unit.clone()),
             samples: filtered_samples,
         };
-        println!("{}", serde_json::to_string_pretty(&json_payload)?);
-        return Ok(health);
+        return Ok((health, vec![serde_json::to_string_pretty(&json_payload)?]));
     }
     let table_width = compute_inspect_process_table_width(unit);
     let outer_inner_width = table_width.saturating_sub(2);
@@ -2803,29 +2821,28 @@ fn render_inspect(
         ));
     }
 
-    println!();
-    println!("╔{}╗", outer_border_line);
+    let mut rendered_lines = Vec::new();
+    rendered_lines.push(String::new());
+    rendered_lines.push(format!("╔{}╗", outer_border_line));
     for (index, (title, lines)) in sections.iter().enumerate() {
         if index > 0 {
-            println!("╠{}╣", outer_border_line);
+            rendered_lines.push(format!("╠{}╣", outer_border_line));
         }
-        println!(
-            "{}",
-            format_inspect_outer_line(
-                &colorize(title, CYAN, opts.no_color),
-                outer_inner_width
-            )
-        );
+        rendered_lines.push(format_inspect_outer_line(
+            &colorize(title, CYAN, opts.no_color),
+            outer_inner_width,
+        ));
         if !lines.is_empty() {
-            println!("╟{}╢", "─".repeat(outer_inner_width));
+            rendered_lines.push(format!("╟{}╢", "─".repeat(outer_inner_width)));
             for line in lines {
-                println!("{}", format_inspect_outer_line(line, outer_inner_width));
+                rendered_lines
+                    .push(format_inspect_outer_line(line, outer_inner_width));
             }
         }
     }
-    println!("╚{}╝", outer_border_line);
+    rendered_lines.push(format!("╚{}╝", outer_border_line));
 
-    Ok(health)
+    Ok((health, rendered_lines))
 }
 
 #[derive(Clone)]

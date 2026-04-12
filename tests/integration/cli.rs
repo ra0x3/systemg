@@ -5,7 +5,10 @@ mod common;
 use std::os::unix::net::UnixListener;
 #[cfg(target_os = "linux")]
 use std::process::Command as StdCommand;
-use std::{fs, thread, time::Duration};
+use std::{
+    fs, thread,
+    time::{Duration, Instant},
+};
 
 use assert_cmd::Command;
 use common::HomeEnvGuard;
@@ -228,6 +231,81 @@ fn inspect_requires_service_flag_not_positional_arg() {
         stderr.contains("unexpected argument") && stderr.contains("--service"),
         "stderr should direct usage to --service: {stderr}"
     );
+}
+
+#[test]
+fn restart_daemonize_returns_without_waiting_for_supervisor_restart() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  test_service:
+    command: "sleep 30"
+"#,
+    )
+    .expect("failed to write initial config");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("start")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    thread::sleep(Duration::from_secs(1));
+
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  test_service:
+    command: "sleep 30"
+    deployment:
+      strategy: "immediate"
+      pre_start: "sleep 3"
+"#,
+    )
+    .expect("failed to write updated config");
+
+    let start = Instant::now();
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("restart")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--daemonize")
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "daemonized restart should return promptly, took {:?}",
+        elapsed
+    );
+
+    thread::sleep(Duration::from_secs(5));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("status")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--service")
+        .arg("test_service")
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("stop")
+        .assert()
+        .success();
 }
 
 #[test]

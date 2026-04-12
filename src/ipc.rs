@@ -145,22 +145,8 @@ pub enum ControlError {
 
 /// Sends a command to the supervisor and waits for a response.
 pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, ControlError> {
-    let path = socket_path()?;
-    if !path.exists() {
-        return Err(ControlError::NotAvailable);
-    }
-
-    let mut stream = match UnixStream::connect(&path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
-            return Err(ControlError::NotAvailable);
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let payload = serde_json::to_vec(command)?;
-    stream.write_all(&payload)?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+    let mut stream = connect_stream()?;
+    write_command(&mut stream, command)?;
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
@@ -176,6 +162,38 @@ pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, Control
     }
 
     Ok(response)
+}
+
+/// Sends a command to the supervisor without waiting for a response.
+pub fn send_command_detached(command: &ControlCommand) -> Result<(), ControlError> {
+    let mut stream = connect_stream()?;
+    write_command(&mut stream, command)
+}
+
+fn connect_stream() -> Result<UnixStream, ControlError> {
+    let path = socket_path()?;
+    if !path.exists() {
+        return Err(ControlError::NotAvailable);
+    }
+
+    match UnixStream::connect(&path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+            Err(ControlError::NotAvailable)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn write_command(
+    stream: &mut UnixStream,
+    command: &ControlCommand,
+) -> Result<(), ControlError> {
+    let payload = serde_json::to_vec(command)?;
+    stream.write_all(&payload)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    Ok(())
 }
 
 /// Sends a command to the supervisor and copies the raw response bytes into the provided writer.

@@ -84,6 +84,39 @@ fn wait_for_inspect_stream_action(
     }
 }
 
+fn render_inspect_stream_frame<W: io::Write>(
+    writer: &mut W,
+    frame_lines: &[String],
+    previous_line_count: usize,
+) -> io::Result<usize> {
+    write!(writer, "\x1B[H")?;
+
+    let total_lines = frame_lines.len().max(previous_line_count);
+    for line_idx in 0..total_lines {
+        write!(writer, "\x1B[2K")?;
+        if let Some(line) = frame_lines.get(line_idx) {
+            write!(writer, "{line}")?;
+        }
+        if line_idx + 1 < total_lines {
+            write!(writer, "\r\n")?;
+        }
+    }
+
+    write!(writer, "\x1B[J")?;
+    Ok(frame_lines.len())
+}
+
+fn write_inspect_stream_frame(
+    frame_lines: &[String],
+    previous_line_count: usize,
+) -> io::Result<usize> {
+    let mut stdout = io::stdout().lock();
+    let line_count =
+        render_inspect_stream_frame(&mut stdout, frame_lines, previous_line_count)?;
+    stdout.flush()?;
+    Ok(line_count)
+}
+
 /// Runs the `sysg` command-line entrypoint.
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
@@ -286,7 +319,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     config: config_override,
                     service,
                 };
-                send_control_command(command)?;
+                if daemonize {
+                    ipc::send_command_detached(&command)?;
+                } else {
+                    send_control_command(command)?;
+                }
             } else if daemonize {
                 let config_path = resolve_config_path(&config)?;
                 start_supervisor_daemon(config_path, None, false)?;
@@ -425,6 +462,8 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     terminal::enable_raw_mode()?;
 
                     let result = (|| -> Result<(), Box<dyn Error>> {
+                        clear_terminal_output()?;
+                        let mut previous_line_count = 0usize;
                         loop {
                             let payload = fetch_inspect(
                                 &effective_config,
@@ -436,8 +475,12 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                                 process::exit(2);
                             }
 
-                            clear_terminal_output()?;
-                            let _ = render_inspect(&payload, &render_opts)?;
+                            let (_health, frame_lines) =
+                                collect_inspect_lines(&payload, &render_opts)?;
+                            previous_line_count = write_inspect_stream_frame(
+                                &frame_lines,
+                                previous_line_count,
+                            )?;
 
                             if wait_for_inspect_stream_action(sleep_interval)?
                                 == InspectStreamAction::Exit
@@ -1676,6 +1719,37 @@ mod tests {
         )));
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn render_inspect_stream_frame_starts_at_home_and_clears_stale_lines() {
+        let frame = vec!["new top".to_string()];
+        let mut output = Vec::new();
+        let line_count =
+            render_inspect_stream_frame(&mut output, &frame, 3).expect("write frame");
+
+        assert_eq!(line_count, 1);
+        assert_eq!(
+            String::from_utf8(output).expect("utf8"),
+            "\x1B[H\x1B[2Knew top\r\n\x1B[2K\r\n\x1B[2K\x1B[J"
+        );
+    }
+
+    #[test]
+    fn render_inspect_stream_frame_rewrites_each_visible_line_without_full_clear() {
+        let frame = vec!["alpha".to_string(), "beta".to_string()];
+        let mut output = Vec::new();
+
+        let line_count =
+            render_inspect_stream_frame(&mut output, &frame, 1).expect("write frame");
+
+        assert_eq!(line_count, 2);
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.starts_with("\x1B[H\x1B[2Kalpha\r\n\x1B[2Kbeta"));
+        assert!(
+            !rendered.contains("\x1B[2J"),
+            "steady-state frame writes should not clear the full terminal"
+        );
     }
 }
 
