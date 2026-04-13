@@ -7,7 +7,7 @@ use std::{
 };
 
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use sha2::{Digest, Sha256};
 use strum_macros::AsRefStr;
 
@@ -430,23 +430,59 @@ pub struct BlueGreenDeploymentConfig {
     pub slots: Vec<String>,
     /// Command executed to switch traffic to the candidate slot once healthy.
     pub switch_command: Option<String>,
-    /// Optional URL template for candidate health checks (supports `{slot}` substitution).
-    pub candidate_health_check_url: Option<String>,
-    /// Optional URL to verify after switch command completes.
-    pub switch_verify_url: Option<String>,
+    /// Optional health check for candidate validation (supports `{slot}` substitution).
+    pub candidate_health_check: Option<HealthCheckConfig>,
+    /// Optional health check to verify after switch command completes.
+    pub switch_verify: Option<HealthCheckConfig>,
     /// Optional path for persisting the active slot state.
     pub state_path: Option<String>,
 }
 
 /// Health check configuration used during rolling deployments.
-#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct HealthCheckConfig {
-    /// Health check URL.
-    pub url: String,
+    /// Optional health check URL.
+    pub url: Option<String>,
+    /// Optional command-based health check.
+    pub command: Option<String>,
+    /// Time between health check attempts (e.g., "2s").
+    pub interval: Option<String>,
     /// Health check timeout duration (e.g., "30s").
     pub timeout: Option<String>,
     /// Number of retries before giving up.
     pub retries: Option<u32>,
+}
+
+/// Deserializes the YAML shape accepted for generic health checks before validation.
+#[derive(Debug, Deserialize)]
+struct RawHealthCheckConfig {
+    url: Option<String>,
+    command: Option<String>,
+    interval: Option<String>,
+    timeout: Option<String>,
+    retries: Option<u32>,
+}
+
+impl<'de> Deserialize<'de> for HealthCheckConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawHealthCheckConfig::deserialize(deserializer)?;
+        if raw.url.is_none() && raw.command.is_none() {
+            return Err(D::Error::custom(
+                "health check requires at least one of 'url' or 'command'",
+            ));
+        }
+
+        Ok(Self {
+            url: raw.url,
+            command: raw.command,
+            interval: raw.interval,
+            timeout: raw.timeout,
+            retries: raw.retries,
+        })
+    }
 }
 
 /// Represents environment variables for a service.
@@ -1290,8 +1326,11 @@ services:
         env_var: "PORT"
         slots: ["8000", "8001"]
         switch_command: "echo switch"
-        candidate_health_check_url: "http://127.0.0.1:{{slot}}/health"
-        switch_verify_url: "http://127.0.0.1/health"
+        candidate_health_check:
+          url: "http://127.0.0.1:{{slot}}/health"
+          interval: "1s"
+        switch_verify:
+          command: "test -f /tmp/api-ready"
         state_path: ".state/web-slot.json"
 "#
         )
@@ -1312,12 +1351,55 @@ services:
         assert_eq!(blue_green.env_var.as_deref(), Some("PORT"));
         assert_eq!(blue_green.slots, vec!["8000", "8001"]);
         assert_eq!(
-            blue_green.candidate_health_check_url.as_deref(),
+            blue_green
+                .candidate_health_check
+                .as_ref()
+                .and_then(|check| check.url.as_deref()),
             Some("http://127.0.0.1:{slot}/health")
         );
         assert_eq!(
-            blue_green.switch_verify_url.as_deref(),
-            Some("http://127.0.0.1/health")
+            blue_green
+                .candidate_health_check
+                .as_ref()
+                .and_then(|check| check.interval.as_deref()),
+            Some("1s")
+        );
+        assert_eq!(
+            blue_green
+                .switch_verify
+                .as_ref()
+                .and_then(|check| check.command.as_deref()),
+            Some("test -f /tmp/api-ready")
+        );
+    }
+
+    #[test]
+    fn load_config_rejects_health_check_without_url_or_command() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).expect("create yaml");
+        writeln!(
+            yaml_file,
+            r#"
+version: "1"
+services:
+  web:
+    command: "python app.py"
+    deployment:
+      strategy: "rolling"
+      health_check:
+        timeout: "30s"
+"#
+        )
+        .expect("write yaml");
+
+        let err = load_config(Some(yaml_path.to_str().expect("yaml path")))
+            .expect_err("health check should fail validation");
+
+        assert!(
+            err.to_string()
+                .contains("health check requires at least one of 'url' or 'command'"),
+            "unexpected error: {err}"
         );
     }
 

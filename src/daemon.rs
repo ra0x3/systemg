@@ -2649,9 +2649,14 @@ impl Daemon {
             );
         }
 
-        if let Some(url_template) = &blue_green.candidate_health_check_url {
-            let health_url = Self::resolve_slot_template(url_template, &candidate_slot);
-            self.wait_for_health_check_url(name, &health_url, service)?;
+        if let Some(health_check) = &blue_green.candidate_health_check {
+            let health_check = Self::resolve_blue_green_health_check(
+                health_check,
+                name,
+                &active_slot,
+                &candidate_slot,
+            );
+            self.wait_for_health_check(name, &health_check)?;
         } else if let Some(health_check) = service
             .deployment
             .as_ref()
@@ -2692,10 +2697,14 @@ impl Daemon {
             )));
         }
 
-        if let Some(verify_url_template) = &blue_green.switch_verify_url {
-            let verify_url =
-                Self::resolve_slot_template(verify_url_template, &candidate_slot);
-            self.wait_for_health_check_url(name, &verify_url, service)?;
+        if let Some(health_check) = &blue_green.switch_verify {
+            let health_check = Self::resolve_blue_green_health_check(
+                health_check,
+                name,
+                &active_slot,
+                &candidate_slot,
+            );
+            self.wait_for_health_check(name, &health_check)?;
         }
 
         if let Some(grace_period) = service
@@ -2829,18 +2838,30 @@ impl Daemon {
         };
 
         let retries = health_check.retries.unwrap_or(3).max(1);
-        let retry_interval = Duration::from_secs(2);
-        let client = Client::builder().timeout(timeout).build().map_err(|err| {
-            ProcessManagerError::ServiceStartError {
-                service: service_name.to_string(),
-                source: std::io::Error::other(err.to_string()),
-            }
-        })?;
+        let retry_interval = health_check
+            .interval
+            .as_deref()
+            .map_or(Ok(Duration::from_secs(2)), Self::parse_duration)?;
+        let client = if health_check.url.is_some() {
+            Some(Client::builder().timeout(timeout).build().map_err(|err| {
+                ProcessManagerError::ServiceStartError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::other(err.to_string()),
+                }
+            })?)
+        } else {
+            None
+        };
 
         let deadline = Instant::now() + timeout;
 
         for attempt in 1..=retries {
-            match self.perform_health_check(&client, &health_check.url) {
+            match self.perform_configured_health_check(
+                service_name,
+                health_check,
+                client.as_ref(),
+                timeout,
+            ) {
                 Ok(true) => {
                     info!(
                         "Health check passed for '{service_name}' on attempt {attempt}"
@@ -2878,6 +2899,28 @@ impl Daemon {
         })
     }
 
+    /// Performs a single configured health check, using command or HTTP mode.
+    fn perform_configured_health_check(
+        &self,
+        service_name: &str,
+        health_check: &HealthCheckConfig,
+        client: Option<&Client>,
+        timeout: Duration,
+    ) -> Result<bool, std::io::Error> {
+        if let Some(command) = &health_check.command {
+            self.perform_command_health_check(service_name, command, timeout)
+        } else if let Some(url) = &health_check.url {
+            let client = client.ok_or_else(|| {
+                std::io::Error::other("HTTP health check client was not initialized")
+            })?;
+            self.perform_health_check(client, url)
+        } else {
+            Err(std::io::Error::other(
+                "health check requires either a command or a url",
+            ))
+        }
+    }
+
     /// Performs a single health check request and evaluates the response.
     fn perform_health_check(
         &self,
@@ -2890,6 +2933,37 @@ impl Daemon {
             .map_err(|err| std::io::Error::other(err.to_string()))?;
 
         Ok(response.status().is_success())
+    }
+
+    /// Executes a single command-based health check and evaluates the exit status.
+    fn perform_command_health_check(
+        &self,
+        service_name: &str,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<bool, std::io::Error> {
+        let mut child = Command::new(DEFAULT_SHELL);
+        child.arg(SHELL_COMMAND_FLAG).arg(command);
+        child.current_dir(&self.project_root);
+        child.env("SYSG_SERVICE_NAME", service_name);
+        child.stdout(Stdio::null());
+        child.stderr(Stdio::null());
+
+        let mut child = child.spawn()?;
+        match wait_with_timeout(&mut child, timeout)? {
+            Some(status) => Ok(status.success()),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                        "health check command timed out after {:?}: {}",
+                        timeout, command
+                    ),
+                ))
+            }
+        }
     }
 
     /// Parses a user-facing duration string in the format `<number>[s|m|h]`.
@@ -2934,65 +3008,28 @@ impl Daemon {
         cloned
     }
 
-    /// Replaces `{slot}` placeholders in health-check URL templates.
-    fn resolve_slot_template(template: &str, slot: &str) -> String {
-        template.replace("{slot}", slot)
-    }
-
-    /// Performs an HTTP health check loop for an explicit URL, reusing deployment timeout/retry settings.
-    fn wait_for_health_check_url(
-        &self,
+    /// Replaces supported placeholders in blue/green health-check templates.
+    fn resolve_blue_green_health_check(
+        health_check: &HealthCheckConfig,
         service_name: &str,
-        url: &str,
-        service: &ServiceConfig,
-    ) -> Result<(), ProcessManagerError> {
-        let timeout = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.health_check.as_ref())
-            .and_then(|health| health.timeout.as_ref())
-            .map_or(Ok(Duration::from_secs(30)), |raw| Self::parse_duration(raw))?;
+        active_slot: &str,
+        candidate_slot: &str,
+    ) -> HealthCheckConfig {
+        let render = |value: &str| {
+            value
+                .replace("{slot}", candidate_slot)
+                .replace("{active_slot}", active_slot)
+                .replace("{candidate_slot}", candidate_slot)
+                .replace("{service_name}", service_name)
+        };
 
-        let retries = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.health_check.as_ref())
-            .and_then(|health| health.retries)
-            .unwrap_or(3)
-            .max(1);
-
-        let interval = timeout / retries;
-        let client = Client::builder().timeout(interval).build().map_err(|err| {
-            ProcessManagerError::ServiceStartError {
-                service: service_name.to_string(),
-                source: std::io::Error::other(err.to_string()),
-            }
-        })?;
-
-        for attempt in 0..retries {
-            match self.perform_health_check(&client, url) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {}
-                Err(err) => {
-                    debug!(
-                        "Blue/green health check failed for '{}' on attempt {}/{}: {}",
-                        service_name,
-                        attempt + 1,
-                        retries,
-                        err
-                    );
-                }
-            }
-            thread::sleep(interval.min(Duration::from_secs(5)));
+        HealthCheckConfig {
+            url: health_check.url.as_deref().map(render),
+            command: health_check.command.as_deref().map(render),
+            interval: health_check.interval.clone(),
+            timeout: health_check.timeout.clone(),
+            retries: health_check.retries,
         }
-
-        Err(ProcessManagerError::ServiceStartError {
-            service: service_name.to_string(),
-            source: std::io::Error::other(format!(
-                "Blue/green health check failed for '{}' at {}",
-                service_name, url
-            )),
-        })
     }
 
     /// Resolves the persisted state path used to track the active blue/green slot.

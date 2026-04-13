@@ -38,7 +38,7 @@ services:
       strategy: "rolling"
       pre_start: "python manage.py migrate"
       health_check:
-        url: "http://localhost:8000/health"
+        command: "curl --fail http://localhost:8000/health"
     hooks:
       on_start:
         success:
@@ -210,19 +210,23 @@ services:
       strategy: "rolling"
       pre_start: "python manage.py migrate"
       health_check:
-        url: "http://localhost:8000/health"
+        command: "curl --fail http://localhost:8000/health"
+        interval: "5s"
         timeout: "30s"
       grace_period: "5s"
       blue_green:
         env_var: "PORT"
         slots: ["8000", "8001"]
-        candidate_health_check_url: "http://127.0.0.1:{slot}/health"
+        candidate_health_check:
+          command: "curl --fail http://127.0.0.1:{slot}/health"
+          interval: "2s"
         switch_command: "/usr/local/bin/switch-upstream {candidate_slot}"
-        switch_verify_url: "http://localhost:8000/health"
+        switch_verify:
+          command: "curl --fail http://localhost:8000/health"
         state_path: ".state/api-slot.json"
 ```
 
-Rolling deployments start the new instance, wait for health checks, then stop the old instance. For single-host zero-downtime with fixed ports, use `blue_green` so traffic can be switched between two slots.
+Rolling deployments start the new instance, wait for health checks, then stop the old instance. For single-host zero-downtime with fixed ports, use `blue_green` so traffic can be switched between two slots. A [blue-green deployment](https://en.wikipedia.org/wiki/Blue-green_deployment) uses two identical slots, starts the new version in the idle slot, verifies it, and then switches traffic only after the candidate is ready.
 
 ## Field reference
 
@@ -299,6 +303,6 @@ Single-host zero-downtime options for alternating between two rollout slots (typ
 | `env_var` | string | Env var injected with slot value (`PORT` default) |
 | `slots` | array | Exactly two slot values to alternate between |
 | `switch_command` | string | Command to switch traffic to candidate slot |
-| `candidate_health_check_url` | string | Candidate health probe URL template (`{slot}` supported) |
-| `switch_verify_url` | string | Optional post-switch verify URL |
+| `candidate_health_check` | object | Optional candidate verification check (`{slot}` supported in `url` or `command`) |
+| `switch_verify` | object | Optional post-switch verification check |
 | `state_path` | string | Optional persisted active-slot state file path |
