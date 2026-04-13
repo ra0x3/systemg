@@ -275,9 +275,9 @@ pub enum Commands {
         #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
 
-        /// Clear log files instead of displaying them.
+        /// Purge log files instead of displaying them.
         #[arg(long)]
-        clear: bool,
+        purge: bool,
 
         /// The name of the service whose logs should be displayed (optional).
         #[arg(short, long)]
@@ -375,12 +375,12 @@ mod tests {
     }
 
     #[test]
-    fn logs_accepts_clear_for_service() {
-        let cli = Cli::try_parse_from(["sysg", "logs", "--service", "demo", "--clear"])
+    fn logs_accepts_purge_for_service() {
+        let cli = Cli::try_parse_from(["sysg", "logs", "--service", "demo", "--purge"])
             .unwrap();
         match cli.command {
-            Commands::Logs { clear, service, .. } => {
-                assert!(clear);
+            Commands::Logs { purge, service, .. } => {
+                assert!(purge);
                 assert_eq!(service.as_deref(), Some("demo"));
             }
             _ => panic!("expected logs command"),
@@ -388,11 +388,11 @@ mod tests {
     }
 
     #[test]
-    fn logs_accepts_clear_without_service() {
-        let cli = Cli::try_parse_from(["sysg", "logs", "--clear"]).unwrap();
+    fn logs_accepts_purge_without_service() {
+        let cli = Cli::try_parse_from(["sysg", "logs", "--purge"]).unwrap();
         match cli.command {
-            Commands::Logs { clear, service, .. } => {
-                assert!(clear);
+            Commands::Logs { purge, service, .. } => {
+                assert!(purge);
                 assert_eq!(service, None);
             }
             _ => panic!("expected logs command"),

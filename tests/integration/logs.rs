@@ -262,7 +262,7 @@ fn read_log(path: &Path) -> String {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn logs_clear_truncates_only_selected_service() {
+fn logs_purge_truncates_only_selected_service() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -286,7 +286,7 @@ fn logs_clear_truncates_only_selected_service() {
     cmd.arg("logs")
         .arg("--service")
         .arg("api")
-        .arg("--clear")
+        .arg("--purge")
         .assert()
         .success()
         .stdout(predicates::str::is_empty());
@@ -299,7 +299,7 @@ fn logs_clear_truncates_only_selected_service() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn logs_clear_without_service_truncates_all_logs() {
+fn logs_purge_without_service_truncates_all_logs() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
     let home = dir.join("home");
@@ -323,7 +323,7 @@ fn logs_clear_without_service_truncates_all_logs() {
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     cmd.arg("logs")
-        .arg("--clear")
+        .arg("--purge")
         .assert()
         .success()
         .stdout(predicates::str::is_empty());
