@@ -16,13 +16,13 @@ $ sysg spawn --name worker_1 -- python worker.py
 
 ## Options
 
-| Option | Description |
-|--------|------------|
-| `--name` | Required. Unique identifier for spawned process |
-| `--ttl` | Time-to-live in seconds (optional) |
-| `--parent-pid` | Parent process ID (defaults to caller's parent PID if not specified) |
-| `--sys` | Opt into privileged system mode. Requires running as root |
-| `--log-level` | Override the logging verbosity for the spawned process |
+| Short | Long | Description |
+|-------|------|-------------|
+| `-` | `--name` | Required. Unique identifier for spawned process |
+| `-` | `--ttl` | Time-to-live in seconds (optional) |
+| `-` | `--parent-pid` | Parent process ID (defaults to caller's parent PID if not specified) |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--log-level` | Override the logging verbosity for the spawned process |
 
 ## Examples
 

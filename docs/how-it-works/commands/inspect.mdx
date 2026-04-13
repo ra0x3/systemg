@@ -12,15 +12,15 @@ $ sysg inspect -s myservice
 
 ## Options
 
-| Option | Description |
-|--------|------------|
-| `-s, --service` | Name of the service to inspect |
-| `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
-| `--config` | Path to configuration file |
-| `--json` | Emit machine-readable JSON output instead of a report |
-| `--sys` | Opt into privileged system mode. Requires running as root |
-| `--no-color` | Disable ANSI colors in output |
-| `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| Short | Long | Description |
+|-------|------|-------------|
+| `-s` | `--service` | Name of the service to inspect |
+| `-` | `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
+| `-c` | `--config` | Path to configuration file |
+| `-` | `--json` | Emit machine-readable JSON output instead of a report |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--no-color` | Disable ANSI colors in output |
+| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples
 

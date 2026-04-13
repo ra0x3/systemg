@@ -15,86 +15,19 @@ $ sysg start
 
 ## Options
 
-### `--config`
-
-Path to the configuration file. If not specified, systemg looks for `systemg.yaml` or `sysg.yaml` in the current directory.
-
-```sh
-$ sysg start --config /etc/myapp/services.yaml
-```
-
-### `--service`
-
-Optionally start only the named service instead of all services.
-
-```sh
-$ sysg start --service api
-```
-
-### `--name`
-
-Optional name for units or child-start units.
-
-```sh
-$ sysg start --name cleanup -- ./cleanup.sh
-```
-
-### `--daemonize`
-
-Run the supervisor as a background daemon. The supervisor continues running after you close your terminal, and subsequent commands communicate with it via Unix socket.
-
-```sh
-$ sysg start --daemonize
-```
-
-### `--parent-pid`
-
-Run `start` in child mode by attaching the process to a parent service PID.
-
-```sh
-$ sysg start --parent-pid 4242 --name worker-1 -- python worker.py
-```
-
-### `--ttl`
-
-Optional time-to-live in seconds for child mode.
-
-```sh
-$ sysg start --parent-pid 4242 --ttl 300 --name temp-worker -- ./job.sh
-```
-
-### `--child`
-
-Explicit child-mode marker. Requires `--parent-pid`.
-
-```sh
-$ sysg start --child --parent-pid 4242 --name worker-1 -- python worker.py
-```
-
-### `--sys`
-
-Opt into privileged system mode. Requires running as root.
-
-```sh
-$ sudo sysg start --sys
-```
-
-### `--drop-privileges`
-
-Drop child service privileges during spawn. When enabled in root/system mode,
-services without an explicit `user` run as `nobody`.
-
-```sh
-$ sudo sysg start --sys --drop-privileges
-```
-
-### `--stderr`
-
-Pipe stderr output from supervised processes to stdout. In foreground mode, stderr from all services is redirected to stdout with `[service_name:stderr]` prefix.
-
-```sh
-$ sysg start --stderr
-```
+| Short | Long | Description |
+|-------|------|-------------|
+| `-c` | `--config` | Path to the configuration file. If not specified, systemg looks for `systemg.yaml` or `sysg.yaml` in the current directory |
+| `-s` | `--service` | Optionally start only the named service instead of all services |
+| `-` | `--name` | Optional name for units or child-start units |
+| `-` | `--daemonize` | Run the supervisor as a background daemon |
+| `-` | `--parent-pid` | Run `start` in child mode by attaching the process to a parent service PID |
+| `-` | `--ttl` | Optional time-to-live in seconds for child mode |
+| `-` | `--child` | Explicit child-mode marker. Requires `--parent-pid` |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Drop child service privileges during spawn. In root/system mode, services without an explicit `user` run as `nobody` |
+| `-` | `--stderr` | Pipe stderr output from supervised processes to stdout in foreground mode |
+| `-` | `--log-level` | Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0) |
 
 :::info
 The `--stderr` flag is particularly useful for:
@@ -104,14 +37,6 @@ The `--stderr` flag is particularly useful for:
 
 Note: This flag only affects foreground mode. In daemonized mode, stderr is still written to log files in `~/.local/share/systemg/logs/`.
 :::
-
-### `--log-level`
-
-Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
-
-```sh
-$ sysg start --log-level debug
-```
 
 ## Examples
 

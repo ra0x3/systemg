@@ -12,54 +12,14 @@ $ sysg restart
 
 ## Options
 
-### `--config`
-
-Path to the configuration file. When specified, reloads the configuration and restarts all services with the new settings.
-
-```sh
-$ sysg restart --config production.yaml
-```
-
-### `--service`
-
-Name of a specific service to restart. If not specified, all services are restarted.
-
-```sh
-$ sysg restart --service api
-```
-
-### `--daemonize`
-
-Start the supervisor before restarting if it isn't already running.
-
-```sh
-$ sysg restart --daemonize
-```
-
-### `--sys`
-
-Opt into privileged system mode. Requires running as root.
-
-```sh
-$ sudo sysg restart --sys
-```
-
-### `--drop-privileges`
-
-Drop child service privileges during spawn. When enabled in root/system mode,
-services without an explicit `user` run as `nobody`.
-
-```sh
-$ sudo sysg restart --sys --drop-privileges
-```
-
-### `--log-level`
-
-Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
-
-```sh
-$ sysg restart --log-level debug
-```
+| Short | Long | Description |
+|-------|------|-------------|
+| `-c` | `--config` | Path to the configuration file. When specified, reloads the configuration and restarts all services with the new settings |
+| `-s` | `--service` | Name of a specific service to restart. If not specified, all services are restarted |
+| `-` | `--daemonize` | Start the supervisor before restarting if it is not already running |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Drop child service privileges during spawn. In root/system mode, services without an explicit `user` run as `nobody` |
+| `-` | `--log-level` | Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0) |
 
 ## Examples
 

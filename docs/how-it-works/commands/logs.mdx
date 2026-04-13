@@ -12,16 +12,16 @@ $ sysg logs
 
 ## Options
 
-| Option | Description |
-|--------|------------|
-| `--config` | Path to configuration file |
-| `--clear` | Reset log files instead of displaying them |
-| `--service` | The name of the service whose logs should be displayed (optional) |
-| `--lines` | Number of lines to show (default: 50) |
-| `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stderr) |
-| `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
-| `--sys` | Opt into privileged system mode. Requires running as root |
-| `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| Short | Long | Description |
+|-------|------|-------------|
+| `-c` | `--config` | Path to configuration file |
+| `-` | `--purge` | Reset log files instead of displaying them |
+| `-s` | `--service` | The name of the service whose logs should be displayed (optional) |
+| `-l` | `--lines` | Number of lines to show (default: 50) |
+| `-k` | `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stderr) |
+| `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples
 
@@ -37,18 +37,18 @@ $ sysg logs
 $ sysg logs --service api
 ```
 
-### Clear logs for a specific service
+### Purge logs for a specific service
 
 ```sh
-$ sysg logs --service api --clear
+$ sysg logs --service api --purge
 ```
 
 This truncates `api`'s current `stdout` and `stderr` log files in place and does not print logs.
 
-### Clear logs for all services
+### Purge logs for all services
 
 ```sh
-$ sysg logs --clear
+$ sysg logs --purge
 ```
 
 This truncates all service log files, plus `supervisor.log`, in place and does not print logs.

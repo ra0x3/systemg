@@ -12,37 +12,12 @@ $ sysg stop
 
 ## Options
 
-### `--config`
-
-Path to the configuration file. Used when no supervisor is running to locate services. When a supervisor is running, it uses the supervisor's configuration.
-
-```sh
-$ sysg stop --config /etc/myapp/services.yaml
-```
-
-### `--service`
-
-Name of a specific service to stop. If not specified, all services are stopped. Leaves other services running.
-
-```sh
-$ sysg stop --service api
-```
-
-### `--sys`
-
-Opt into privileged system mode. Requires running as root.
-
-```sh
-$ sudo sysg stop --sys
-```
-
-### `--log-level`
-
-Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0).
-
-```sh
-$ sysg stop --log-level debug
-```
+| Short | Long | Description |
+|-------|------|-------------|
+| `-c` | `--config` | Path to the configuration file. Used when no supervisor is running to locate services. When a supervisor is running, it uses the supervisor's configuration |
+| `-s` | `--service` | Name of a specific service to stop. If not specified, all services are stopped |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--log-level` | Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0) |
 
 ## Examples
 
