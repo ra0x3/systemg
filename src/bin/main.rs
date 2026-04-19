@@ -6,7 +6,10 @@ use std::{
     os::unix::io::IntoRawFd,
     path::{Path, PathBuf},
     process,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -48,6 +51,9 @@ const UNIT_CONFIG_MAX_FILES: usize = 200;
 const UNIT_CONFIG_MAX_AGE_DAYS: u64 = 30;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
+const FETCH_SPINNER_DELAY: Duration = Duration::from_millis(120);
+const FETCH_SPINNER_TICK: Duration = Duration::from_millis(80);
+const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectStreamAction {
@@ -115,6 +121,60 @@ fn write_inspect_stream_frame(
         render_inspect_stream_frame(&mut stdout, frame_lines, previous_line_count)?;
     stdout.flush()?;
     Ok(line_count)
+}
+
+fn stderr_is_tty() -> bool {
+    unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
+}
+
+fn format_progress_spinner_frame(frame: &str, label: &str) -> String {
+    format!("\r{frame} {label}…\x1B[K")
+}
+
+fn clear_progress_spinner_line() -> &'static str {
+    "\r\x1B[2K\r"
+}
+
+fn with_progress_spinner<T, F>(
+    label: &'static str,
+    operation: F,
+) -> Result<T, Box<dyn Error>>
+where
+    F: FnOnce() -> Result<T, Box<dyn Error>>,
+{
+    if !stderr_is_tty() {
+        return operation();
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let spinner_stop = Arc::clone(&stop);
+    let spinner = thread::spawn(move || {
+        thread::sleep(FETCH_SPINNER_DELAY);
+        if spinner_stop.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let mut stderr = io::stderr().lock();
+        let mut frame_idx = 0usize;
+        loop {
+            if spinner_stop.load(Ordering::Relaxed) {
+                let _ = write!(stderr, "{}", clear_progress_spinner_line());
+                let _ = stderr.flush();
+                return;
+            }
+
+            let frame = FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
+            let _ = write!(stderr, "{}", format_progress_spinner_frame(frame, label));
+            let _ = stderr.flush();
+            frame_idx += 1;
+            thread::sleep(FETCH_SPINNER_TICK);
+        }
+    });
+
+    let result = operation();
+    stop.store(true, Ordering::Relaxed);
+    let _ = spinner.join();
+    result
 }
 
 /// Runs the `sysg` command-line entrypoint.
@@ -399,7 +459,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     thread::sleep(sleep_interval);
                 }
             } else {
-                let snapshot = fetch_status_snapshot(&effective_config)?;
+                let snapshot = with_progress_spinner("Computing", || {
+                    fetch_status_snapshot(&effective_config)
+                })?;
 
                 let health =
                     render_status(&snapshot, &render_opts, false, &effective_config)?;
@@ -509,7 +571,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     thread::sleep(sleep_interval);
                 }
             } else {
-                let payload = fetch_inspect(&effective_config, &service, samples_limit)?;
+                let payload = with_progress_spinner("Inspecting", || {
+                    fetch_inspect(&effective_config, &service, samples_limit)
+                })?;
                 if payload.unit.is_none() {
                     eprintln!("Service '{service}' not found.");
                     process::exit(2);
@@ -1750,6 +1814,23 @@ mod tests {
             !rendered.contains("\x1B[2J"),
             "steady-state frame writes should not clear the full terminal"
         );
+    }
+
+    #[test]
+    fn progress_spinner_frame_uses_requested_label() {
+        assert_eq!(
+            format_progress_spinner_frame("⠋", "Computing"),
+            "\r⠋ Computing…\x1B[K"
+        );
+        assert_eq!(
+            format_progress_spinner_frame("⠙", "Inspecting"),
+            "\r⠙ Inspecting…\x1B[K"
+        );
+    }
+
+    #[test]
+    fn progress_spinner_clear_sequence_erases_the_active_line() {
+        assert_eq!(clear_progress_spinner_line(), "\r\x1B[2K\r");
     }
 }
 

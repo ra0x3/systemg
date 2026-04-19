@@ -76,6 +76,10 @@ services:
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
     assert_eq!(payload["overall_health"], "healthy");
+    assert!(
+        output.stderr.is_empty(),
+        "status json output should not emit progress noise on stderr in non-interactive mode"
+    );
 
     drop(home_guard);
 }
@@ -133,6 +137,10 @@ services:
     let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
     assert_eq!(payload["unit"]["hash"], hash);
     assert!(payload["samples"].as_array().unwrap().is_empty());
+    assert!(
+        output.stderr.is_empty(),
+        "inspect json output should not emit progress noise on stderr in non-interactive mode"
+    );
 
     drop(home_guard);
 }
