@@ -2778,75 +2778,93 @@ fn collect_inspect_lines(
         ));
     }
 
-    if unit.kind == UnitKind::Cron
-        && let Some(cron_status) = &unit.cron
-        && !cron_status.recent_runs.is_empty()
-    {
-        let rows: Vec<InspectCronRunRow> = cron_status
-            .recent_runs
-            .iter()
-            .take(INSPECT_CRON_HISTORY_LIMIT)
-            .enumerate()
-            .map(|(index, run)| InspectCronRunRow {
-                run: (index + 1).to_string(),
-                time: run
-                    .started_at
-                    .with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string(),
-                user: run.user.clone().unwrap_or_else(|| "-".to_string()),
-                pid: run
-                    .pid
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                command: run.command.clone().unwrap_or_else(|| "-".to_string()),
-            })
-            .collect();
+    if unit.kind == UnitKind::Cron {
+        let history_lines = if let Some(cron_status) = &unit.cron {
+            if cron_status.recent_runs.is_empty() {
+                vec![colorize("No cron runs recorded yet", GRAY, opts.no_color)]
+            } else {
+                let rows: Vec<InspectCronRunRow> = cron_status
+                    .recent_runs
+                    .iter()
+                    .take(INSPECT_CRON_HISTORY_LIMIT)
+                    .enumerate()
+                    .map(|(index, run)| InspectCronRunRow {
+                        run: (index + 1).to_string(),
+                        time: run
+                            .started_at
+                            .with_timezone(&Local)
+                            .format("%Y-%m-%d %H:%M:%S")
+                            .to_string(),
+                        status: format_inspect_cron_status(run.status.as_ref()),
+                        user: run.user.clone().unwrap_or_else(|| "-".to_string()),
+                        pid: run
+                            .pid
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        command: run.command.clone().unwrap_or_else(|| "-".to_string()),
+                    })
+                    .collect();
 
-        let mut widths = compute_inspect_cron_preferred_widths(&rows);
-        shrink_inspect_cron_widths_to_fit(&mut widths, content_width);
-        let columns = [
-            Column {
-                title: INSPECT_CRON_COLUMN_TITLES[0],
-                width: widths[0],
-                align: INSPECT_CRON_COLUMN_ALIGNS[0],
-            },
-            Column {
-                title: INSPECT_CRON_COLUMN_TITLES[1],
-                width: widths[1],
-                align: INSPECT_CRON_COLUMN_ALIGNS[1],
-            },
-            Column {
-                title: INSPECT_CRON_COLUMN_TITLES[2],
-                width: widths[2],
-                align: INSPECT_CRON_COLUMN_ALIGNS[2],
-            },
-            Column {
-                title: INSPECT_CRON_COLUMN_TITLES[3],
-                width: widths[3],
-                align: INSPECT_CRON_COLUMN_ALIGNS[3],
-            },
-            Column {
-                title: INSPECT_CRON_COLUMN_TITLES[4],
-                width: widths[4],
-                align: INSPECT_CRON_COLUMN_ALIGNS[4],
-            },
-        ];
-        let row_values: Vec<Vec<String>> = rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.run.clone(),
-                    row.time.clone(),
-                    row.user.clone(),
-                    row.pid.clone(),
-                    row.command.clone(),
-                ]
-            })
-            .collect();
+                let mut widths = compute_inspect_cron_preferred_widths(&rows);
+                shrink_inspect_cron_widths_to_fit(&mut widths, content_width);
+                let columns = [
+                    Column {
+                        title: INSPECT_CRON_COLUMN_TITLES[0],
+                        width: widths[0],
+                        align: INSPECT_CRON_COLUMN_ALIGNS[0],
+                    },
+                    Column {
+                        title: INSPECT_CRON_COLUMN_TITLES[1],
+                        width: widths[1],
+                        align: INSPECT_CRON_COLUMN_ALIGNS[1],
+                    },
+                    Column {
+                        title: INSPECT_CRON_COLUMN_TITLES[2],
+                        width: widths[2],
+                        align: INSPECT_CRON_COLUMN_ALIGNS[2],
+                    },
+                    Column {
+                        title: INSPECT_CRON_COLUMN_TITLES[3],
+                        width: widths[3],
+                        align: INSPECT_CRON_COLUMN_ALIGNS[3],
+                    },
+                    Column {
+                        title: INSPECT_CRON_COLUMN_TITLES[4],
+                        width: widths[4],
+                        align: INSPECT_CRON_COLUMN_ALIGNS[4],
+                    },
+                    Column {
+                        title: INSPECT_CRON_COLUMN_TITLES[5],
+                        width: widths[5],
+                        align: INSPECT_CRON_COLUMN_ALIGNS[5],
+                    },
+                ];
+                let row_values: Vec<Vec<String>> = rows
+                    .iter()
+                    .map(|row| {
+                        vec![
+                            row.run.clone(),
+                            row.time.clone(),
+                            row.status.clone(),
+                            row.user.clone(),
+                            row.pid.clone(),
+                            row.command.clone(),
+                        ]
+                    })
+                    .collect();
+                render_section_table_lines(&columns, &row_values, None, opts.no_color)
+            }
+        } else {
+            vec![colorize(
+                "No cron state recorded for this unit",
+                GRAY,
+                opts.no_color,
+            )]
+        };
+
         sections.push((
             format!("Cron Run History (last {})", INSPECT_CRON_HISTORY_LIMIT),
-            render_section_table_lines(&columns, &row_values, None, opts.no_color),
+            history_lines,
         ));
     }
 
@@ -2899,9 +2917,22 @@ struct InspectProcessRow {
 struct InspectCronRunRow {
     run: String,
     time: String,
+    status: String,
     user: String,
     pid: String,
     command: String,
+}
+
+fn format_inspect_cron_status(status: Option<&CronExecutionStatus>) -> String {
+    match status {
+        Some(CronExecutionStatus::Success) => "success".to_string(),
+        Some(CronExecutionStatus::Failed(reason)) if reason.trim().is_empty() => {
+            "failed".to_string()
+        }
+        Some(CronExecutionStatus::Failed(reason)) => format!("failed: {reason}"),
+        Some(CronExecutionStatus::OverlapError) => "overlap".to_string(),
+        None => "running".to_string(),
+    }
 }
 
 #[derive(Default)]
@@ -2966,10 +2997,11 @@ const INSPECT_PROCESS_SHRINK_PRIORITY: [usize; INSPECT_PROCESS_COLUMN_COUNT] =
     [0, 13, 3, 12, 6, 7, 8, 9, 4, 5, 2, 11, 10, 1];
 const INSPECT_PROC_CMD_MAX_DIFF: usize = 4;
 
-const INSPECT_CRON_COLUMN_COUNT: usize = 5;
+const INSPECT_CRON_COLUMN_COUNT: usize = 6;
 const INSPECT_CRON_COLUMN_TITLES: [&str; INSPECT_CRON_COLUMN_COUNT] =
-    ["RUN", "TIME", "USER", "PID", "CMD"];
+    ["RUN", "TIME", "STATUS", "USER", "PID", "CMD"];
 const INSPECT_CRON_COLUMN_ALIGNS: [Alignment; INSPECT_CRON_COLUMN_COUNT] = [
+    Alignment::Left,
     Alignment::Left,
     Alignment::Left,
     Alignment::Left,
@@ -2977,8 +3009,9 @@ const INSPECT_CRON_COLUMN_ALIGNS: [Alignment; INSPECT_CRON_COLUMN_COUNT] = [
     Alignment::Left,
 ];
 const INSPECT_CRON_SOFT_MIN_WIDTHS: [usize; INSPECT_CRON_COLUMN_COUNT] =
-    [3, 19, 4, 3, 18];
-const INSPECT_CRON_SHRINK_PRIORITY: [usize; INSPECT_CRON_COLUMN_COUNT] = [4, 2, 1, 0, 3];
+    [3, 19, 6, 4, 3, 18];
+const INSPECT_CRON_SHRINK_PRIORITY: [usize; INSPECT_CRON_COLUMN_COUNT] =
+    [5, 3, 1, 2, 0, 4];
 
 /// Handles inspect process content budget.
 fn inspect_process_content_budget(terminal_width: usize) -> usize {
@@ -3200,9 +3233,10 @@ fn compute_inspect_cron_preferred_widths(
     for row in rows {
         widths[0] = widths[0].max(visible_length(&row.run));
         widths[1] = widths[1].max(visible_length(&row.time));
-        widths[2] = widths[2].max(visible_length(&row.user));
-        widths[3] = widths[3].max(visible_length(&row.pid));
-        widths[4] = widths[4].max(visible_length(&row.command));
+        widths[2] = widths[2].max(visible_length(&row.status));
+        widths[3] = widths[3].max(visible_length(&row.user));
+        widths[4] = widths[4].max(visible_length(&row.pid));
+        widths[5] = widths[5].max(visible_length(&row.command));
     }
     widths
 }

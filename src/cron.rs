@@ -269,8 +269,10 @@ pub struct CronExecutionRecord {
     #[serde(with = "systemtime_serde_opt")]
     pub completed_at: Option<SystemTime>,
     /// Final status of the execution (None if still running).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<CronExecutionStatus>,
     /// Exit code of the process (None if no exit code available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// PID of the spawned cron process when one was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1219,5 +1221,48 @@ mod tests {
             .and_then(|job| job.execution_history.back())
             .expect("legacy record present");
         assert!(matches!(record.status, Some(CronExecutionStatus::Success)));
+    }
+
+    #[test]
+    fn cron_state_round_trips_running_execution_without_status() {
+        let mut state = CronStateFile::default();
+        let mut history = VecDeque::new();
+        history.push_back(CronExecutionRecord {
+            started_at: SystemTime::UNIX_EPOCH + Duration::from_secs(20),
+            completed_at: None,
+            status: None,
+            exit_code: None,
+            pid: Some(1234),
+            user: Some("ubuntu".to_string()),
+            command: Some("/bin/true".to_string()),
+            metrics: vec![],
+        });
+
+        state.jobs.insert(
+            "running-hash".to_string(),
+            PersistedCronJobState {
+                last_execution: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+                execution_history: history,
+                timezone_label: "UTC".to_string(),
+                timezone: Some("UTC".to_string()),
+            },
+        );
+
+        let xml = quick_xml::se::to_string(&state).expect("serialize cron state");
+        assert!(
+            !xml.contains("<status"),
+            "in-progress records should omit status instead of writing an empty status element"
+        );
+
+        let parsed: CronStateFile =
+            quick_xml::de::from_str(&xml).expect("deserialize running state");
+        let record = parsed
+            .jobs()
+            .get("running-hash")
+            .and_then(|job| job.execution_history.back())
+            .expect("running record present");
+        assert!(record.status.is_none());
+        assert_eq!(record.exit_code, None);
+        assert_eq!(record.pid, Some(1234));
     }
 }

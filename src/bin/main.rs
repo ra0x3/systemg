@@ -1619,6 +1619,7 @@ mod tests {
         let rows = vec![InspectCronRunRow {
             run: "10".to_string(),
             time: "2026-03-10 14:03:00".to_string(),
+            status: "success".to_string(),
             user: "postgres".to_string(),
             pid: "12345".to_string(),
             command: "sh scripts/migrate-provider-data.sh --delete".to_string(),
@@ -1634,16 +1635,17 @@ mod tests {
         let rows = vec![InspectCronRunRow {
             run: "10".to_string(),
             time: "2026-03-10 14:03:00".to_string(),
+            status: "success".to_string(),
             user: "postgres".to_string(),
             pid: "12345".to_string(),
             command: "sh scripts/migrate-provider-data.sh --delete --sink rds --force"
                 .to_string(),
         }];
         let mut widths = compute_inspect_cron_preferred_widths(&rows);
-        let original_cmd = widths[4];
+        let original_cmd = widths[5];
         shrink_inspect_cron_widths_to_fit(&mut widths, 60);
-        assert!(widths[4] < original_cmd);
-        assert!(widths[2] >= INSPECT_CRON_SOFT_MIN_WIDTHS[2]);
+        assert!(widths[5] < original_cmd);
+        assert!(widths[3] >= INSPECT_CRON_SOFT_MIN_WIDTHS[3]);
     }
 
     #[test]
