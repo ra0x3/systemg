@@ -38,6 +38,15 @@ const DIM_CYAN: &str = "\x1b[2;36m";
 const RESET: &str = "\x1b[0m";
 
 #[derive(Clone, Copy)]
+/// Represents the semantic color family inherited by nested status rows.
+enum RowTintFamily {
+    Success,
+    Warning,
+    Failing,
+    Neutral,
+}
+
+#[derive(Clone, Copy)]
 /// Defines alignment values.
 enum Alignment {
     Left,
@@ -758,7 +767,7 @@ fn render_status_table_with_selection(
         }
 
         if !unit.spawned_children.is_empty() {
-            render_spawn_rows(&unit.spawned_children, columns, opts.no_color);
+            render_spawn_rows(unit, columns, opts.no_color);
         }
     }
 
@@ -927,7 +936,7 @@ fn render_status_non_interactive(
     for unit in &units {
         println!("{}", format_unit_row(unit, columns, opts.no_color));
         if !unit.spawned_children.is_empty() {
-            render_spawn_rows(&unit.spawned_children, columns, opts.no_color);
+            render_spawn_rows(unit, columns, opts.no_color);
         }
     }
 
@@ -1566,6 +1575,103 @@ fn depth_tint_color(depth: usize) -> &'static str {
     }
 }
 
+/// Returns the row tint family children should inherit from their parent unit.
+fn unit_row_tint_family(unit: &UnitStatus) -> RowTintFamily {
+    if let Some(process) = &unit.process {
+        return match process.state {
+            ProcessState::Running => RowTintFamily::Success,
+            ProcessState::Zombie | ProcessState::Missing => RowTintFamily::Failing,
+        };
+    }
+
+    if let Some(lifecycle) = unit.lifecycle {
+        return match lifecycle {
+            ServiceLifecycleStatus::Running | ServiceLifecycleStatus::ExitedSuccessfully => {
+                RowTintFamily::Success
+            }
+            ServiceLifecycleStatus::ExitedWithError => RowTintFamily::Failing,
+            ServiceLifecycleStatus::Stopped | ServiceLifecycleStatus::Skipped => {
+                RowTintFamily::Neutral
+            }
+        };
+    }
+
+    if let Some(cron) = &unit.cron {
+        if let Some(last) = cron.last_run.as_ref() {
+            if let Some(status) = &last.status {
+                return match status {
+                    CronExecutionStatus::Success => {
+                        if matches!(last.exit_code, Some(code) if code != 0) {
+                            RowTintFamily::Warning
+                        } else {
+                            RowTintFamily::Neutral
+                        }
+                    }
+                    CronExecutionStatus::Failed(reason) => {
+                        if reason.contains("Failed to get PID") {
+                            RowTintFamily::Neutral
+                        } else if matches!(last.exit_code, Some(0)) {
+                            RowTintFamily::Warning
+                        } else {
+                            RowTintFamily::Failing
+                        }
+                    }
+                    CronExecutionStatus::OverlapError => RowTintFamily::Warning,
+                };
+            }
+
+            return RowTintFamily::Success;
+        }
+
+        return RowTintFamily::Warning;
+    }
+
+    match unit.health {
+        UnitHealth::Healthy => RowTintFamily::Success,
+        UnitHealth::Degraded => RowTintFamily::Warning,
+        UnitHealth::Failing => RowTintFamily::Failing,
+        UnitHealth::Inactive => RowTintFamily::Neutral,
+    }
+}
+
+/// Handles nested row tint color.
+fn nested_row_tint_color(family: RowTintFamily, depth: usize) -> &'static str {
+    let depth = depth.saturating_sub(1).min(4);
+    match family {
+        RowTintFamily::Success => match depth {
+            0 => "\x1b[38;5;71m",
+            1 => "\x1b[38;5;65m",
+            2 => "\x1b[38;5;64m",
+            3 => "\x1b[38;5;59m",
+            _ => "\x1b[38;5;58m",
+        },
+        RowTintFamily::Warning => match depth {
+            0 => "\x1b[38;5;178m",
+            1 => "\x1b[38;5;142m",
+            2 => "\x1b[38;5;136m",
+            3 => "\x1b[38;5;100m",
+            _ => "\x1b[38;5;58m",
+        },
+        RowTintFamily::Failing => match depth {
+            0 => "\x1b[38;5;167m",
+            1 => "\x1b[38;5;131m",
+            2 => "\x1b[38;5;95m",
+            3 => "\x1b[38;5;59m",
+            _ => "\x1b[38;5;52m",
+        },
+        RowTintFamily::Neutral => depth_tint_color(depth + 1),
+    }
+}
+
+/// Applies one inherited tint to an entire nested status row.
+fn tint_nested_row(row: String, family: RowTintFamily, depth: usize, no_color: bool) -> String {
+    if no_color || depth == 0 {
+        row
+    } else {
+        colorize(&row, nested_row_tint_color(family, depth), no_color)
+    }
+}
+
 /// Handles tint value for depth.
 fn tint_value_for_depth(value: String, depth: usize, no_color: bool) -> String {
     if no_color || depth == 0 {
@@ -1576,11 +1682,12 @@ fn tint_value_for_depth(value: String, depth: usize, no_color: bool) -> String {
 }
 
 /// Renders spawn rows.
-fn render_spawn_rows(nodes: &[SpawnedProcessNode], columns: &[Column], no_color: bool) {
-    visit_spawn_tree(nodes, "", &mut |child, prefix, _| {
+fn render_spawn_rows(unit: &UnitStatus, columns: &[Column], no_color: bool) {
+    let tint_family = unit_row_tint_family(unit);
+    visit_spawn_tree(&unit.spawned_children, "", &mut |child, prefix, _| {
         println!(
             "{}",
-            format_spawned_child_row(child, columns, no_color, prefix)
+            format_spawned_child_row(child, columns, no_color, prefix, tint_family)
         );
     });
 }
@@ -1650,6 +1757,7 @@ fn format_spawned_child_row(
     columns: &[Column],
     no_color: bool,
     prefix: &str,
+    tint_family: RowTintFamily,
 ) -> String {
     let name_width = columns.first().map(|col| col.width).unwrap_or(4);
     let child_name = truncate_nested_unit_label(prefix, &child.name, name_width);
@@ -1674,15 +1782,9 @@ fn format_spawned_child_row(
 
         let health = if succeeded { "Healthy" } else { "Failing" };
 
-        (
-            tint_value_for_depth("Exited".to_string(), child.depth, no_color),
-            tint_value_for_depth(health.to_string(), child.depth, no_color),
-        )
+        ("Exited".to_string(), health.to_string())
     } else {
-        (
-            tint_value_for_depth("Running".to_string(), child.depth, no_color),
-            tint_value_for_depth("Healthy".to_string(), child.depth, no_color),
-        )
+        ("Running".to_string(), "Healthy".to_string())
     };
 
     let uptime = if let Some(exit) = &child.last_exit
@@ -1708,29 +1810,25 @@ fn format_spawned_child_row(
     };
 
     let kind_label = match child.kind {
-        SpawnedChildKind::Spawned => {
-            tint_value_for_depth("spwn".to_string(), child.depth, no_color)
-        }
-        SpawnedChildKind::Peripheral => {
-            tint_value_for_depth("peri".to_string(), child.depth, no_color)
-        }
+        SpawnedChildKind::Spawned => "spwn".to_string(),
+        SpawnedChildKind::Peripheral => "peri".to_string(),
     };
 
     let values = [
-        tint_value_for_depth(child_name, child.depth, no_color),
+        child_name,
         kind_label,
         state,
-        tint_value_for_depth(user, child.depth, no_color),
-        tint_value_for_depth(pid, child.depth, no_color),
-        tint_value_for_depth(cpu_col, child.depth, no_color),
-        tint_value_for_depth(rss_col, child.depth, no_color),
-        tint_value_for_depth(uptime, child.depth, no_color),
-        tint_value_for_depth(command, child.depth, no_color),
-        tint_value_for_depth(last_exit, child.depth, no_color),
+        user,
+        pid,
+        cpu_col,
+        rss_col,
+        uptime,
+        command,
+        last_exit,
         health_label,
     ];
 
-    format_row(&values, columns)
+    tint_nested_row(format_row(&values, columns), tint_family, child.depth, no_color)
 }
 
 /// Formats spawn exit.

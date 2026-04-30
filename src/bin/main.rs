@@ -930,7 +930,13 @@ mod tests {
             user: Some("rashad".to_string()),
             kind: SpawnedChildKind::Spawned,
         };
-        let child_row = format_spawned_child_row(&child, &columns, true, "└─ ");
+        let child_row = format_spawned_child_row(
+            &child,
+            &columns,
+            true,
+            "└─ ",
+            RowTintFamily::Success,
+        );
         assert!(child_row.contains("spwn"));
         assert!(child_row.contains("rashad"));
     }
@@ -1011,19 +1017,26 @@ mod tests {
             kind: SpawnedChildKind::Peripheral,
         };
 
-        let row = format_spawned_child_row(&child, &columns, false, "└─ ");
-        assert!(row.contains(&format!("{DARK_GRAY}└─ /opt/homebrew/bin/claude{RESET}")));
-        assert!(row.contains(&format!("{DARK_GRAY}rashad{RESET}")));
-        assert!(row.contains(&format!("{DARK_GRAY}62751{RESET}")));
-        assert!(row.contains(&format!("{DARK_GRAY}0.0%{RESET}")));
-        assert!(row.contains(&format!("{DARK_GRAY}117.7MB{RESET}")));
-        assert!(row.contains(&format!(
-            "{DARK_GRAY}/opt/homebrew/bin/claude --dangerously-skip-permissions{RESET}"
-        )));
-        assert!(row.contains(&format!("{DARK_GRAY}-{RESET}")));
-        assert!(row.contains(&format!("{DARK_GRAY}peri{RESET}")));
-        assert!(row.contains(&format!("{DARK_GRAY}Running{RESET}")));
-        assert!(row.contains(&format!("{DARK_GRAY}Healthy{RESET}")));
+        let row = format_spawned_child_row(
+            &child,
+            &columns,
+            false,
+            "└─ ",
+            RowTintFamily::Neutral,
+        );
+        assert!(
+            row.starts_with(nested_row_tint_color(RowTintFamily::Neutral, child.depth))
+        );
+        assert!(row.ends_with(RESET));
+        assert!(row.contains("└─ /opt/homebrew/bin/claude"));
+        assert!(row.contains("rashad"));
+        assert!(row.contains("62751"));
+        assert!(row.contains("0.0%"));
+        assert!(row.contains("117.7MB"));
+        assert!(row.contains("/opt/homebrew/bin/claude --dangerously-skip-permissions"));
+        assert!(row.contains("peri"));
+        assert!(row.contains("Running"));
+        assert!(row.contains("Healthy"));
     }
 
     #[test]
@@ -1100,12 +1113,60 @@ mod tests {
             user: Some("ubuntu".to_string()),
             kind: SpawnedChildKind::Spawned,
         };
-        let shallow_row = format_spawned_child_row(&shallow, &columns, false, "└─ ");
+        let shallow_row = format_spawned_child_row(
+            &shallow,
+            &columns,
+            false,
+            "└─ ",
+            RowTintFamily::Success,
+        );
         shallow.depth = 4;
-        let deep_row = format_spawned_child_row(&shallow, &columns, false, "└─ ");
+        let deep_row = format_spawned_child_row(
+            &shallow,
+            &columns,
+            false,
+            "└─ ",
+            RowTintFamily::Success,
+        );
 
-        assert!(shallow_row.contains(&format!("{DIM_WHITE}└─ worker{RESET}")));
-        assert!(deep_row.contains(&format!("{DARK_GRAY}└─ worker{RESET}")));
+        assert!(
+            shallow_row.starts_with(nested_row_tint_color(RowTintFamily::Success, 1))
+        );
+        assert!(deep_row.starts_with(nested_row_tint_color(RowTintFamily::Success, 4)));
+        assert_ne!(
+            nested_row_tint_color(RowTintFamily::Success, 1),
+            nested_row_tint_color(RowTintFamily::Success, 4)
+        );
+        assert!(shallow_row.contains("└─ worker"));
+        assert!(deep_row.contains("└─ worker"));
+    }
+
+    #[test]
+    fn spawned_rows_inherit_running_parent_green_family() {
+        let unit = UnitStatus {
+            name: "orchestrator".to_string(),
+            hash: "abc123".to_string(),
+            kind: UnitKind::Service,
+            lifecycle: Some(ServiceLifecycleStatus::Running),
+            health: UnitHealth::Healthy,
+            process: Some(systemg::status::ProcessRuntime {
+                pid: 1234,
+                state: ProcessState::Running,
+                user: Some("rashad".to_string()),
+            }),
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: None,
+            runtime_command: None,
+            spawned_children: vec![],
+        };
+
+        assert_eq!(
+            nested_row_tint_color(unit_row_tint_family(&unit), 1),
+            "\x1b[38;5;71m"
+        );
     }
 
     #[test]
@@ -1183,7 +1244,13 @@ mod tests {
             kind: SpawnedChildKind::Peripheral,
         };
 
-        let row = format_spawned_child_row(&child, &columns, false, "└─ ");
+        let row = format_spawned_child_row(
+            &child,
+            &columns,
+            false,
+            "└─ ",
+            RowTintFamily::Neutral,
+        );
         assert_eq!(visible_length(&row), total_inner_width(&columns) + 2);
     }
 
