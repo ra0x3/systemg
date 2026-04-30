@@ -299,13 +299,31 @@ jobs:
   # Docker UAT tests run in parallel with cargo-test
   # Tests both user mode and kernel mode scenarios
   docker-uat-tests:
-    name: Docker UAT Tests
+    name: Docker UAT Tests (${{ matrix.name }})
     runs-on: ubuntu-latest
     needs: [changes, clippy]
-    if: false  # TEMPORARILY DISABLED - Docker UAT tests are skipped for now
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
-        test-mode: [user, kernel]
+        include:
+          - name: user-linux-x86_64
+            test-mode: user
+            docker-platform: linux/amd64
+            runtime-image: ubuntu:22.04
+          - name: kernel-linux-x86_64
+            test-mode: kernel
+            docker-platform: linux/amd64
+            runtime-image: ubuntu:22.04
+          - name: kernel-linux-arm64
+            test-mode: kernel
+            docker-platform: linux/arm64
+            runtime-image: ubuntu:22.04
+          - name: kernel-debian-x86_64
+            test-mode: kernel
+            docker-platform: linux/amd64
+            runtime-image: debian:bookworm-slim
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -319,15 +337,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Build Docker image (${{ matrix.test-mode }})
         run: |
+          set -euo pipefail
           # Build the Docker image using CI-specific Dockerfile
-          docker build -f tests/Dockerfile.${{ matrix.test-mode }}.ci -t systemg-${{ matrix.test-mode }}:ci .
+          timeout 45m docker build \
+            --platform "${{ matrix.docker-platform }}" \
+            --build-arg RUNTIME_IMAGE="${{ matrix.runtime-image }}" \
+            -f tests/docker/${{ matrix.test-mode }}/Dockerfile.ci \
+            -t systemg-${{ matrix.name }}:ci \
+            .
 
       - name: Run Docker UAT tests (${{ matrix.test-mode }})
         id: run-tests
         run: |
-          set -e
+          set -euo pipefail
 
           # Create a directory for test output
           mkdir -p test-output
@@ -335,28 +362,30 @@ jobs:
           # Run the Docker container with appropriate settings
           if [ "${{ matrix.test-mode }}" = "kernel" ]; then
             # Kernel mode needs privileged access
-            docker run \
+            timeout 45m docker run \
               --rm \
+              --platform "${{ matrix.docker-platform }}" \
               --privileged \
               --cap-add SYS_ADMIN \
               --cap-add NET_ADMIN \
               --security-opt apparmor:unconfined \
               -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
               -v $(pwd)/test-output:/test-output \
-              systemg-${{ matrix.test-mode }}:ci | tee test-output/${{ matrix.test-mode }}.log
+              systemg-${{ matrix.name }}:ci | tee test-output/${{ matrix.name }}.log
           else
             # User mode can run without special privileges
-            docker run \
+            timeout 45m docker run \
               --rm \
+              --platform "${{ matrix.docker-platform }}" \
               -v $(pwd)/test-output:/test-output \
-              systemg-${{ matrix.test-mode }}:ci | tee test-output/${{ matrix.test-mode }}.log
+              systemg-${{ matrix.name }}:ci | tee test-output/${{ matrix.name }}.log
           fi
 
           # Extract test results for job summary
-          if grep -q "All.*tests passed successfully" test-output/${{ matrix.test-mode }}.log; then
-            echo "✅ ${{ matrix.test-mode }} mode: All tests passed" >> $GITHUB_STEP_SUMMARY
+          if grep -q "All.*tests passed successfully" test-output/${{ matrix.name }}.log; then
+            echo "${{ matrix.name }}: All tests passed" >> $GITHUB_STEP_SUMMARY
           else
-            echo "❌ ${{ matrix.test-mode }} mode: Some tests failed" >> $GITHUB_STEP_SUMMARY
+            echo "${{ matrix.name }}: Some tests failed" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
 
@@ -364,8 +393,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: docker-${{ matrix.test-mode }}-logs
-          path: test-output/${{ matrix.test-mode }}.log
+          name: docker-${{ matrix.name }}-logs
+          path: test-output/${{ matrix.name }}.log
 
   create-github-release:
     name: Create GitHub Release

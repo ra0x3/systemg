@@ -2,6 +2,12 @@
 # Simplified UAT test to verify Docker infrastructure
 set -e
 
+cleanup() {
+    /usr/local/bin/sysg purge --config /tmp/test-project/systemg.yaml >/dev/null 2>&1 || true
+}
+
+trap cleanup EXIT
+
 echo "==================================="
 echo "    USER MODE UAT TEST (SIMPLE)    "
 echo "==================================="
@@ -44,11 +50,14 @@ echo "✓ Configuration created"
 
 echo ""
 echo "Attempting to start systemg with the test config..."
-/usr/local/bin/sysg start --config systemg.yaml 2>&1 || echo "Note: Start command failed (expected if binary lacks platform support)"
+timeout 20 /usr/local/bin/sysg start --daemonize --config systemg.yaml
+
+echo ""
+echo "Checking systemg status..."
+timeout 20 /usr/local/bin/sysg status --config systemg.yaml
 
 echo ""
 echo "==================================="
 echo "    TEST INFRASTRUCTURE WORKING    "
 echo "==================================="
 echo "Docker UAT infrastructure is functional."
-echo "To complete tests, compile systemg for Linux target."

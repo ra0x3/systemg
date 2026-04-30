@@ -11,8 +11,9 @@ NC='\033[0m' # No Color
 
 # Configuration
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
-TEST_MODE="${1:-all}" # Options: all, user, kernel
-TIMEOUT="${TIMEOUT:-600}" # 10 minutes default timeout
+TEST_MODE="${TEST_MODE:-all}" # Options: all, user, kernel
+TEST_TIMEOUT="${TEST_TIMEOUT:-${TIMEOUT:-3600}}" # 60 minutes default test timeout
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-3600}" # 60 minutes default build timeout
 VERBOSE="${VERBOSE:-0}"
 
 # Logging functions
@@ -30,6 +31,40 @@ log_error() {
 
 log_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+run_timeout() {
+    local seconds=$1
+    shift
+
+    if command -v timeout &> /dev/null; then
+        timeout "$seconds" "$@"
+        return $?
+    fi
+
+    if command -v gtimeout &> /dev/null; then
+        gtimeout "$seconds" "$@"
+        return $?
+    fi
+
+    "$@" &
+    local command_pid=$!
+
+    (
+        sleep "$seconds"
+        kill -TERM "$command_pid" 2>/dev/null || true
+        sleep 5
+        kill -KILL "$command_pid" 2>/dev/null || true
+    ) &
+    local watchdog_pid=$!
+
+    wait "$command_pid"
+    local status=$?
+
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+
+    return "$status"
 }
 
 # Cleanup function
@@ -79,7 +114,7 @@ check_prerequisites() {
     fi
 
     # Check Docker daemon
-    if ! docker ps &> /dev/null; then
+    if ! docker ps; then
         log_error "Docker daemon is not running"
         exit 1
     fi
@@ -100,14 +135,26 @@ build_images() {
 
     case "$TEST_MODE" in
         user)
-            docker build -f tests/Dockerfile.user -t systemg-user . || return 1
+            run_timeout "$BUILD_TIMEOUT" docker build -f tests/docker/user/Dockerfile -t systemg-user . || {
+                log_error "User-space Docker image build timed out or failed after ${BUILD_TIMEOUT} seconds"
+                return 1
+            }
             ;;
         kernel)
-            docker build -f tests/Dockerfile.kernel -t systemg-kernel . || return 1
+            run_timeout "$BUILD_TIMEOUT" docker build -f tests/docker/kernel/Dockerfile -t systemg-kernel . || {
+                log_error "Kernel-space Docker image build timed out or failed after ${BUILD_TIMEOUT} seconds"
+                return 1
+            }
             ;;
         all)
-            docker build -f tests/Dockerfile.user -t systemg-user . || return 1
-            docker build -f tests/Dockerfile.kernel -t systemg-kernel . || return 1
+            run_timeout "$BUILD_TIMEOUT" docker build -f tests/docker/user/Dockerfile -t systemg-user . || {
+                log_error "User-space Docker image build timed out or failed after ${BUILD_TIMEOUT} seconds"
+                return 1
+            }
+            run_timeout "$BUILD_TIMEOUT" docker build -f tests/docker/kernel/Dockerfile -t systemg-kernel . || {
+                log_error "Kernel-space Docker image build timed out or failed after ${BUILD_TIMEOUT} seconds"
+                return 1
+            }
             ;;
     esac
 
@@ -123,21 +170,21 @@ run_user_tests() {
 
     # Wait for services to be healthy
     log_info "Waiting for test infrastructure..."
-    timeout 30 bash -c 'until docker-compose ps | grep -q "healthy"; do sleep 1; done' || {
+    run_timeout 60 bash -c 'until [ "$(docker-compose -f "$1" ps | grep -c healthy)" -ge 2 ]; do sleep 1; done' _ "$COMPOSE_FILE" || {
         log_error "Test infrastructure failed to start"
         return 1
     }
 
     # Run user mode tests
-    if docker-compose -f "$COMPOSE_FILE" run \
+    if run_timeout "$TEST_TIMEOUT" docker-compose -f "$COMPOSE_FILE" run \
         --rm \
         -T \
         --name systemg-user-test-run \
         systemg-user; then
-        log_success "User mode tests passed"
+        log_success "User-space tests passed"
         return 0
     else
-        log_error "User mode tests failed"
+        log_error "User-space tests failed or timed out after ${TEST_TIMEOUT} seconds"
         return 1
     fi
 }
@@ -151,21 +198,21 @@ run_kernel_tests() {
 
     # Wait for services to be healthy
     log_info "Waiting for test infrastructure..."
-    timeout 30 bash -c 'until docker-compose ps | grep -q "healthy"; do sleep 1; done' || {
+    run_timeout 60 bash -c 'until [ "$(docker-compose -f "$1" ps | grep -c healthy)" -ge 2 ]; do sleep 1; done' _ "$COMPOSE_FILE" || {
         log_error "Test infrastructure failed to start"
         return 1
     }
 
     # Run kernel mode tests (requires privileged mode)
-    if docker-compose -f "$COMPOSE_FILE" run \
+    if run_timeout "$TEST_TIMEOUT" docker-compose -f "$COMPOSE_FILE" run \
         --rm \
         -T \
         --name systemg-kernel-test-run \
         systemg-kernel; then
-        log_success "Kernel mode tests passed"
+        log_success "Kernel-space tests passed"
         return 0
     else
-        log_error "Kernel mode tests failed"
+        log_error "Kernel-space tests failed or timed out after ${TEST_TIMEOUT} seconds"
         return 1
     fi
 }
@@ -175,14 +222,10 @@ run_with_timeout() {
     local test_func=$1
     local test_name=$2
 
-    if timeout "$TIMEOUT" bash -c "$test_func"; then
-        return 0
-    else
-        if [ $? -eq 124 ]; then
-            log_error "$test_name timed out after ${TIMEOUT} seconds"
-        fi
+    "$test_func" || {
+        log_error "$test_name failed"
         return 1
-    fi
+    }
 }
 
 # Generate test report
@@ -200,11 +243,11 @@ generate_report() {
         echo ""
 
         if [ "$TEST_MODE" = "all" ] || [ "$TEST_MODE" = "user" ]; then
-            echo "User Mode Tests: $([ $user_result -eq 0 ] && echo "PASSED" || echo "FAILED")"
+            echo "User-Space Tests: $([ $user_result -eq 0 ] && echo "PASSED" || echo "FAILED")"
         fi
 
         if [ "$TEST_MODE" = "all" ] || [ "$TEST_MODE" = "kernel" ]; then
-            echo "Kernel Mode Tests: $([ $kernel_result -eq 0 ] && echo "PASSED" || echo "FAILED")"
+            echo "Kernel-Space Tests: $([ $kernel_result -eq 0 ] && echo "PASSED" || echo "FAILED")"
         fi
 
         echo "=========================================="
@@ -263,7 +306,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --timeout|-t)
-            TIMEOUT="$2"
+            TEST_TIMEOUT="$2"
+            shift 2
+            ;;
+        --build-timeout)
+            BUILD_TIMEOUT="$2"
             shift 2
             ;;
         --compose-file|-f)
@@ -271,6 +318,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --help|-h)
+            trap - EXIT
             cat <<EOF
 Usage: $0 [OPTIONS] [MODE]
 
@@ -283,14 +331,17 @@ MODE:
 
 OPTIONS:
     -v, --verbose         Enable verbose output
-    -t, --timeout SEC     Set timeout in seconds (default: 600)
+    -t, --timeout SEC     Set test run timeout in seconds (default: 3600)
+    --build-timeout SEC   Set Docker image build timeout in seconds (default: 3600)
     -f, --compose-file    Specify docker-compose file
     -h, --help           Show this help message
 
 Environment Variables:
     CI                   Set to 'true' for CI mode
     COMPOSE_FILE         Docker compose file path
-    TIMEOUT              Test timeout in seconds
+    TEST_TIMEOUT         Test run timeout in seconds
+    BUILD_TIMEOUT        Docker image build timeout in seconds
+    TIMEOUT              Backward-compatible alias for TEST_TIMEOUT
     VERBOSE              Enable verbose output (0 or 1)
     REPORT_FILE          Test report output file
 

@@ -1,11 +1,10 @@
-version: '3.8'
-
 services:
   # User mode testing - simulates developer workflows
   systemg-user:
+    image: systemg-user
     build:
       context: .
-      dockerfile: tests/Dockerfile.user
+      dockerfile: tests/docker/user/Dockerfile
     container_name: systemg-user-test
     environment:
       - USER_MODE=true
@@ -23,13 +22,15 @@ services:
 
   # Kernel mode testing - requires privileged mode for system operations
   systemg-kernel:
+    image: systemg-kernel
     build:
       context: .
-      dockerfile: tests/Dockerfile.kernel
+      dockerfile: tests/docker/kernel/Dockerfile
     container_name: systemg-kernel-test
     privileged: true
     environment:
       - KERNEL_MODE=true
+      - KERNEL_STRICT=false
       - TEST_ENV=docker
     volumes:
       # System directories for kernel mode

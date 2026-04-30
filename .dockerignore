@@ -1,0 +1,15 @@
+.git
+.github
+.idea
+.vscode
+
+target
+**/target
+
+.DS_Store
+*.log
+test-report.txt
+test-output
+
+systemg-user.tar
+systemg-kernel.tar

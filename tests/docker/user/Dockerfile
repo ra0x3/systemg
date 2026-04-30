@@ -1,11 +1,13 @@
 # User mode UAT testing for systemg
-FROM rust:1.75 AS builder
+ARG RUST_IMAGE=rust:1.90.0-bullseye
+ARG RUNTIME_IMAGE=ubuntu:22.04
+FROM ${RUST_IMAGE} AS builder
 
 WORKDIR /app
 COPY . .
 RUN cargo build --release
 
-FROM ubuntu:22.04
+FROM ${RUNTIME_IMAGE}
 
 # Install runtime requirements for user-mode tests
 RUN apt-get update && apt-get install -y \
