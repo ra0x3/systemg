@@ -6,8 +6,8 @@
 use std::{
     collections::BTreeSet,
     env,
-    fs::{self, OpenOptions},
-    io::{IsTerminal, Read, Write},
+    fs::{self, File, OpenOptions},
+    io::{IsTerminal, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, mpsc, mpsc::RecvTimeoutError},
     thread,
@@ -394,24 +394,81 @@ fn format_boxed_log_title(title: &str, terminal_width: usize) -> String {
     )
 }
 
+const LOG_TAIL_CHUNK_SIZE: u64 = 8192;
+
 /// Returns the last `lines` newline-delimited slices from a raw byte buffer.
 fn tail_log_bytes(bytes: &[u8], lines: usize) -> Vec<u8> {
     if lines == 0 || bytes.is_empty() {
         return Vec::new();
     }
 
-    let newline_positions: Vec<usize> = bytes
-        .iter()
-        .enumerate()
-        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
-        .collect();
-
-    if newline_positions.len() < lines {
-        return bytes.to_vec();
+    let mut index = bytes.len();
+    if bytes.last() == Some(&b'\n') {
+        index = index.saturating_sub(1);
     }
 
-    let start = newline_positions[newline_positions.len() - lines] + 1;
-    bytes[start..].to_vec()
+    let mut newlines_seen = 0usize;
+    while index > 0 {
+        index -= 1;
+        if bytes[index] == b'\n' {
+            newlines_seen += 1;
+            if newlines_seen == lines {
+                return bytes[index + 1..].to_vec();
+            }
+        }
+    }
+
+    bytes.to_vec()
+}
+
+/// Reads the last `lines` log lines without scanning the whole file when the
+/// requested tail fits near the end.
+fn tail_log_file(path: &Path, lines: usize) -> Result<Vec<u8>, LogsManagerError> {
+    if lines == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut file = File::open(path)?;
+    let mut remaining = file.metadata()?.len();
+    let mut bytes = Vec::new();
+
+    while remaining > 0 {
+        let chunk_len = remaining.min(LOG_TAIL_CHUNK_SIZE);
+        remaining -= chunk_len;
+
+        file.seek(SeekFrom::Start(remaining))?;
+        let mut chunk = vec![0_u8; chunk_len as usize];
+        file.read_exact(&mut chunk)?;
+
+        chunk.extend_from_slice(&bytes);
+        bytes = chunk;
+
+        if tail_log_bytes(&bytes, lines).len() < bytes.len() {
+            break;
+        }
+    }
+
+    Ok(tail_log_bytes(&bytes, lines))
+}
+
+/// Writes the selected one-shot log tails to a writer.
+fn write_log_file_tail(
+    mut writer: impl Write,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    lines: usize,
+    kind: Option<&str>,
+) -> Result<(), LogsManagerError> {
+    match kind {
+        Some("stdout") => writer.write_all(&tail_log_file(stdout_path, lines)?)?,
+        Some("stderr") => writer.write_all(&tail_log_file(stderr_path, lines)?)?,
+        _ => {
+            writer.write_all(&tail_log_file(stdout_path, lines)?)?;
+            writer.write_all(&tail_log_file(stderr_path, lines)?)?;
+        }
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 /// Writes forwarded console line.
@@ -830,6 +887,16 @@ impl LogManager {
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
+        if matches!(mode, TailMode::OneShot) {
+            return write_log_file_tail(
+                std::io::stdout().lock(),
+                &stdout_path,
+                &stderr_path,
+                lines,
+                kind,
+            );
+        }
+
         let mut cmd = Command::new("tail");
         #[cfg(target_os = "linux")]
         {
@@ -870,6 +937,16 @@ impl LogManager {
         let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via supervisor tail for '{}'", service_name);
+
+        if matches!(mode, TailMode::OneShot) {
+            return write_log_file_tail(
+                stream.try_clone()?,
+                &stdout_path,
+                &stderr_path,
+                lines,
+                kind,
+            );
+        }
 
         let mut cmd = Command::new("tail");
         if let Some(pid_value) = pid
@@ -922,6 +999,16 @@ impl LogManager {
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
+        if matches!(mode, TailMode::OneShot) {
+            return write_log_file_tail(
+                std::io::stdout().lock(),
+                &stdout_path,
+                &stderr_path,
+                lines,
+                kind,
+            );
+        }
+
         let mut cmd = Command::new("tail");
         mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
         cmd.stdout(std::process::Stdio::inherit())
@@ -951,6 +1038,16 @@ impl LogManager {
         let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via supervisor tail for '{}'", service_name);
+
+        if matches!(mode, TailMode::OneShot) {
+            return write_log_file_tail(
+                stream.try_clone()?,
+                &stdout_path,
+                &stderr_path,
+                lines,
+                kind,
+            );
+        }
 
         let mut cmd = Command::new("tail");
         mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
@@ -1125,17 +1222,10 @@ impl LogManager {
             "-", "Supervisor", "-"
         );
 
-        let mut cmd = Command::new("tail");
-        cmd.arg("-n").arg(lines.to_string());
-        cmd.arg(&supervisor_log);
-        cmd.stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit());
-
-        let status = cmd.status()?;
-        if !status.success() {
-            return Err(LogsManagerError::TailCommandFailed(status.code()));
-        }
-
+        let tail = tail_log_file(&supervisor_log, lines)?;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&tail)?;
+        stdout.flush()?;
         Ok(())
     }
 }
@@ -1153,6 +1243,33 @@ mod tests {
     use tempfile::tempdir_in;
 
     use super::*;
+
+    #[test]
+    fn tail_log_bytes_returns_last_lines_with_trailing_newline() {
+        let bytes = b"line 1\nline 2\nline 3\nline 4\n";
+
+        assert_eq!(tail_log_bytes(bytes, 2), b"line 3\nline 4\n");
+    }
+
+    #[test]
+    fn tail_log_bytes_returns_last_lines_without_trailing_newline() {
+        let bytes = b"line 1\nline 2\nline 3\nline 4";
+
+        assert_eq!(tail_log_bytes(bytes, 2), b"line 3\nline 4");
+    }
+
+    #[test]
+    fn tail_log_bytes_returns_all_bytes_when_line_count_fits() {
+        let bytes = b"line 1\nline 2\n";
+
+        assert_eq!(tail_log_bytes(bytes, 2), bytes);
+        assert_eq!(tail_log_bytes(bytes, 5), bytes);
+    }
+
+    #[test]
+    fn tail_log_bytes_returns_empty_when_zero_lines_requested() {
+        assert_eq!(tail_log_bytes(b"line 1\nline 2\n", 0), b"");
+    }
 
     #[test]
     fn resolve_log_path_matches_hyphenated_files() {

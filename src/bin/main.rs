@@ -128,7 +128,7 @@ fn stderr_is_tty() -> bool {
 }
 
 fn format_progress_spinner_frame(frame: &str, label: &str) -> String {
-    format!("\r{frame} {label}…\x1B[K")
+    format!("\r{frame} {label}\x1B[K")
 }
 
 fn clear_progress_spinner_line() -> &'static str {
@@ -637,7 +637,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 };
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
-                let snapshot = fetch_status_snapshot(&effective_config)?;
+                let snapshot = with_progress_spinner("Fetching logs", || {
+                    fetch_status_snapshot(&effective_config)
+                })?;
 
                 match service.as_ref() {
                     Some(service_name) => {
@@ -690,7 +692,15 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     thread::sleep(sleep_interval);
                 }
             } else {
-                match stream_logs_via_supervisor(true) {
+                let stream_result = if service.is_none() {
+                    with_progress_spinner("Fetching logs", || {
+                        stream_logs_via_supervisor(true)
+                    })
+                } else {
+                    stream_logs_via_supervisor(true)
+                };
+
+                match stream_result {
                     Ok(()) => {}
                     Err(err) => match err.downcast_ref::<ControlError>() {
                         Some(ControlError::NotAvailable) => render_logs_once(false)?,
@@ -1889,11 +1899,11 @@ mod tests {
     fn progress_spinner_frame_uses_requested_label() {
         assert_eq!(
             format_progress_spinner_frame("⠋", "Computing"),
-            "\r⠋ Computing…\x1B[K"
+            "\r⠋ Computing\x1B[K"
         );
         assert_eq!(
             format_progress_spinner_frame("⠙", "Inspecting"),
-            "\r⠙ Inspecting…\x1B[K"
+            "\r⠙ Inspecting\x1B[K"
         );
     }
 

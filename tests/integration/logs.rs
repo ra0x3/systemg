@@ -154,6 +154,91 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+fn logs_lines_returns_last_lines_for_service() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/sleep 30"
+"#,
+    )
+    .expect("write config");
+
+    let config =
+        load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
+    let hash = config
+        .services
+        .get("demo")
+        .expect("demo service")
+        .compute_hash();
+
+    let mut child = StdCommand::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::Running,
+            Some(child.id()),
+            None,
+            None,
+        )
+        .expect("persist state");
+
+    let log_dir = home.join(".local/share/systemg/logs");
+    fs::create_dir_all(&log_dir).expect("make log dir");
+    fs::write(
+        log_dir.join("demo_stdout.log"),
+        "first log line\nsecond log line\nthird log line\nfourth log line\n",
+    )
+    .expect("write stdout log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    let output = cmd
+        .env("SYSTEMG_TAIL_MODE", "oneshot")
+        .arg("logs")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--service")
+        .arg("demo")
+        .arg("--kind")
+        .arg("stdout")
+        .arg("--lines")
+        .arg("2")
+        .output()
+        .expect("run sysg logs");
+
+    assert!(
+        output.status.success(),
+        "sysg logs should succeed, stderr was: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("first log line"));
+    assert!(!stdout.contains("second log line"));
+    assert!(stdout.contains("third log line"));
+    assert!(stdout.contains("fourth log line"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn logs_without_service_groups_running_before_offline() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
