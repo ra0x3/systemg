@@ -239,19 +239,63 @@ fn build_spawn_tree(
         .collect()
 }
 
+/// Parent-child lookup built from one refreshed process table.
+struct ProcessIndex<'a> {
+    system: &'a System,
+    children_by_parent: HashMap<u32, Vec<u32>>,
+}
+
+impl<'a> ProcessIndex<'a> {
+    /// Builds an index from the already-refreshed process table.
+    fn new(system: &'a System) -> Self {
+        let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, process) in system.processes() {
+            if let Some(parent) = process.parent() {
+                children_by_parent
+                    .entry(parent.as_u32())
+                    .or_default()
+                    .push(pid.as_u32());
+            }
+        }
+
+        Self {
+            system,
+            children_by_parent,
+        }
+    }
+
+    /// Returns known child pids for a parent.
+    fn child_pids(&self, parent_pid: u32) -> impl Iterator<Item = u32> + '_ {
+        self.children_by_parent
+            .get(&parent_pid)
+            .into_iter()
+            .flatten()
+            .copied()
+    }
+
+    /// Returns process metadata from the indexed table.
+    fn process(&self, pid: u32) -> Option<&'a sysinfo::Process> {
+        self.system.process(SysPid::from_u32(pid))
+    }
+}
+
 /// Augments spawn tree with system descendants.
 fn augment_spawn_tree_with_system_descendants(
     node: &mut SpawnedProcessNode,
-    system: Option<&System>,
+    process_index: Option<&ProcessIndex<'_>>,
     seen: &mut HashSet<u32>,
 ) {
     seen.insert(node.child.pid);
     for child in &mut node.children {
-        augment_spawn_tree_with_system_descendants(child, system, seen);
+        augment_spawn_tree_with_system_descendants(child, process_index, seen);
     }
 
-    let system_nodes =
-        build_spawn_tree_from_system(system, node.child.pid, node.child.depth + 1, seen);
+    let system_nodes = build_spawn_tree_from_system(
+        process_index,
+        node.child.pid,
+        node.child.depth + 1,
+        seen,
+    );
     append_unique_nodes(&mut node.children, system_nodes, seen);
 }
 
@@ -383,55 +427,54 @@ fn build_spawn_tree_from_pidfile(
 
 /// Builds spawn tree from system.
 fn build_spawn_tree_from_system(
-    system: Option<&System>,
+    process_index: Option<&ProcessIndex<'_>>,
     parent_pid: u32,
     depth: usize,
     seen: &mut HashSet<u32>,
 ) -> Vec<SpawnedProcessNode> {
     let mut nodes = Vec::new();
-    if let Some(system_ref) = system {
-        for (proc_pid, process) in system_ref.processes() {
-            if let Some(parent) = process.parent()
-                && parent.as_u32() == parent_pid
-            {
-                let child_pid = proc_pid.as_u32();
-                if seen.contains(&child_pid) {
-                    continue;
-                }
-
-                let (cpu_percent, rss_bytes) =
-                    sample_process_metrics(Some(system_ref), child_pid);
-                let command = StatusManager::get_process_cmdline(child_pid);
-                let mut display_name = command
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                if display_name.is_empty() {
-                    display_name = format!("pid-{child_pid}");
-                }
-                let started_at = process_started_at(system_ref, process);
-
-                let child = SpawnedChild {
-                    name: display_name,
-                    pid: child_pid,
-                    parent_pid,
-                    command,
-                    started_at,
-                    ttl: None,
-                    depth,
-                    cpu_percent,
-                    rss_bytes,
-                    last_exit: None,
-                    user: Some(StatusManager::get_process_user(child_pid)),
-                    kind: SpawnedChildKind::Peripheral,
-                };
-
-                let descendants =
-                    build_spawn_tree_from_system(system, child_pid, depth + 1, seen);
-
-                nodes.push(SpawnedProcessNode::new(child, descendants));
+    if let Some(index) = process_index {
+        for child_pid in index.child_pids(parent_pid) {
+            if seen.contains(&child_pid) {
+                continue;
             }
+
+            let (cpu_percent, rss_bytes) =
+                sample_process_metrics(Some(index.system), child_pid);
+            let command = StatusManager::get_process_cmdline(child_pid);
+            let mut display_name = command
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            if display_name.is_empty() {
+                display_name = format!("pid-{child_pid}");
+            }
+            let started_at = if let Some(process) = index.process(child_pid) {
+                process_started_at(index.system, process)
+            } else {
+                SystemTime::now()
+            };
+
+            let child = SpawnedChild {
+                name: display_name,
+                pid: child_pid,
+                parent_pid,
+                command,
+                started_at,
+                ttl: None,
+                depth,
+                cpu_percent,
+                rss_bytes,
+                last_exit: None,
+                user: Some(StatusManager::get_process_user(child_pid)),
+                kind: SpawnedChildKind::Peripheral,
+            };
+
+            let descendants =
+                build_spawn_tree_from_system(process_index, child_pid, depth + 1, seen);
+
+            nodes.push(SpawnedProcessNode::new(child, descendants));
         }
     }
 
@@ -443,6 +486,7 @@ fn build_spawn_tree_from_system(
                     continue;
                 }
 
+                let system = process_index.map(|index| index.system);
                 let (cpu_percent, rss_bytes) = sample_process_metrics(system, child_pid);
                 let command = StatusManager::get_process_cmdline(child_pid);
                 let mut display_name = command
@@ -454,10 +498,10 @@ fn build_spawn_tree_from_system(
                     display_name = format!("pid-{child_pid}");
                 }
 
-                let started_at = if let Some(system_ref) = system
-                    && let Some(process) = system_ref.process(SysPid::from_u32(child_pid))
+                let started_at = if let Some(index) = process_index
+                    && let Some(process) = index.process(child_pid)
                 {
-                    process_started_at(system_ref, process)
+                    process_started_at(index.system, process)
                 } else {
                     SystemTime::now()
                 };
@@ -477,8 +521,12 @@ fn build_spawn_tree_from_system(
                     kind: SpawnedChildKind::Peripheral,
                 };
 
-                let descendants =
-                    build_spawn_tree_from_system(system, child_pid, depth + 1, seen);
+                let descendants = build_spawn_tree_from_system(
+                    process_index,
+                    child_pid,
+                    depth + 1,
+                    seen,
+                );
 
                 nodes.push(SpawnedProcessNode::new(child, descendants));
             }
@@ -834,6 +882,7 @@ fn build_snapshot(
     } else {
         None
     };
+    let process_index = process_system.as_ref().map(ProcessIndex::new);
 
     for hash in unit_hashes {
         let actual_name = hash_to_name.get(&hash).cloned();
@@ -972,27 +1021,19 @@ fn build_snapshot(
             );
             append_unique_nodes(&mut nodes, pidfile_nodes, &mut seen);
 
-            let fresh_system = if process_system.is_some() {
-                let mut sys = System::new();
-                sys.refresh_processes(ProcessesToUpdate::All, true);
-                Some(sys)
-            } else {
-                None
-            };
-
             let system_nodes = build_spawn_tree_from_system(
-                fresh_system.as_ref(),
+                process_index.as_ref(),
                 runtime.pid,
                 1,
                 &mut seen,
             );
             append_unique_nodes(&mut nodes, system_nodes, &mut seen);
 
-            if let Some(refreshed_system) = fresh_system.as_ref() {
+            if let Some(index) = process_index.as_ref() {
                 for node in &mut nodes {
                     augment_spawn_tree_with_system_descendants(
                         node,
-                        Some(refreshed_system),
+                        Some(index),
                         &mut seen,
                     );
                 }
@@ -2007,6 +2048,7 @@ impl StatusManager {
 mod tests {
     use std::{
         env, fs,
+        process::Command as StdCommand,
         sync::{Arc, Mutex},
         time::SystemTime,
     };
@@ -2016,6 +2058,25 @@ mod tests {
 
     use super::*;
     use crate::{daemon::PersistedSpawnChild, spawn::SpawnedExit};
+
+    #[test]
+    fn process_index_maps_children_from_single_refresh() {
+        let mut child = StdCommand::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn child process");
+        let parent_pid = std::process::id();
+
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        let index = ProcessIndex::new(&system);
+        let found = index.child_pids(parent_pid).any(|pid| pid == child.id());
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(found, "process index should map parent pid to child pid");
+    }
 
     #[test]
     fn format_cron_status_success_includes_green_exit_code() {
