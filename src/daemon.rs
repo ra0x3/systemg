@@ -27,8 +27,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     config::{
-        BlueGreenDeploymentConfig, Config, EnvConfig, HealthCheckConfig, HookAction,
-        HookOutcome, HookStage, ServiceConfig, SkipConfig,
+        BlueGreenDeploymentConfig, Config, EffectiveLogsConfig, EnvConfig,
+        HealthCheckConfig, HookAction, HookOutcome, HookStage, LogSink, ServiceConfig,
+        SkipConfig,
     },
     constants::{
         DEFAULT_SHELL, DaemonLock, DeploymentStrategy, MAX_STATUS_LOG_LINES,
@@ -38,7 +39,7 @@ use crate::{
         STATE_FILE_NAME,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
-    logs::{resolve_log_path, spawn_log_writer},
+    logs::{resolve_log_path, spawn_log_writer_with_config},
     runtime,
     spawn::SpawnedExit,
 };
@@ -1896,6 +1897,7 @@ impl Daemon {
         processes: Arc<Mutex<HashMap<String, Child>>>,
         detach_children: bool,
         pipe_stderr: bool,
+        log_settings: EffectiveLogsConfig,
     ) -> Result<(u32, Option<libc::pid_t>), ProcessManagerError> {
         let command = &service_config.command;
         debug!("Launching service: '{service_name}' with command: `{command}`");
@@ -1906,7 +1908,19 @@ impl Daemon {
 
         debug!("Executing command: {cmd:?}");
 
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        match log_settings.sink {
+            LogSink::File => {
+                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+            }
+            LogSink::None => {
+                cmd.stdout(Stdio::null());
+                if pipe_stderr {
+                    cmd.stderr(Stdio::piped());
+                } else {
+                    cmd.stderr(Stdio::null());
+                }
+            }
+        }
 
         let mut merged_env =
             collect_service_env(&service_config.env, &working_dir, service_name);
@@ -1977,7 +1991,12 @@ impl Daemon {
                 let stderr = child.stderr.take();
 
                 if let Some(out) = stdout {
-                    spawn_log_writer(service_name, out, "stdout");
+                    spawn_log_writer_with_config(
+                        service_name,
+                        out,
+                        "stdout",
+                        log_settings,
+                    );
                 }
                 if let Some(err) = stderr {
                     if pipe_stderr {
@@ -2000,7 +2019,12 @@ impl Daemon {
                             }
                         });
                     } else {
-                        spawn_log_writer(service_name, err, "stderr");
+                        spawn_log_writer_with_config(
+                            service_name,
+                            err,
+                            "stderr",
+                            log_settings,
+                        );
                     }
                 }
 
@@ -3353,6 +3377,7 @@ impl Daemon {
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
         let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
+        let log_settings = service.effective_logs(&self.config.logs);
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -3364,6 +3389,7 @@ impl Daemon {
                 processes.clone(),
                 detach_children,
                 pipe_stderr,
+                log_settings,
             ) {
                 Ok((pid, pgid)) => {
                     let mut pid_guard = pid_file.lock()?;
@@ -3485,6 +3511,7 @@ impl Daemon {
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
         let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
+        let log_settings = service.effective_logs(&self.config.logs);
 
         let cancellation_token = self
             .context()
@@ -3501,6 +3528,7 @@ impl Daemon {
                 processes.clone(),
                 detach_children,
                 pipe_stderr,
+                log_settings,
             );
 
             match launch_result {
@@ -4195,6 +4223,7 @@ impl Daemon {
                 Arc::clone(&ctx.processes),
                 ctx.detach_children,
                 ctx.pipe_stderr.load(Ordering::SeqCst),
+                service_clone.effective_logs(&ctx.config.logs),
             );
 
             match restart_result {
@@ -4474,6 +4503,7 @@ mod tests {
             cron: None,
             skip: None,
             spawn: None,
+            logs: None,
         }
     }
 
@@ -4490,6 +4520,7 @@ mod tests {
             project_dir: Some(dir.to_string_lossy().to_string()),
             env: None,
             metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
         };
         config.service_start_order().unwrap();
 

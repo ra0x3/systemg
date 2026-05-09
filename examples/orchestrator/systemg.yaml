@@ -1,4 +1,6 @@
 version: "1"
+logs:
+  sink: none
 
 services:
   orchestrator:

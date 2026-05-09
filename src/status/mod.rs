@@ -2407,6 +2407,7 @@ services:
             project_dir: None,
             env: None,
             metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
         };
 
         let pid_file = PidFile::default();

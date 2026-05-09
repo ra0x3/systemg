@@ -13,6 +13,10 @@ version: "1"
 env:
   vars:
     APP_ENV: "production"
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 5
 services:
   postgres:
     command: "postgres -D /var/lib/postgresql/data"
@@ -83,6 +87,25 @@ env:
   file: "/etc/myapp/common.env"
 ```
 
+### `logs`
+
+Optional defaults for service stdout/stderr handling.
+
+```yaml
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 5
+```
+
+Fields:
+
+- `sink`: `file` captures service output to systemg-managed log files. `none` discards service output without creating log-writer threads or files.
+- `max_bytes`: active log-file size before rotation for the `file` sink.
+- `max_files`: number of rotated files to retain per active log.
+
+Use `sink: none` for noisy production services when service output is already collected by another logging pipeline.
+
 ### `services`
 
 **Required**. Defines the services to manage.
@@ -144,6 +167,24 @@ services:
     restart_policy: "always"
     backoff: "5s"
     max_restarts: 10
+```
+
+### Service `logs`
+
+Override global logging settings for one service.
+
+```yaml
+services:
+  api:
+    command: "python app.py"
+    logs:
+      sink: file
+      max_bytes: 5242880
+      max_files: 3
+  noisy_worker:
+    command: "worker --verbose"
+    logs:
+      sink: none
 ```
 
 **Policies:**
@@ -246,6 +287,7 @@ Primary keys available on each service definition.
 | `health_check` | object | Service readiness probe |
 | `cron` | string | Cron schedule expression |
 | `deployment` | object | Update strategy configuration |
+| `logs` | object | Service stdout/stderr capture and rotation settings |
 
 ### Environment object
 

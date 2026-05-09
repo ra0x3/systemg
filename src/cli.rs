@@ -269,7 +269,7 @@ pub enum Commands {
         stream: Option<String>,
     },
 
-    /// Show logs for a specific service.
+    /// Tail stored service output logs.
     Logs {
         /// Path to the configuration file (defaults to `systemg.yaml`).
         #[arg(short, long, default_value = "systemg.yaml")]
@@ -287,7 +287,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "50")]
         lines: usize,
 
-        /// Kind of logs to show: stdout, stderr, or supervisor (default: stdout).
+        /// Kind of logs to show: stdout, stderr, or supervisor (default: stderr).
         #[arg(short = 'k', long, default_value_t = LogKind::default())]
         kind: LogKind,
 

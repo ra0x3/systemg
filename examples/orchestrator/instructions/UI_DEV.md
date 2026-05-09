@@ -141,7 +141,7 @@ Visual specs:
 │     Select SystemG Directory        │
 │                                     │
 │    ┌─────────────────────────┐      │
-│    │   📁 Choose Directory    │      │
+│    │    Choose Directory    │      │
 │    └─────────────────────────┘      │
 │                                     │
 │    --- or for Firefox/Safari ---    │
@@ -216,10 +216,10 @@ Features:
 Visual:
 ```
 ┌──────────────────────────────────────────────┐
-│ 🔍 Search...              ▼ Status  ▼ Sort   │
+│ Search Search...              v Status  v Sort   │
 ├──────────────────────────────────────────────┤
 │ ▶ nginx           [RUNNING] CPU: ▁▃▅▂ Mem: 45MB│
-│ ▼ postgres        [RUNNING] CPU: ▅▆▇▄ Mem: 320MB│
+│ v postgres        [RUNNING] CPU: ▅▆▇▄ Mem: 320MB│
 │   └ worker-1      [RUNNING] CPU: ▂▁▂▁ Mem: 89MB│
 │   └ worker-2      [STOPPED] CPU: ---- Mem: 0MB │
 │ ▶ redis           [ERROR]   CPU: ---- Mem: 0MB │
@@ -285,7 +285,7 @@ Requirements:
 Visual:
 ```
 ┌─────────────────────────────────────────────┐
-│ Logs │ 🔍 Search │ Levels: ■INFO ■WARN ■ERR │
+│ Logs │ Search Search │ Levels: ■INFO ■WARN ■ERR │
 ├─────────────────────────────────────────────┤
 │[14:23:01] INFO  Server started on port 3000  │
 │[14:23:02] DEBUG Connected to database        │
@@ -295,7 +295,7 @@ Visual:
 │     at connect() line 45                     │
 │[14:23:10] INFO  Retrying connection...       │
 ├─────────────────────────────────────────────┤
-│ ⚠ Log truncated (showing last 1MB)   [▼ Auto]│
+│ Warning Log truncated (showing last 1MB)   [v Auto]│
 └─────────────────────────────────────────────┘
 ```
 
@@ -345,7 +345,7 @@ Layout:
 │ Name      Schedule    Next Run    Last Status│
 │ backup    0 * * * *   in 5 min    ✓ Success │
 │ cleanup   0 0 * * *   in 1 hr     ✓ Success │
-│ report    0 9 * * 1   Monday      ⚠ Warning │
+│ report    0 9 * * 1   Monday      Warning Warning │
 └─────────────────────────────────────────────┘
 ```
 

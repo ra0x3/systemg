@@ -31,11 +31,91 @@ pub struct Config {
     /// Metrics collection configuration.
     #[serde(default)]
     pub metrics: MetricsConfig,
+    /// Service output logging defaults.
+    #[serde(default)]
+    pub logs: LogsConfig,
 }
 const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
 const METRICS_DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
 const METRICS_DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 const METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES: u64 = 256 * 1024;
+/// Default maximum size, in bytes, for an active service log file before rotation.
+pub const LOGS_DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// Default number of rotated service log files retained per active log.
+pub const LOGS_DEFAULT_MAX_FILES: usize = 5;
+
+/// Output sink for supervised service stdout/stderr.
+#[derive(Debug, Deserialize, Clone, Copy, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LogSink {
+    /// Persist service output to systemg-managed log files.
+    #[default]
+    File,
+    /// Discard service output without creating log writer threads or files.
+    None,
+}
+
+/// Logging configuration shared by global and service-level config blocks.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+#[serde(default)]
+pub struct LogsConfig {
+    /// Where service stdout/stderr should be sent.
+    pub sink: Option<LogSink>,
+    /// Maximum active log-file size before rotation.
+    pub max_bytes: Option<u64>,
+    /// Number of rotated files to retain per active log.
+    pub max_files: Option<usize>,
+}
+
+/// Fully resolved logging policy for a service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveLogsConfig {
+    /// Where service stdout/stderr should be sent.
+    pub sink: LogSink,
+    /// Maximum active log-file size before rotation.
+    pub max_bytes: u64,
+    /// Number of rotated files to retain per active log.
+    pub max_files: usize,
+}
+
+impl Default for EffectiveLogsConfig {
+    fn default() -> Self {
+        Self {
+            sink: LogSink::File,
+            max_bytes: LOGS_DEFAULT_MAX_BYTES,
+            max_files: LOGS_DEFAULT_MAX_FILES,
+        }
+    }
+}
+
+impl LogsConfig {
+    /// Resolves this logging block over the built-in defaults.
+    pub fn to_effective(&self) -> EffectiveLogsConfig {
+        Self::merge(None, Some(self))
+    }
+
+    /// Resolves service logging over global logging and built-in defaults.
+    pub fn merge(
+        global: Option<&LogsConfig>,
+        service: Option<&LogsConfig>,
+    ) -> EffectiveLogsConfig {
+        let defaults = EffectiveLogsConfig::default();
+        EffectiveLogsConfig {
+            sink: service
+                .and_then(|logs| logs.sink)
+                .or_else(|| global.and_then(|logs| logs.sink))
+                .unwrap_or(defaults.sink),
+            max_bytes: service
+                .and_then(|logs| logs.max_bytes)
+                .or_else(|| global.and_then(|logs| logs.max_bytes))
+                .unwrap_or(defaults.max_bytes),
+            max_files: service
+                .and_then(|logs| logs.max_files)
+                .or_else(|| global.and_then(|logs| logs.max_files))
+                .unwrap_or(defaults.max_files),
+        }
+    }
+}
 
 /// Top-level metrics configuration block.
 #[derive(Debug, Deserialize, Clone)]
@@ -202,6 +282,9 @@ pub struct ServiceConfig {
     pub skip: Option<SkipConfig>,
     /// Dynamic process spawning configuration.
     pub spawn: Option<SpawnConfig>,
+    /// Service output logging overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<LogsConfig>,
 }
 
 /// Resource limit overrides configured per service.
@@ -388,6 +471,11 @@ pub struct IsolationConfig {
 }
 
 impl ServiceConfig {
+    /// Resolves effective logging settings for this service.
+    pub fn effective_logs(&self, global: &LogsConfig) -> EffectiveLogsConfig {
+        LogsConfig::merge(Some(global), self.logs.as_ref())
+    }
+
     /// Computes a stable hash of this service configuration, excluding the service name.
     /// This hash is used to identify the service state across renames.
     ///
@@ -962,6 +1050,7 @@ services:
             cron: None,
             skip: None,
             spawn: None,
+            logs: None,
         }
     }
 
@@ -978,6 +1067,7 @@ services:
             project_dir: None,
             env: None,
             metrics: MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
         };
 
         let order = config.service_start_order().unwrap();
@@ -995,6 +1085,7 @@ services:
             project_dir: None,
             env: None,
             metrics: MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
         };
 
         match config.service_start_order() {
@@ -1021,6 +1112,7 @@ services:
             project_dir: None,
             env: None,
             metrics: MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
         };
 
         match config.service_start_order() {
@@ -1030,6 +1122,68 @@ services:
             }
             other => panic!("expected dependency cycle error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn logs_config_defaults_to_file_with_rotation() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+version: "1"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .unwrap();
+
+        let service = &config.services["api"];
+        let logs = service.effective_logs(&config.logs);
+        assert_eq!(logs.sink, LogSink::File);
+        assert_eq!(logs.max_bytes, LOGS_DEFAULT_MAX_BYTES);
+        assert_eq!(logs.max_files, LOGS_DEFAULT_MAX_FILES);
+    }
+
+    #[test]
+    fn service_logs_override_global_logs_config() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+version: "1"
+logs:
+  sink: file
+  max_bytes: 2048
+  max_files: 4
+services:
+  api:
+    command: "echo ok"
+    logs:
+      sink: none
+      max_files: 0
+"#,
+        )
+        .unwrap();
+
+        let service = &config.services["api"];
+        let logs = service.effective_logs(&config.logs);
+        assert_eq!(logs.sink, LogSink::None);
+        assert_eq!(logs.max_bytes, 2048);
+        assert_eq!(logs.max_files, 0);
+    }
+
+    #[test]
+    fn logs_config_rejects_unknown_sink() {
+        let err = serde_yaml::from_str::<Config>(
+            r#"
+version: "1"
+logs:
+  sink: journald
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("journald"));
     }
 
     #[test]
@@ -1426,6 +1580,7 @@ services:
             }),
             skip: None,
             spawn: None,
+            logs: None,
         };
 
         let config2 = ServiceConfig {
@@ -1449,6 +1604,7 @@ services:
             }),
             skip: None,
             spawn: None,
+            logs: None,
         };
 
         let hash1 = config1.compute_hash();
@@ -1481,6 +1637,7 @@ services:
             cron: None,
             skip: None,
             spawn: None,
+            logs: None,
         };
 
         let modified_command = ServiceConfig {
@@ -1495,16 +1652,28 @@ services:
             }),
             ..base_config.clone()
         };
+        let modified_logs = ServiceConfig {
+            logs: Some(LogsConfig {
+                sink: Some(LogSink::None),
+                ..LogsConfig::default()
+            }),
+            ..base_config.clone()
+        };
 
         let base_hash = base_config.compute_hash();
         let command_hash = modified_command.compute_hash();
         let cron_hash = modified_cron.compute_hash();
+        let logs_hash = modified_logs.compute_hash();
 
         assert_ne!(
             base_hash, command_hash,
             "Changing command should change hash"
         );
         assert_ne!(base_hash, cron_hash, "Adding cron should change hash");
+        assert_ne!(
+            base_hash, logs_hash,
+            "Changing service logs should change hash"
+        );
         assert_ne!(
             command_hash, cron_hash,
             "Different changes should produce different hashes"
@@ -1534,6 +1703,7 @@ services:
             }),
             skip: None,
             spawn: None,
+            logs: None,
         };
         let hash = config.compute_hash();
         assert_eq!(hash.len(), 16);

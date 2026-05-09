@@ -8,6 +8,10 @@ The `hello-world.sysg.yaml` configuration file defines the service:
 
 ```yaml
 version: "1"
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 3
 services:
   sh__hello_world:
     command: "sh hello-world.sh"
@@ -28,6 +32,7 @@ services:
 - **Max Retries**: 5 attempts
 - **Backoff**: 5 seconds between restart attempts
 - **Environment**: Loads variables from `.env` file and defines `FOO=foo`
+- **Logs**: Captures stdout/stderr to systemg-managed files with local rotation
 
 ## Usage
 
@@ -62,6 +67,10 @@ sysg status
 ```bash
 sysg logs --service sh__hello_world
 ```
+
+This example keeps the default `logs.sink: file` behavior explicit because it is
+useful for learning `sysg logs`. For noisy production services, set
+`logs.sink: none` and use your normal logging pipeline.
 
 ### Expected log output:
 ```

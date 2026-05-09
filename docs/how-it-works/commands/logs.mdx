@@ -4,7 +4,7 @@ title: logs
 
 # logs
 
-View output from running services.
+View stored output from managed services.
 
 ```sh
 $ sysg logs
@@ -86,6 +86,12 @@ Logs are stored in `~/.local/share/systemg/logs/`:
 - `{service}_stderr.log` - Standard error (primary log stream)
 
 > **Note:** systemg treats stderr as the primary log stream. Service logs written to stderr are given priority in the supervisor's log output.
+
+## Performance model
+
+For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes its own copy to log files. On Linux and macOS, `sysg logs` then tails those files with `tail -F` in follow mode. The command itself is lightweight; the continuous cost comes from capture threads and filesystem writes while services are running.
+
+For high-output production workloads, configure `logs.sink: none` globally or per service to discard service output and avoid systemg log-writer threads, pipe backpressure from log capture, and file growth.
 
 ## See also
 

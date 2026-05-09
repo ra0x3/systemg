@@ -137,11 +137,11 @@ All handled by `qa-dev`:
 ## Common Mistakes to Avoid
 
 ### WRONG Assignments (caused previous failure):
-- ❌ core-infra-dev: "Create Layout Components"
-- ❌ core-infra-dev: "Build Dashboard Page"
-- ❌ core-infra-dev: "Build Log Viewer Component"
-- ❌ features-dev: "Build Resource Monitor Component"
-- ❌ qa-dev: "Create test suite" (before components exist)
+- [x] core-infra-dev: "Create Layout Components"
+- [x] core-infra-dev: "Build Dashboard Page"
+- [x] core-infra-dev: "Build Log Viewer Component"
+- [x] features-dev: "Build Resource Monitor Component"
+- [x] qa-dev: "Create test suite" (before components exist)
 
 ### CORRECT Assignments:
 - ✓ ui-dev: "Create Layout Components"

@@ -72,6 +72,22 @@ System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/
 
 > **Tip:** `--stderr` redirects stderr from supervised processes to stdout with a `[service_name:stderr]` prefix, which is useful for debugging and CI pipelines.
 
+By default, systemg captures service stdout/stderr through pipes and persists a local copy under its log directory. For high-output services, configure logging explicitly:
+
+```yaml
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 5
+services:
+  noisy_worker:
+    command: "worker --verbose"
+    logs:
+      sink: none
+```
+
+`sink: none` discards service output without creating systemg log-writer threads or files, which is useful when another production logging pipeline already collects process output.
+
 ---
 
 ## Why systemg

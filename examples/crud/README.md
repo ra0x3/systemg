@@ -97,6 +97,10 @@ The `crud.sysg.yaml` file configures:
 
 ```yaml
 version: "1"
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 5
 
 services:
   fastapi_server:
@@ -106,6 +110,10 @@ services:
     retries: "10"                          # Max restart attempts
     backoff: "5s"                          # Delay between restarts
 ```
+
+This example keeps file logging enabled so `sysg logs --service fastapi_server`
+works out of the box. In production, set `logs.sink: none` when uvicorn output is
+already collected by another logging agent.
 
 ## Project Structure
 
@@ -161,8 +169,8 @@ curl http://localhost:8888/chaos
 ## Why This Example?
 
 This example demonstrates:
-- ✅ Modern Python web development with FastAPI
-- ✅ Simple service management with `sysg start` and `sysg stop`
-- ✅ Automatic recovery from failures
-- ✅ Zero-downtime deployments with rolling strategy
-- ✅ Minimal configuration for maximum clarity
+- [ok] Modern Python web development with FastAPI
+- [ok] Simple service management with `sysg start` and `sysg stop`
+- [ok] Automatic recovery from failures
+- [ok] Zero-downtime deployments with rolling strategy
+- [ok] Minimal configuration for maximum clarity

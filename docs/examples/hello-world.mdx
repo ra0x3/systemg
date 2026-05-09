@@ -10,6 +10,10 @@ Minimal systemg service.
 
 ```yaml
 version: "1"
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 3
 services:
   counter:
     command: "sh counter.sh"
@@ -37,6 +41,10 @@ $ sysg stop
 
 You'll see:
 ```
+
+The example keeps `logs.sink: file` explicit so `sysg logs` works immediately.
+For high-volume services, use `logs.sink: none` and rely on your normal logging
+pipeline.
 Count: 1
 Count: 2
 Count: 3
@@ -48,6 +56,10 @@ Add a restart policy to handle crashes:
 
 ```yaml
 version: "1"
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 3
 services:
   counter:
     command: "sh counter.sh"

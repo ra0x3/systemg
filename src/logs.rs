@@ -25,7 +25,10 @@ use std::{
 use terminal_size::Width;
 use tracing::debug;
 
-use crate::{cron::CronStateFile, daemon::PidFile, error::LogsManagerError, runtime};
+use crate::{
+    config::EffectiveLogsConfig, cron::CronStateFile, daemon::PidFile,
+    error::LogsManagerError, runtime,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// High-level bucket for all-services log rendering.
@@ -270,6 +273,80 @@ fn truncate_log_file(path: &Path) -> Result<(), LogsManagerError> {
         .write(true)
         .truncate(true)
         .open(path)?;
+
+    Ok(())
+}
+
+/// Removes numbered rotated files that belong to an active log file.
+fn remove_rotated_log_files(path: &Path) -> Result<(), LogsManagerError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let Some(base_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let prefix = format!("{base_name}.");
+
+    if !parent.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(parent)? {
+        let entry_path = entry?.path();
+        if !entry_path.is_file() {
+            continue;
+        }
+        let Some(file_name) = entry_path.file_name().and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        if file_name
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| suffix.parse::<usize>().is_ok())
+        {
+            fs::remove_file(entry_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns the numbered rotation path for an active log file.
+fn rotated_log_path(path: &Path, index: usize) -> PathBuf {
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(format!(".{index}"));
+    PathBuf::from(rotated)
+}
+
+/// Rotates an active log file and keeps at most `max_files` numbered backups.
+fn rotate_log_file(path: &Path, max_files: usize) -> std::io::Result<()> {
+    if max_files == 0 {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        return Ok(());
+    }
+
+    let oldest = rotated_log_path(path, max_files);
+    match fs::remove_file(&oldest) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+
+    for index in (1..max_files).rev() {
+        let from = rotated_log_path(path, index);
+        let to = rotated_log_path(path, index + 1);
+        if from.exists() {
+            fs::rename(from, to)?;
+        }
+    }
+
+    if path.exists() {
+        fs::rename(path, rotated_log_path(path, 1))?;
+    }
 
     Ok(())
 }
@@ -537,11 +614,13 @@ fn stream_service_log(
     service_label: &str,
     kind: &str,
     mut reader: impl Read,
+    settings: EffectiveLogsConfig,
 ) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut active_len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut buffer = [0_u8; 8192];
     let mut pending = Vec::new();
     let echo_to_terminal = std::io::stderr().is_terminal();
@@ -553,7 +632,18 @@ fn stream_service_log(
         }
 
         let chunk = &buffer[..bytes_read];
+        if settings.max_bytes > 0
+            && active_len > 0
+            && active_len.saturating_add(chunk.len() as u64) > settings.max_bytes
+        {
+            file.flush()?;
+            drop(file);
+            rotate_log_file(path, settings.max_files)?;
+            file = OpenOptions::new().create(true).append(true).open(path)?;
+            active_len = 0;
+        }
         file.write_all(chunk)?;
+        active_len = active_len.saturating_add(chunk.len() as u64);
         append_live_log_chunk(service_label, kind, chunk);
         pending.extend_from_slice(chunk);
         flush_forwarded_lines(&mut pending, service_label, echo_to_terminal);
@@ -624,11 +714,23 @@ fn stream_dynamic_child_log(
 
 /// Creates the log directory if it doesn't exist and spawns a thread to write logs to file.
 pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
+    spawn_log_writer_with_config(service, reader, kind, EffectiveLogsConfig::default());
+}
+
+/// Spawns a thread to write logs using an explicit logging policy.
+pub fn spawn_log_writer_with_config(
+    service: &str,
+    reader: impl Read + Send + 'static,
+    kind: &str,
+    settings: EffectiveLogsConfig,
+) {
     let path = get_log_path(service, kind);
     let service_label = service.to_string();
     let kind_label = kind.to_string();
     thread::spawn(move || {
-        if let Err(err) = stream_service_log(&path, &service_label, &kind_label, reader) {
+        if let Err(err) =
+            stream_service_log(&path, &service_label, &kind_label, reader, settings)
+        {
             eprintln!("Warning: Unable to write log file at {:?}: {}", path, err);
         }
     });
@@ -834,6 +936,8 @@ impl LogManager {
 
         truncate_log_file(&stdout_path)?;
         truncate_log_file(&stderr_path)?;
+        remove_rotated_log_files(&stdout_path)?;
+        remove_rotated_log_files(&stderr_path)?;
 
         Ok(())
     }
@@ -858,6 +962,13 @@ impl LogManager {
                 || file_name.ends_with("_stderr.log")
             {
                 truncate_log_file(&path)?;
+                remove_rotated_log_files(&path)?;
+            } else if file_name.strip_suffix(".log").is_none()
+                && (file_name.contains("_stdout.log.")
+                    || file_name.contains("_stderr.log.")
+                    || file_name.starts_with("supervisor.log."))
+            {
+                fs::remove_file(&path)?;
             }
         }
 
@@ -1102,7 +1213,7 @@ impl LogManager {
         println!(
             "\n\
             ╭{}╮\n\
-            │ ⚠️  Showing latest logs per service (stdout & stderr)             │\n\
+            │ Warning  Showing latest logs per service (stdout & stderr)             │\n\
             │                                                                   │\n\
             │ For complete logs, run: sysg logs <service>                      │\n\
             ╰{}╯\n",
@@ -1419,6 +1530,57 @@ mod tests {
         let log_path = get_log_path("svc", "stderr");
         let contents = fs::read(&log_path).expect("service log should be written");
         assert_eq!(contents, vec![0xff, b'a', b'\n']);
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn spawn_log_writer_rotates_when_active_file_exceeds_limit() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        let settings = EffectiveLogsConfig {
+            sink: crate::config::LogSink::File,
+            max_bytes: 6,
+            max_files: 1,
+        };
+        let log_path = get_log_path("svc", "stdout");
+        fs::create_dir_all(log_path.parent().expect("log parent")).unwrap();
+        fs::write(&log_path, "first\n").unwrap();
+        super::spawn_log_writer_with_config(
+            "svc",
+            Cursor::new(b"second\n".to_vec()),
+            "stdout",
+            settings,
+        );
+
+        thread::sleep(Duration::from_millis(100));
+
+        let active = fs::read_to_string(&log_path).expect("active log exists");
+        let rotated = fs::read_to_string(rotated_log_path(&log_path, 1))
+            .expect("rotated log exists");
+        assert_eq!(rotated, "first\n");
+        assert_eq!(active, "second\n");
 
         unsafe {
             if let Some(home) = original_home {

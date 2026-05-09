@@ -49,6 +49,8 @@ docs/*.md                       # Example specs
 **systemg.yaml:**
 ```yaml
 version: "1"
+logs:
+  sink: none
 services:
   redis:
     command: "redis-server"
@@ -67,6 +69,11 @@ services:
       mode: dynamic
       limit: 10
 ```
+
+The orchestrator example disables systemg-managed service output capture because
+agent workloads can be noisy. Use your regular logging pipeline for production
+agent output, and reserve `sysg logs` for services that opt into `logs.sink:
+file`.
 
 `PORKI_LLM_MAX_CONCURRENCY` raises the number of global LLM leases available
 across agents, and `PORKI_LLM_CONCURRENCY_WAIT_SECONDS` controls how long agents
@@ -102,7 +109,7 @@ $ redis-server
 $ sysg start
 
 # Monitor
-$ sysg logs --service orchestrator
+$ sysg status
 $ redis-cli KEYS "*"
 
 # Control
@@ -111,8 +118,8 @@ $ echo "PAUSE" >> ./instructions/heartbeat/research.md
 
 ## Validation
 
-Use `sysg status`, `sysg logs --service orchestrator`, and Redis keys to validate
-runtime behavior. Package-level runtime tests execute in the `porki` repository.
+Use `sysg status` and Redis keys to validate runtime behavior. Package-level
+runtime tests execute in the `porki` repository.
 
 ## Links
 

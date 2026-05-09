@@ -4,7 +4,7 @@ title: Logs
 
 # Logs
 
-systemg's internal operational logs, separate from service output.
+systemg writes internal operational logs and can optionally capture service stdout/stderr.
 
 ## What's logged
 
@@ -17,6 +17,45 @@ systemg's internal operational logs, separate from service output.
 
 `~/.local/share/systemg/logs/supervisor.log` (user mode)
 `/var/log/systemg/supervisor.log` (system mode)
+
+Service output uses the same directory:
+
+- `{service}_stdout.log`
+- `{service}_stderr.log`
+
+By default, systemg pipes each managed service's stdout and stderr into background log-writer threads and persists a copy to those files. `sysg logs` reads those stored files; it does not attach to the original process streams.
+
+## Service output configuration
+
+Use the top-level `logs` block to set defaults for all services:
+
+```yaml
+version: "1"
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 5
+services:
+  api:
+    command: "python app.py"
+```
+
+Use a service-level `logs` block to override the global defaults:
+
+```yaml
+services:
+  noisy_worker:
+    command: "worker --verbose"
+    logs:
+      sink: none
+```
+
+Supported sinks:
+
+- `file` - Capture stdout/stderr and write systemg-managed log files.
+- `none` - Discard stdout/stderr without creating log-writer threads or files.
+
+`max_bytes` controls active file rotation for the `file` sink. `max_files` controls how many numbered rotated files are retained. Set `sink: none` for high-output services when another logging pipeline is already responsible for collection.
 
 ## View logs
 
@@ -73,7 +112,7 @@ Supervisor shutting down
 Reloading configuration from "/path/to/config"
 ```
 
-## Log rotation
+## Supervisor log rotation
 
 ### Using logrotate
 
@@ -106,7 +145,8 @@ $ mv ~/.local/share/systemg/logs/supervisor.log ~/.local/share/systemg/logs/supe
 - Check services are running
 
 **Large log files**
-- Implement rotation
+- Configure service log rotation with `logs.max_bytes` and `logs.max_files`
+- Use logrotate for `supervisor.log`
 - Reduce log level
 
 ## See also

@@ -455,8 +455,8 @@ Create comprehensive test report in `reports/qa-report.md`:
 |---------|--------|--------|
 | Chrome 120+ | ✓ Full support | None |
 | Edge 120+ | ✓ Full support | None |
-| Firefox 121+ | ⚠ Degraded mode | Manual upload only |
-| Safari 17+ | ⚠ Degraded mode | Upload intermittent |
+| Firefox 121+ | Warning Degraded mode | Manual upload only |
+| Safari 17+ | Warning Degraded mode | Upload intermittent |
 
 ## Security Validation
 - [x] Environment variables sanitized

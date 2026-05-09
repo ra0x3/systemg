@@ -950,6 +950,7 @@ mod tests {
             cron: Some(cron_config.clone()),
             skip: None,
             spawn: None,
+            logs: None,
         };
         service_config.compute_hash()
     }
@@ -1105,6 +1106,7 @@ mod tests {
             }),
             skip: None,
             spawn: None,
+            logs: None,
         }
     }
 
@@ -1136,6 +1138,7 @@ mod tests {
             project_dir: None,
             env: None,
             metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
         };
 
         manager.sync_from_config(&config_v1).unwrap();
@@ -1149,6 +1152,7 @@ mod tests {
             project_dir: None,
             env: None,
             metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
         };
 
         let job_two_hash = service_with_cron("*/2 * * * * *").compute_hash();

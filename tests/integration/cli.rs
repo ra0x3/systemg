@@ -17,6 +17,17 @@ use common::{is_process_alive, wait_for_path};
 use systemg::daemon::PidFile;
 use tempfile::tempdir;
 
+#[test]
+fn logs_help_reports_stderr_default() {
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("logs")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("default: stderr"))
+        .stdout(predicates::str::contains("Tail stored service output logs"));
+}
+
 #[cfg(unix)]
 #[test]
 fn stale_socket_doesnt_block_commands() {

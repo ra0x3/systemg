@@ -35,7 +35,7 @@ The `--stderr` flag is particularly useful for:
 - **CI/CD Pipelines**: Capture all output in a single stream
 - **Real-time Monitoring**: Watch for errors as they happen
 
-Note: This flag only affects foreground mode. In daemonized mode, stderr is still written to log files in `~/.local/share/systemg/logs/`.
+Note: This flag only affects foreground mode. In daemonized mode, stderr is written to log files when the service uses `logs.sink: file`.
 :::
 
 ## Examples
@@ -111,7 +111,7 @@ $ sysg start --parent-pid 4242 --name worker-1 --ttl 900 -- python worker.py
 1. Manifest mode starts services in dependency order
 2. Unit mode creates a single managed unit from the command
 3. Child mode attaches a managed child to the parent process tree
-4. Logs are written to `~/.local/share/systemg/logs/`
+4. Service output follows the configured `logs.sink` policy
 5. PIDs are tracked for other commands
 
 In daemon mode, the supervisor monitors services and handles restarts according to your configuration.

@@ -9,6 +9,10 @@ use std::fs;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::process::Command as StdCommand;
+#[cfg(target_os = "linux")]
+use std::thread;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use assert_cmd::Command;
@@ -19,7 +23,7 @@ use predicates::prelude::PredicateBooleanExt;
 #[cfg(target_os = "linux")]
 use systemg::{
     config::load_config,
-    daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
 };
 #[cfg(target_os = "linux")]
 use tempfile::tempdir;
@@ -72,6 +76,52 @@ services:
         .stdout(predicates::str::contains("streamed stdout line"));
 
     unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn logs_sink_none_discards_service_output_without_files() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+logs:
+  sink: none
+services:
+  quiet:
+    command: "sh -c 'echo stdout-line; echo stderr-line >&2; sleep 30'"
+"#,
+    )
+    .expect("write config");
+
+    let config =
+        load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
+    let daemon = Daemon::from_config(config.clone(), false).expect("create daemon");
+    let service = config.services.get("quiet").expect("quiet service");
+
+    daemon
+        .start_service("quiet", service)
+        .expect("start quiet service");
+    thread::sleep(Duration::from_millis(300));
+
+    let log_dir = home.join(".local/share/systemg/logs");
+    assert!(
+        !log_dir.join("quiet_stdout.log").exists(),
+        "stdout log should not be created when logs.sink is none"
+    );
+    assert!(
+        !log_dir.join("quiet_stderr.log").exists(),
+        "stderr log should not be created when logs.sink is none"
+    );
+
+    daemon.stop_service("quiet").expect("stop quiet service");
 }
 
 #[cfg(target_os = "linux")]

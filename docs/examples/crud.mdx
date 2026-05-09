@@ -18,6 +18,10 @@ A simple FastAPI CRUD service for testing systemg service management capabilitie
 
 ```yaml
 version: "1"
+logs:
+  sink: file
+  max_bytes: 10485760
+  max_files: 5
 
 services:
   fastapi_server:
@@ -27,6 +31,10 @@ services:
     retries: "10"
     backoff: "5s"
 ```
+
+File logging is enabled here so `sysg logs --service fastapi_server` works out
+of the box. For production services whose output is already collected elsewhere,
+set `logs.sink: none`.
 
 ## Application code
 
