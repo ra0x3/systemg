@@ -93,7 +93,9 @@ services:
 
 `status.snapshot_mode: summary` keeps `sysg status` and `sysg inspect` backed by
 a bounded supervisor snapshot cache. Use `detailed` only when you need process
-tree and runtime command details for diagnostics.
+tree and runtime command details for diagnostics. Add `--live` to `sysg status`
+or `sysg inspect` when a single request should force a fresh snapshot instead of
+reading the cache.
 
 ---
 

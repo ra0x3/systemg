@@ -58,14 +58,21 @@ pub enum ControlCommand {
     },
     /// Shutdown the supervisor daemon.
     Shutdown,
-    /// Fetch the cached status snapshot from the supervisor.
-    Status,
+    /// Fetch a status snapshot from the supervisor.
+    Status {
+        /// Whether to force a fresh snapshot instead of reading the cache.
+        #[serde(default)]
+        live: bool,
+    },
     /// Inspect an individual unit with metrics.
     Inspect {
         /// Name or hash of the unit to inspect.
         unit: String,
         /// Maximum number of samples to return.
         samples: u32,
+        /// Whether to force a fresh snapshot instead of reading the cache.
+        #[serde(default)]
+        live: bool,
     },
     /// Stream logs for one or all services through the supervisor.
     Logs {
@@ -362,10 +369,17 @@ mod tests {
         let inspect = ControlCommand::Inspect {
             unit: "svc".to_string(),
             samples: 10,
+            live: true,
         };
         let json = serde_json::to_string(&inspect).unwrap();
         assert!(json.contains("Inspect"));
         assert!(json.contains("\"samples\":10"));
+        assert!(json.contains("\"live\":true"));
+
+        let status = ControlCommand::Status { live: true };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("Status"));
+        assert!(json.contains("\"live\":true"));
     }
 
     #[test]

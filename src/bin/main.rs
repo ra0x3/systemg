@@ -403,6 +403,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             json,
             no_color,
             full_cmd,
+            live,
             stream,
         } => {
             let mut effective_config = config.clone();
@@ -433,7 +434,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 };
                 let sleep_interval = Duration::from_secs(stream_seconds);
                 loop {
-                    match fetch_status_snapshot(&effective_config) {
+                    match fetch_status_snapshot(&effective_config, live) {
                         Ok(snapshot) => {
                             if let Err(e) = render_status(
                                 &snapshot,
@@ -460,7 +461,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
             } else {
                 let snapshot = with_progress_spinner("Computing", || {
-                    fetch_status_snapshot(&effective_config)
+                    fetch_status_snapshot(&effective_config, live)
                 })?;
 
                 let health =
@@ -479,6 +480,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             service,
             json,
             no_color,
+            live,
             stream,
         } => {
             let mut effective_config = config.clone();
@@ -531,6 +533,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                                 &effective_config,
                                 &service,
                                 samples_limit,
+                                live,
                             )?;
                             if payload.unit.is_none() {
                                 eprintln!("Service '{service}' not found.");
@@ -560,7 +563,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 
                 loop {
                     let payload =
-                        fetch_inspect(&effective_config, &service, samples_limit)?;
+                        fetch_inspect(&effective_config, &service, samples_limit, live)?;
                     if payload.unit.is_none() {
                         eprintln!("Service '{service}' not found.");
                         process::exit(2);
@@ -572,7 +575,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
             } else {
                 let payload = with_progress_spinner("Inspecting", || {
-                    fetch_inspect(&effective_config, &service, samples_limit)
+                    fetch_inspect(&effective_config, &service, samples_limit, live)
                 })?;
                 if payload.unit.is_none() {
                     eprintln!("Service '{service}' not found.");
@@ -638,7 +641,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
                 let snapshot = with_progress_spinner("Fetching logs", || {
-                    fetch_status_snapshot(&effective_config)
+                    fetch_status_snapshot(&effective_config, false)
                 })?;
 
                 match service.as_ref() {
@@ -1446,6 +1449,7 @@ mod tests {
             no_color: false,
             full_cmd: false,
             stream: None,
+            live: false,
         }));
     }
 

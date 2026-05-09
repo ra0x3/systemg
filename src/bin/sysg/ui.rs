@@ -64,8 +64,11 @@ struct Column {
 
 /// Fetches a status snapshot from the live supervisor, falling back to the
 /// persisted on-disk snapshot when no supervisor is available.
-fn fetch_status_snapshot(config_path: &str) -> Result<StatusSnapshot, Box<dyn Error>> {
-    match ipc::send_command(&ControlCommand::Status) {
+fn fetch_status_snapshot(
+    config_path: &str,
+    live: bool,
+) -> Result<StatusSnapshot, Box<dyn Error>> {
+    match ipc::send_command(&ControlCommand::Status { live }) {
         Ok(ControlResponse::Status(snapshot)) => Ok(snapshot),
         Ok(other) => Err(io::Error::other(format!(
             "unexpected supervisor response: {:?}",
@@ -2059,11 +2062,13 @@ fn fetch_inspect(
     config_path: &str,
     unit: &str,
     samples: usize,
+    live: bool,
 ) -> Result<InspectPayload, Box<dyn Error>> {
     let limit = samples.min(u32::MAX as usize) as u32;
     match ipc::send_command(&ControlCommand::Inspect {
         unit: unit.to_string(),
         samples: limit,
+        live,
     }) {
         Ok(ControlResponse::Inspect(payload)) => Ok(*payload),
         Ok(other) => Err(io::Error::other(format!(

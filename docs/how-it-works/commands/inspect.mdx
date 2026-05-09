@@ -13,7 +13,8 @@ $ sysg inspect -s myservice
 When a supervisor is running, `sysg inspect` reads the cached status snapshot
 and attaches recent metric samples from the supervisor's metrics store. It does
 not rebuild the full process tree on every invocation unless
-`status.snapshot_mode` is configured as `detailed`.
+`status.snapshot_mode` is configured as `detailed`. Use `--live` to force a
+fresh snapshot for a specific inspect request.
 
 ## Options
 
@@ -25,6 +26,7 @@ not rebuild the full process tree on every invocation unless
 | `-` | `--json` | Emit machine-readable JSON output instead of a report |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--no-color` | Disable ANSI colors in output |
+| `-` | `--live` | Force a fresh supervisor snapshot instead of reading the cached snapshot |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples
@@ -64,6 +66,17 @@ $ sysg inspect -s api --stream 24h
 Stream mode reuses cached supervisor snapshots and recent metric samples. The
 rolling window controls the charted sample range, not how often systemg performs
 live process discovery.
+
+### Force fresh inspect data
+
+```sh
+$ sysg inspect -s api --live
+```
+
+`--live` recomputes the status snapshot before selecting the inspected unit and
+loading recent metric samples. With `status.snapshot_mode: summary`, it remains
+a fresh summary snapshot; with `detailed`, it refreshes runtime command lines
+and process/spawn descendants.
 
 ## Metrics shown
 

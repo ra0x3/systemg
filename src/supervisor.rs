@@ -114,6 +114,14 @@ impl Supervisor {
         config.status.snapshot_mode
     }
 
+    /// Returns the snapshot mode used by an explicit live request.
+    fn live_status_snapshot_mode(config: &Config) -> StatusSnapshotMode {
+        match config.status.snapshot_mode {
+            StatusSnapshotMode::Off => StatusSnapshotMode::Summary,
+            mode => mode,
+        }
+    }
+
     /// Creates supervisor with config.
     pub fn new(
         config_path: PathBuf,
@@ -928,8 +936,18 @@ impl Supervisor {
                     Ok(ControlResponse::Message("All services restarted".into()))
                 }
             }
-            ControlCommand::Inspect { unit, samples } => {
-                let snapshot = self.status_cache.snapshot();
+            ControlCommand::Inspect {
+                unit,
+                samples,
+                live,
+            } => {
+                let snapshot = if live {
+                    let snapshot = self.collect_live_snapshot_for_request()?;
+                    self.status_cache.replace(snapshot.clone());
+                    snapshot
+                } else {
+                    self.status_cache.snapshot()
+                };
                 let limit = samples as usize;
                 let matching_unit = snapshot
                     .units
@@ -979,8 +997,14 @@ impl Supervisor {
                 self.refresh_status_cache();
                 Ok(ControlResponse::Message("Supervisor shutting down".into()))
             }
-            ControlCommand::Status => {
-                let snapshot = self.status_cache.snapshot();
+            ControlCommand::Status { live } => {
+                let snapshot = if live {
+                    let snapshot = self.collect_live_snapshot_for_request()?;
+                    self.status_cache.replace(snapshot.clone());
+                    snapshot
+                } else {
+                    self.status_cache.snapshot()
+                };
                 Ok(ControlResponse::Status(snapshot))
             }
         }
@@ -1261,6 +1285,24 @@ impl Supervisor {
     fn collect_live_snapshot(&self) -> Result<StatusSnapshot, SupervisorError> {
         let config = self.daemon.config();
         let mode = Self::status_snapshot_mode(config.as_ref());
+        self.collect_live_snapshot_with_mode(mode)
+    }
+
+    /// Collects a fresh runtime snapshot for an explicit live command request.
+    fn collect_live_snapshot_for_request(
+        &self,
+    ) -> Result<StatusSnapshot, SupervisorError> {
+        let config = self.daemon.config();
+        let mode = Self::live_status_snapshot_mode(config.as_ref());
+        self.collect_live_snapshot_with_mode(mode)
+    }
+
+    /// Collects a fresh runtime snapshot directly from daemon state using the supplied mode.
+    fn collect_live_snapshot_with_mode(
+        &self,
+        mode: StatusSnapshotMode,
+    ) -> Result<StatusSnapshot, SupervisorError> {
+        let config = self.daemon.config();
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
@@ -1485,7 +1527,7 @@ services:
         });
 
         match supervisor
-            .handle_command(ControlCommand::Status)
+            .handle_command(ControlCommand::Status { live: false })
             .expect("status response")
         {
             ControlResponse::Status(snapshot) => {
@@ -1499,6 +1541,7 @@ services:
             .handle_command(ControlCommand::Inspect {
                 unit: "cached".into(),
                 samples: 10,
+                live: false,
             })
             .expect("inspect response")
         {
@@ -1509,6 +1552,18 @@ services:
                 );
             }
             other => panic!("expected inspect response, got {other:?}"),
+        }
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("live status response")
+        {
+            ControlResponse::Status(snapshot) => {
+                assert_eq!(snapshot.units.len(), 1);
+                assert_eq!(snapshot.units[0].name, "cached");
+                assert_ne!(snapshot.units[0].hash, "cached-hash");
+            }
+            other => panic!("expected status response, got {other:?}"),
         }
 
         unsafe {

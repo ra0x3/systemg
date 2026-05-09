@@ -184,7 +184,7 @@ services:
 fn wait_for_supervisor_socket() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match ipc::send_command(&ControlCommand::Status) {
+        match ipc::send_command(&ControlCommand::Status { live: false }) {
             Ok(_) => return,
             Err(ControlError::NotAvailable) | Err(ControlError::Io(_)) => {}
             Err(err) => panic!("unexpected supervisor status error: {err}"),

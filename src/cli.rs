@@ -241,6 +241,10 @@ pub enum Commands {
         #[arg(long = "full-cmd")]
         full_cmd: bool,
 
+        /// Force the supervisor to recompute a fresh snapshot for this request.
+        #[arg(long)]
+        live: bool,
+
         /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
         #[arg(long, value_name = "DURATION")]
         stream: Option<String>,
@@ -263,6 +267,10 @@ pub enum Commands {
         /// Disable ANSI colors in output.
         #[arg(long = "no-color")]
         no_color: bool,
+
+        /// Force the supervisor to recompute a fresh snapshot for this request.
+        #[arg(long)]
+        live: bool,
 
         /// Continuously refresh output and use a rolling metrics window (e.g., "5", "1s", "2m").
         #[arg(long, value_name = "DURATION")]
@@ -343,6 +351,15 @@ mod tests {
     }
 
     #[test]
+    fn status_accepts_live() {
+        let cli = Cli::try_parse_from(["sysg", "status", "--live"]).unwrap();
+        match cli.command {
+            Commands::Status { live, .. } => assert!(live),
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
     fn inspect_accepts_stream() {
         let cli = Cli::try_parse_from([
             "sysg",
@@ -357,6 +374,16 @@ mod tests {
             Commands::Inspect { stream, .. } => {
                 assert_eq!(stream.as_deref(), Some("2m"))
             }
+            _ => panic!("expected inspect command"),
+        }
+    }
+
+    #[test]
+    fn inspect_accepts_live() {
+        let cli = Cli::try_parse_from(["sysg", "inspect", "--service", "demo", "--live"])
+            .unwrap();
+        match cli.command {
+            Commands::Inspect { live, .. } => assert!(live),
             _ => panic!("expected inspect command"),
         }
     }

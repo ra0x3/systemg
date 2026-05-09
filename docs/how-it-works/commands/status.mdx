@@ -13,7 +13,8 @@ $ sysg status
 When a supervisor is running, `sysg status` reads the supervisor's cached
 snapshot instead of rebuilding live process state for every invocation. The
 cache refresh interval and detail level are controlled by the top-level
-`status` configuration block.
+`status` configuration block. Use `--live` when you need systemg to recompute a
+fresh snapshot for that request.
 
 ## Interactive Mode
 
@@ -35,6 +36,7 @@ The selected row is highlighted with a white background for easy visibility.
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--json` | Emit machine-readable JSON output instead of a table (disables interactive mode) |
 | `-` | `--no-color` | Disable ANSI colors in output |
+| `-` | `--live` | Force a fresh supervisor snapshot instead of reading the cached snapshot |
 | `-` | `--stream` | Continuously refresh status at the provided interval (e.g., `5`, `1s`, `2m`) (disables interactive mode) |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
@@ -79,6 +81,17 @@ $ sysg status --stream 5
 Stream mode polls the cached supervisor snapshot. It does not force a full
 process scan on each redraw unless the supervisor is configured with a very
 short `status.snapshot_interval_secs`.
+
+### Force a fresh snapshot
+
+```sh
+$ sysg status --live
+```
+
+`--live` bypasses the cached read for this invocation and updates the cache with
+the fresh result. With `status.snapshot_mode: summary`, the fresh snapshot still
+uses the cheaper summary detail level; with `detailed`, it recomputes full
+process and spawn-tree details.
 
 ## Performance
 
