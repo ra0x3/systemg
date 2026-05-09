@@ -34,11 +34,15 @@ pub struct Config {
     /// Service output logging defaults.
     #[serde(default)]
     pub logs: LogsConfig,
+    /// Status and inspect snapshot collection configuration.
+    #[serde(default)]
+    pub status: StatusConfig,
 }
 const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
 const METRICS_DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
 const METRICS_DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 const METRICS_DEFAULT_SPILLOVER_SEGMENT_BYTES: u64 = 256 * 1024;
+const STATUS_DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 5;
 /// Default maximum size, in bytes, for an active service log file before rotation.
 pub const LOGS_DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Default number of rotated service log files retained per active log.
@@ -114,6 +118,45 @@ impl LogsConfig {
                 .or_else(|| global.and_then(|logs| logs.max_files))
                 .unwrap_or(defaults.max_files),
         }
+    }
+}
+
+/// Snapshot collection mode for status and inspect views.
+#[derive(Debug, Deserialize, Clone, Copy, serde::Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusSnapshotMode {
+    /// Use persisted state only; no background live process snapshot refresh.
+    Off,
+    /// Collect cheap service state without process tree expansion.
+    #[default]
+    Summary,
+    /// Collect the full process tree and runtime command details.
+    Detailed,
+}
+
+/// Status and inspect snapshot configuration.
+#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[serde(default)]
+pub struct StatusConfig {
+    /// Snapshot collection mode.
+    pub snapshot_mode: StatusSnapshotMode,
+    /// Interval between background status snapshot refreshes.
+    pub snapshot_interval_secs: u64,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self {
+            snapshot_mode: StatusSnapshotMode::Summary,
+            snapshot_interval_secs: STATUS_DEFAULT_SNAPSHOT_INTERVAL_SECS,
+        }
+    }
+}
+
+impl StatusConfig {
+    /// Returns the clamped snapshot refresh interval.
+    pub fn snapshot_interval(&self) -> Duration {
+        Duration::from_secs(self.snapshot_interval_secs.clamp(1, 300))
     }
 }
 
@@ -1068,6 +1111,7 @@ services:
             env: None,
             metrics: MetricsConfig::default(),
             logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
         };
 
         let order = config.service_start_order().unwrap();
@@ -1086,6 +1130,7 @@ services:
             env: None,
             metrics: MetricsConfig::default(),
             logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
         };
 
         match config.service_start_order() {
@@ -1113,6 +1158,7 @@ services:
             env: None,
             metrics: MetricsConfig::default(),
             logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
         };
 
         match config.service_start_order() {
@@ -1184,6 +1230,59 @@ services:
         .unwrap_err();
 
         assert!(err.to_string().contains("journald"));
+    }
+
+    #[test]
+    fn status_config_defaults_to_summary_snapshots() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+version: "1"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.status.snapshot_mode, StatusSnapshotMode::Summary);
+        assert_eq!(config.status.snapshot_interval_secs, 5);
+        assert_eq!(config.status.snapshot_interval(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn status_config_parses_detailed_mode_and_clamps_interval() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+version: "1"
+status:
+  snapshot_mode: detailed
+  snapshot_interval_secs: 0
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.status.snapshot_mode, StatusSnapshotMode::Detailed);
+        assert_eq!(config.status.snapshot_interval(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn status_config_rejects_unknown_snapshot_mode() {
+        let err = serde_yaml::from_str::<Config>(
+            r#"
+version: "1"
+status:
+  snapshot_mode: deep
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("deep"));
     }
 
     #[test]

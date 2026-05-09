@@ -3,6 +3,9 @@ logs:
   sink: file
   max_bytes: 10485760
   max_files: 5
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
 
 services:
   fastapi_server:

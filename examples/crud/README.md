@@ -101,6 +101,9 @@ logs:
   sink: file
   max_bytes: 10485760
   max_files: 5
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
 
 services:
   fastapi_server:
@@ -114,6 +117,9 @@ services:
 This example keeps file logging enabled so `sysg logs --service fastapi_server`
 works out of the box. In production, set `logs.sink: none` when uvicorn output is
 already collected by another logging agent.
+
+The default summary status snapshot keeps `sysg status` and `sysg inspect`
+responsive without collecting full process trees on every command.
 
 ## Project Structure
 

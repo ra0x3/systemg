@@ -1,6 +1,9 @@
 version: "1"
 logs:
   sink: none
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 10
 
 services:
   orchestrator:

@@ -26,7 +26,7 @@ use thiserror::Error;
 use tracing::{debug, error};
 
 use crate::{
-    config::Config,
+    config::{Config, StatusSnapshotMode},
     cron::{
         CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
     },
@@ -767,6 +767,7 @@ pub fn collect_runtime_snapshot(
     service_state: &Arc<Mutex<ServiceStateFile>>,
     metrics: Option<&MetricsHandle>,
     spawn_manager: Option<&DynamicSpawnManager>,
+    mode: StatusSnapshotMode,
 ) -> Result<StatusSnapshot, StatusError> {
     let mut cron_state = CronStateFile::load()?;
     let valid_cron_hashes: HashSet<String> = config
@@ -793,7 +794,7 @@ pub fn collect_runtime_snapshot(
         &mut cron_state,
         metrics_guard.as_deref(),
         spawn_manager,
-        true,
+        mode,
     ))
 }
 
@@ -823,7 +824,7 @@ pub fn collect_disk_snapshot(
         &mut cron_state,
         None,
         None,
-        false,
+        StatusSnapshotMode::Detailed,
     ))
 }
 
@@ -851,7 +852,7 @@ fn build_snapshot(
     cron_state: &mut CronStateFile,
     metrics_store: Option<&MetricsStore>,
     spawn_manager: Option<&DynamicSpawnManager>,
-    include_live_processes: bool,
+    mode: StatusSnapshotMode,
 ) -> StatusSnapshot {
     let mut hash_to_name: HashMap<String, String> = HashMap::new();
     let mut hash_kind: HashMap<String, UnitKind> = HashMap::new();
@@ -875,7 +876,7 @@ fn build_snapshot(
 
     let mut units = Vec::new();
 
-    let process_system = if include_live_processes {
+    let process_system = if matches!(mode, StatusSnapshotMode::Detailed) {
         let mut sys = System::new();
         sys.refresh_processes(ProcessesToUpdate::All, true);
         Some(sys)
@@ -915,11 +916,19 @@ fn build_snapshot(
             pid = pid_file.pid_for(name);
         }
 
-        let process_runtime = pid.map(|pid| ProcessRuntime {
-            pid,
-            state: StatusManager::process_state(pid),
-            user: Some(StatusManager::get_process_user(pid)),
-        });
+        let process_runtime = if matches!(mode, StatusSnapshotMode::Off) {
+            None
+        } else {
+            pid.map(|pid| ProcessRuntime {
+                pid,
+                state: StatusManager::process_state(pid),
+                user: if matches!(mode, StatusSnapshotMode::Detailed) {
+                    Some(StatusManager::get_process_user(pid))
+                } else {
+                    None
+                },
+            })
+        };
 
         if let Some(runtime) = process_runtime.as_ref()
             && matches!(runtime.state, ProcessState::Running)
@@ -943,11 +952,15 @@ fn build_snapshot(
             lifecycle = Some(ServiceLifecycleStatus::Stopped);
         }
 
-        let uptime = match process_runtime.as_ref() {
-            Some(runtime) if matches!(runtime.state, ProcessState::Running) => {
-                compute_uptime(runtime.pid)
+        let uptime = if matches!(mode, StatusSnapshotMode::Detailed) {
+            match process_runtime.as_ref() {
+                Some(runtime) if matches!(runtime.state, ProcessState::Running) => {
+                    compute_uptime(runtime.pid)
+                }
+                _ => None,
             }
-            _ => None,
+        } else {
+            None
         };
 
         let last_exit = state_entry.as_ref().and_then(|entry| {
@@ -988,10 +1001,14 @@ fn build_snapshot(
         let command = config
             .and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")))
             .map(|service_config| service_config.command.clone());
-        let runtime_command = process_runtime
-            .as_ref()
-            .map(|runtime| StatusManager::get_process_cmdline(runtime.pid))
-            .filter(|cmd| !cmd.is_empty());
+        let runtime_command = if matches!(mode, StatusSnapshotMode::Detailed) {
+            process_runtime
+                .as_ref()
+                .map(|runtime| StatusManager::get_process_cmdline(runtime.pid))
+                .filter(|cmd| !cmd.is_empty())
+        } else {
+            None
+        };
         let service_hash_for_spawn = if matches!(kind, UnitKind::Service | UnitKind::Cron)
         {
             Some(hash.as_str())
@@ -999,7 +1016,9 @@ fn build_snapshot(
             None
         };
 
-        let spawned_children = if let Some(runtime) = &process_runtime {
+        let spawned_children = if matches!(mode, StatusSnapshotMode::Detailed)
+            && let Some(runtime) = &process_runtime
+        {
             let mut seen = HashSet::new();
             seen.insert(runtime.pid);
 
@@ -1012,12 +1031,17 @@ fn build_snapshot(
                 nodes.extend(managed);
             }
 
+            let pidfile_system = if spawn_manager.is_some() {
+                process_system.as_ref()
+            } else {
+                None
+            };
             let pidfile_nodes = build_spawn_tree_from_pidfile(
                 pid_file,
                 runtime.pid,
                 service_hash_for_spawn,
                 true,
-                process_system.as_ref(),
+                pidfile_system,
             );
             append_unique_nodes(&mut nodes, pidfile_nodes, &mut seen);
 
@@ -1066,39 +1090,58 @@ fn build_snapshot(
             continue;
         }
 
-        let runtime = ProcessRuntime {
-            pid: pid_value,
-            state: StatusManager::process_state(pid_value),
-            user: Some(StatusManager::get_process_user(pid_value)),
+        let runtime = if matches!(mode, StatusSnapshotMode::Off) {
+            None
+        } else {
+            Some(ProcessRuntime {
+                pid: pid_value,
+                state: StatusManager::process_state(pid_value),
+                user: if matches!(mode, StatusSnapshotMode::Detailed) {
+                    Some(StatusManager::get_process_user(pid_value))
+                } else {
+                    None
+                },
+            })
         };
-        let uptime = if matches!(runtime.state, ProcessState::Running) {
+        let uptime = if matches!(mode, StatusSnapshotMode::Detailed)
+            && let Some(runtime) = runtime.as_ref()
+            && matches!(runtime.state, ProcessState::Running)
+        {
             compute_uptime(runtime.pid)
         } else {
             None
         };
 
-        let health = match runtime.state {
-            ProcessState::Running => UnitHealth::Healthy,
-            ProcessState::Zombie | ProcessState::Missing => UnitHealth::Failing,
+        let health = match runtime.as_ref().map(|runtime| runtime.state) {
+            Some(ProcessState::Running) => UnitHealth::Healthy,
+            Some(ProcessState::Zombie | ProcessState::Missing) => UnitHealth::Failing,
+            None => UnitHealth::Inactive,
         };
 
         let metrics_summary = metrics_store
             .and_then(|store| store.summarize_unit(service_name))
             .map(UnitMetricsSummary::from);
 
-        let mut spawned_children = if let Some(manager) = spawn_manager {
+        let mut spawned_children = if matches!(mode, StatusSnapshotMode::Detailed)
+            && let Some(manager) = spawn_manager
+        {
             build_spawn_tree(manager, pid_value, process_system.as_ref())
         } else {
             Vec::new()
         };
 
-        if spawned_children.is_empty() {
+        if matches!(mode, StatusSnapshotMode::Detailed) && spawned_children.is_empty() {
+            let pidfile_system = if spawn_manager.is_some() {
+                process_system.as_ref()
+            } else {
+                None
+            };
             spawned_children = build_spawn_tree_from_pidfile(
                 pid_file,
                 pid_value,
                 None,
                 true,
-                process_system.as_ref(),
+                pidfile_system,
             );
         }
 
@@ -1108,14 +1151,18 @@ fn build_snapshot(
             kind: UnitKind::Orphaned,
             lifecycle: None,
             health,
-            process: Some(runtime),
+            process: runtime,
             uptime,
             last_exit: None,
             cron: None,
             metrics: metrics_summary,
             command: None,
-            runtime_command: Some(StatusManager::get_process_cmdline(pid_value))
-                .filter(|cmd| !cmd.is_empty()),
+            runtime_command: if matches!(mode, StatusSnapshotMode::Detailed) {
+                Some(StatusManager::get_process_cmdline(pid_value))
+                    .filter(|cmd| !cmd.is_empty())
+            } else {
+                None
+            },
             spawned_children,
         });
     }
@@ -2408,6 +2455,7 @@ services:
             env: None,
             metrics: crate::config::MetricsConfig::default(),
             logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
         };
 
         let pid_file = PidFile::default();
@@ -2434,7 +2482,7 @@ services:
             &mut cron_state,
             None,
             None,
-            false,
+            StatusSnapshotMode::Off,
         );
 
         let orphan_cron_units: Vec<_> = snapshot
@@ -2449,6 +2497,71 @@ services:
             orphan_cron_units.is_empty(),
             "orphaned cron entries should be pruned from status"
         );
+    }
+
+    #[test]
+    fn build_snapshot_summary_omits_expensive_process_details() {
+        let mut services = std::collections::HashMap::new();
+        let service = crate::config::ServiceConfig {
+            command: "/bin/sleep 30".into(),
+            ..crate::config::ServiceConfig::default()
+        };
+        let hash = service.compute_hash();
+        services.insert("demo".into(), service);
+        let config = Config {
+            version: "1".into(),
+            services,
+            project_dir: None,
+            env: None,
+            metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
+        };
+
+        let mut pid_file = PidFile::default();
+        pid_file.insert("demo", 42).expect("insert pid");
+        pid_file
+            .record_spawn(PersistedSpawnChild {
+                pid: 43,
+                name: "child".into(),
+                command: "sleep 30".into(),
+                started_at: SystemTime::now(),
+                ttl_secs: None,
+                depth: 1,
+                parent_pid: 42,
+                service_hash: Some(hash.clone()),
+                cpu_percent: None,
+                rss_bytes: None,
+                last_exit: None,
+            })
+            .expect("record child");
+
+        let mut service_state = ServiceStateFile::default();
+        service_state
+            .set(&hash, ServiceLifecycleStatus::Running, Some(42), None, None)
+            .expect("set state");
+        let mut cron_state = CronStateFile::default();
+
+        let snapshot = build_snapshot(
+            Some(&config),
+            &pid_file,
+            &mut service_state,
+            &mut cron_state,
+            None,
+            None,
+            StatusSnapshotMode::Summary,
+        );
+        let unit = snapshot
+            .units
+            .iter()
+            .find(|unit| unit.name == "demo")
+            .expect("demo unit");
+
+        assert!(unit.process.is_some());
+        assert!(unit.process.as_ref().unwrap().user.is_none());
+        assert!(unit.uptime.is_none());
+        assert!(unit.runtime_command.is_none());
+        assert!(unit.spawned_children.is_empty());
     }
 
     #[test]

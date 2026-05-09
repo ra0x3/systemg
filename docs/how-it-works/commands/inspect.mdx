@@ -10,6 +10,11 @@ View detailed metrics for a specific service.
 $ sysg inspect -s myservice
 ```
 
+When a supervisor is running, `sysg inspect` reads the cached status snapshot
+and attaches recent metric samples from the supervisor's metrics store. It does
+not rebuild the full process tree on every invocation unless
+`status.snapshot_mode` is configured as `detailed`.
+
 ## Options
 
 | Short | Long | Description |
@@ -56,6 +61,10 @@ CPU: 45.2% (current)  Memory: 23.1% (current)
 $ sysg inspect -s api --stream 24h
 ```
 
+Stream mode reuses cached supervisor snapshots and recent metric samples. The
+rolling window controls the charted sample range, not how often systemg performs
+live process discovery.
+
 ## Metrics shown
 
 - **CPU usage** - Percentage over time
@@ -63,6 +72,14 @@ $ sysg inspect -s api --stream 24h
 - **Execution count** - For cron jobs
 - **Average duration** - For completed processes
 - **Success rate** - For cron jobs
+
+## Snapshot detail
+
+The default `status.snapshot_mode: summary` is intended for production-scale
+systems. It keeps inspect useful for service health and sampled metrics while
+omitting expensive process tree details. Set `status.snapshot_mode: detailed`
+when you need runtime command lines and spawn/process descendants in inspect
+output.
 
 ## See also
 

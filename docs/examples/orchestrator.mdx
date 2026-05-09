@@ -51,6 +51,9 @@ docs/*.md                       # Example specs
 version: "1"
 logs:
   sink: none
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 10
 services:
   redis:
     command: "redis-server"
@@ -74,6 +77,9 @@ The orchestrator example disables systemg-managed service output capture because
 agent workloads can be noisy. Use your regular logging pipeline for production
 agent output, and reserve `sysg logs` for services that opt into `logs.sink:
 file`.
+
+The status cache uses summary snapshots every 10 seconds to avoid expensive
+process tree discovery across many dynamic children.
 
 `PORKI_LLM_MAX_CONCURRENCY` raises the number of global LLM leases available
 across agents, and `PORKI_LLM_CONCURRENCY_WAIT_SECONDS` controls how long agents

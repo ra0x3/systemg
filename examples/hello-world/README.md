@@ -12,6 +12,9 @@ logs:
   sink: file
   max_bytes: 10485760
   max_files: 3
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
 services:
   sh__hello_world:
     command: "sh hello-world.sh"
@@ -33,6 +36,7 @@ services:
 - **Backoff**: 5 seconds between restart attempts
 - **Environment**: Loads variables from `.env` file and defines `FOO=foo`
 - **Logs**: Captures stdout/stderr to systemg-managed files with local rotation
+- **Status**: Uses cached summary snapshots for inexpensive status/inspect views
 
 ## Usage
 

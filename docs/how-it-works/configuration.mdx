@@ -17,6 +17,9 @@ logs:
   sink: file
   max_bytes: 10485760
   max_files: 5
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
 services:
   postgres:
     command: "postgres -D /var/lib/postgresql/data"
@@ -105,6 +108,29 @@ Fields:
 - `max_files`: number of rotated files to retain per active log.
 
 Use `sink: none` for noisy production services when service output is already collected by another logging pipeline.
+
+### `status`
+
+Optional defaults for cached `status` and `inspect` snapshots.
+
+```yaml
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
+```
+
+Fields:
+
+- `snapshot_mode`: `off`, `summary`, or `detailed`.
+- `snapshot_interval_secs`: seconds between background snapshot refreshes, clamped between 1 and 300.
+
+Modes:
+
+- `summary`: default. Tracks service state, pid, health, last exit, cron state, and sampled metric summaries while skipping expensive process tree expansion.
+- `detailed`: includes runtime command details and process/spawn descendants for richer `inspect` output.
+- `off`: disables background live process snapshot refresh and uses persisted state plus pid files.
+
+For large deployments, keep `summary` globally and use focused `inspect --service` workflows when deeper investigation is needed.
 
 ### `services`
 

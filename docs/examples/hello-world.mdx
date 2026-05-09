@@ -14,6 +14,9 @@ logs:
   sink: file
   max_bytes: 10485760
   max_files: 3
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
 services:
   counter:
     command: "sh counter.sh"
@@ -45,6 +48,9 @@ You'll see:
 The example keeps `logs.sink: file` explicit so `sysg logs` works immediately.
 For high-volume services, use `logs.sink: none` and rely on your normal logging
 pipeline.
+
+`status.snapshot_mode: summary` keeps status and inspect reads inexpensive by
+using cached summary snapshots.
 Count: 1
 Count: 2
 Count: 3
@@ -60,6 +66,9 @@ logs:
   sink: file
   max_bytes: 10485760
   max_files: 3
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
 services:
   counter:
     command: "sh counter.sh"

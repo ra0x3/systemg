@@ -4521,6 +4521,7 @@ mod tests {
             env: None,
             metrics: crate::config::MetricsConfig::default(),
             logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
         };
         config.service_start_order().unwrap();
 

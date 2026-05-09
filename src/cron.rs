@@ -1139,6 +1139,7 @@ mod tests {
             env: None,
             metrics: crate::config::MetricsConfig::default(),
             logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
         };
 
         manager.sync_from_config(&config_v1).unwrap();
@@ -1153,6 +1154,7 @@ mod tests {
             env: None,
             metrics: crate::config::MetricsConfig::default(),
             logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
         };
 
         let job_two_hash = service_with_cron("*/2 * * * * *").compute_hash();

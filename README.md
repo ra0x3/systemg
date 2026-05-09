@@ -79,6 +79,9 @@ logs:
   sink: file
   max_bytes: 10485760
   max_files: 5
+status:
+  snapshot_mode: summary
+  snapshot_interval_secs: 5
 services:
   noisy_worker:
     command: "worker --verbose"
@@ -87,6 +90,10 @@ services:
 ```
 
 `sink: none` discards service output without creating systemg log-writer threads or files, which is useful when another production logging pipeline already collects process output.
+
+`status.snapshot_mode: summary` keeps `sysg status` and `sysg inspect` backed by
+a bounded supervisor snapshot cache. Use `detailed` only when you need process
+tree and runtime command details for diagnostics.
 
 ---
 

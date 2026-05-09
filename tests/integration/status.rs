@@ -16,13 +16,15 @@ use common::wait_for_pid_removed;
 use serde_json::Value;
 #[cfg(target_os = "linux")]
 use systemg::daemon::{Daemon, PidFile};
-#[cfg(target_os = "linux")]
-use systemg::{
-    config::SpawnMode, spawn::DynamicSpawnManager, status::collect_runtime_snapshot,
-};
 use systemg::{
     config::load_config,
     daemon::{ServiceLifecycleStatus, ServiceStateFile},
+};
+#[cfg(target_os = "linux")]
+use systemg::{
+    config::{SpawnMode, StatusSnapshotMode},
+    spawn::DynamicSpawnManager,
+    status::collect_runtime_snapshot,
 };
 use tempfile::tempdir;
 
@@ -279,6 +281,7 @@ services:
             &state_handle,
             None,
             Some(&spawn_manager),
+            StatusSnapshotMode::Detailed,
         )
         .expect("collect snapshot");
 
@@ -336,6 +339,7 @@ services:
             &state_handle,
             None,
             Some(&spawn_manager),
+            StatusSnapshotMode::Detailed,
         ) && let Some(unit) = snapshot.units.iter().find(|unit| unit.name == "root")
         {
             eprintln!(

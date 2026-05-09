@@ -15,7 +15,9 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{SkipConfig, SpawnMode, TerminationPolicy, load_config},
+    config::{
+        Config, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy, load_config,
+    },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
         Daemon, PersistedSpawnChild, ServiceLifecycleStatus, ServiceReadyState,
@@ -102,6 +104,16 @@ fn fallback_cron_user(service_config: &crate::config::ServiceConfig) -> Option<S
 }
 
 impl Supervisor {
+    /// Returns the configured status snapshot refresh interval.
+    fn status_snapshot_interval(config: &Config) -> Duration {
+        config.status.snapshot_interval()
+    }
+
+    /// Returns the configured status snapshot collection mode.
+    fn status_snapshot_mode(config: &Config) -> StatusSnapshotMode {
+        config.status.snapshot_mode
+    }
+
     /// Creates supervisor with config.
     pub fn new(
         config_path: PathBuf,
@@ -263,6 +275,7 @@ impl Supervisor {
             &state_handle,
             Some(&self.metrics_store),
             Some(&self.spawn_manager),
+            Self::status_snapshot_mode(config_handle.as_ref()),
         ) {
             Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to build initial status snapshot: {err}"),
@@ -274,19 +287,24 @@ impl Supervisor {
         let state_for_refresh = Arc::clone(&state_handle);
         let metrics_for_refresh = self.metrics_store.clone();
         let spawn_manager_for_refresh = self.spawn_manager.clone();
-        self.status_refresher = Some(StatusRefresher::spawn(
-            cache_clone,
-            Duration::from_secs(1),
-            move || {
-                collect_runtime_snapshot(
-                    Arc::clone(&config_for_refresh),
-                    &pid_for_refresh,
-                    &state_for_refresh,
-                    Some(&metrics_for_refresh),
-                    Some(&spawn_manager_for_refresh),
-                )
-            },
-        ));
+        let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
+        let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
+        if !matches!(refresh_mode, StatusSnapshotMode::Off) {
+            self.status_refresher = Some(StatusRefresher::spawn(
+                cache_clone,
+                refresh_interval,
+                move || {
+                    collect_runtime_snapshot(
+                        Arc::clone(&config_for_refresh),
+                        &pid_for_refresh,
+                        &state_for_refresh,
+                        Some(&metrics_for_refresh),
+                        Some(&spawn_manager_for_refresh),
+                        refresh_mode,
+                    )
+                },
+            ));
+        }
 
         let metrics_handle = self.metrics_store.clone();
         self.metrics_collector = Some(MetricsCollector::spawn(
@@ -911,8 +929,7 @@ impl Supervisor {
                 }
             }
             ControlCommand::Inspect { unit, samples } => {
-                let snapshot = self.collect_live_snapshot()?;
-                self.status_cache.replace(snapshot.clone());
+                let snapshot = self.status_cache.snapshot();
                 let limit = samples as usize;
                 let matching_unit = snapshot
                     .units
@@ -963,8 +980,7 @@ impl Supervisor {
                 Ok(ControlResponse::Message("Supervisor shutting down".into()))
             }
             ControlCommand::Status => {
-                let snapshot = self.collect_live_snapshot()?;
-                self.status_cache.replace(snapshot.clone());
+                let snapshot = self.status_cache.snapshot();
                 Ok(ControlResponse::Status(snapshot))
             }
         }
@@ -1179,6 +1195,7 @@ impl Supervisor {
             &state_handle,
             Some(&self.metrics_store),
             Some(&self.spawn_manager),
+            Self::status_snapshot_mode(config_handle.as_ref()),
         ) {
             self.status_cache.replace(snapshot);
         }
@@ -1189,19 +1206,24 @@ impl Supervisor {
         let refresh_state = Arc::clone(&state_handle);
         let refresh_metrics = self.metrics_store.clone();
         let refresh_spawn_manager = self.spawn_manager.clone();
-        self.status_refresher = Some(StatusRefresher::spawn(
-            cache_clone,
-            Duration::from_secs(1),
-            move || {
-                collect_runtime_snapshot(
-                    Arc::clone(&refresh_config),
-                    &refresh_pid,
-                    &refresh_state,
-                    Some(&refresh_metrics),
-                    Some(&refresh_spawn_manager),
-                )
-            },
-        ));
+        let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
+        let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
+        if !matches!(refresh_mode, StatusSnapshotMode::Off) {
+            self.status_refresher = Some(StatusRefresher::spawn(
+                cache_clone,
+                refresh_interval,
+                move || {
+                    collect_runtime_snapshot(
+                        Arc::clone(&refresh_config),
+                        &refresh_pid,
+                        &refresh_state,
+                        Some(&refresh_metrics),
+                        Some(&refresh_spawn_manager),
+                        refresh_mode,
+                    )
+                },
+            ));
+        }
 
         self.metrics_collector = Some(MetricsCollector::spawn(
             metrics_handle,
@@ -1238,6 +1260,7 @@ impl Supervisor {
     /// Collects a fresh runtime snapshot directly from daemon state and process inspection.
     fn collect_live_snapshot(&self) -> Result<StatusSnapshot, SupervisorError> {
         let config = self.daemon.config();
+        let mode = Self::status_snapshot_mode(config.as_ref());
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
@@ -1247,6 +1270,7 @@ impl Supervisor {
             &state_handle,
             Some(&self.metrics_store),
             Some(&self.spawn_manager),
+            mode,
         )
         .map_err(SupervisorError::from)
     }
@@ -1388,5 +1412,113 @@ impl Supervisor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use chrono::Utc;
+    use tempfile::tempdir_in;
+
+    use super::*;
+    use crate::{
+        runtime,
+        status::{OverallHealth, UnitHealth, UnitKind, UnitStatus},
+    };
+
+    #[test]
+    fn status_and_inspect_commands_use_cached_snapshot() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("systemg.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "1"
+status:
+  snapshot_mode: summary
+services:
+  cached:
+    command: "/bin/true"
+"#,
+        )
+        .expect("write config");
+
+        let mut supervisor =
+            Supervisor::new(config_path, false, None).expect("create supervisor");
+        let cached_unit = UnitStatus {
+            name: "cached".into(),
+            hash: "cached-hash".into(),
+            kind: UnitKind::Service,
+            lifecycle: None,
+            health: UnitHealth::Healthy,
+            process: None,
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: Some("/bin/true".into()),
+            runtime_command: None,
+            spawned_children: Vec::new(),
+        };
+        supervisor.status_cache.replace(StatusSnapshot {
+            schema_version: crate::status::STATUS_SCHEMA_VERSION.into(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: vec![cached_unit],
+        });
+
+        match supervisor
+            .handle_command(ControlCommand::Status)
+            .expect("status response")
+        {
+            ControlResponse::Status(snapshot) => {
+                assert_eq!(snapshot.units.len(), 1);
+                assert_eq!(snapshot.units[0].name, "cached");
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        match supervisor
+            .handle_command(ControlCommand::Inspect {
+                unit: "cached".into(),
+                samples: 10,
+            })
+            .expect("inspect response")
+        {
+            ControlResponse::Inspect(payload) => {
+                assert_eq!(
+                    payload.unit.as_ref().map(|unit| unit.name.as_str()),
+                    Some("cached")
+                );
+            }
+            other => panic!("expected inspect response, got {other:?}"),
+        }
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
     }
 }

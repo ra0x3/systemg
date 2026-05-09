@@ -14,7 +14,9 @@ use std::{
 use assert_cmd::cargo::cargo_bin_cmd;
 use common::{HomeEnvGuard, is_process_alive, wait_for_pid, wait_for_pid_removed};
 use systemg::{
-    config::{Config, LogsConfig, MetricsConfig, ServiceConfig, load_config},
+    config::{
+        Config, LogsConfig, MetricsConfig, ServiceConfig, StatusConfig, load_config,
+    },
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
 };
 use tempfile::tempdir;
@@ -105,6 +107,7 @@ fn restart_updates_state_with_new_pid() {
         env: None,
         metrics: MetricsConfig::default(),
         logs: LogsConfig::default(),
+        status: StatusConfig::default(),
     };
 
     let daemon = build_daemon(config);

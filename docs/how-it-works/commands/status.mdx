@@ -10,6 +10,11 @@ Check the health of running services with an interactive table interface.
 $ sysg status
 ```
 
+When a supervisor is running, `sysg status` reads the supervisor's cached
+snapshot instead of rebuilding live process state for every invocation. The
+cache refresh interval and detail level are controlled by the top-level
+`status` configuration block.
+
 ## Interactive Mode
 
 By default, `sysg status` displays an interactive table where you can:
@@ -70,6 +75,17 @@ Command: python app.py
 ```sh
 $ sysg status --stream 5
 ```
+
+Stream mode polls the cached supervisor snapshot. It does not force a full
+process scan on each redraw unless the supervisor is configured with a very
+short `status.snapshot_interval_secs`.
+
+## Performance
+
+The default `status.snapshot_mode: summary` keeps status inexpensive for larger
+systems by skipping process tree expansion, runtime command lookups, and per-pid
+user/uptime lookups. Use `status.snapshot_mode: detailed` when you want richer
+process and spawn-tree detail in status/inspect views.
 
 ## Output fields
 
