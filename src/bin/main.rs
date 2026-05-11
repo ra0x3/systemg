@@ -640,7 +640,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 };
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
-                let snapshot = with_progress_spinner("Fetching logs", || {
+                let snapshot = with_progress_spinner("Statusing", || {
                     fetch_status_snapshot(&effective_config, false)
                 })?;
 
@@ -695,13 +695,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     thread::sleep(sleep_interval);
                 }
             } else {
-                let stream_result = if service.is_none() {
-                    with_progress_spinner("Fetching logs", || {
-                        stream_logs_via_supervisor(true)
-                    })
-                } else {
+                let stream_result = with_progress_spinner("Statusing", || {
                     stream_logs_via_supervisor(true)
-                };
+                });
 
                 match stream_result {
                     Ok(()) => {}
