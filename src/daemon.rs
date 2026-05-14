@@ -4515,7 +4515,7 @@ mod tests {
         let pid_file = Arc::new(Mutex::new(PidFile::default()));
         let state_file = Arc::new(Mutex::new(ServiceStateFile::default()));
         let config = Config {
-            version: "1".into(),
+            version: crate::config::Version::V1,
             services,
             project_dir: Some(dir.to_string_lossy().to_string()),
             env: None,

@@ -1,7 +1,7 @@
 //! Configuration management for Systemg.
 use std::{
     collections::{BTreeSet, HashMap},
-    env, fs,
+    env, fmt, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -16,11 +16,94 @@ use crate::{
     metrics::{MetricsSettings, SpilloverSettings},
 };
 
+/// Current manifest schema version used by the runtime after migration.
+pub const CURRENT_MANIFEST_VERSION: Version = Version::V1;
+
+/// Supported manifest schema versions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Version {
+    /// Initial Systemg manifest schema.
+    V1,
+}
+
+impl Version {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "1" => Ok(Self::V1),
+            other => Err(format!(
+                "unsupported manifest version '{other}'; supported versions: 1"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::V1 => f.write_str("1"),
+        }
+    }
+}
+
+impl serde::Serialize for Version {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct VersionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for VersionVisitor {
+            type Value = Version;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a manifest version as a string or integer")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Version::parse(value).map_err(E::custom)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Version::parse(&value.to_string()).map_err(E::custom)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 0 {
+                    return Err(E::custom(format!(
+                        "unsupported manifest version '{value}'; supported versions: 1"
+                    )));
+                }
+                Version::parse(&value.to_string()).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(VersionVisitor)
+    }
+}
+
 /// Represents the structure of the configuration file.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// Configuration version.
-    pub version: String,
+    pub version: Version,
     /// Map of service names to their respective configurations.
     pub services: HashMap<String, ServiceConfig>,
     /// Root directory from which relative paths are resolved.
@@ -37,6 +120,56 @@ pub struct Config {
     /// Status and inspect snapshot collection configuration.
     #[serde(default)]
     pub status: StatusConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestHeader {
+    version: Version,
+}
+
+/// Version 1 manifest schema as accepted from YAML before migration.
+#[derive(Debug, Deserialize)]
+pub struct ConfigV1 {
+    /// Configuration version.
+    pub version: Version,
+    /// Map of service names to their respective configurations.
+    pub services: HashMap<String, ServiceConfig>,
+    /// Root directory from which relative paths are resolved.
+    pub project_dir: Option<String>,
+    /// Optional environment variables that apply to all services by default.
+    pub env: Option<EnvConfig>,
+    /// Metrics collection configuration.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
+    /// Service output logging defaults.
+    #[serde(default)]
+    pub logs: LogsConfig,
+    /// Status and inspect snapshot collection configuration.
+    #[serde(default)]
+    pub status: StatusConfig,
+}
+
+impl TryFrom<ConfigV1> for Config {
+    type Error = String;
+
+    fn try_from(value: ConfigV1) -> Result<Self, Self::Error> {
+        if value.version != Version::V1 {
+            return Err(format!(
+                "cannot migrate manifest version {} as version 1",
+                value.version
+            ));
+        }
+
+        Ok(Self {
+            version: CURRENT_MANIFEST_VERSION,
+            services: value.services,
+            project_dir: value.project_dir,
+            env: value.env,
+            metrics: value.metrics,
+            logs: value.logs,
+            status: value.status,
+        })
+    }
 }
 const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
 const METRICS_DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
@@ -909,6 +1042,18 @@ fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
     Ok(())
 }
 
+/// Parses a manifest using its declared schema version and migrates it to the
+/// current runtime configuration shape.
+pub fn parse_config_manifest(content: &str) -> Result<Config, serde_yaml::Error> {
+    let header: ManifestHeader = serde_yaml::from_str(content)?;
+    match header.version {
+        Version::V1 => {
+            let config: ConfigV1 = serde_yaml::from_str(content)?;
+            config.try_into().map_err(serde_yaml::Error::custom)
+        }
+    }
+}
+
 /// Loads and parses the configuration file, expanding environment variables.
 pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerError> {
     let config_path = config_path.map(Path::new).unwrap_or_else(|| {
@@ -926,8 +1071,8 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         ))
     })?;
 
-    let mut config: Config =
-        serde_yaml::from_str(&content).map_err(ProcessManagerError::ConfigParseError)?;
+    let mut config =
+        parse_config_manifest(&content).map_err(ProcessManagerError::ConfigParseError)?;
 
     let base_path = config_path
         .parent()
@@ -972,7 +1117,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
 
     let expanded_content = expand_env_vars(&content)?;
 
-    let mut config: Config = serde_yaml::from_str(&expanded_content)
+    let mut config = parse_config_manifest(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
 
     config.project_dir = Some(base_path.to_string_lossy().to_string());
@@ -991,6 +1136,107 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn parse_manifest_accepts_string_version() {
+        let config = parse_config_manifest(
+            r#"
+version: "1"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect("parse manifest");
+
+        assert_eq!(config.version, Version::V1);
+        assert_eq!(config.services["api"].command, "echo ok");
+    }
+
+    #[test]
+    fn parse_manifest_accepts_integer_version() {
+        let config = parse_config_manifest(
+            r#"
+version: 1
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect("parse manifest");
+
+        assert_eq!(config.version, Version::V1);
+        assert_eq!(config.services["api"].command, "echo ok");
+    }
+
+    #[test]
+    fn parse_manifest_rejects_missing_version() {
+        let err = parse_config_manifest(
+            r#"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect_err("missing version should fail");
+
+        assert!(err.to_string().contains("missing field `version`"));
+    }
+
+    #[test]
+    fn parse_manifest_rejects_unsupported_version() {
+        let err = parse_config_manifest(
+            r#"
+version: "2"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect_err("unsupported version should fail");
+
+        assert!(
+            err.to_string()
+                .contains("unsupported manifest version '2'; supported versions: 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn migrates_v1_manifest_to_current_config() {
+        let mut services = HashMap::new();
+        services.insert("api".into(), minimal_service(None));
+
+        let current = Config::try_from(ConfigV1 {
+            version: Version::V1,
+            services,
+            project_dir: Some("/tmp/systemg".into()),
+            env: Some(EnvConfig {
+                file: Some(".env".into()),
+                vars: Some(HashMap::from([("RUST_LOG".into(), "debug".into())])),
+            }),
+            metrics: MetricsConfig {
+                retention_minutes: 30,
+                ..MetricsConfig::default()
+            },
+            logs: LogsConfig {
+                sink: Some(LogSink::None),
+                ..LogsConfig::default()
+            },
+            status: StatusConfig {
+                snapshot_mode: StatusSnapshotMode::Detailed,
+                snapshot_interval_secs: 15,
+            },
+        })
+        .expect("migrate v1 config");
+
+        assert_eq!(current.version, CURRENT_MANIFEST_VERSION);
+        assert_eq!(current.project_dir.as_deref(), Some("/tmp/systemg"));
+        assert_eq!(current.services["api"].command, "echo ok");
+        assert_eq!(current.metrics.retention_minutes, 30);
+        assert_eq!(current.logs.sink, Some(LogSink::None));
+        assert_eq!(current.status.snapshot_mode, StatusSnapshotMode::Detailed);
+    }
 
     #[test]
     fn test_load_env_file() {
@@ -1105,7 +1351,7 @@ services:
         services.insert("c".into(), minimal_service(Some(vec!["b"])));
 
         let config = Config {
-            version: "1".into(),
+            version: Version::V1,
             services,
             project_dir: None,
             env: None,
@@ -1124,7 +1370,7 @@ services:
         services.insert("a".into(), minimal_service(Some(vec!["missing"])));
 
         let config = Config {
-            version: "1".into(),
+            version: Version::V1,
             services,
             project_dir: None,
             env: None,
@@ -1152,7 +1398,7 @@ services:
         services.insert("b".into(), minimal_service(Some(vec!["a"])));
 
         let config = Config {
-            version: "1".into(),
+            version: Version::V1,
             services,
             project_dir: None,
             env: None,

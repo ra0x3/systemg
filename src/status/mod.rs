@@ -2449,7 +2449,7 @@ services:
     fn build_snapshot_omits_orphaned_cron_units() {
         let services = std::collections::HashMap::new();
         let config = Config {
-            version: "1".into(),
+            version: crate::config::Version::V1,
             services,
             project_dir: None,
             env: None,
@@ -2509,7 +2509,7 @@ services:
         let hash = service.compute_hash();
         services.insert("demo".into(), service);
         let config = Config {
-            version: "1".into(),
+            version: crate::config::Version::V1,
             services,
             project_dir: None,
             env: None,

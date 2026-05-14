@@ -101,7 +101,7 @@ fn restart_updates_state_with_new_pid() {
     );
 
     let config = Config {
-        version: "1".to_string(),
+        version: systemg::config::Version::V1,
         services,
         project_dir: Some(temp.path().to_string_lossy().to_string()),
         env: None,

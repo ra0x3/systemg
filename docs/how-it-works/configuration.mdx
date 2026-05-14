@@ -374,3 +374,13 @@ Single-host zero-downtime options for alternating between two rollout slots (typ
 | `candidate_health_check` | object | Optional candidate verification check (`{slot}` supported in `url` or `command`) |
 | `switch_verify` | object | Optional post-switch verification check |
 | `state_path` | string | Optional persisted active-slot state file path |
+
+::::info Manifest schema migrations
+
+The top-level `version` field declares the manifest schema version. systemg accepts the current version as either a string or integer, so `version: "1"` and `version: 1` are equivalent.
+
+When upgrading systemg, the binary reads the declared manifest version first, then migrates supported older manifest schemas into the current runtime configuration before starting services. This compatibility step happens in memory; systemg does not rewrite your YAML file just because it can migrate it.
+
+When downgrading systemg, the older binary can only parse and migrate manifest versions it knows about. If a manifest has been updated to a newer schema, keep a copy of the previous manifest or convert it back to a version supported by the older binary before starting that older release.
+
+::::
