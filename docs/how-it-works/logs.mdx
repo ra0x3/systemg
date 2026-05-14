@@ -20,10 +20,17 @@ systemg writes internal operational logs and can optionally capture service stdo
 
 Service output uses the same directory:
 
-- `{service}_stdout.log`
-- `{service}_stderr.log`
+- `{service}.log`
 
-By default, systemg pipes each managed service's stdout and stderr into background log-writer threads and persists a copy to those files. `sysg logs` reads those stored files; it does not attach to the original process streams.
+By default, systemg pipes each managed service's stdout and stderr into reader
+threads, then writes both streams through one per-service writer into
+`{service}.log`. `sysg logs` reads that stored file; it does not attach to the
+original process streams.
+
+> **Info:** The default service log is stacked in capture order. Each line gets
+> a systemg UTC capture timestamp plus a stream label, such as `stdout` or
+> `stderr`, so `sysg logs --kind stderr` can filter recent lines without needing
+> a second stderr file.
 
 ## Service output configuration
 

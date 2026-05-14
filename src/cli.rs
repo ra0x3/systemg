@@ -68,12 +68,11 @@ impl FromStr for LogLevelArg {
 }
 
 /// Type of logs to display.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogKind {
     /// Standard output logs
     Stdout,
     /// Standard error logs
-    #[default]
     Stderr,
     /// Supervisor logs
     Supervisor,
@@ -295,9 +294,9 @@ pub enum Commands {
         #[arg(short, long, default_value = "50")]
         lines: usize,
 
-        /// Kind of logs to show: stdout, stderr, or supervisor (default: stderr).
-        #[arg(short = 'k', long, default_value_t = LogKind::default())]
-        kind: LogKind,
+        /// Kind of logs to show: stdout, stderr, or supervisor. Defaults to stdout+stderr.
+        #[arg(short = 'k', long)]
+        kind: Option<LogKind>,
 
         /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
         #[arg(long, value_name = "DURATION")]

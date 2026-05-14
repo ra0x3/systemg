@@ -4,7 +4,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
-    io::{BufRead, BufReader, ErrorKind},
+    io::{BufRead, BufReader, ErrorKind, Read},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -39,7 +39,7 @@ use crate::{
         STATE_FILE_NAME,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
-    logs::{resolve_log_path, spawn_log_writer_with_config},
+    logs::{resolve_log_path, spawn_service_log_writers},
     runtime,
     spawn::SpawnedExit,
 };
@@ -1990,16 +1990,8 @@ impl Daemon {
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
 
-                if let Some(out) = stdout {
-                    spawn_log_writer_with_config(
-                        service_name,
-                        out,
-                        "stdout",
-                        log_settings,
-                    );
-                }
-                if let Some(err) = stderr {
-                    if pipe_stderr {
+                if pipe_stderr {
+                    if let Some(err) = stderr {
                         use std::{
                             io::{self, BufRead, BufReader, Write},
                             thread,
@@ -2018,14 +2010,14 @@ impl Daemon {
                                 let _ = stdout.flush();
                             }
                         });
-                    } else {
-                        spawn_log_writer_with_config(
-                            service_name,
-                            err,
-                            "stderr",
-                            log_settings,
-                        );
                     }
+                } else {
+                    spawn_service_log_writers(
+                        service_name,
+                        stdout.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
+                        stderr.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
+                        log_settings,
+                    );
                 }
 
                 processes.lock()?.insert(service_name.to_string(), child);

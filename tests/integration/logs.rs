@@ -289,6 +289,99 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+fn logs_default_reads_combined_stdout_stderr_in_capture_order() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/sleep 30"
+"#,
+    )
+    .expect("write config");
+
+    let config =
+        load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
+    let hash = config
+        .services
+        .get("demo")
+        .expect("demo service")
+        .compute_hash();
+
+    let mut child = StdCommand::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn sleep");
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::Running,
+            Some(child.id()),
+            None,
+            None,
+        )
+        .expect("persist state");
+
+    let log_dir = home.join(".local/share/systemg/logs");
+    fs::create_dir_all(&log_dir).expect("make log dir");
+    fs::write(
+        log_dir.join("demo.log"),
+        "2026-05-14T02:00:00.000000Z stdout first\n\
+2026-05-14T02:00:00.000001Z stderr second\n\
+2026-05-14T02:00:00.000002Z stdout third\n",
+    )
+    .expect("write combined log");
+    fs::write(log_dir.join("demo_stdout.log"), "stdout-only\n")
+        .expect("write stdout log");
+    fs::write(log_dir.join("demo_stderr.log"), "stderr-only\n")
+        .expect("write stderr log");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
+    let output = cmd
+        .env("SYSTEMG_TAIL_MODE", "oneshot")
+        .arg("logs")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--service")
+        .arg("demo")
+        .arg("--lines")
+        .arg("3")
+        .output()
+        .expect("run sysg logs");
+
+    assert!(
+        output.status.success(),
+        "sysg logs should succeed, stderr was: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_idx = stdout.find("stdout first").expect("first combined line");
+    let second_idx = stdout.find("stderr second").expect("second combined line");
+    let third_idx = stdout.find("stdout third").expect("third combined line");
+
+    assert!(first_idx < second_idx);
+    assert!(second_idx < third_idx);
+    assert!(!stdout.contains("stdout-only"));
+    assert!(!stdout.contains("stderr-only"));
+
+    let _ = child.kill();
+    let _ = child.wait();
+    unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn logs_without_service_groups_running_before_offline() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();

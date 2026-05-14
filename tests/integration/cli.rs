@@ -18,13 +18,13 @@ use systemg::daemon::PidFile;
 use tempfile::tempdir;
 
 #[test]
-fn logs_help_reports_stderr_default() {
+fn logs_help_reports_combined_default() {
     Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
         .arg("logs")
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicates::str::contains("default: stderr"))
+        .stdout(predicates::str::contains("Defaults to stdout+stderr"))
         .stdout(predicates::str::contains("Tail stored service output logs"));
 }
 

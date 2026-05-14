@@ -1,13 +1,12 @@
 //! Module for managing and displaying logs of system services.
 //!
-//! This module treats stderr as the primary log stream. Service output to stderr is logged
-//! at debug level while stdout is logged at warn level to ensure stderr messages have priority
-//! in the supervisor's log output.
+//! Service output is captured into one canonical per-service log, with each line
+//! tagged by capture timestamp and source stream.
 use std::{
     collections::BTreeSet,
     env,
     fs::{self, File, OpenOptions},
-    io::{IsTerminal, Read, Seek, SeekFrom, Write},
+    io::{BufWriter, IsTerminal, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, mpsc, mpsc::RecvTimeoutError},
     thread,
@@ -49,7 +48,49 @@ impl LogSection {
     }
 }
 
-/// Returns the path to the log file for a given service and kind (stdout or stderr).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Captured service output stream.
+enum LogStream {
+    /// Standard output.
+    Stdout,
+    /// Standard error.
+    Stderr,
+    /// Canonical merged stdout/stderr stream.
+    Combined,
+}
+
+impl LogStream {
+    /// Returns the stable persisted label.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Combined => "combined",
+        }
+    }
+
+    /// Parses a stream filter.
+    fn from_filter(kind: &str) -> Option<Self> {
+        match kind {
+            "stdout" => Some(Self::Stdout),
+            "stderr" => Some(Self::Stderr),
+            _ => None,
+        }
+    }
+}
+
+impl From<LogStream> for &'static str {
+    fn from(stream: LogStream) -> Self {
+        stream.as_str()
+    }
+}
+
+/// Returns the path to the canonical service log file.
+pub fn get_service_log_path(service: &str) -> PathBuf {
+    resolve_combined_log_path(service)
+}
+
+/// Returns the legacy path to the log file for a given service and kind.
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     resolve_log_path(service, kind)
 }
@@ -58,6 +99,13 @@ pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
 fn canonical_log_path(service: &str, kind: &str) -> PathBuf {
     let mut path = runtime::log_dir();
     path.push(format!("{service}_{kind}.log"));
+    path
+}
+
+/// Returns the canonical stdout/stderr log path for a service.
+fn canonical_combined_log_path(service: &str) -> PathBuf {
+    let mut path = runtime::log_dir();
+    path.push(format!("{service}.log"));
     path
 }
 
@@ -102,8 +150,8 @@ fn live_log_registry()
 }
 
 /// Appends new live log bytes for a service stream and notifies subscribers.
-fn append_live_log_chunk(service: &str, kind: &str, chunk: &[u8]) {
-    let key = (service.to_string(), kind.to_string());
+fn append_live_log_chunk(service: &str, stream: LogStream, chunk: &[u8]) {
+    let key = (service.to_string(), stream.as_str().to_string());
     if let Ok(mut registry) = live_log_registry().lock() {
         let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
         entry.append(chunk);
@@ -111,8 +159,8 @@ fn append_live_log_chunk(service: &str, kind: &str, chunk: &[u8]) {
 }
 
 /// Returns the buffered live log bytes for a service stream, if any.
-fn snapshot_live_log(service: &str, kind: &str) -> Option<Vec<u8>> {
-    let key = (service.to_string(), kind.to_string());
+fn snapshot_live_log(service: &str, stream: LogStream) -> Option<Vec<u8>> {
+    let key = (service.to_string(), stream.as_str().to_string());
     live_log_registry()
         .lock()
         .ok()
@@ -120,9 +168,9 @@ fn snapshot_live_log(service: &str, kind: &str) -> Option<Vec<u8>> {
 }
 
 /// Registers a subscriber for future live log chunks on a service stream.
-fn subscribe_live_log(service: &str, kind: &str) -> mpsc::Receiver<Vec<u8>> {
+fn subscribe_live_log(service: &str, stream: LogStream) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
-    let key = (service.to_string(), kind.to_string());
+    let key = (service.to_string(), stream.as_str().to_string());
     if let Ok(mut registry) = live_log_registry().lock() {
         let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
         entry.subscribers.push(tx);
@@ -197,6 +245,39 @@ fn locate_existing_log(service: &str, kind: &str) -> Option<PathBuf> {
     None
 }
 
+/// Locates an existing merged service log.
+fn locate_existing_combined_log(service: &str) -> Option<PathBuf> {
+    let canonical = canonical_combined_log_path(service);
+    let directory = canonical.parent()?;
+    let needle = normalize(service);
+
+    let entries = fs::read_dir(directory).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let file_name = path.file_name()?.to_str()?;
+        if file_name == "supervisor.log"
+            || file_name.ends_with("_stdout.log")
+            || file_name.ends_with("_stderr.log")
+            || !file_name.ends_with(".log")
+        {
+            continue;
+        }
+
+        if let Some(service_name) = file_name.strip_suffix(".log")
+            && normalize(service_name) == needle
+        {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 /// Attempts to resolve an on-disk log path for the given service and kind, falling back to the
 /// canonical location when no existing file can be found.
 pub fn resolve_log_path(service: &str, kind: &str) -> PathBuf {
@@ -206,6 +287,16 @@ pub fn resolve_log_path(service: &str, kind: &str) -> PathBuf {
     }
 
     locate_existing_log(service, kind).unwrap_or(canonical)
+}
+
+/// Attempts to resolve an on-disk merged log path for the given service.
+fn resolve_combined_log_path(service: &str) -> PathBuf {
+    let canonical = canonical_combined_log_path(service);
+    if canonical.exists() {
+        return canonical;
+    }
+
+    locate_existing_combined_log(service).unwrap_or(canonical)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +323,7 @@ impl TailMode {
         lines: usize,
         stdout_path: &Path,
         stderr_path: &Path,
+        combined_path: &Path,
         kind: Option<&str>,
     ) {
         cmd.arg("-n").arg(lines.to_string());
@@ -241,13 +333,25 @@ impl TailMode {
 
         match kind {
             Some("stdout") => {
-                cmd.arg(stdout_path);
+                if combined_path.exists() {
+                    cmd.arg(combined_path);
+                } else {
+                    cmd.arg(stdout_path);
+                }
             }
             Some("stderr") => {
-                cmd.arg(stderr_path);
+                if combined_path.exists() {
+                    cmd.arg(combined_path);
+                } else {
+                    cmd.arg(stderr_path);
+                }
             }
             _ => {
-                cmd.arg(stdout_path).arg(stderr_path);
+                if combined_path.exists() {
+                    cmd.arg(combined_path);
+                } else {
+                    cmd.arg(stdout_path).arg(stderr_path);
+                }
             }
         }
     }
@@ -351,6 +455,68 @@ fn rotate_log_file(path: &Path, max_files: usize) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Append-only log file that applies systemg rotation limits.
+struct ActiveLogFile {
+    path: PathBuf,
+    file: BufWriter<File>,
+    active_len: u64,
+    settings: EffectiveLogsConfig,
+}
+
+impl ActiveLogFile {
+    /// Opens an active log file.
+    fn open(path: PathBuf, settings: EffectiveLogsConfig) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let raw_file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let active_len = raw_file.metadata().map(|meta| meta.len()).unwrap_or(0);
+        Ok(Self {
+            path,
+            file: BufWriter::new(raw_file),
+            active_len,
+            settings,
+        })
+    }
+
+    /// Writes one already-formatted log line.
+    fn write_line(&mut self, line: &[u8]) -> std::io::Result<()> {
+        if self.settings.max_bytes > 0
+            && self.active_len > 0
+            && self.active_len.saturating_add(line.len() as u64) > self.settings.max_bytes
+        {
+            self.file.flush()?;
+            rotate_log_file(&self.path, self.settings.max_files)?;
+            let raw_file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            self.file = BufWriter::new(raw_file);
+            self.active_len = 0;
+        }
+
+        self.file.write_all(line)?;
+        self.active_len = self.active_len.saturating_add(line.len() as u64);
+        Ok(())
+    }
+
+    /// Flushes the active file.
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// Returns the current capture timestamp for persisted service output.
+fn capture_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
+/// Formats a captured stdout/stderr line.
+fn format_captured_log_line(kind: &str, line: &[u8]) -> Vec<u8> {
+    let line = String::from_utf8_lossy(line);
+    format!("{} {} {}\n", capture_timestamp(), kind, line).into_bytes()
+}
+
 #[cfg(target_os = "linux")]
 /// Handles process fds present.
 fn process_fds_present(pid: u32) -> bool {
@@ -365,24 +531,28 @@ fn process_fds_present(pid: u32) -> bool {
 fn resolve_tail_targets(
     service_name: &str,
     pid: Option<u32>,
-) -> Result<(PathBuf, PathBuf), LogsManagerError> {
+) -> Result<(PathBuf, PathBuf, PathBuf), LogsManagerError> {
     let stdout_path = resolve_log_path(service_name, "stdout");
     let stderr_path = resolve_log_path(service_name, "stderr");
+    let combined_path = resolve_combined_log_path(service_name);
 
     let stdout_exists = stdout_path.exists();
     let stderr_exists = stderr_path.exists();
 
-    if !stdout_exists {
+    if !combined_path.exists() && !stdout_exists {
         touch_log_file(&stdout_path);
     }
-    if !stderr_exists {
+    if !combined_path.exists() && !stderr_exists {
         touch_log_file(&stderr_path);
     }
 
     #[cfg(target_os = "linux")]
     {
         if let Some(pid_value) = pid
-            && !(stdout_exists || stderr_exists || process_fds_present(pid_value))
+            && !(combined_path.exists()
+                || stdout_exists
+                || stderr_exists
+                || process_fds_present(pid_value))
         {
             return Err(LogsManagerError::LogUnavailable(pid_value));
         }
@@ -391,7 +561,7 @@ fn resolve_tail_targets(
     #[cfg(not(target_os = "linux"))]
     let _ = pid;
 
-    Ok((stdout_path, stderr_path))
+    Ok((stdout_path, stderr_path, combined_path))
 }
 
 /// Writes the standard service log header into the provided writer.
@@ -528,20 +698,166 @@ fn tail_log_file(path: &Path, lines: usize) -> Result<Vec<u8>, LogsManagerError>
     Ok(tail_log_bytes(&bytes, lines))
 }
 
+/// Returns whether a captured canonical service log line belongs to `kind`.
+fn captured_log_line_matches_kind(line: &[u8], kind: &str) -> bool {
+    let Some(stream) = LogStream::from_filter(kind) else {
+        return false;
+    };
+    let Some(first_space) = line.iter().position(|byte| *byte == b' ') else {
+        return false;
+    };
+    let rest = &line[first_space + 1..];
+    rest.strip_prefix(stream.as_str().as_bytes())
+        .is_some_and(|remaining| remaining.first() == Some(&b' '))
+}
+
+/// Returns the last `lines` canonical log lines matching a stream kind.
+fn tail_log_file_filtered(
+    path: &Path,
+    lines: usize,
+    kind: &str,
+) -> Result<Vec<u8>, LogsManagerError> {
+    if lines == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut file = File::open(path)?;
+    let mut remaining = file.metadata()?.len();
+    let mut bytes = Vec::new();
+
+    while remaining > 0 {
+        let chunk_len = remaining.min(LOG_TAIL_CHUNK_SIZE);
+        remaining -= chunk_len;
+
+        file.seek(SeekFrom::Start(remaining))?;
+        let mut chunk = vec![0_u8; chunk_len as usize];
+        file.read_exact(&mut chunk)?;
+
+        chunk.extend_from_slice(&bytes);
+        bytes = chunk;
+
+        let matching_count = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| captured_log_line_matches_kind(line, kind))
+            .count();
+        if matching_count > lines {
+            break;
+        }
+    }
+
+    let mut matching = bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| captured_log_line_matches_kind(line.trim_ascii_end(), kind))
+        .map(Vec::from)
+        .collect::<Vec<_>>();
+
+    if matching.len() > lines {
+        matching.drain(..matching.len() - lines);
+    }
+
+    Ok(matching.concat())
+}
+
+/// Filters canonical captured log bytes by stream kind.
+fn filter_captured_log_bytes(bytes: &[u8], kind: &str) -> Vec<u8> {
+    bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| captured_log_line_matches_kind(line.trim_ascii_end(), kind))
+        .flat_map(|line| line.iter().copied())
+        .collect()
+}
+
+/// Follows a canonical service log while emitting only the requested stream.
+fn follow_filtered_log_file(
+    mut writer: impl Write,
+    path: &Path,
+    lines: usize,
+    stream: LogStream,
+) -> Result<(), LogsManagerError> {
+    writer.write_all(&tail_log_file_filtered(path, lines, stream.as_str())?)?;
+    writer.flush()?;
+
+    let mut offset = fs::metadata(path)?.len();
+    let mut pending = Vec::new();
+
+    loop {
+        thread::sleep(Duration::from_millis(250));
+
+        let current_len = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                offset = 0;
+                pending.clear();
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        if current_len < offset {
+            offset = 0;
+            pending.clear();
+        }
+
+        if current_len == offset {
+            continue;
+        }
+
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut chunk = Vec::with_capacity((current_len - offset) as usize);
+        file.read_to_end(&mut chunk)?;
+        offset = current_len;
+        pending.extend_from_slice(&chunk);
+
+        while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = pending.drain(..=newline_pos).collect::<Vec<_>>();
+            if captured_log_line_matches_kind(line.trim_ascii_end(), stream.as_str()) {
+                writer.write_all(&line)?;
+                writer.flush()?;
+            }
+        }
+    }
+}
+
 /// Writes the selected one-shot log tails to a writer.
 fn write_log_file_tail(
     mut writer: impl Write,
     stdout_path: &Path,
     stderr_path: &Path,
+    combined_path: &Path,
     lines: usize,
     kind: Option<&str>,
 ) -> Result<(), LogsManagerError> {
-    match kind {
-        Some("stdout") => writer.write_all(&tail_log_file(stdout_path, lines)?)?,
-        Some("stderr") => writer.write_all(&tail_log_file(stderr_path, lines)?)?,
+    match kind.and_then(LogStream::from_filter) {
+        Some(LogStream::Stdout) => {
+            if combined_path.exists() {
+                writer.write_all(&tail_log_file_filtered(
+                    combined_path,
+                    lines,
+                    LogStream::Stdout.as_str(),
+                )?)?;
+            } else {
+                writer.write_all(&tail_log_file(stdout_path, lines)?)?;
+            }
+        }
+        Some(LogStream::Stderr) => {
+            if combined_path.exists() {
+                writer.write_all(&tail_log_file_filtered(
+                    combined_path,
+                    lines,
+                    LogStream::Stderr.as_str(),
+                )?)?;
+            } else {
+                writer.write_all(&tail_log_file(stderr_path, lines)?)?;
+            }
+        }
         _ => {
-            writer.write_all(&tail_log_file(stdout_path, lines)?)?;
-            writer.write_all(&tail_log_file(stderr_path, lines)?)?;
+            if combined_path.exists() {
+                writer.write_all(&tail_log_file(combined_path, lines)?)?;
+            } else {
+                writer.write_all(&tail_log_file(stdout_path, lines)?)?;
+                writer.write_all(&tail_log_file(stderr_path, lines)?)?;
+            }
         }
     }
     writer.flush()?;
@@ -608,21 +924,22 @@ fn flush_remaining_forwarded_line(
     forward_prefixed_line(service_label, &line, echo_to_terminal);
 }
 
-/// Copies a service output stream into the service log file while forwarding completed lines.
-fn stream_service_log(
-    path: &Path,
+/// A completed service output line received by the canonical log writer.
+struct ServiceLogLine {
+    stream: LogStream,
+    line: Vec<u8>,
+}
+
+/// Reads one service output stream and sends completed lines to the canonical writer.
+fn read_service_log_stream(
     service_label: &str,
-    kind: &str,
+    stream: LogStream,
     mut reader: impl Read,
-    settings: EffectiveLogsConfig,
+    sender: mpsc::Sender<ServiceLogLine>,
 ) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let mut active_len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     let mut buffer = [0_u8; 8192];
     let mut pending = Vec::new();
+    let mut forward_pending = Vec::new();
     let echo_to_terminal = std::io::stderr().is_terminal();
 
     loop {
@@ -632,24 +949,48 @@ fn stream_service_log(
         }
 
         let chunk = &buffer[..bytes_read];
-        if settings.max_bytes > 0
-            && active_len > 0
-            && active_len.saturating_add(chunk.len() as u64) > settings.max_bytes
-        {
-            file.flush()?;
-            drop(file);
-            rotate_log_file(path, settings.max_files)?;
-            file = OpenOptions::new().create(true).append(true).open(path)?;
-            active_len = 0;
-        }
-        file.write_all(chunk)?;
-        active_len = active_len.saturating_add(chunk.len() as u64);
-        append_live_log_chunk(service_label, kind, chunk);
         pending.extend_from_slice(chunk);
-        flush_forwarded_lines(&mut pending, service_label, echo_to_terminal);
+        forward_pending.extend_from_slice(chunk);
+        while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
+            let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
+            if matches!(line.last(), Some(b'\n')) {
+                line.pop();
+            }
+            if matches!(line.last(), Some(b'\r')) {
+                line.pop();
+            }
+
+            let _ = sender.send(ServiceLogLine { stream, line });
+        }
+        flush_forwarded_lines(&mut forward_pending, service_label, echo_to_terminal);
     }
 
-    flush_remaining_forwarded_line(&mut pending, service_label, echo_to_terminal);
+    if !pending.is_empty() {
+        let _ = sender.send(ServiceLogLine {
+            stream,
+            line: pending.clone(),
+        });
+    }
+
+    flush_remaining_forwarded_line(&mut forward_pending, service_label, echo_to_terminal);
+    Ok(())
+}
+
+/// Writes all service output streams into one canonical append-only service log.
+fn write_service_log(
+    service_label: &str,
+    path: PathBuf,
+    receiver: mpsc::Receiver<ServiceLogLine>,
+    settings: EffectiveLogsConfig,
+) -> std::io::Result<()> {
+    let mut file = ActiveLogFile::open(path, settings)?;
+
+    for message in receiver {
+        let formatted = format_captured_log_line(message.stream.as_str(), &message.line);
+        file.write_line(&formatted)?;
+        append_live_log_chunk(service_label, LogStream::Combined, &formatted);
+    }
+
     file.flush()
 }
 
@@ -717,23 +1058,79 @@ pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind:
     spawn_log_writer_with_config(service, reader, kind, EffectiveLogsConfig::default());
 }
 
-/// Spawns a thread to write logs using an explicit logging policy.
+/// Spawns a legacy single-stream writer through the canonical service log.
 pub fn spawn_log_writer_with_config(
     service: &str,
     reader: impl Read + Send + 'static,
     kind: &str,
     settings: EffectiveLogsConfig,
 ) {
-    let path = get_log_path(service, kind);
-    let service_label = service.to_string();
-    let kind_label = kind.to_string();
-    thread::spawn(move || {
-        if let Err(err) =
-            stream_service_log(&path, &service_label, &kind_label, reader, settings)
-        {
-            eprintln!("Warning: Unable to write log file at {:?}: {}", path, err);
+    let reader = Box::new(reader) as Box<dyn Read + Send>;
+    match LogStream::from_filter(kind) {
+        Some(LogStream::Stdout) => {
+            spawn_service_log_writers(service, Some(reader), None, settings)
         }
-    });
+        Some(LogStream::Stderr) => {
+            spawn_service_log_writers(service, None, Some(reader), settings)
+        }
+        _ => spawn_service_log_writers(service, Some(reader), None, settings),
+    }
+}
+
+/// Spawns one canonical writer for a service's stdout and stderr streams.
+pub fn spawn_service_log_writers(
+    service: &str,
+    stdout: Option<Box<dyn Read + Send>>,
+    stderr: Option<Box<dyn Read + Send>>,
+    settings: EffectiveLogsConfig,
+) {
+    let path = get_service_log_path(service);
+    let service_label = service.to_string();
+    let (sender, receiver) = mpsc::channel();
+
+    {
+        let service_label = service_label.clone();
+        let path = path.clone();
+        thread::spawn(move || {
+            if let Err(err) =
+                write_service_log(&service_label, path.clone(), receiver, settings)
+            {
+                eprintln!(
+                    "Warning: Unable to write service log file at {:?}: {}",
+                    path, err
+                );
+            }
+        });
+    }
+
+    if let Some(stdout) = stdout {
+        let service_label = service_label.clone();
+        let sender = sender.clone();
+        thread::spawn(move || {
+            if let Err(err) =
+                read_service_log_stream(&service_label, LogStream::Stdout, stdout, sender)
+            {
+                eprintln!(
+                    "Warning: Unable to read stdout for [{}]: {}",
+                    service_label, err
+                );
+            }
+        });
+    }
+
+    if let Some(stderr) = stderr {
+        let service_label = service_label.clone();
+        thread::spawn(move || {
+            if let Err(err) =
+                read_service_log_stream(&service_label, LogStream::Stderr, stderr, sender)
+            {
+                eprintln!(
+                    "Warning: Unable to read stderr for [{}]: {}",
+                    service_label, err
+                );
+            }
+        });
+    }
 }
 
 /// Spawns a thread to capture and log output from dynamically spawned child processes.
@@ -883,23 +1280,38 @@ impl LogManager {
         } else {
             TailMode::OneShot
         };
-        if matches!(kind, Some("stdout") | Some("stderr")) {
-            let kind_name = kind.unwrap_or("stdout");
-            if let Some(snapshot) = snapshot_live_log(service_name, kind_name)
-                && !snapshot.is_empty()
-            {
-                write_log_header(stream.try_clone()?, service_name, pid)?;
-                let mut socket = stream.try_clone()?;
-                let tail = tail_log_bytes(&snapshot, lines);
-                if !tail.is_empty() {
-                    socket.write_all(&tail)?;
-                    socket.flush()?;
-                }
-                if matches!(mode, TailMode::Follow) {
-                    let receiver = subscribe_live_log(service_name, kind_name);
-                    loop {
-                        match receiver.recv_timeout(Duration::from_millis(250)) {
-                            Ok(chunk) => match socket.write_all(&chunk) {
+        if let Some(snapshot) = (kind.is_none()
+            || kind.and_then(LogStream::from_filter).is_some())
+        .then(|| snapshot_live_log(service_name, LogStream::Combined))
+        .flatten()
+            && !snapshot.is_empty()
+        {
+            write_log_header(stream.try_clone()?, service_name, pid)?;
+            let mut socket = stream.try_clone()?;
+            let snapshot = match kind {
+                Some(kind_name) => filter_captured_log_bytes(&snapshot, kind_name),
+                None => snapshot,
+            };
+            let tail = tail_log_bytes(&snapshot, lines);
+            if !tail.is_empty() {
+                socket.write_all(&tail)?;
+                socket.flush()?;
+            }
+            if matches!(mode, TailMode::Follow) {
+                let receiver = subscribe_live_log(service_name, LogStream::Combined);
+                loop {
+                    match receiver.recv_timeout(Duration::from_millis(250)) {
+                        Ok(chunk) => {
+                            let chunk = match kind {
+                                Some(kind_name) => {
+                                    filter_captured_log_bytes(&chunk, kind_name)
+                                }
+                                None => chunk,
+                            };
+                            if chunk.is_empty() {
+                                continue;
+                            }
+                            match socket.write_all(&chunk) {
                                 Ok(()) => {
                                     socket.flush()?;
                                 }
@@ -913,18 +1325,18 @@ impl LogManager {
                                     break;
                                 }
                                 Err(err) => return Err(err.into()),
-                            },
-                            Err(RecvTimeoutError::Timeout) => {
-                                if socket_peer_disconnected(&socket) {
-                                    break;
-                                }
                             }
-                            Err(RecvTimeoutError::Disconnected) => break,
                         }
+                        Err(RecvTimeoutError::Timeout) => {
+                            if socket_peer_disconnected(&socket) {
+                                break;
+                            }
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
-                return Ok(());
             }
+            return Ok(());
         }
         self.stream_logs_platform_with_mode(service_name, pid, lines, kind, mode, stream)
     }
@@ -933,11 +1345,14 @@ impl LogManager {
     pub fn clear_service_logs(&self, service_name: &str) -> Result<(), LogsManagerError> {
         let stdout_path = resolve_log_path(service_name, "stdout");
         let stderr_path = resolve_log_path(service_name, "stderr");
+        let combined_path = resolve_combined_log_path(service_name);
 
         truncate_log_file(&stdout_path)?;
         truncate_log_file(&stderr_path)?;
+        truncate_log_file(&combined_path)?;
         remove_rotated_log_files(&stdout_path)?;
         remove_rotated_log_files(&stderr_path)?;
+        remove_rotated_log_files(&combined_path)?;
 
         Ok(())
     }
@@ -960,6 +1375,9 @@ impl LogManager {
             if file_name == "supervisor.log"
                 || file_name.ends_with("_stdout.log")
                 || file_name.ends_with("_stderr.log")
+                || (file_name.ends_with(".log")
+                    && !file_name.contains("_stdout.log")
+                    && !file_name.contains("_stderr.log"))
             {
                 truncate_log_file(&path)?;
                 remove_rotated_log_files(&path)?;
@@ -994,7 +1412,8 @@ impl LogManager {
             "-"
         );
 
-        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
+        let (stdout_path, stderr_path, combined_path) =
+            resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
@@ -1003,8 +1422,20 @@ impl LogManager {
                 std::io::stdout().lock(),
                 &stdout_path,
                 &stderr_path,
+                &combined_path,
                 lines,
                 kind,
+            );
+        }
+
+        if combined_path.exists()
+            && let Some(stream) = kind.and_then(LogStream::from_filter)
+        {
+            return follow_filtered_log_file(
+                std::io::stdout().lock(),
+                &combined_path,
+                lines,
+                stream,
             );
         }
 
@@ -1020,7 +1451,14 @@ impl LogManager {
                 );
             }
         }
-        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
+        mode.configure_command(
+            &mut cmd,
+            lines,
+            &stdout_path,
+            &stderr_path,
+            &combined_path,
+            kind,
+        );
         cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
 
@@ -1045,7 +1483,8 @@ impl LogManager {
     ) -> Result<(), LogsManagerError> {
         write_log_header(stream.try_clone()?, service_name, pid)?;
 
-        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
+        let (stdout_path, stderr_path, combined_path) =
+            resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via supervisor tail for '{}'", service_name);
 
@@ -1054,8 +1493,20 @@ impl LogManager {
                 stream.try_clone()?,
                 &stdout_path,
                 &stderr_path,
+                &combined_path,
                 lines,
                 kind,
+            );
+        }
+
+        if combined_path.exists()
+            && let Some(stream_filter) = kind.and_then(LogStream::from_filter)
+        {
+            return follow_filtered_log_file(
+                stream.try_clone()?,
+                &combined_path,
+                lines,
+                stream_filter,
             );
         }
 
@@ -1068,7 +1519,14 @@ impl LogManager {
                 service_name
             );
         }
-        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
+        mode.configure_command(
+            &mut cmd,
+            lines,
+            &stdout_path,
+            &stderr_path,
+            &combined_path,
+            kind,
+        );
 
         let stdout_stream = stream.try_clone()?;
         let stderr_stream = stream.try_clone()?;
@@ -1106,7 +1564,8 @@ impl LogManager {
             "-"
         );
 
-        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
+        let (stdout_path, stderr_path, combined_path) =
+            resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
@@ -1115,13 +1574,32 @@ impl LogManager {
                 std::io::stdout().lock(),
                 &stdout_path,
                 &stderr_path,
+                &combined_path,
                 lines,
                 kind,
             );
         }
 
+        if combined_path.exists()
+            && let Some(stream) = kind.and_then(LogStream::from_filter)
+        {
+            return follow_filtered_log_file(
+                std::io::stdout().lock(),
+                &combined_path,
+                lines,
+                stream,
+            );
+        }
+
         let mut cmd = Command::new("tail");
-        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
+        mode.configure_command(
+            &mut cmd,
+            lines,
+            &stdout_path,
+            &stderr_path,
+            &combined_path,
+            kind,
+        );
         cmd.stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit());
 
@@ -1146,7 +1624,8 @@ impl LogManager {
     ) -> Result<(), LogsManagerError> {
         write_log_header(stream.try_clone()?, service_name, pid)?;
 
-        let (stdout_path, stderr_path) = resolve_tail_targets(service_name, pid)?;
+        let (stdout_path, stderr_path, combined_path) =
+            resolve_tail_targets(service_name, pid)?;
 
         debug!("Streaming logs via supervisor tail for '{}'", service_name);
 
@@ -1155,13 +1634,32 @@ impl LogManager {
                 stream.try_clone()?,
                 &stdout_path,
                 &stderr_path,
+                &combined_path,
                 lines,
                 kind,
             );
         }
 
+        if combined_path.exists()
+            && let Some(stream_filter) = kind.and_then(LogStream::from_filter)
+        {
+            return follow_filtered_log_file(
+                stream.try_clone()?,
+                &combined_path,
+                lines,
+                stream_filter,
+            );
+        }
+
         let mut cmd = Command::new("tail");
-        mode.configure_command(&mut cmd, lines, &stdout_path, &stderr_path, kind);
+        mode.configure_command(
+            &mut cmd,
+            lines,
+            &stdout_path,
+            &stderr_path,
+            &combined_path,
+            kind,
+        );
 
         let stdout_stream = stream.try_clone()?;
         let stderr_stream = stream.try_clone()?;
@@ -1221,14 +1719,12 @@ impl LogManager {
             "─".repeat(67)
         );
 
-        if matches!(kind, None | Some("supervisor")) {
+        if matches!(kind, Some("supervisor")) {
             let _ = self.show_supervisor_log(lines).map_err(|err| {
                 eprintln!("Failed to show supervisor logs: {}", err);
             });
 
-            if kind == Some("supervisor") {
-                return Ok(());
-            }
+            return Ok(());
         }
 
         let pid_snapshot = {
@@ -1491,9 +1987,10 @@ mod tests {
 
         thread::sleep(Duration::from_millis(100));
 
-        let log_path = get_log_path("svc", "stdout");
-        let contents = fs::read(&log_path).expect("service log should be written");
-        assert_eq!(contents, b"partial line");
+        let log_path = get_service_log_path("svc");
+        let contents =
+            fs::read_to_string(&log_path).expect("service log should be written");
+        assert!(contents.contains(" stdout partial line\n"));
 
         unsafe {
             if let Some(home) = original_home {
@@ -1527,9 +2024,11 @@ mod tests {
 
         thread::sleep(Duration::from_millis(100));
 
-        let log_path = get_log_path("svc", "stderr");
-        let contents = fs::read(&log_path).expect("service log should be written");
-        assert_eq!(contents, vec![0xff, b'a', b'\n']);
+        let log_path = get_service_log_path("svc");
+        let contents =
+            fs::read_to_string(&log_path).expect("service log should be written");
+        assert!(contents.contains(" stderr "));
+        assert!(contents.contains("a\n"));
 
         unsafe {
             if let Some(home) = original_home {
@@ -1564,7 +2063,7 @@ mod tests {
             max_bytes: 6,
             max_files: 1,
         };
-        let log_path = get_log_path("svc", "stdout");
+        let log_path = get_service_log_path("svc");
         fs::create_dir_all(log_path.parent().expect("log parent")).unwrap();
         fs::write(&log_path, "first\n").unwrap();
         super::spawn_log_writer_with_config(
@@ -1580,7 +2079,7 @@ mod tests {
         let rotated = fs::read_to_string(rotated_log_path(&log_path, 1))
             .expect("rotated log exists");
         assert_eq!(rotated, "first\n");
-        assert_eq!(active, "second\n");
+        assert!(active.contains(" stdout second\n"));
 
         unsafe {
             if let Some(home) = original_home {

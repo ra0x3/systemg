@@ -26,8 +26,8 @@ use crate::{
     error::{LogsManagerError, ProcessManagerError},
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
     logs::{
-        LogManager, LogSection, resolve_log_path, spawn_dynamic_child_log_writer,
-        write_log_section_header,
+        LogManager, LogSection, get_service_log_path, resolve_log_path,
+        spawn_dynamic_child_log_writer, write_log_section_header,
     },
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
@@ -704,7 +704,7 @@ impl Supervisor {
                                     pid_file,
                                     service,
                                     lines,
-                                    &kind,
+                                    kind.as_deref(),
                                     follow,
                                     &log_stream,
                                 ) {
@@ -760,12 +760,12 @@ impl Supervisor {
         pid_file: std::sync::Arc<std::sync::Mutex<crate::daemon::PidFile>>,
         service: Option<String>,
         lines: usize,
-        kind: &str,
+        kind: Option<&str>,
         follow: bool,
         stream: &std::os::unix::net::UnixStream,
     ) -> Result<(), SupervisorError> {
         let manager = LogManager::new(pid_file);
-        let requested_kind = Some(kind);
+        let requested_kind = kind;
 
         if let Some(service_name) = service {
             let matching_unit = snapshot
@@ -793,9 +793,10 @@ impl Supervisor {
                     .map_err(SupervisorError::from);
             }
 
+            let combined_exists = get_service_log_path(&service_name).exists();
             let stdout_exists = resolve_log_path(&service_name, "stdout").exists();
             let stderr_exists = resolve_log_path(&service_name, "stderr").exists();
-            if stdout_exists || stderr_exists {
+            if combined_exists || stdout_exists || stderr_exists {
                 return manager
                     .stream_log_to_socket(
                         &service_name,

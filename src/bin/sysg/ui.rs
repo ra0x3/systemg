@@ -152,7 +152,7 @@ fn render_service_logs_from_snapshot(
     snapshot: &StatusSnapshot,
     service_name: &str,
     lines: usize,
-    kind: &str,
+    kind: Option<&str>,
     snapshot_mode: bool,
 ) -> Result<(), Box<dyn Error>> {
     let unit = snapshot
@@ -167,31 +167,36 @@ fn render_service_logs_from_snapshot(
                     service_name,
                     process_pid,
                     lines,
-                    Some(kind),
+                    kind,
                 )?;
             } else {
-                manager.show_log(service_name, process_pid, lines, Some(kind))?;
+                manager.show_log(service_name, process_pid, lines, kind)?;
             }
             return Ok(());
         }
 
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, Some(kind))?;
+            manager.show_inactive_log_snapshot(service_name, lines, kind)?;
         } else {
-            manager.show_inactive_log(service_name, lines, Some(kind))?;
+            manager.show_inactive_log(service_name, lines, kind)?;
         }
         return Ok(());
     }
 
     let cron_state = CronStateFile::load().unwrap_or_default();
+    let combined_exists = get_service_log_path(service_name).exists();
     let stdout_exists = resolve_log_path(service_name, "stdout").exists();
     let stderr_exists = resolve_log_path(service_name, "stderr").exists();
 
-    if cron_state.jobs().contains_key(service_name) || stdout_exists || stderr_exists {
+    if cron_state.jobs().contains_key(service_name)
+        || combined_exists
+        || stdout_exists
+        || stderr_exists
+    {
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, Some(kind))?;
+            manager.show_inactive_log_snapshot(service_name, lines, kind)?;
         } else {
-            manager.show_inactive_log(service_name, lines, Some(kind))?;
+            manager.show_inactive_log(service_name, lines, kind)?;
         }
     } else {
         warn!("Service '{service_name}' is not currently running");
@@ -206,7 +211,7 @@ fn render_all_logs_from_snapshot(
     manager: &LogManager,
     snapshot: &StatusSnapshot,
     lines: usize,
-    kind: &str,
+    kind: Option<&str>,
     snapshot_mode: bool,
 ) -> Result<(), Box<dyn Error>> {
     let grouped_units = grouped_log_units(snapshot);

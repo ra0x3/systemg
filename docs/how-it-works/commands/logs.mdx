@@ -18,7 +18,7 @@ $ sysg logs
 | `-` | `--purge` | Reset log files instead of displaying them |
 | `-s` | `--service` | The name of the service whose logs should be displayed (optional) |
 | `-l` | `--lines` | Number of lines to show (default: 50) |
-| `-k` | `--kind` | Kind of logs to show: stdout, stderr, or supervisor (default: stderr) |
+| `-k` | `--kind` | Kind of logs to show: stdout, stderr, or supervisor. Omit this flag to show stdout+stderr together |
 | `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
@@ -36,6 +36,12 @@ $ sysg logs
 ```sh
 $ sysg logs --service api
 ```
+
+> **Info:** By default, `sysg logs` shows a stacked stdout+stderr stream in
+> capture order. systemg adds its own UTC capture timestamp and stream label to
+> service output as it is written, then reads the combined service log for the
+> default view. Use `--kind stdout` or `--kind stderr` when you need a single
+> stream only.
 
 ### Purge logs for a specific service
 
@@ -82,14 +88,20 @@ In stream mode, each refresh prints a new snapshot of the latest `--lines` entri
 ## Log files
 
 Logs are stored in `~/.local/share/systemg/logs/`:
-- `{service}_stdout.log` - Standard output
-- `{service}_stderr.log` - Standard error (primary log stream)
+- `{service}.log` - Canonical stdout+stderr stream in capture order
+- `{service}_stdout.log` / `{service}_stderr.log` - Legacy split-stream files from older systemg versions, still read as a fallback when no canonical log exists
 
-> **Note:** systemg treats stderr as the primary log stream. Service logs written to stderr are given priority in the supervisor's log output.
+Each captured service line is stored with a systemg capture timestamp and stream
+label:
+
+```text
+2026-05-14T02:05:13.470911Z stderr Compiling tungstenite v0.28.0
+2026-05-14T02:05:13.471020Z stdout request completed status=200
+```
 
 ## Performance model
 
-For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes its own copy to log files. On Linux and macOS, `sysg logs` then tails those files with `tail -F` in follow mode. The command itself is lightweight; the continuous cost comes from capture threads and filesystem writes while services are running.
+For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes both streams through one per-service writer into `{service}.log`. On Linux and macOS, the default `sysg logs` view tails that file directly with `tail -F` in follow mode. `--kind stdout` and `--kind stderr` filter recent captured lines by the stored stream label. The command itself is lightweight; the continuous cost comes from the capture threads, one writer thread, and one append-only file write path per service.
 
 For high-output production workloads, configure `logs.sink: none` globally or per service to discard service output and avoid systemg log-writer threads, pipe backpressure from log capture, and file growth.
 

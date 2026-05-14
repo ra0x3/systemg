@@ -80,8 +80,8 @@ pub enum ControlCommand {
         service: Option<String>,
         /// Number of lines to include initially.
         lines: usize,
-        /// Log kind to stream.
-        kind: String,
+        /// Log kind to stream. None means merged stdout+stderr.
+        kind: Option<String>,
         /// Whether to follow the log stream until the client disconnects.
         follow: bool,
     },

@@ -33,7 +33,10 @@ use systemg::{
     cron::{CronExecutionStatus, CronStateFile},
     daemon::{Daemon, PidFile, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
-    logs::{LogManager, LogSection, resolve_log_path, write_log_section_header},
+    logs::{
+        LogManager, LogSection, get_service_log_path, resolve_log_path,
+        write_log_section_header,
+    },
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
     spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
@@ -632,7 +635,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     let command = ControlCommand::Logs {
                         service: service.clone(),
                         lines,
-                        kind: kind.as_str().to_string(),
+                        kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
                         follow,
                     };
                     ipc::stream_command_output(&command, io::stdout())
@@ -652,7 +655,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             &snapshot,
                             service_name,
                             lines,
-                            kind.as_str(),
+                            kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
                         )?;
                     }
@@ -662,7 +665,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             &manager,
                             &snapshot,
                             lines,
-                            kind.as_str(),
+                            kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
                         )?;
                     }
