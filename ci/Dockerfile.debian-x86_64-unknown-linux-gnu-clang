@@ -1,6 +1,6 @@
 FROM debian:12-slim
 
-ARG RUST_VERSION=1.90.0
+ARG RUST_VERSION=1.96.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/root/.cargo \

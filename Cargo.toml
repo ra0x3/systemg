@@ -4,7 +4,7 @@ version = "0.35.0"
 edition = "2024"
 license = "MIT"
 description = "A simple process manager."
-rust-version = "1.90.0"
+rust-version = "1.96.0"
 
 [package.metadata.docs.rs]
 features = []

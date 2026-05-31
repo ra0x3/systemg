@@ -2518,7 +2518,7 @@ fn prune_unit_configs_with_limits(
         }
     }
 
-    fresh_entries.sort_by(|a, b| b.1.cmp(&a.1));
+    fresh_entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     for (path, _) in fresh_entries.into_iter().skip(max_files) {
         let _ = fs::remove_file(path);
     }

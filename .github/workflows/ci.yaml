@@ -25,7 +25,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUSTC_VERSION: 1.90.0
+  RUSTC_VERSION: 1.96.0
 
 jobs:
   cancel-previous:

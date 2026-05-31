@@ -1,6 +1,6 @@
 # Stage 1: Build
 FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
-FROM --platform=$BUILDPLATFORM rust:1.90.0-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.96.0-bookworm AS chef
 
 ARG TARGETPLATFORM
 RUN cargo install cargo-chef

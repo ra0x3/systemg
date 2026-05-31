@@ -1,5 +1,5 @@
 # CI-optimized user mode UAT testing for systemg
-ARG RUST_IMAGE=rust:1.90.0-bullseye
+ARG RUST_IMAGE=rust:1.96.0-bullseye
 ARG RUNTIME_IMAGE=ubuntu:22.04
 FROM ${RUST_IMAGE} AS builder
 
