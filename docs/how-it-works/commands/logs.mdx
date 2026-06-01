@@ -10,6 +10,11 @@ View stored output from managed services.
 $ sysg logs
 ```
 
+> **Info:** From the interactive `sysg status` table, select a UNIT with
+> Tab/arrow navigation and press **L** to jump straight into that unit's logs.
+> The status shortcut runs `sysg logs -s <UNIT> -l 100 --stream 2`, which shows
+> the latest 100 lines and refreshes the snapshot every 2 seconds.
+
 ## Options
 
 | Short | Long | Description |

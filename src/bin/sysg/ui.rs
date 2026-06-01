@@ -606,37 +606,46 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
-                            terminal::disable_raw_mode()?;
-
-                            let current_exe = std::env::current_exe()
-                                .unwrap_or_else(|_| PathBuf::from("sysg"));
-
-                            let _ = process::Command::new(&current_exe)
-                                .arg("inspect")
-                                .arg("--config")
-                                .arg(config_path)
-                                .arg("--service")
-                                .arg(&selected_unit.name)
-                                .stdin(process::Stdio::inherit())
-                                .stdout(process::Stdio::inherit())
-                                .stderr(process::Stdio::inherit())
-                                .status();
-
-                            println!("\n\nPress any key to return to status view...");
-
-                            terminal::enable_raw_mode()?;
-                            let _ = event::read();
-                            terminal::disable_raw_mode()?;
-
-                            clear_terminal_output()?;
-                            render_status_table_with_selection(
+                            run_status_child_view(
+                                &[
+                                    "inspect",
+                                    "--config",
+                                    config_path,
+                                    "--service",
+                                    &selected_unit.name,
+                                ],
                                 snapshot,
                                 &units,
                                 opts,
                                 selected_row,
                                 health,
                             )?;
-                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('l') | KeyCode::Char('L'),
+                        ..
+                    } => {
+                        if !units.is_empty() {
+                            let selected_unit = &units[selected_row];
+                            run_status_child_view(
+                                &[
+                                    "logs",
+                                    "--config",
+                                    config_path,
+                                    "--service",
+                                    &selected_unit.name,
+                                    "--lines",
+                                    "100",
+                                    "--stream",
+                                    "2",
+                                ],
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                health,
+                            )?;
                         }
                     }
                     KeyEvent {
@@ -657,6 +666,39 @@ fn render_status_interactive(
 
     terminal::disable_raw_mode()?;
     result
+}
+
+/// Runs a child sysg view while status is in interactive mode, then redraws status.
+fn run_status_child_view(
+    args: &[&str],
+    snapshot: &StatusSnapshot,
+    units: &[UnitStatus],
+    opts: &StatusRenderOptions,
+    selected_row: usize,
+    health: OverallHealth,
+) -> Result<(), Box<dyn Error>> {
+    terminal::disable_raw_mode()?;
+
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
+
+    let _ = process::Command::new(&current_exe)
+        .args(args)
+        .stdin(process::Stdio::inherit())
+        .stdout(process::Stdio::inherit())
+        .stderr(process::Stdio::inherit())
+        .status();
+
+    println!("\n\nPress any key to return to status view...");
+
+    terminal::enable_raw_mode()?;
+    let _ = event::read();
+    terminal::disable_raw_mode()?;
+
+    clear_terminal_output()?;
+    render_status_table_with_selection(snapshot, units, opts, selected_row, health)?;
+    terminal::enable_raw_mode()?;
+
+    Ok(())
 }
 
 /// Renders the status table with a selected row highlighted.
@@ -783,7 +825,7 @@ fn render_status_table_with_selection(
     println!("{}", make_bottom_border(columns));
 
     println!(
-        "\nTab/↓\x1b[41;97m Next \x1b[0m  Shift+Tab/↑\x1b[41;97m Prev \x1b[0m  Enter\x1b[41;97m Inspect \x1b[0m  q/ESC\x1b[41;97m Quit \x1b[0m"
+        "\nTab/↓\x1b[41;97m Next \x1b[0m  Shift+Tab/↑\x1b[41;97m Prev \x1b[0m  Enter\x1b[41;97m Inspect \x1b[0m  L\x1b[41;97m Logs \x1b[0m  q/ESC\x1b[41;97m Quit \x1b[0m"
     );
 
     Ok(())

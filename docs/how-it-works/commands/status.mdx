@@ -22,9 +22,15 @@ By default, `sysg status` displays an interactive table where you can:
 - **Tab** or **↓** (Down arrow) - Move to the next service
 - **Shift+Tab** or **↑** (Up arrow) - Move to the previous service
 - **Enter** - Open the inspect view for the selected service
+- **L** - Open a live log snapshot stream for the selected service
 - **q** or **ESC** - Exit the status view
 
 The selected row is highlighted with a white background for easy visibility.
+
+> **Info:** Press **L** while a UNIT row is selected to open that unit's logs
+> without leaving the status workflow. The shortcut runs
+> `sysg logs -s <UNIT> -l 100 --stream 2`, giving you the latest 100 log lines
+> and refreshing the snapshot every 2 seconds.
 
 ## Options
 
