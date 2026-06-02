@@ -360,6 +360,139 @@ services:
     daemon.shutdown_monitor();
 }
 
+#[test]
+fn stop_kills_process_group_members_spawned_during_shutdown() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let late_child_pid_path = dir.join("late_child.pid");
+    let script = dir.join("late_child_on_term.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+trap 'sleep 60 & echo $! > \"{}\"; exit 0' TERM\n\
+while :; do sleep 1; done\n",
+            late_child_pid_path.display()
+        ),
+    )
+    .expect("failed to write service script");
+    let mut perms = fs::metadata(&script).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  late_spawner:
+    command: "{}"
+"#,
+            script.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services().expect("start services");
+    let service_pid = common::wait_for_pid("late_spawner");
+    assert!(
+        common::is_process_alive(service_pid),
+        "service should be running before stop"
+    );
+
+    daemon
+        .stop_service("late_spawner")
+        .expect("stop late_spawner");
+    common::wait_for_pid_removed("late_spawner");
+
+    common::wait_for_path(&late_child_pid_path);
+    let late_child_pid = fs::read_to_string(&late_child_pid_path)
+        .expect("read late child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse late child pid");
+    assert!(
+        !common::is_process_alive(late_child_pid),
+        "late-spawned process-group member should be terminated"
+    );
+
+    daemon.shutdown_monitor();
+}
+
+#[test]
+fn stop_cleans_up_stale_instances_with_overwritten_pid_tracking() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+services:
+  stale_worker:
+    command: "sleep 60"
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let service = config
+        .services
+        .get("stale_worker")
+        .expect("service present")
+        .clone();
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon
+        .start_service("stale_worker", &service)
+        .expect("start first stale_worker");
+    let first_pid = common::wait_for_pid("stale_worker");
+    daemon
+        .start_service("stale_worker", &service)
+        .expect("start second stale_worker");
+    let mut second_pid = common::wait_for_pid("stale_worker");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while second_pid == first_pid && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        second_pid = common::wait_for_pid("stale_worker");
+    }
+    assert_ne!(
+        first_pid, second_pid,
+        "second start should overwrite pid tracking"
+    );
+
+    let worker_pids = [first_pid, second_pid];
+
+    for pid in &worker_pids {
+        assert!(
+            common::is_process_alive(*pid),
+            "worker {pid} should be alive before stop"
+        );
+    }
+
+    daemon.stop_services().expect("stop services");
+
+    for pid in &worker_pids {
+        assert!(
+            !common::is_process_alive(*pid),
+            "stale worker {pid} should be terminated by config-owned cleanup"
+        );
+    }
+
+    daemon.shutdown_monitor();
+}
+
 #[cfg(unix)]
 fn assert_restart_replaces_worker(
     service_name: &str,

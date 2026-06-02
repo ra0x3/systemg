@@ -22,7 +22,7 @@ use quick_xml::{de::from_str as xml_from_str, se::to_string as xml_to_string};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::Error as _};
 use serde_yaml;
-use sysinfo::{ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
@@ -1492,6 +1492,80 @@ impl Daemon {
         if pgid >= 0 { Some(pgid) } else { None }
     }
 
+    /// Returns all live process IDs currently assigned to `pgid`.
+    #[cfg(target_os = "linux")]
+    fn collect_process_group_members(pgid: libc::pid_t) -> HashSet<u32> {
+        let mut members = HashSet::new();
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return members;
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+
+            let stat_path = entry.path().join("stat");
+            let Ok(stat) = fs::read_to_string(stat_path) else {
+                continue;
+            };
+            let Some(close_paren) = stat.rfind(')') else {
+                continue;
+            };
+            let mut fields = stat[close_paren + 1..].split_whitespace();
+            let _state = fields.next();
+            let _ppid = fields.next();
+            let Some(process_group) = fields
+                .next()
+                .and_then(|raw| raw.parse::<libc::pid_t>().ok())
+            else {
+                continue;
+            };
+
+            if process_group == pgid {
+                members.insert(pid);
+            }
+        }
+
+        members
+    }
+
+    /// Returns all live process IDs currently assigned to `pgid`.
+    #[cfg(not(target_os = "linux"))]
+    fn collect_process_group_members(pgid: libc::pid_t) -> HashSet<u32> {
+        let mut members = HashSet::new();
+        let Ok(output) = Command::new("ps")
+            .args(["-axo", "pid=,pgid=,stat="])
+            .output()
+        else {
+            return members;
+        };
+
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut fields = line.split_whitespace();
+            let Some(pid) = fields.next().and_then(|raw| raw.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Some(process_group) = fields
+                .next()
+                .and_then(|raw| raw.parse::<libc::pid_t>().ok())
+            else {
+                continue;
+            };
+            let state = fields.next().and_then(|raw| raw.chars().next());
+
+            if process_group == pgid && !matches!(state, Some('Z')) {
+                members.insert(pid);
+            }
+        }
+
+        members
+    }
+
     /// Signals process. None = liveness check. Also detects Linux zombies.
     fn signal_pid(
         service_name: &str,
@@ -1501,13 +1575,10 @@ impl Daemon {
         let target = nix::unistd::Pid::from_raw(pid as i32);
         match nix::sys::signal::kill(target, signal) {
             Ok(_) => {
-                if signal.is_none() {
-                    #[cfg(target_os = "linux")]
-                    {
-                        if matches!(Self::read_proc_state(pid), Some('Z') | Some('X')) {
-                            return Ok(false);
-                        }
-                    }
+                if signal.is_none()
+                    && matches!(Self::read_proc_state(pid), Some('Z') | Some('X'))
+                {
+                    return Ok(false);
                 }
                 Ok(true)
             }
@@ -1539,6 +1610,20 @@ impl Daemon {
         }
 
         parts.next()?.chars().next()
+    }
+
+    /// Reads the process state character from `ps` on non-Linux Unix platforms.
+    #[cfg(not(target_os = "linux"))]
+    fn read_proc_state(pid: u32) -> Option<char> {
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p"])
+            .arg(pid.to_string())
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .chars()
+            .next()
     }
 
     /// Waits for processes to exit by polling their liveness. Checks each PID in the pending set
@@ -1583,6 +1668,130 @@ impl Daemon {
             }
         }
         Ok(survivors)
+    }
+
+    fn process_command_line(process: &sysinfo::Process) -> String {
+        process
+            .cmd()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn process_outside_project_root(
+        process: &sysinfo::Process,
+        project_root: &Path,
+    ) -> bool {
+        let Some(cwd) = process.cwd() else {
+            return false;
+        };
+
+        cwd != project_root
+            && cwd
+                .canonicalize()
+                .ok()
+                .as_deref()
+                .is_none_or(|canonical| canonical != project_root)
+    }
+
+    fn process_matches_service_command(
+        process: &sysinfo::Process,
+        service: &ServiceConfig,
+    ) -> bool {
+        let command_line = Self::process_command_line(process);
+        if command_line == service.command {
+            return true;
+        }
+
+        let args = process.cmd();
+        if args.len() >= 3
+            && args[1].to_string_lossy() == SHELL_COMMAND_FLAG
+            && args[2].to_string_lossy() == service.command
+        {
+            let shell = Path::new(&args[0])
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            return shell == DEFAULT_SHELL;
+        }
+
+        false
+    }
+
+    /// Finds service processes that match the configured command and project root, including
+    /// stale instances whose PID file entries were overwritten by a later start.
+    fn collect_config_owned_service_roots(
+        service_name: &str,
+        service: &ServiceConfig,
+        project_root: &Path,
+    ) -> HashSet<u32> {
+        let canonical_root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::everything(),
+        );
+
+        system
+            .processes()
+            .iter()
+            .filter_map(|(pid, process)| {
+                let raw_pid = pid.as_u32();
+                if raw_pid == std::process::id() {
+                    return None;
+                }
+                if Self::process_outside_project_root(process, &canonical_root) {
+                    return None;
+                }
+                if !Self::process_matches_service_command(process, service) {
+                    return None;
+                }
+
+                debug!(
+                    "Found config-owned stale process for '{service_name}': pid={} command={:?}",
+                    raw_pid,
+                    process.cmd()
+                );
+                Some(raw_pid)
+            })
+            .collect()
+    }
+
+    fn cleanup_config_owned_service_processes(
+        service_name: &str,
+        service: &ServiceConfig,
+        project_root: &Path,
+    ) -> Result<(), ProcessManagerError> {
+        let roots =
+            Self::collect_config_owned_service_roots(service_name, service, project_root);
+
+        for pid in roots {
+            if !Self::signal_pid(service_name, pid, None)? {
+                continue;
+            }
+
+            let group = Self::process_group_for_pid(pid);
+            info!(
+                "Stopping stale config-owned process for '{service_name}' with pid {pid}"
+            );
+            match Self::terminate_process_tree(service_name, pid, group) {
+                Ok(()) => {}
+                Err(ProcessManagerError::ServiceStopError { source, .. })
+                    if source.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    warn!(
+                        "Timed out terminating stale process for '{service_name}' (pid {pid})"
+                    );
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(())
     }
 
     /// Terminates a process and all its descendants using escalating signals. First sends SIGTERM
@@ -1636,6 +1845,17 @@ impl Daemon {
             }
         };
 
+        let merge_group_members = |pending: &mut HashSet<u32>| {
+            if let Some(target_pgid) = group_target
+                && target_pgid >= 0
+                && target_pgid != supervisor_pgid
+            {
+                pending.extend(Self::collect_process_group_members(target_pgid));
+            }
+        };
+
+        merge_group_members(&mut pending);
+
         signal_group(SIGTERM as libc::c_int);
         pending = Self::send_signal_to_pids(service_name, pending, SIGTERM)?;
         pending = Self::wait_for_exit(
@@ -1644,6 +1864,7 @@ impl Daemon {
             PROCESS_READY_CHECKS,
             PROCESS_CHECK_INTERVAL,
         )?;
+        merge_group_members(&mut pending);
 
         if pending.is_empty() {
             return Ok(());
@@ -1651,6 +1872,13 @@ impl Daemon {
 
         signal_group(SIGKILL as libc::c_int);
         pending = Self::send_signal_to_pids(service_name, pending, SIGKILL)?;
+        pending = Self::wait_for_exit(
+            service_name,
+            pending,
+            PROCESS_READY_CHECKS,
+            PROCESS_CHECK_INTERVAL,
+        )?;
+        merge_group_members(&mut pending);
         pending = Self::wait_for_exit(
             service_name,
             pending,
@@ -3823,6 +4051,16 @@ impl Daemon {
             );
         }
 
+        if result.is_ok()
+            && let Some(service) = self.config.services.get(service_name)
+        {
+            Self::cleanup_config_owned_service_processes(
+                service_name,
+                service,
+                &self.project_root,
+            )?;
+        }
+
         result
     }
 
@@ -3901,10 +4139,27 @@ impl Daemon {
     pub fn stop_services(&self) -> Result<(), ProcessManagerError> {
         let services: Vec<String> =
             self.pid_file.lock()?.services.keys().cloned().collect();
+        let mut cleaned_services = HashSet::new();
 
         for service in services {
             if let Err(e) = self.stop_service(&service) {
                 error!("Failed to stop service '{service}': {e}");
+            }
+            cleaned_services.insert(service);
+        }
+
+        for (service_name, service) in &self.config.services {
+            if cleaned_services.contains(service_name) {
+                continue;
+            }
+            if let Err(err) = Self::cleanup_config_owned_service_processes(
+                service_name,
+                service,
+                &self.project_root,
+            ) {
+                error!(
+                    "Failed to clean up stale config-owned process for '{service_name}': {err}"
+                );
             }
         }
 
