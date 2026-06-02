@@ -72,20 +72,26 @@ enum LogsStreamAction {
 
 fn inspect_stream_event_action(event: Event) -> Option<InspectStreamAction> {
     match event {
-        Event::Key(KeyEvent {
-            code: KeyCode::Esc, ..
-        }) => Some(InspectStreamAction::Exit),
+        Event::Key(key_event) if stream_exit_key_event(&key_event) => {
+            Some(InspectStreamAction::Exit)
+        }
         _ => None,
     }
 }
 
 fn logs_stream_event_action(event: Event) -> Option<LogsStreamAction> {
     match event {
-        Event::Key(KeyEvent {
-            code: KeyCode::Esc, ..
-        }) => Some(LogsStreamAction::Exit),
+        Event::Key(key_event) if stream_exit_key_event(&key_event) => {
+            Some(LogsStreamAction::Exit)
+        }
         _ => None,
     }
+}
+
+fn stream_exit_key_event(key_event: &KeyEvent) -> bool {
+    matches!(key_event.code, KeyCode::Esc)
+        || matches!(key_event.code, KeyCode::Char('c') | KeyCode::Char('C'))
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn wait_for_inspect_stream_action(
@@ -159,6 +165,21 @@ fn write_inspect_stream_frame(
         render_inspect_stream_frame(&mut stdout, frame_lines, previous_line_count)?;
     stdout.flush()?;
     Ok(line_count)
+}
+
+fn logs_stream_frame_lines(output: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn write_logs_stream_frame(
+    output: &[u8],
+    previous_line_count: usize,
+) -> io::Result<usize> {
+    let frame_lines = logs_stream_frame_lines(output);
+    write_inspect_stream_frame(&frame_lines, previous_line_count)
 }
 
 fn stderr_is_tty() -> bool {
@@ -678,7 +699,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 };
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
-                let snapshot = with_progress_spinner("Statusing", || {
+                let snapshot = with_progress_spinner("Logging", || {
                     fetch_status_snapshot(&effective_config, false)
                 })?;
 
@@ -728,14 +749,43 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     terminal::enable_raw_mode()?;
                 }
                 let stream_result = (|| -> Result<(), Box<dyn Error>> {
+                    let mut previous_line_count = 0usize;
+                    if logs_stream_tty {
+                        clear_terminal_output()?;
+                    }
                     loop {
-                        print!("\x1B[2J\x1B[H");
-                        let _ = io::stdout().flush();
-                        match stream_logs_via_supervisor(false) {
-                            Ok(()) => {}
+                        let command = ControlCommand::Logs {
+                            service: service.clone(),
+                            lines,
+                            kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
+                            follow: false,
+                        };
+                        let mut output = Vec::new();
+                        match ipc::stream_command_output(&command, &mut output)
+                            .map_err(|err| Box::new(err) as Box<dyn Error>)
+                        {
+                            Ok(()) => {
+                                if logs_stream_tty {
+                                    previous_line_count = write_logs_stream_frame(
+                                        &output,
+                                        previous_line_count,
+                                    )?;
+                                } else {
+                                    io::stdout().write_all(&output)?;
+                                    io::stdout().flush()?;
+                                }
+                            }
                             Err(err) => match err.downcast_ref::<ControlError>() {
                                 Some(ControlError::NotAvailable) => {
-                                    render_logs_once(true)?
+                                    if logs_stream_tty {
+                                        terminal::disable_raw_mode()?;
+                                        clear_terminal_output()?;
+                                    }
+                                    render_logs_once(true)?;
+                                    previous_line_count = 0;
+                                    if logs_stream_tty {
+                                        terminal::enable_raw_mode()?;
+                                    }
                                 }
                                 _ => return Err(err),
                             },
@@ -757,11 +807,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
                 stream_result?;
             } else {
-                let stream_result = with_progress_spinner("Statusing", || {
-                    stream_logs_via_supervisor(true)
-                });
-
-                match stream_result {
+                match stream_logs_via_supervisor(true) {
                     Ok(()) => {}
                     Err(err) => match err.downcast_ref::<ControlError>() {
                         Some(ControlError::NotAvailable) => render_logs_once(false)?,
@@ -1917,6 +1963,16 @@ mod tests {
     }
 
     #[test]
+    fn inspect_stream_event_action_exits_on_ctrl_c() {
+        let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(action, Some(InspectStreamAction::Exit));
+    }
+
+    #[test]
     fn inspect_stream_event_action_ignores_other_keys() {
         let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
             KeyCode::Char('q'),
@@ -1937,6 +1993,16 @@ mod tests {
     }
 
     #[test]
+    fn logs_stream_event_action_exits_on_ctrl_c() {
+        let action = logs_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(action, Some(LogsStreamAction::Exit));
+    }
+
+    #[test]
     fn logs_stream_event_action_ignores_other_keys() {
         let action = logs_stream_event_action(Event::Key(KeyEvent::new(
             KeyCode::Char('q'),
@@ -1944,6 +2010,13 @@ mod tests {
         )));
 
         assert_eq!(action, None);
+    }
+
+    #[test]
+    fn status_interactive_exit_key_event_exits_on_ctrl_c() {
+        let key_event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        assert!(status_interactive_exit_key_event(&key_event));
     }
 
     #[test]
@@ -1974,6 +2047,21 @@ mod tests {
         assert!(
             !rendered.contains("\x1B[2J"),
             "steady-state frame writes should not clear the full terminal"
+        );
+    }
+
+    #[test]
+    fn render_logs_stream_frame_rewrites_lines_with_carriage_returns() {
+        let output = b"header\n\nlog line one\nlog line two\n";
+        let mut frame_output = Vec::new();
+        let frame_lines = logs_stream_frame_lines(output);
+        let line_count = render_inspect_stream_frame(&mut frame_output, &frame_lines, 5)
+            .expect("write frame");
+
+        assert_eq!(line_count, 4);
+        assert_eq!(
+            String::from_utf8(frame_output).expect("utf8"),
+            "\x1B[H\x1B[2Kheader\r\n\x1B[2K\r\n\x1B[2Klog line one\r\n\x1B[2Klog line two\r\n\x1B[2K\x1B[J"
         );
     }
 

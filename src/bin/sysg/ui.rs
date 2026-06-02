@@ -648,13 +648,7 @@ fn render_status_interactive(
                             )?;
                         }
                     }
-                    KeyEvent {
-                        code: KeyCode::Char('q'),
-                        ..
-                    }
-                    | KeyEvent {
-                        code: KeyCode::Esc, ..
-                    } => {
+                    key_event if status_interactive_exit_key_event(&key_event) => {
                         clear_terminal_output()?;
                         return Ok(health);
                     }
@@ -997,6 +991,12 @@ fn render_status_non_interactive(
 
     let _ = io::stdout().flush();
     Ok(health)
+}
+
+fn status_interactive_exit_key_event(key_event: &KeyEvent) -> bool {
+    matches!(key_event.code, KeyCode::Char('q') | KeyCode::Esc)
+        || matches!(key_event.code, KeyCode::Char('c') | KeyCode::Char('C'))
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Applies color to this item.
