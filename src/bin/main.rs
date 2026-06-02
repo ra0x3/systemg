@@ -2201,19 +2201,19 @@ fn is_supervisor(process: &sysinfo::Process) -> bool {
         return false;
     }
 
-    let mut has_start = false;
+    let mut has_supervisor_command = false;
     let mut has_daemonize = false;
 
     for arg in cmd {
         let value = arg.to_string_lossy();
-        if value == "start" {
-            has_start = true;
+        if value == "start" || value == "restart" {
+            has_supervisor_command = true;
         } else if value == "--daemonize" {
             has_daemonize = true;
         }
     }
 
-    has_start && has_daemonize
+    has_supervisor_command && has_daemonize
 }
 
 /// Waits for for supervisor exit.
@@ -2809,8 +2809,21 @@ fn supervisor_running() -> bool {
             if let Ok(path) = ipc::socket_path()
                 && path.exists()
             {
-                warn!("Found stale socket without PID file, cleaning up");
-                let _ = ipc::cleanup_runtime();
+                match ipc::send_command(&ControlCommand::Status { live: false }) {
+                    Ok(_) => {
+                        warn!("Found running systemg supervisor socket without PID file");
+                        return true;
+                    }
+                    Err(ControlError::NotAvailable) => {
+                        warn!("Found stale socket without PID file, cleaning up");
+                        let _ = ipc::cleanup_runtime();
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Failed to query supervisor socket without PID file: {err}"
+                        );
+                    }
+                }
             }
             false
         }

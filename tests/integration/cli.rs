@@ -319,6 +319,217 @@ services:
         .success();
 }
 
+#[cfg(unix)]
+#[test]
+fn rolling_restart_cli_does_not_leave_duplicate_long_lived_processes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let pid_log = dir.join("service-pids.txt");
+    let service_script = dir.join("long-lived-service.sh");
+    fs::write(
+        &service_script,
+        format!(
+            "#!/bin/sh\n\
+echo $$ >> '{}'\n\
+trap 'exit 0' TERM INT\n\
+while true; do sleep 1; done\n",
+            pid_log.display()
+        ),
+    )
+    .expect("failed to write service script");
+    let mut perms = fs::metadata(&service_script)
+        .expect("failed to stat service script")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&service_script, perms).expect("failed to chmod service script");
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  long_lived:
+    command: "{}"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"
+      grace_period: "100ms"
+"#,
+            service_script.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("start")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    let initial_pids = common::wait_for_lines(&pid_log, 1);
+    let first_pid: u32 = initial_pids[0]
+        .trim()
+        .parse()
+        .expect("first service pid should parse");
+    assert!(
+        common::is_process_alive(first_pid),
+        "initial service pid {first_pid} should be alive"
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("restart")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    let restarted_pids = common::wait_for_lines(&pid_log, 2);
+    let latest_pid: u32 = restarted_pids
+        .last()
+        .expect("latest pid line")
+        .trim()
+        .parse()
+        .expect("latest service pid should parse");
+
+    thread::sleep(Duration::from_secs(1));
+
+    let alive: Vec<u32> = restarted_pids
+        .iter()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| common::is_process_alive(*pid))
+        .collect();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("stop")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .assert()
+        .success();
+
+    assert_eq!(
+        alive,
+        vec![latest_pid],
+        "rolling restart should retire the old long-lived process; pids={restarted_pids:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_daemonize_does_not_start_second_supervisor_when_pidfile_is_missing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let pid_log = dir.join("service-pids.txt");
+    let service_script = dir.join("long-lived-service.sh");
+    fs::write(
+        &service_script,
+        format!(
+            "#!/bin/sh\n\
+echo $$ >> '{}'\n\
+trap 'exit 0' TERM INT\n\
+while true; do sleep 1; done\n",
+            pid_log.display()
+        ),
+    )
+    .expect("failed to write service script");
+    let mut perms = fs::metadata(&service_script)
+        .expect("failed to stat service script")
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&service_script, perms).expect("failed to chmod service script");
+
+    let config_path = dir.join("systemg.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  long_lived:
+    command: "{}"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"
+      grace_period: "100ms"
+"#,
+            service_script.display()
+        ),
+    )
+    .expect("failed to write config");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("start")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    let initial_pids = common::wait_for_lines(&pid_log, 1);
+    let first_pid: u32 = initial_pids[0]
+        .trim()
+        .parse()
+        .expect("first service pid should parse");
+    assert!(
+        common::is_process_alive(first_pid),
+        "initial service pid {first_pid} should be alive"
+    );
+
+    let old_supervisor_pid = systemg::ipc::read_supervisor_pid()
+        .expect("read supervisor pid")
+        .expect("supervisor pid should be recorded");
+    let pid_path = systemg::ipc::supervisor_pid_path().expect("supervisor pid path");
+    fs::remove_file(&pid_path).expect("remove supervisor pid file");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("restart")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    let restarted_pids = common::wait_for_lines(&pid_log, 2);
+    thread::sleep(Duration::from_secs(1));
+    let alive: Vec<u32> = restarted_pids
+        .iter()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| common::is_process_alive(*pid))
+        .collect();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("stop")
+        .arg("--config")
+        .arg(config_path.to_str().unwrap())
+        .assert()
+        .success();
+
+    unsafe {
+        libc::kill(old_supervisor_pid, libc::SIGTERM);
+    }
+    thread::sleep(Duration::from_secs(1));
+
+    assert_eq!(
+        alive.len(),
+        1,
+        "restart --daemonize should not start a second supervisor and duplicate services; pids={restarted_pids:?}"
+    );
+}
+
 #[test]
 fn start_daemonize_accepts_unit_command_without_config() {
     let temp = tempdir().expect("failed to create tempdir");
