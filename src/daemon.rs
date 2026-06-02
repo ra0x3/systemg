@@ -1517,7 +1517,11 @@ impl Daemon {
                 continue;
             };
             let mut fields = stat[close_paren + 1..].split_whitespace();
-            let _state = fields.next();
+            let state = fields.next().and_then(|raw| raw.chars().next());
+            if matches!(state, Some('Z' | 'X')) {
+                continue;
+            }
+
             let _ppid = fields.next();
             let Some(process_group) = fields
                 .next()
@@ -1578,6 +1582,7 @@ impl Daemon {
                 if signal.is_none()
                     && matches!(Self::read_proc_state(pid), Some('Z') | Some('X'))
                 {
+                    Self::reap_child_if_ready(pid);
                     return Ok(false);
                 }
                 Ok(true)
@@ -1587,6 +1592,20 @@ impl Daemon {
                 service: service_name.to_string(),
                 source: std::io::Error::from_raw_os_error(err as i32),
             }),
+        }
+    }
+
+    #[cfg(unix)]
+    fn reap_child_if_ready(pid: u32) {
+        use nix::sys::wait::{WaitPidFlag, waitpid};
+
+        let target = nix::unistd::Pid::from_raw(pid as i32);
+        match waitpid(target, Some(WaitPidFlag::WNOHANG)) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::ECHILD) => {}
+            Err(err) => {
+                debug!("Failed to reap child process {pid}: {err}");
+            }
         }
     }
 

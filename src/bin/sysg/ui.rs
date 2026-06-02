@@ -688,11 +688,13 @@ fn run_status_child_view(
         .stderr(process::Stdio::inherit())
         .status();
 
-    println!("\n\nPress any key to return to status view...");
+    if !matches!(args.first(), Some(&"logs")) {
+        println!("\n\nPress any key to return to status view...");
 
-    terminal::enable_raw_mode()?;
-    let _ = event::read();
-    terminal::disable_raw_mode()?;
+        terminal::enable_raw_mode()?;
+        let _ = event::read();
+        terminal::disable_raw_mode()?;
+    }
 
     clear_terminal_output()?;
     render_status_table_with_selection(snapshot, units, opts, selected_row, health)?;

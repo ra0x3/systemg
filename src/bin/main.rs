@@ -64,11 +64,26 @@ enum InspectStreamAction {
     Exit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogsStreamAction {
+    Refresh,
+    Exit,
+}
+
 fn inspect_stream_event_action(event: Event) -> Option<InspectStreamAction> {
     match event {
         Event::Key(KeyEvent {
             code: KeyCode::Esc, ..
         }) => Some(InspectStreamAction::Exit),
+        _ => None,
+    }
+}
+
+fn logs_stream_event_action(event: Event) -> Option<LogsStreamAction> {
+    match event {
+        Event::Key(KeyEvent {
+            code: KeyCode::Esc, ..
+        }) => Some(LogsStreamAction::Exit),
         _ => None,
     }
 }
@@ -87,6 +102,26 @@ fn wait_for_inspect_stream_action(
         let poll_timeout = remaining.min(Duration::from_millis(50));
         if event::poll(poll_timeout)?
             && let Some(action) = inspect_stream_event_action(event::read()?)
+        {
+            return Ok(action);
+        }
+    }
+}
+
+fn wait_for_logs_stream_action(
+    sleep_interval: Duration,
+) -> Result<LogsStreamAction, Box<dyn Error>> {
+    let deadline = Instant::now() + sleep_interval;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(LogsStreamAction::Refresh);
+        }
+
+        let poll_timeout = remaining.min(Duration::from_millis(50));
+        if event::poll(poll_timeout)?
+            && let Some(action) = logs_stream_event_action(event::read()?)
         {
             return Ok(action);
         }
@@ -685,18 +720,42 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     }
                 };
                 let sleep_interval = Duration::from_secs(stream_seconds);
-                loop {
-                    print!("\x1B[2J\x1B[H");
-                    let _ = io::stdout().flush();
-                    match stream_logs_via_supervisor(false) {
-                        Ok(()) => {}
-                        Err(err) => match err.downcast_ref::<ControlError>() {
-                            Some(ControlError::NotAvailable) => render_logs_once(true)?,
-                            _ => return Err(err),
-                        },
-                    }
-                    thread::sleep(sleep_interval);
+                let logs_stream_tty = unsafe {
+                    libc::isatty(libc::STDIN_FILENO) == 1
+                        && libc::isatty(libc::STDOUT_FILENO) == 1
+                };
+                if logs_stream_tty {
+                    terminal::enable_raw_mode()?;
                 }
+                let stream_result = (|| -> Result<(), Box<dyn Error>> {
+                    loop {
+                        print!("\x1B[2J\x1B[H");
+                        let _ = io::stdout().flush();
+                        match stream_logs_via_supervisor(false) {
+                            Ok(()) => {}
+                            Err(err) => match err.downcast_ref::<ControlError>() {
+                                Some(ControlError::NotAvailable) => {
+                                    render_logs_once(true)?
+                                }
+                                _ => return Err(err),
+                            },
+                        }
+                        if logs_stream_tty {
+                            if matches!(
+                                wait_for_logs_stream_action(sleep_interval)?,
+                                LogsStreamAction::Exit
+                            ) {
+                                return Ok(());
+                            }
+                        } else {
+                            thread::sleep(sleep_interval);
+                        }
+                    }
+                })();
+                if logs_stream_tty {
+                    terminal::disable_raw_mode()?;
+                }
+                stream_result?;
             } else {
                 let stream_result = with_progress_spinner("Statusing", || {
                     stream_logs_via_supervisor(true)
@@ -1860,6 +1919,26 @@ mod tests {
     #[test]
     fn inspect_stream_event_action_ignores_other_keys() {
         let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn logs_stream_event_action_exits_on_escape() {
+        let action = logs_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(action, Some(LogsStreamAction::Exit));
+    }
+
+    #[test]
+    fn logs_stream_event_action_ignores_other_keys() {
+        let action = logs_stream_event_action(Event::Key(KeyEvent::new(
             KeyCode::Char('q'),
             KeyModifiers::NONE,
         )));
