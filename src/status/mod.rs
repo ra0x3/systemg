@@ -26,7 +26,7 @@ use thiserror::Error;
 use tracing::{debug, error};
 
 use crate::{
-    config::{Config, StatusSnapshotMode},
+    config::{Config, ServiceConfig, StatusSnapshotMode},
     cron::{
         CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
     },
@@ -992,15 +992,20 @@ fn build_snapshot(
             }
         });
 
-        let health =
-            derive_unit_health(kind, lifecycle, process_runtime.as_ref(), cron.as_ref());
+        let service_config =
+            config.and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")));
+        let health = derive_unit_health(
+            kind,
+            lifecycle,
+            process_runtime.as_ref(),
+            cron.as_ref(),
+            service_config,
+        );
         let metrics_summary = metrics_store
             .and_then(|store| store.summarize_unit(&hash))
             .map(UnitMetricsSummary::from);
 
-        let command = config
-            .and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")))
-            .map(|service_config| service_config.command.clone());
+        let command = service_config.map(|service_config| service_config.command.clone());
         let runtime_command = if matches!(mode, StatusSnapshotMode::Detailed) {
             process_runtime
                 .as_ref()
@@ -1192,6 +1197,7 @@ fn derive_unit_health(
     lifecycle: Option<ServiceLifecycleStatus>,
     runtime: Option<&ProcessRuntime>,
     cron: Option<&CronUnitStatus>,
+    service_config: Option<&ServiceConfig>,
 ) -> UnitHealth {
     if let Some(runtime) = runtime {
         match runtime.state {
@@ -1236,7 +1242,13 @@ fn derive_unit_health(
     match lifecycle {
         Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
         Some(ServiceLifecycleStatus::Running) => return UnitHealth::Healthy,
-        Some(ServiceLifecycleStatus::Skipped) | Some(ServiceLifecycleStatus::Stopped) => {
+        Some(ServiceLifecycleStatus::Skipped) => {
+            return UnitHealth::Healthy;
+        }
+        Some(ServiceLifecycleStatus::Stopped) => {
+            if service_expects_availability(service_config) {
+                return UnitHealth::Degraded;
+            }
             return UnitHealth::Healthy;
         }
         Some(ServiceLifecycleStatus::ExitedSuccessfully) => return UnitHealth::Healthy,
@@ -1247,6 +1259,19 @@ fn derive_unit_health(
         UnitKind::Cron => UnitHealth::Degraded,
         UnitKind::Service | UnitKind::Orphaned => UnitHealth::Degraded,
     }
+}
+
+fn service_expects_availability(service_config: Option<&ServiceConfig>) -> bool {
+    let Some(service_config) = service_config else {
+        return false;
+    };
+
+    service_config.restart_policy.as_deref() == Some("always")
+        || service_config
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.health_check.as_ref())
+            .is_some()
 }
 
 /// Computes overall health.
@@ -2622,7 +2647,8 @@ services:
             recent_runs: vec![summary],
         };
 
-        let health = derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status));
+        let health =
+            derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status), None);
         assert_eq!(health, UnitHealth::Healthy);
     }
 
@@ -2664,7 +2690,8 @@ services:
             recent_runs,
         };
 
-        let health = derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status));
+        let health =
+            derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status), None);
         assert_eq!(health, UnitHealth::Degraded);
     }
 
@@ -2704,7 +2731,8 @@ services:
             recent_runs,
         };
 
-        let health = derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status));
+        let health =
+            derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status), None);
         assert_eq!(health, UnitHealth::Healthy);
     }
 
@@ -2715,7 +2743,45 @@ services:
             Some(ServiceLifecycleStatus::ExitedWithError),
             None,
             None,
+            None,
         );
         assert_eq!(health, UnitHealth::Failing);
+    }
+
+    #[test]
+    fn derive_unit_health_for_stopped_ordinary_service_is_healthy() {
+        let service = ServiceConfig {
+            command: "sleep 30".into(),
+            ..ServiceConfig::default()
+        };
+
+        let health = derive_unit_health(
+            UnitKind::Service,
+            Some(ServiceLifecycleStatus::Stopped),
+            None,
+            None,
+            Some(&service),
+        );
+
+        assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn derive_unit_health_for_stopped_always_restart_service_is_degraded() {
+        let service = ServiceConfig {
+            command: "sleep 30".into(),
+            restart_policy: Some("always".into()),
+            ..ServiceConfig::default()
+        };
+
+        let health = derive_unit_health(
+            UnitKind::Service,
+            Some(ServiceLifecycleStatus::Stopped),
+            None,
+            None,
+            Some(&service),
+        );
+
+        assert_eq!(health, UnitHealth::Degraded);
     }
 }

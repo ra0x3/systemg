@@ -122,6 +122,17 @@ impl Supervisor {
         }
     }
 
+    fn startup_service_order(
+        config: &Config,
+        service_filter: Option<&str>,
+    ) -> Result<Vec<String>, SupervisorError> {
+        let mut order = config.service_start_order()?;
+        if let Some(filter) = service_filter {
+            order.retain(|service_name| service_name == filter);
+        }
+        Ok(order)
+    }
+
     /// Creates supervisor with config.
     pub fn new(
         config_path: PathBuf,
@@ -201,12 +212,12 @@ impl Supervisor {
         let listener = UnixListener::bind(&socket_path)?;
         ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
-        for (service_name, service_config) in &config.services {
-            if let Some(ref filter) = self.service_filter
-                && service_name != filter
-            {
+        let service_order =
+            Self::startup_service_order(&config, self.service_filter.as_deref())?;
+        for service_name in service_order {
+            let Some(service_config) = config.services.get(&service_name) else {
                 continue;
-            }
+            };
 
             if service_config.cron.is_none() {
                 if let Some(skip_config) = &service_config.skip {
@@ -214,7 +225,7 @@ impl Supervisor {
                         SkipConfig::Flag(true) => {
                             info!("Skipping service '{service_name}' due to skip flag");
                             if let Err(err) =
-                                self.daemon.mark_service_skipped(service_name)
+                                self.daemon.mark_service_skipped(&service_name)
                             {
                                 warn!(
                                     "Failed to record skipped state for '{service_name}': {err}"
@@ -230,14 +241,14 @@ impl Supervisor {
                         SkipConfig::Command(skip_command) => {
                             match self
                                 .daemon
-                                .evaluate_skip_condition(service_name, skip_command)
+                                .evaluate_skip_condition(&service_name, skip_command)
                             {
                                 Ok(true) => {
                                     info!(
                                         "Skipping service '{service_name}' due to skip condition"
                                     );
                                     if let Err(err) =
-                                        self.daemon.mark_service_skipped(service_name)
+                                        self.daemon.mark_service_skipped(&service_name)
                                     {
                                         warn!(
                                             "Failed to record skipped state for '{service_name}': {err}"
@@ -259,12 +270,12 @@ impl Supervisor {
                         }
                     }
                 }
-                self.daemon.start_service(service_name, service_config)?;
+                self.daemon.start_service(&service_name, service_config)?;
 
                 if let Some(ref spawn) = service_config.spawn
                     && let Some(SpawnMode::Dynamic) = spawn.mode
                     && let Ok(pid_file) = self.daemon.pid_file_handle().lock()
-                    && let Some(&pid) = pid_file.services().get(service_name)
+                    && let Some(&pid) = pid_file.services().get(&service_name)
                 {
                     self.spawn_manager
                         .register_service_pid(service_name.clone(), pid);
@@ -1460,16 +1471,72 @@ impl Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{collections::HashMap, fs};
 
     use chrono::Utc;
     use tempfile::tempdir_in;
 
     use super::*;
     use crate::{
+        config::{LogsConfig, MetricsConfig, ServiceConfig, StatusConfig, Version},
         runtime,
         status::{OverallHealth, UnitHealth, UnitKind, UnitStatus},
     };
+
+    fn test_service(depends_on: &[&str]) -> ServiceConfig {
+        ServiceConfig {
+            command: "/bin/true".into(),
+            depends_on: if depends_on.is_empty() {
+                None
+            } else {
+                Some(depends_on.iter().map(|dep| dep.to_string()).collect())
+            },
+            ..ServiceConfig::default()
+        }
+    }
+
+    #[test]
+    fn supervisor_startup_order_honors_dependencies() {
+        let mut services = HashMap::new();
+        services.insert("worker".into(), test_service(&["beacon"]));
+        services.insert("server".into(), test_service(&["worker"]));
+        services.insert("beacon".into(), test_service(&[]));
+
+        let config = Config {
+            version: Version::V1,
+            services,
+            project_dir: None,
+            env: None,
+            metrics: MetricsConfig::default(),
+            logs: LogsConfig::default(),
+            status: StatusConfig::default(),
+        };
+
+        let order = Supervisor::startup_service_order(&config, None).unwrap();
+
+        assert_eq!(order, vec!["beacon", "worker", "server"]);
+    }
+
+    #[test]
+    fn supervisor_startup_order_applies_service_filter_after_sorting() {
+        let mut services = HashMap::new();
+        services.insert("worker".into(), test_service(&["beacon"]));
+        services.insert("beacon".into(), test_service(&[]));
+
+        let config = Config {
+            version: Version::V1,
+            services,
+            project_dir: None,
+            env: None,
+            metrics: MetricsConfig::default(),
+            logs: LogsConfig::default(),
+            status: StatusConfig::default(),
+        };
+
+        let order = Supervisor::startup_service_order(&config, Some("worker")).unwrap();
+
+        assert_eq!(order, vec!["worker"]);
+    }
 
     #[test]
     fn status_and_inspect_commands_use_cached_snapshot() {
