@@ -26,7 +26,7 @@ use thiserror::Error;
 use tracing::{debug, error};
 
 use crate::{
-    config::{Config, ServiceConfig, StatusSnapshotMode},
+    config::{Config, ProjectConfig, ServiceConfig, StatusSnapshotMode},
     cron::{
         CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
     },
@@ -562,6 +562,8 @@ fn sample_process_metrics(
 pub struct UnitStatus {
     pub name: String,
     pub hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectStatus>,
     pub kind: UnitKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<ServiceLifecycleStatus>,
@@ -582,6 +584,22 @@ pub struct UnitStatus {
     pub runtime_command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spawned_children: Vec<SpawnedProcessNode>,
+}
+
+/// Project metadata attached to a status entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectStatus {
+    pub id: String,
+    pub name: String,
+}
+
+impl From<&ProjectConfig> for ProjectStatus {
+    fn from(project: &ProjectConfig) -> Self {
+        Self {
+            id: project.id.clone(),
+            name: project.name.clone(),
+        }
+    }
 }
 
 /// Summarized metrics attached to a unit entry.
@@ -857,6 +875,7 @@ fn build_snapshot(
     let mut hash_to_name: HashMap<String, String> = HashMap::new();
     let mut hash_kind: HashMap<String, UnitKind> = HashMap::new();
     let mut unit_hashes: BTreeSet<String> = BTreeSet::new();
+    let project_status = config.map(|cfg| ProjectStatus::from(&cfg.project));
 
     if let Some(cfg) = config {
         for (service_name, service_config) in &cfg.services {
@@ -1076,6 +1095,7 @@ fn build_snapshot(
         units.push(UnitStatus {
             name: display_name,
             hash,
+            project: project_status.clone(),
             kind,
             lifecycle,
             health,
@@ -1153,6 +1173,7 @@ fn build_snapshot(
         units.push(UnitStatus {
             name: service_name.clone(),
             hash: service_name.clone(),
+            project: None,
             kind: UnitKind::Orphaned,
             lifecycle: None,
             health,
@@ -2475,6 +2496,7 @@ services:
         let services = std::collections::HashMap::new();
         let config = Config {
             version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,
             env: None,
@@ -2535,6 +2557,7 @@ services:
         services.insert("demo".into(), service);
         let config = Config {
             version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,
             env: None,
@@ -2595,6 +2618,7 @@ services:
             UnitStatus {
                 name: "svc-a".into(),
                 hash: "hash-a".into(),
+                project: None,
                 kind: UnitKind::Service,
                 lifecycle: None,
                 health: UnitHealth::Healthy,
@@ -2610,6 +2634,7 @@ services:
             UnitStatus {
                 name: "svc-b".into(),
                 hash: "hash-b".into(),
+                project: None,
                 kind: UnitKind::Service,
                 lifecycle: None,
                 health: UnitHealth::Failing,

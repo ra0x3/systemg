@@ -1134,6 +1134,7 @@ mod tests {
         services_v1.insert("job_two".to_string(), service_with_cron("*/2 * * * * *"));
         let config_v1 = Config {
             version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
             services: services_v1,
             project_dir: None,
             env: None,
@@ -1149,6 +1150,7 @@ mod tests {
         services_v2.insert("job_three".to_string(), service_with_cron("0 */5 * * * *"));
         let config_v2 = Config {
             version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
             services: services_v2,
             project_dir: None,
             env: None,

@@ -1478,7 +1478,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::{LogsConfig, MetricsConfig, ServiceConfig, StatusConfig, Version},
+        config::{
+            LogsConfig, MetricsConfig, ProjectConfig, ServiceConfig, StatusConfig,
+            Version,
+        },
         runtime,
         status::{OverallHealth, UnitHealth, UnitKind, UnitStatus},
     };
@@ -1504,6 +1507,7 @@ mod tests {
 
         let config = Config {
             version: Version::V1,
+            project: ProjectConfig::default(),
             services,
             project_dir: None,
             env: None,
@@ -1525,6 +1529,7 @@ mod tests {
 
         let config = Config {
             version: Version::V1,
+            project: ProjectConfig::default(),
             services,
             project_dir: None,
             env: None,
@@ -1575,6 +1580,7 @@ services:
         let cached_unit = UnitStatus {
             name: "cached".into(),
             hash: "cached-hash".into(),
+            project: None,
             kind: UnitKind::Service,
             lifecycle: None,
             health: UnitHealth::Healthy,

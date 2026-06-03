@@ -15,7 +15,8 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use common::{HomeEnvGuard, is_process_alive, wait_for_pid, wait_for_pid_removed};
 use systemg::{
     config::{
-        Config, LogsConfig, MetricsConfig, ServiceConfig, StatusConfig, load_config,
+        Config, LogsConfig, MetricsConfig, ProjectConfig, ServiceConfig, StatusConfig,
+        load_config,
     },
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
 };
@@ -102,6 +103,7 @@ fn restart_updates_state_with_new_pid() {
 
     let config = Config {
         version: systemg::config::Version::V1,
+        project: ProjectConfig::default(),
         services,
         project_dir: Some(temp.path().to_string_lossy().to_string()),
         env: None,

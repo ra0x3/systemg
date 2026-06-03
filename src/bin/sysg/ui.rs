@@ -62,6 +62,9 @@ struct Column {
     align: Alignment,
 }
 
+type StatusProjectGroup<'a> = (String, Vec<(usize, &'a UnitStatus)>);
+type WorkingStatusProjectGroup<'a> = (String, String, Vec<(usize, &'a UnitStatus)>);
+
 /// Fetches a status snapshot from the live supervisor, falling back to the
 /// persisted on-disk snapshot when no supervisor is available.
 fn fetch_status_snapshot(
@@ -801,19 +804,31 @@ fn render_status_table_with_selection(
     println!("{}", format_header_row(columns));
     println!("{}", make_separator_border(columns));
 
-    for (index, unit) in units.iter().enumerate() {
-        if index == selected_row {
-            print!("\x1b[47m\x1b[30m");
-            let row_content = format_unit_row(unit, columns, true);
-            print!("{}", row_content);
-            println!("\x1b[0m");
-        } else {
-            let row_content = format_unit_row(unit, columns, opts.no_color);
-            println!("{}", row_content);
+    let groups = status_project_groups(units);
+    let render_groups = groups.len() > 1;
+    for (group_index, (label, group_units)) in groups.iter().enumerate() {
+        if render_groups {
+            if group_index > 0 {
+                println!("{}", make_separator_border(columns));
+            }
+            println!("{}", format_banner(&format!(" Project: {label}"), columns));
+            println!("{}", make_separator_border(columns));
         }
 
-        if !unit.spawned_children.is_empty() {
-            render_spawn_rows(unit, columns, opts.no_color);
+        for (index, unit) in group_units {
+            if *index == selected_row {
+                print!("\x1b[47m\x1b[30m");
+                let row_content = format_unit_row(unit, columns, true);
+                print!("{}", row_content);
+                println!("\x1b[0m");
+            } else {
+                let row_content = format_unit_row(unit, columns, opts.no_color);
+                println!("{}", row_content);
+            }
+
+            if !unit.spawned_children.is_empty() {
+                render_spawn_rows(unit, columns, opts.no_color);
+            }
         }
     }
 
@@ -979,10 +994,22 @@ fn render_status_non_interactive(
     println!("{}", format_header_row(columns));
     println!("{}", make_separator_border(columns));
 
-    for unit in &units {
-        println!("{}", format_unit_row(unit, columns, opts.no_color));
-        if !unit.spawned_children.is_empty() {
-            render_spawn_rows(unit, columns, opts.no_color);
+    let groups = status_project_groups(&units);
+    let render_groups = groups.len() > 1;
+    for (group_index, (label, group_units)) in groups.iter().enumerate() {
+        if render_groups {
+            if group_index > 0 {
+                println!("{}", make_separator_border(columns));
+            }
+            println!("{}", format_banner(&format!(" Project: {label}"), columns));
+            println!("{}", make_separator_border(columns));
+        }
+
+        for (_, unit) in group_units {
+            println!("{}", format_unit_row(unit, columns, opts.no_color));
+            if !unit.spawned_children.is_empty() {
+                render_spawn_rows(unit, columns, opts.no_color);
+            }
         }
     }
 
@@ -1393,6 +1420,39 @@ fn format_banner(text: &str, columns: &[Column]) -> String {
     let inner_width = total_inner_width(columns);
     let content = ansi_pad(text, inner_width, Alignment::Center);
     format!("│{}│", content)
+}
+
+fn status_project_groups(units: &[UnitStatus]) -> Vec<StatusProjectGroup<'_>> {
+    let mut groups: Vec<WorkingStatusProjectGroup<'_>> = Vec::new();
+
+    for (index, unit) in units.iter().enumerate() {
+        let (key, label) = unit
+            .project
+            .as_ref()
+            .map(|project| {
+                let label = if project.name == project.id {
+                    project.name.clone()
+                } else {
+                    format!("{} ({})", project.name, project.id)
+                };
+                (project.id.clone(), label)
+            })
+            .unwrap_or_else(|| ("__orphans__".to_string(), "Ungrouped".to_string()));
+
+        if let Some((_, _, group_units)) = groups
+            .iter_mut()
+            .find(|(existing_key, _, _)| existing_key == &key)
+        {
+            group_units.push((index, unit));
+        } else {
+            groups.push((key, label, vec![(index, unit)]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(_, label, units)| (label, units))
+        .collect()
 }
 
 /// Counts states and health.

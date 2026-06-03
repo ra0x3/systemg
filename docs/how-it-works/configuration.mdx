@@ -10,6 +10,9 @@ systemg uses YAML files to define services and their relationships.
 
 ```yaml
 version: "1"
+project:
+  id: myapp
+  name: My App
 env:
   vars:
     APP_ENV: "production"
@@ -77,6 +80,35 @@ services:
 ```yaml
 version: "1"
 ```
+
+### `project`
+
+Optional project metadata used to group services when one supervisor manages
+units from more than one project.
+
+```yaml
+project:
+  id: arbitration
+  name: Arbitration
+```
+
+Fields:
+
+- `id`: Stable project identifier. Treat this as durable runtime identity; changing it creates a different project namespace.
+- `name`: Display name used in status output. You can rename this without changing project identity.
+
+For short configs, you can use shorthand:
+
+```yaml
+project: arbitration
+```
+
+This sets both `id` and `name` to `arbitration`.
+
+Configs without `project` still load. systemg assigns a legacy project identity
+from the config directory so existing deployments continue to work after
+upgrades, but explicit `project.id` values are recommended for multi-project
+supervisors.
 
 ### `env`
 

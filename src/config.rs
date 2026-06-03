@@ -104,6 +104,9 @@ impl<'de> Deserialize<'de> for Version {
 pub struct Config {
     /// Configuration version.
     pub version: Version,
+    /// Stable project namespace and display metadata.
+    #[serde(default)]
+    pub project: ProjectConfig,
     /// Map of service names to their respective configurations.
     pub services: HashMap<String, ServiceConfig>,
     /// Root directory from which relative paths are resolved.
@@ -132,6 +135,9 @@ struct ManifestHeader {
 pub struct ConfigV1 {
     /// Configuration version.
     pub version: Version,
+    /// Optional stable project namespace and display metadata.
+    #[serde(default)]
+    pub project: Option<ProjectConfigInput>,
     /// Map of service names to their respective configurations.
     pub services: HashMap<String, ServiceConfig>,
     /// Root directory from which relative paths are resolved.
@@ -162,6 +168,7 @@ impl TryFrom<ConfigV1> for Config {
 
         Ok(Self {
             version: CURRENT_MANIFEST_VERSION,
+            project: value.project.map(Into::into).unwrap_or_default(),
             services: value.services,
             project_dir: value.project_dir,
             env: value.env,
@@ -180,6 +187,97 @@ const STATUS_DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 5;
 pub const LOGS_DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Default number of rotated service log files retained per active log.
 pub const LOGS_DEFAULT_MAX_FILES: usize = 5;
+
+/// Stable project namespace and display metadata.
+#[derive(Debug, Clone, serde::Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ProjectConfig {
+    /// Durable project identifier used to group runtime state.
+    pub id: String,
+    /// Human-friendly display name. Changing this does not change identity.
+    pub name: String,
+}
+
+/// YAML shapes accepted for top-level project metadata before normalization.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ProjectConfigInput {
+    /// Shorthand project declaration: `project: my_project`.
+    Id(String),
+    /// Explicit project declaration with stable id and display name.
+    Fields {
+        /// Durable project identifier used to group runtime state.
+        id: String,
+        /// Optional human-friendly display name.
+        name: Option<String>,
+    },
+}
+
+impl From<ProjectConfigInput> for ProjectConfig {
+    fn from(input: ProjectConfigInput) -> Self {
+        match input {
+            ProjectConfigInput::Id(id) => Self {
+                name: id.clone(),
+                id,
+            },
+            ProjectConfigInput::Fields { id, name } => Self {
+                name: name.unwrap_or_else(|| id.clone()),
+                id,
+            },
+        }
+    }
+}
+
+fn validate_project_id(id: &str) -> Result<(), ProcessManagerError> {
+    if id.is_empty() {
+        return Err(ProcessManagerError::ConfigParseError(
+            serde_yaml::Error::custom("project.id must not be empty"),
+        ));
+    }
+
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Err(ProcessManagerError::ConfigParseError(
+            serde_yaml::Error::custom(
+                "project.id may only contain ASCII letters, numbers, '_', '-', or '.'",
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn resolve_project_config(
+    mut project: ProjectConfig,
+    base_path: &Path,
+) -> Result<ProjectConfig, ProcessManagerError> {
+    if project.id.is_empty() {
+        let canonical = base_path
+            .canonicalize()
+            .unwrap_or_else(|_| base_path.to_path_buf());
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.to_string_lossy().as_bytes());
+        let result = hasher.finalize();
+        project.id = format!(
+            "legacy-{:016x}",
+            u64::from_be_bytes(result[0..8].try_into().unwrap())
+        );
+        project.name = canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(project.id.as_str())
+            .to_string();
+    } else {
+        validate_project_id(&project.id)?;
+        if project.name.trim().is_empty() {
+            project.name = project.id.clone();
+        }
+    }
+
+    Ok(project)
+}
 
 /// Output sink for supervised service stdout/stderr.
 #[derive(Debug, Deserialize, Clone, Copy, serde::Serialize, PartialEq, Eq, Default)]
@@ -1079,6 +1177,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     config.project_dir = Some(base_path.to_string_lossy().to_string());
+    config.project = resolve_project_config(config.project, &base_path)?;
     if let Some(env_config) = &config.env
         && let Some(resolved_path) = env_config.path(&base_path)
     {
@@ -1121,6 +1220,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         .map_err(ProcessManagerError::ConfigParseError)?;
 
     config.project_dir = Some(base_path.to_string_lossy().to_string());
+    config.project = resolve_project_config(config.project, &base_path)?;
     for service in config.services.values_mut() {
         service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
     }
@@ -1170,6 +1270,76 @@ services:
     }
 
     #[test]
+    fn load_config_accepts_project_object() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        fs::write(
+            &yaml_path,
+            r#"
+version: "1"
+project:
+  id: arbitration
+  name: Arbitration
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+
+        assert_eq!(config.project.id, "arbitration");
+        assert_eq!(config.project.name, "Arbitration");
+    }
+
+    #[test]
+    fn load_config_accepts_project_shorthand() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        fs::write(
+            &yaml_path,
+            r#"
+version: "1"
+project: arbitration
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+
+        assert_eq!(config.project.id, "arbitration");
+        assert_eq!(config.project.name, "arbitration");
+    }
+
+    #[test]
+    fn load_config_migrates_missing_project_to_legacy_identity() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        fs::write(
+            &yaml_path,
+            r#"
+version: "1"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+
+        assert!(config.project.id.starts_with("legacy-"));
+        assert_eq!(
+            config.project.name,
+            dir.path().file_name().unwrap().to_string_lossy()
+        );
+    }
+
+    #[test]
     fn parse_manifest_rejects_missing_version() {
         let err = parse_config_manifest(
             r#"
@@ -1209,6 +1379,10 @@ services:
 
         let current = Config::try_from(ConfigV1 {
             version: Version::V1,
+            project: Some(ProjectConfigInput::Fields {
+                id: "systemg".into(),
+                name: Some("Systemg".into()),
+            }),
             services,
             project_dir: Some("/tmp/systemg".into()),
             env: Some(EnvConfig {
@@ -1231,6 +1405,8 @@ services:
         .expect("migrate v1 config");
 
         assert_eq!(current.version, CURRENT_MANIFEST_VERSION);
+        assert_eq!(current.project.id, "systemg");
+        assert_eq!(current.project.name, "Systemg");
         assert_eq!(current.project_dir.as_deref(), Some("/tmp/systemg"));
         assert_eq!(current.services["api"].command, "echo ok");
         assert_eq!(current.metrics.retention_minutes, 30);
@@ -1352,6 +1528,7 @@ services:
 
         let config = Config {
             version: Version::V1,
+            project: ProjectConfig::default(),
             services,
             project_dir: None,
             env: None,
@@ -1371,6 +1548,7 @@ services:
 
         let config = Config {
             version: Version::V1,
+            project: ProjectConfig::default(),
             services,
             project_dir: None,
             env: None,
@@ -1399,6 +1577,7 @@ services:
 
         let config = Config {
             version: Version::V1,
+            project: ProjectConfig::default(),
             services,
             project_dir: None,
             env: None,

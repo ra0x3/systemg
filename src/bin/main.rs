@@ -1013,6 +1013,7 @@ mod tests {
         let unit = UnitStatus {
             name: "orchestrator".to_string(),
             hash: "abc123".to_string(),
+            project: None,
             kind: UnitKind::Service,
             lifecycle: Some(ServiceLifecycleStatus::Running),
             health: UnitHealth::Healthy,
@@ -1056,6 +1057,58 @@ mod tests {
         );
         assert!(child_row.contains("spwn"));
         assert!(child_row.contains("rashad"));
+    }
+
+    #[test]
+    fn status_project_groups_preserve_project_boundaries() {
+        let units = vec![
+            UnitStatus {
+                name: "api".to_string(),
+                hash: "hash-a".to_string(),
+                project: Some(systemg::status::ProjectStatus {
+                    id: "arbitration".to_string(),
+                    name: "Arbitration".to_string(),
+                }),
+                kind: UnitKind::Service,
+                lifecycle: None,
+                health: UnitHealth::Healthy,
+                process: None,
+                uptime: None,
+                last_exit: None,
+                cron: None,
+                metrics: None,
+                command: None,
+                runtime_command: None,
+                spawned_children: vec![],
+            },
+            UnitStatus {
+                name: "api".to_string(),
+                hash: "hash-b".to_string(),
+                project: Some(systemg::status::ProjectStatus {
+                    id: "gamecast".to_string(),
+                    name: "Gamecast".to_string(),
+                }),
+                kind: UnitKind::Service,
+                lifecycle: None,
+                health: UnitHealth::Healthy,
+                process: None,
+                uptime: None,
+                last_exit: None,
+                cron: None,
+                metrics: None,
+                command: None,
+                runtime_command: None,
+                spawned_children: vec![],
+            },
+        ];
+
+        let groups = status_project_groups(&units);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Arbitration (arbitration)");
+        assert_eq!(groups[0].1[0].1.hash, "hash-a");
+        assert_eq!(groups[1].0, "Gamecast (gamecast)");
+        assert_eq!(groups[1].1[0].1.hash, "hash-b");
     }
 
     #[test]
@@ -1263,6 +1316,7 @@ mod tests {
         let unit = UnitStatus {
             name: "orchestrator".to_string(),
             hash: "abc123".to_string(),
+            project: None,
             kind: UnitKind::Service,
             lifecycle: Some(ServiceLifecycleStatus::Running),
             health: UnitHealth::Healthy,
@@ -1633,6 +1687,7 @@ mod tests {
         let unit = UnitStatus {
             name: "app".to_string(),
             hash: "abc".to_string(),
+            project: None,
             kind: UnitKind::Service,
             lifecycle: Some(ServiceLifecycleStatus::Running),
             health: UnitHealth::Healthy,
