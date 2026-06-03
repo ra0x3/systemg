@@ -2290,6 +2290,180 @@ impl Daemon {
         }
     }
 
+    /// Launches a Linux service from a dedicated lifetime thread so `PR_SET_PDEATHSIG`
+    /// remains tied to a live parent until the service is explicitly stopped.
+    #[cfg(target_os = "linux")]
+    fn launch_service_with_lifetime_thread(
+        ctx: &DaemonContext,
+        service_name: String,
+        service_config: ServiceConfig,
+        log_settings: EffectiveLogsConfig,
+    ) -> Result<u32, ProcessManagerError> {
+        use std::{sync::mpsc, thread};
+
+        let cancellation_token = ctx.create_cancellation_token(&service_name);
+        let processes = Arc::clone(&ctx.processes);
+        let pid_file = Arc::clone(&ctx.pid_file);
+        let working_dir = ctx.project_root.clone();
+        let detach_children = ctx.detach_children;
+        let pipe_stderr = ctx.pipe_stderr.load(Ordering::SeqCst);
+        let service_name_for_thread = service_name.clone();
+        let service_name_for_cleanup = service_name.clone();
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            debug!("Starting service thread for '{service_name_for_thread}'");
+
+            let launch_result = Daemon::launch_attached_service(
+                &service_name_for_thread,
+                &service_config,
+                working_dir,
+                Arc::clone(&processes),
+                detach_children,
+                pipe_stderr,
+                log_settings,
+            );
+
+            match launch_result {
+                Ok((pid, pgid)) => {
+                    let record_result = pid_file
+                        .lock()
+                        .map_err(ProcessManagerError::from)
+                        .and_then(|mut guard| {
+                            guard
+                                .insert_with_group(&service_name_for_thread, pid, pgid)
+                                .map_err(ProcessManagerError::from)
+                        });
+
+                    if let Err(err) = record_result {
+                        error!(
+                            "Failed to record PID {pid} for service '{service_name_for_thread}': {err}"
+                        );
+
+                        if let Err(stop_err) = Self::terminate_process_tree(
+                            &service_name_for_thread,
+                            pid,
+                            pgid,
+                        ) {
+                            warn!(
+                                "Also failed to terminate untracked service '{service_name_for_thread}': {stop_err}"
+                            );
+                        }
+
+                        if let Ok(mut guard) = processes.lock()
+                            && let Some(mut child) =
+                                guard.remove(&service_name_for_thread)
+                        {
+                            let _ = child.wait();
+                        }
+
+                        let _ = tx.send(Err(err));
+                        return;
+                    }
+
+                    if tx.send(Ok(pid)).is_err() {
+                        return;
+                    }
+
+                    while !cancellation_token.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                    debug!(
+                        "Service thread for '{service_name_for_thread}' terminated by cancellation token"
+                    );
+                }
+                Err(err) => {
+                    error!("Failed to start service '{service_name_for_thread}': {err}");
+                    let _ = tx.send(Err(err));
+                }
+            }
+        });
+
+        match rx.recv() {
+            Ok(Ok(pid)) => Ok(pid),
+            Ok(Err(err)) => {
+                ctx.cancel_service_thread(&service_name_for_cleanup);
+                Err(err)
+            }
+            Err(recv_err) => {
+                ctx.cancel_service_thread(&service_name_for_cleanup);
+                Err(ProcessManagerError::ServiceStartError {
+                    service: service_name,
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        format!("thread failed to report launch status: {recv_err}"),
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Launches a service and records its PID using the platform's supervision model.
+    #[cfg(target_os = "linux")]
+    fn launch_service_for_supervision(
+        ctx: &DaemonContext,
+        service_name: String,
+        service_config: ServiceConfig,
+        log_settings: EffectiveLogsConfig,
+    ) -> Result<u32, ProcessManagerError> {
+        Self::launch_service_with_lifetime_thread(
+            ctx,
+            service_name,
+            service_config,
+            log_settings,
+        )
+    }
+
+    /// Launches a service and records its PID using the platform's supervision model.
+    #[cfg(not(target_os = "linux"))]
+    fn launch_service_for_supervision(
+        ctx: &DaemonContext,
+        service_name: String,
+        service_config: ServiceConfig,
+        log_settings: EffectiveLogsConfig,
+    ) -> Result<u32, ProcessManagerError> {
+        let (pid, pgid) = Self::launch_attached_service(
+            &service_name,
+            &service_config,
+            ctx.project_root.clone(),
+            Arc::clone(&ctx.processes),
+            ctx.detach_children,
+            ctx.pipe_stderr.load(Ordering::SeqCst),
+            log_settings,
+        )?;
+
+        let record_result = ctx
+            .pid_file
+            .lock()
+            .map_err(ProcessManagerError::from)
+            .and_then(|mut guard| {
+                guard
+                    .insert_with_group(&service_name, pid, pgid)
+                    .map_err(ProcessManagerError::from)
+            });
+
+        if let Err(err) = record_result {
+            error!("Failed to record PID {pid} for service '{service_name}': {err}");
+
+            if let Err(stop_err) = Self::terminate_process_tree(&service_name, pid, pgid)
+            {
+                warn!(
+                    "Also failed to terminate untracked service '{service_name}': {stop_err}"
+                );
+            }
+
+            if let Ok(mut guard) = ctx.processes.lock()
+                && let Some(mut child) = guard.remove(&service_name)
+            {
+                let _ = child.wait();
+            }
+
+            return Err(err);
+        }
+
+        Ok(pid)
+    }
+
     /// Common logic for service startup that's shared between Linux and non-Linux platforms.
     /// Returns Ok(Some(state)) if the service was skipped or completed immediately,
     /// Ok(None) if the service should continue with platform-specific startup.
@@ -3736,94 +3910,18 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        use std::{sync::mpsc, thread};
-
         if let Some(state) = self.start_service_common(name, service)? {
             return Ok(state);
         }
 
-        let processes = Arc::clone(&self.processes);
-        let service_config = service.clone();
-        let service_name = name.to_string();
-        let service_name_for_token = service_name.clone();
-        let pid_file = Arc::clone(&self.pid_file);
-        let detach_children = self.detach_children;
-        let working_dir = self.project_root.clone();
-        let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
+        let ctx = self.context();
         let log_settings = service.effective_logs(&self.config.logs);
-
-        let cancellation_token = self
-            .context()
-            .create_cancellation_token(&service_name_for_token);
-
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            debug!("Starting service thread for '{service_name}'");
-
-            let launch_result = Daemon::launch_attached_service(
-                &service_name,
-                &service_config,
-                working_dir.clone(),
-                processes.clone(),
-                detach_children,
-                pipe_stderr,
-                log_settings,
-            );
-
-            match launch_result {
-                Ok((pid, pgid)) => {
-                    match pid_file.lock() {
-                        Ok(mut guard) => {
-                            if let Err(err) =
-                                guard.insert_with_group(&service_name, pid, pgid)
-                            {
-                                error!(
-                                    "Failed to save PID file for service '{service_name}': {}",
-                                    err
-                                );
-                                let _ = tx.send(Err(err.into()));
-                                return;
-                            }
-                        }
-                        Err(poison) => {
-                            error!(
-                                "Pid file mutex poisoned while starting '{}': {}",
-                                service_name, poison
-                            );
-                            let _ = tx.send(Err(ProcessManagerError::from(poison)));
-                            return;
-                        }
-                    }
-
-                    if tx.send(Ok(pid)).is_err() {
-                        return;
-                    }
-
-                    while !cancellation_token.load(Ordering::SeqCst) {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                    }
-                    debug!(
-                        "Service thread for '{service_name}' terminated by cancellation token"
-                    );
-                }
-                Err(e) => {
-                    error!("Failed to start service '{service_name}': {e}");
-                    let _ = tx.send(Err(e));
-                }
-            }
-        });
-
-        debug!("Service thread for '{name}' launched and detached (Linux)");
-
-        let launch_result =
-            rx.recv()
-                .map_err(|recv_err| ProcessManagerError::ServiceStartError {
-                    service: name.to_string(),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        format!("thread failed to report launch status: {recv_err}"),
-                    ),
-                })?;
+        let launch_result = Self::launch_service_with_lifetime_thread(
+            &ctx,
+            name.to_string(),
+            service.clone(),
+            log_settings,
+        );
 
         match launch_result {
             Ok(pid) => {
@@ -3853,6 +3951,7 @@ impl Daemon {
         match readiness {
             Ok(state) => {
                 if matches!(state, ServiceReadyState::CompletedSuccess) {
+                    ctx.cancel_service_thread(name);
                     self.update_state(
                         name,
                         ServiceLifecycleStatus::ExitedSuccessfully,
@@ -3878,6 +3977,7 @@ impl Daemon {
                 Ok(state)
             }
             Err(err) => {
+                ctx.cancel_service_thread(name);
                 if let Some(action) = service
                     .hooks
                     .as_ref()
@@ -4255,6 +4355,9 @@ impl Daemon {
                 let mut pid_file_guard = ctx.lock_pid_file().unwrap();
 
                 for (name, exit_status) in exited_services {
+                    #[cfg(target_os = "linux")]
+                    ctx.cancel_service_thread(&name);
+
                     let manually_stopped = {
                         let mut manual_guard = ctx.lock_manual_stop_flags().unwrap();
                         if manual_guard.remove(&name) {
@@ -4482,71 +4585,15 @@ impl Daemon {
                 return;
             }
 
-            let restart_result = Daemon::launch_attached_service(
-                &name,
-                &service_clone,
-                ctx.project_root.clone(),
-                Arc::clone(&ctx.processes),
-                ctx.detach_children,
-                ctx.pipe_stderr.load(Ordering::SeqCst),
+            let restart_result = Self::launch_service_for_supervision(
+                &ctx,
+                name.clone(),
+                service_clone.clone(),
                 service_clone.effective_logs(&ctx.config.logs),
             );
 
             match restart_result {
-                Ok((pid, pgid)) => {
-                    let record_result = ctx.pid_file
-                        .lock()
-                        .map_err(ProcessManagerError::from)
-                        .and_then(|mut guard| {
-                            guard
-                                .insert_with_group(&name, pid, pgid)
-                                .map_err(ProcessManagerError::from)
-                        });
-
-                    if let Err(err) = record_result {
-                        error!(
-                            "Failed to record PID {pid} for restarted service '{name}': {err}"
-                        );
-
-                        if let Err(stop_err) =
-                            Self::terminate_process_tree(&name, pid, pgid)
-                        {
-                            warn!(
-                                "Also failed to terminate untracked restart of '{name}': {stop_err}"
-                            );
-                        }
-
-                        if let Some(hooks_cfg) = hooks.as_ref()
-                            && let Some(action) =
-                                hooks_cfg.action(HookStage::OnStart, HookOutcome::Error)
-                        {
-                            run_hook(
-                                action,
-                                &service_clone.env,
-                                HookStage::OnStart,
-                                HookOutcome::Error,
-                                &name,
-                                &ctx.project_root,
-                            );
-                        }
-
-                        if let Some(hooks_cfg) = hooks.as_ref()
-                            && let Some(action) =
-                                hooks_cfg.action(HookStage::OnRestart, HookOutcome::Error)
-                        {
-                            run_hook(
-                                action,
-                                &service_clone.env,
-                                HookStage::OnRestart,
-                                HookOutcome::Error,
-                                &name,
-                                &ctx.project_root,
-                            );
-                        }
-
-                        return;
-                    }
-
+                Ok(pid) => {
                     match Self::wait_for_ready(
                         &name,
                         &ctx.processes,
@@ -4606,6 +4653,9 @@ impl Daemon {
                             }
                         }
                         Ok(ServiceReadyState::CompletedSuccess) => {
+                            #[cfg(target_os = "linux")]
+                            ctx.cancel_service_thread(&name);
+
                             if let Ok(mut counts) = ctx.lock_restart_counts() {
                                 counts.insert(name.clone(), 0);
                             }
@@ -4653,6 +4703,9 @@ impl Daemon {
                             }
                         }
                         Err(err) => {
+                            #[cfg(target_os = "linux")]
+                            ctx.cancel_service_thread(&name);
+
                             error!(
                                 "Service '{name}' failed to become ready after restart: {err}"
                             );
@@ -4930,6 +4983,64 @@ fi
                 .get(&service_hash)
                 .expect("state entry present");
             assert_eq!(entry.status, ServiceLifecycleStatus::ExitedSuccessfully);
+
+            daemon.shutdown_monitor();
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn automatic_restart_keeps_restarted_service_alive() {
+        with_temp_home(|dir| {
+            let restarted_pid_path = dir.join("restarted.pid");
+            fs::write(
+                dir.join("flaky.sh"),
+                format!(
+                    r#"
+if [ ! -f first-run.done ]; then
+  touch first-run.done
+  sleep 0.3
+  exit 1
+fi
+echo $$ > "{}"
+sleep 30
+"#,
+                    restarted_pid_path.display()
+                ),
+            )
+            .unwrap();
+
+            let mut service = make_service("sh flaky.sh", &[]);
+            service.restart_policy = Some("always".into());
+            service.backoff = Some("0s".into());
+
+            let mut services = HashMap::new();
+            services.insert("flaky".into(), service);
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services().unwrap();
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let restarted_pid = loop {
+                if let Ok(contents) = fs::read_to_string(&restarted_pid_path)
+                    && let Ok(pid) = contents.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+
+                if Instant::now() >= deadline {
+                    panic!("automatic restart did not write replacement PID");
+                }
+
+                thread::sleep(Duration::from_millis(50));
+            };
+
+            thread::sleep(Duration::from_secs(2));
+
+            assert!(
+                Daemon::signal_pid("flaky", restarted_pid, None).unwrap(),
+                "automatic restart replacement process {restarted_pid} should still be alive"
+            );
 
             daemon.shutdown_monitor();
         });
