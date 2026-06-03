@@ -16,6 +16,7 @@ $ sysg restart
 |-------|------|-------------|
 | `-c` | `--config` | Path to the configuration file. When specified, reloads the configuration and restarts all services with the new settings |
 | `-s` | `--service` | Name of a specific service to restart. If not specified, all services are restarted |
+| `-p` | `--project` | Target a stable project id when restarting services |
 | `-` | `--daemonize` | Start the supervisor before restarting if it is not already running |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--drop-privileges` | Drop child service privileges during spawn. In root/system mode, services without an explicit `user` run as `nobody` |

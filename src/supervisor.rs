@@ -84,6 +84,26 @@ struct SpawnParams {
     log_level: Option<String>,
 }
 
+/// Parameters for streaming logs through the supervisor control socket.
+struct SupervisorLogRequest<'a> {
+    /// Latest status snapshot used to resolve service/project targets.
+    snapshot: crate::status::StatusSnapshot,
+    /// Shared PID file handle used by the log manager.
+    pid_file: std::sync::Arc<std::sync::Mutex<crate::daemon::PidFile>>,
+    /// Optional service name, hash, or `project/service` selector.
+    service: Option<String>,
+    /// Optional stable project id used to filter log targets.
+    project: Option<String>,
+    /// Number of trailing log lines to include.
+    lines: usize,
+    /// Optional stream kind (`stdout`, `stderr`, or combined when absent).
+    kind: Option<&'a str>,
+    /// Whether to follow the log stream until the client disconnects.
+    follow: bool,
+    /// Supervisor-owned Unix stream connected to the CLI client.
+    stream: &'a std::os::unix::net::UnixStream,
+}
+
 #[derive(Debug, Clone)]
 /// Represents cron completion outcome.
 struct CronCompletionOutcome {
@@ -101,6 +121,80 @@ fn fallback_cron_user(service_config: &crate::config::ServiceConfig) -> Option<S
         .ok()
         .flatten()
         .map(|user| user.name)
+}
+
+/// Splits a qualified selector of the form `project_id/service_name`.
+fn split_project_selector(selector: &str) -> Option<(&str, &str)> {
+    let (project, service) = selector.split_once('/')?;
+    if project.is_empty() || service.is_empty() {
+        None
+    } else {
+        Some((project, service))
+    }
+}
+
+/// Returns whether a status unit belongs to the requested project id.
+fn project_matches(unit: &crate::status::UnitStatus, project: Option<&str>) -> bool {
+    project.is_none_or(|project_id| {
+        unit.project.as_ref().map(|project| project.id.as_str()) == Some(project_id)
+    })
+}
+
+/// Returns whether a status unit matches a service selector and optional project id.
+fn unit_matches_selector(
+    unit: &crate::status::UnitStatus,
+    selector: &str,
+    project: Option<&str>,
+) -> bool {
+    let (selector_project, service_selector) = split_project_selector(selector)
+        .map(|(project_id, service_name)| (Some(project_id), service_name))
+        .unwrap_or((None, selector));
+    let requested_project = project.or(selector_project);
+
+    project_matches(unit, requested_project)
+        && (unit.name == service_selector || unit.hash == service_selector)
+}
+
+/// Groups non-orphan status units by project for supervisor log streaming.
+fn log_project_groups<'a>(
+    snapshot: &'a crate::status::StatusSnapshot,
+    project: Option<&str>,
+) -> Vec<(String, Vec<&'a crate::status::UnitStatus>)> {
+    let mut groups: Vec<(String, String, Vec<&crate::status::UnitStatus>)> = Vec::new();
+
+    for unit in snapshot
+        .units
+        .iter()
+        .filter(|unit| !matches!(unit.kind, crate::status::UnitKind::Orphaned))
+        .filter(|unit| project_matches(unit, project))
+    {
+        let (key, label) = unit
+            .project
+            .as_ref()
+            .map(|project| {
+                let label = if project.name == project.id {
+                    project.name.clone()
+                } else {
+                    format!("{} ({})", project.name, project.id)
+                };
+                (project.id.clone(), label)
+            })
+            .unwrap_or_else(|| ("__orphans__".to_string(), "Ungrouped".to_string()));
+
+        if let Some((_, _, units)) = groups
+            .iter_mut()
+            .find(|(existing_key, _, _)| existing_key == &key)
+        {
+            units.push(unit);
+        } else {
+            groups.push((key, label, vec![unit]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(_, label, units)| (label, units))
+        .collect()
 }
 
 impl Supervisor {
@@ -131,6 +225,53 @@ impl Supervisor {
             order.retain(|service_name| service_name == filter);
         }
         Ok(order)
+    }
+
+    /// Validates a requested project id and strips any project prefix from the service selector.
+    fn normalize_service_target(
+        &self,
+        service: Option<String>,
+        project: Option<&str>,
+    ) -> Result<Option<String>, SupervisorError> {
+        let config = self.daemon.config();
+        let active_project = config.project.id.as_str();
+        let (selector_project, selector_service) = match service {
+            Some(value) => split_project_selector(&value)
+                .map(|(project_id, service_name)| {
+                    (Some(project_id.to_string()), Some(service_name.to_string()))
+                })
+                .unwrap_or((None, Some(value))),
+            None => (None, None),
+        };
+
+        let requested_project = match (project, selector_project.as_deref()) {
+            (Some(flag), Some(selector)) if flag != selector => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "project flag '{flag}' does not match service selector project '{selector}'"
+                    ),
+                )
+                .into());
+            }
+            (Some(flag), _) => Some(flag),
+            (_, Some(selector)) => Some(selector),
+            (None, None) => None,
+        };
+
+        if let Some(requested) = requested_project
+            && requested != active_project
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project '{requested}' does not match running supervisor project '{active_project}'"
+                ),
+            )
+            .into());
+        }
+
+        Ok(selector_service)
     }
 
     /// Creates supervisor with config.
@@ -683,6 +824,7 @@ impl Supervisor {
                         debug!("Supervisor received command: {:?}", command);
                         if let ControlCommand::Logs {
                             service,
+                            project,
                             lines,
                             kind,
                             follow,
@@ -710,15 +852,18 @@ impl Supervisor {
                                 }
                             };
                             thread::spawn(move || {
-                                if let Err(err) = Supervisor::handle_logs_command(
+                                let request = SupervisorLogRequest {
                                     snapshot,
                                     pid_file,
                                     service,
+                                    project,
                                     lines,
-                                    kind.as_deref(),
+                                    kind: kind.as_deref(),
                                     follow,
-                                    &log_stream,
-                                ) {
+                                    stream: &log_stream,
+                                };
+                                if let Err(err) = Supervisor::handle_logs_command(request)
+                                {
                                     error!("Supervisor logs command failed: {err}");
                                     let _ = writeln!(log_stream, "{err}");
                                 }
@@ -767,22 +912,15 @@ impl Supervisor {
 
     /// Streams logs through the supervisor-owned control socket.
     fn handle_logs_command(
-        snapshot: crate::status::StatusSnapshot,
-        pid_file: std::sync::Arc<std::sync::Mutex<crate::daemon::PidFile>>,
-        service: Option<String>,
-        lines: usize,
-        kind: Option<&str>,
-        follow: bool,
-        stream: &std::os::unix::net::UnixStream,
+        request: SupervisorLogRequest<'_>,
     ) -> Result<(), SupervisorError> {
-        let manager = LogManager::new(pid_file);
-        let requested_kind = kind;
+        let manager = LogManager::new(request.pid_file);
+        let requested_kind = request.kind;
 
-        if let Some(service_name) = service {
-            let matching_unit = snapshot
-                .units
-                .iter()
-                .find(|unit| unit.name == service_name || unit.hash == service_name);
+        if let Some(service_name) = request.service {
+            let matching_unit = request.snapshot.units.iter().find(|unit| {
+                unit_matches_selector(unit, &service_name, request.project.as_deref())
+            });
 
             if let Some(unit) = matching_unit {
                 let pid = unit.process.as_ref().and_then(|process| {
@@ -796,12 +934,20 @@ impl Supervisor {
                     .stream_log_to_socket(
                         &unit.name,
                         pid,
-                        lines,
+                        request.lines,
                         requested_kind,
-                        follow,
-                        stream,
+                        request.follow,
+                        request.stream,
                     )
                     .map_err(SupervisorError::from);
+            }
+
+            if request.project.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Service '{service_name}' not found in requested project"),
+                )
+                .into());
             }
 
             let combined_exists = get_service_log_path(&service_name).exists();
@@ -812,10 +958,10 @@ impl Supervisor {
                     .stream_log_to_socket(
                         &service_name,
                         None,
-                        lines,
+                        request.lines,
                         requested_kind,
-                        follow,
-                        stream,
+                        request.follow,
+                        request.stream,
                     )
                     .map_err(SupervisorError::from);
             }
@@ -827,52 +973,70 @@ impl Supervisor {
             .into());
         }
 
-        let mut running_units = Vec::new();
-        let mut offline_units = Vec::new();
-        for unit in snapshot
-            .units
-            .iter()
-            .filter(|unit| !matches!(unit.kind, crate::status::UnitKind::Orphaned))
+        let project_groups =
+            log_project_groups(&request.snapshot, request.project.as_deref());
+        let render_project_groups = project_groups.len() > 1
+            || project_groups
+                .iter()
+                .any(|(label, _)| label.as_str() != "Ungrouped");
+
+        for (group_index, (project_label, group_units)) in
+            project_groups.into_iter().enumerate()
         {
-            let pid = unit.process.as_ref().and_then(|process| {
-                if matches!(process.state, crate::status::ProcessState::Running) {
-                    Some(process.pid)
-                } else {
-                    None
+            let mut running_units = Vec::new();
+            let mut offline_units = Vec::new();
+
+            if render_project_groups {
+                if group_index > 0 {
+                    writeln!(request.stream.try_clone()?)?;
                 }
-            });
-
-            if pid.is_some() {
-                running_units.push((unit.name.clone(), pid));
-            } else {
-                offline_units.push((unit.name.clone(), pid));
-            }
-        }
-
-        running_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        running_units.dedup_by(|left, right| left.0 == right.0);
-        offline_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-        offline_units.dedup_by(|left, right| left.0 == right.0);
-
-        for (section, units) in [
-            (LogSection::Running, running_units),
-            (LogSection::Offline, offline_units),
-        ] {
-            if units.is_empty() {
-                continue;
+                writeln!(request.stream.try_clone()?, "Project: {project_label}")?;
             }
 
-            write_log_section_header(stream.try_clone()?, section)?;
+            for unit in group_units
+                .iter()
+                .filter(|unit| !matches!(unit.kind, crate::status::UnitKind::Orphaned))
+            {
+                let pid = unit.process.as_ref().and_then(|process| {
+                    if matches!(process.state, crate::status::ProcessState::Running) {
+                        Some(process.pid)
+                    } else {
+                        None
+                    }
+                });
 
-            for (service_name, pid) in units {
-                manager.stream_log_to_socket(
-                    &service_name,
-                    pid,
-                    lines,
-                    requested_kind,
-                    false,
-                    stream,
-                )?;
+                if pid.is_some() {
+                    running_units.push((unit.name.clone(), pid));
+                } else {
+                    offline_units.push((unit.name.clone(), pid));
+                }
+            }
+
+            running_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            running_units.dedup_by(|left, right| left.0 == right.0);
+            offline_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            offline_units.dedup_by(|left, right| left.0 == right.0);
+
+            for (section, units) in [
+                (LogSection::Running, running_units),
+                (LogSection::Offline, offline_units),
+            ] {
+                if units.is_empty() {
+                    continue;
+                }
+
+                write_log_section_header(request.stream.try_clone()?, section)?;
+
+                for (service_name, pid) in units {
+                    manager.stream_log_to_socket(
+                        &service_name,
+                        pid,
+                        request.lines,
+                        requested_kind,
+                        false,
+                        request.stream,
+                    )?;
+                }
             }
         }
 
@@ -885,7 +1049,9 @@ impl Supervisor {
         command: ControlCommand,
     ) -> Result<ControlResponse, SupervisorError> {
         match command {
-            ControlCommand::Start { service } => {
+            ControlCommand::Start { service, project } => {
+                let service =
+                    self.normalize_service_target(service, project.as_deref())?;
                 if let Some(service_name) = service {
                     let config = self.daemon.config();
                     if let Some(service_config) = config.services.get(&service_name) {
@@ -915,7 +1081,9 @@ impl Supervisor {
                     Ok(ControlResponse::Message("All services started".into()))
                 }
             }
-            ControlCommand::Stop { service } => {
+            ControlCommand::Stop { service, project } => {
+                let service =
+                    self.normalize_service_target(service, project.as_deref())?;
                 if let Some(service) = service {
                     self.daemon.stop_service(&service)?;
                     self.refresh_status_cache();
@@ -928,7 +1096,13 @@ impl Supervisor {
                     Ok(ControlResponse::Message("All services stopped".into()))
                 }
             }
-            ControlCommand::Restart { config, service } => {
+            ControlCommand::Restart {
+                config,
+                service,
+                project,
+            } => {
+                let service =
+                    self.normalize_service_target(service, project.as_deref())?;
                 if let Some(service) = service {
                     if let Some(path) = config {
                         self.reload_config(Path::new(&path))?;
@@ -950,6 +1124,7 @@ impl Supervisor {
             }
             ControlCommand::Inspect {
                 unit,
+                project,
                 samples,
                 live,
             } => {
@@ -964,7 +1139,9 @@ impl Supervisor {
                 let matching_unit = snapshot
                     .units
                     .iter()
-                    .find(|status| status.name == unit || status.hash == unit)
+                    .find(|status| {
+                        unit_matches_selector(status, &unit, project.as_deref())
+                    })
                     .cloned();
 
                 let metrics_samples = if let Some(ref unit_status) = matching_unit {
@@ -1614,6 +1791,7 @@ services:
         match supervisor
             .handle_command(ControlCommand::Inspect {
                 unit: "cached".into(),
+                project: None,
                 samples: 10,
                 live: false,
             })

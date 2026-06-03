@@ -296,6 +296,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             config,
             daemonize,
             service,
+            project,
             name,
             ttl,
             parent_pid,
@@ -339,11 +340,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                     } else if let Some(service_name) = start_target.service {
                         let command = ControlCommand::Start {
                             service: Some(service_name.clone()),
+                            project: project.clone(),
                         };
                         send_control_command(command)?;
                         info!(
                             "Service '{service_name}' start command sent to supervisor"
                         );
+                    } else if project.is_some() {
+                        let command = ControlCommand::Start {
+                            service: None,
+                            project: project.clone(),
+                        };
+                        send_control_command(command)?;
                     } else {
                         warn!(
                             "systemg supervisor already running; aborting duplicate start"
@@ -366,12 +374,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 start_foreground(start_target.config_path, start_target.service, stderr)?;
             }
         }
-        Commands::Stop { service, config } => {
+        Commands::Stop {
+            service,
+            project,
+            config,
+        } => {
             let service_name = service.clone();
             if supervisor_running() {
                 let command = if let Some(name) = service_name.clone() {
                     ControlCommand::Stop {
                         service: Some(name),
+                        project,
+                    }
+                } else if project.is_some() {
+                    ControlCommand::Stop {
+                        service: None,
+                        project,
                     }
                 } else {
                     ControlCommand::Shutdown
@@ -420,6 +438,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Commands::Restart {
             config,
             service,
+            project,
             daemonize,
         } => {
             if supervisor_running() {
@@ -437,6 +456,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let command = ControlCommand::Restart {
                     config: config_override,
                     service,
+                    project,
                 };
                 if daemonize {
                     ipc::send_command_detached(&command)?;
@@ -458,6 +478,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
         Commands::Status {
             config,
             service,
+            project,
             all,
             json,
             no_color,
@@ -478,6 +499,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 full_cmd,
                 include_orphans: all,
                 service_filter: service.as_deref(),
+                project_filter: project.as_deref(),
             };
 
             if let Some(stream_interval) = stream {
@@ -537,6 +559,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
         Commands::Inspect {
             config,
             service,
+            project,
             json,
             no_color,
             live,
@@ -591,6 +614,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             let payload = fetch_inspect(
                                 &effective_config,
                                 &service,
+                                project.as_deref(),
                                 samples_limit,
                                 live,
                             )?;
@@ -621,8 +645,13 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
 
                 loop {
-                    let payload =
-                        fetch_inspect(&effective_config, &service, samples_limit, live)?;
+                    let payload = fetch_inspect(
+                        &effective_config,
+                        &service,
+                        project.as_deref(),
+                        samples_limit,
+                        live,
+                    )?;
                     if payload.unit.is_none() {
                         eprintln!("Service '{service}' not found.");
                         process::exit(2);
@@ -634,7 +663,13 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
             } else {
                 let payload = with_progress_spinner("Inspecting", || {
-                    fetch_inspect(&effective_config, &service, samples_limit, live)
+                    fetch_inspect(
+                        &effective_config,
+                        &service,
+                        project.as_deref(),
+                        samples_limit,
+                        live,
+                    )
                 })?;
                 if payload.unit.is_none() {
                     eprintln!("Service '{service}' not found.");
@@ -654,6 +689,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config,
             purge,
             service,
+            project,
             lines,
             kind,
             stream,
@@ -673,14 +709,39 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             let manager = LogManager::new(pid.clone());
 
             if purge {
-                match service.as_deref() {
-                    Some(service_name) => {
-                        info!("Purging logs for service: {service_name}");
-                        manager.clear_service_logs(service_name)?;
+                if project.is_some() {
+                    let snapshot = with_progress_spinner("Purging logs", || {
+                        fetch_status_snapshot(&effective_config, false)
+                    })?;
+                    let matching_units: Vec<_> = snapshot
+                        .units
+                        .iter()
+                        .filter(|unit| {
+                            status_unit_matches_selector(
+                                unit,
+                                service.as_deref(),
+                                project.as_deref(),
+                            )
+                        })
+                        .collect();
+                    if matching_units.is_empty() {
+                        eprintln!("No matching units found.");
+                        process::exit(2);
                     }
-                    None => {
-                        info!("Purging logs for all services");
-                        manager.clear_all_logs()?;
+                    for unit in matching_units {
+                        info!("Purging logs for service: {}", unit.name);
+                        manager.clear_service_logs(&unit.name)?;
+                    }
+                } else {
+                    match service.as_deref() {
+                        Some(service_name) => {
+                            info!("Purging logs for service: {service_name}");
+                            manager.clear_service_logs(service_name)?;
+                        }
+                        None => {
+                            info!("Purging logs for all services");
+                            manager.clear_all_logs()?;
+                        }
                     }
                 }
                 return Ok(());
@@ -690,6 +751,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 |follow: bool| -> Result<(), Box<dyn Error>> {
                     let command = ControlCommand::Logs {
                         service: service.clone(),
+                        project: project.clone(),
                         lines,
                         kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
                         follow,
@@ -710,6 +772,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             &manager,
                             &snapshot,
                             service_name,
+                            project.as_deref(),
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
@@ -720,6 +783,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                         render_all_logs_from_snapshot(
                             &manager,
                             &snapshot,
+                            project.as_deref(),
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
@@ -756,6 +820,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     loop {
                         let command = ControlCommand::Logs {
                             service: service.clone(),
+                            project: project.clone(),
                             lines,
                             kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
                             follow: false,
@@ -1587,6 +1652,7 @@ mod tests {
             config: "systemg.yaml".to_string(),
             daemonize: false,
             service: None,
+            project: None,
             name: None,
             ttl: None,
             parent_pid: None,
@@ -1597,11 +1663,13 @@ mod tests {
         assert!(drop_privileges_applies_to_command(&Commands::Restart {
             config: "systemg.yaml".to_string(),
             service: None,
+            project: None,
             daemonize: false,
         }));
         assert!(!drop_privileges_applies_to_command(&Commands::Status {
             config: "systemg.yaml".to_string(),
             service: None,
+            project: None,
             all: false,
             json: false,
             no_color: false,

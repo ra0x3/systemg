@@ -43,11 +43,15 @@ pub enum ControlCommand {
     Start {
         /// Optional service name to start. If None, starts all services.
         service: Option<String>,
+        /// Optional project id to target.
+        project: Option<String>,
     },
     /// Stop one or all services.
     Stop {
         /// Optional service name to stop. If None, stops all services.
         service: Option<String>,
+        /// Optional project id to target.
+        project: Option<String>,
     },
     /// Restart services, optionally with a new configuration.
     Restart {
@@ -55,6 +59,8 @@ pub enum ControlCommand {
         config: Option<String>,
         /// Optional service name to restart. If None, restarts all services.
         service: Option<String>,
+        /// Optional project id to target.
+        project: Option<String>,
     },
     /// Shutdown the supervisor daemon.
     Shutdown,
@@ -68,6 +74,8 @@ pub enum ControlCommand {
     Inspect {
         /// Name or hash of the unit to inspect.
         unit: String,
+        /// Optional project id containing the inspected unit.
+        project: Option<String>,
         /// Maximum number of samples to return.
         samples: u32,
         /// Whether to force a fresh snapshot instead of reading the cache.
@@ -78,6 +86,8 @@ pub enum ControlCommand {
     Logs {
         /// Optional service name to stream. If None, streams all managed services.
         service: Option<String>,
+        /// Optional project id to filter logs by.
+        project: Option<String>,
         /// Number of lines to include initially.
         lines: usize,
         /// Log kind to stream. None means merged stdout+stderr.
@@ -345,18 +355,23 @@ mod tests {
     fn control_command_serialization() {
         let start = ControlCommand::Start {
             service: Some("test_service".to_string()),
+            project: None,
         };
         let json = serde_json::to_string(&start).unwrap();
         assert!(json.contains("Start"));
         assert!(json.contains("test_service"));
 
-        let stop = ControlCommand::Stop { service: None };
+        let stop = ControlCommand::Stop {
+            service: None,
+            project: None,
+        };
         let json = serde_json::to_string(&stop).unwrap();
         assert!(json.contains("Stop"));
 
         let restart = ControlCommand::Restart {
             config: Some("config.yaml".to_string()),
             service: Some("service".to_string()),
+            project: None,
         };
         let json = serde_json::to_string(&restart).unwrap();
         assert!(json.contains("Restart"));
@@ -368,6 +383,7 @@ mod tests {
 
         let inspect = ControlCommand::Inspect {
             unit: "svc".to_string(),
+            project: None,
             samples: 10,
             live: true,
         };
@@ -518,6 +534,7 @@ mod tests {
         let mut stream = UnixStream::connect(&socket_path).unwrap();
         let command = ControlCommand::Start {
             service: Some("test".to_string()),
+            project: None,
         };
         let payload = serde_json::to_vec(&command).unwrap();
         stream.write_all(&payload).unwrap();

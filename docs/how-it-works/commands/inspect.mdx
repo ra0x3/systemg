@@ -21,6 +21,7 @@ fresh snapshot for a specific inspect request.
 | Short | Long | Description |
 |-------|------|-------------|
 | `-s` | `--service` | Name of the service to inspect |
+| `-p` | `--project` | Select the stable project id containing the service |
 | `-` | `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
 | `-c` | `--config` | Path to configuration file |
 | `-` | `--json` | Emit machine-readable JSON output instead of a report |
@@ -35,6 +36,13 @@ fresh snapshot for a specific inspect request.
 
 ```sh
 $ sysg inspect -s api
+```
+
+For multi-project supervisors, disambiguate duplicate service names with the
+stable project id:
+
+```sh
+$ sysg inspect --project arbitration --service api
 ```
 
 Shows CPU and memory usage chart:

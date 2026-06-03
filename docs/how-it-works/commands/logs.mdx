@@ -22,6 +22,7 @@ $ sysg logs
 | `-c` | `--config` | Path to configuration file |
 | `-` | `--purge` | Reset log files instead of displaying them |
 | `-s` | `--service` | The name of the service whose logs should be displayed (optional) |
+| `-p` | `--project` | Filter logs by stable project id |
 | `-l` | `--lines` | Number of lines to show (default: 50) |
 | `-k` | `--kind` | Kind of logs to show: stdout, stderr, or supervisor. Omit this flag to show stdout+stderr together |
 | `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
@@ -40,6 +41,13 @@ $ sysg logs
 
 ```sh
 $ sysg logs --service api
+```
+
+To disambiguate a service in a multi-project supervisor, provide the stable
+project id:
+
+```sh
+$ sysg logs --project arbitration --service api
 ```
 
 > **Info:** By default, `sysg logs` shows a stacked stdout+stderr stream in

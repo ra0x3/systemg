@@ -152,6 +152,10 @@ pub enum Commands {
         #[arg(short, long)]
         service: Option<String>,
 
+        /// Project id to target.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+
         /// Name for ad-hoc units or child-start requests.
         #[arg(long)]
         name: Option<String>,
@@ -197,6 +201,10 @@ pub enum Commands {
         /// Name of service to stop (optional).
         #[arg(short, long)]
         service: Option<String>,
+
+        /// Project id to target.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
     },
 
     /// Restart the process manager, optionally specifying a new configuration file.
@@ -208,6 +216,10 @@ pub enum Commands {
         /// Optionally restart only the named service.
         #[arg(short, long)]
         service: Option<String>,
+
+        /// Project id to target.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
 
         /// Start the supervisor before restarting if it isn't already running.
         #[arg(long)]
@@ -223,6 +235,10 @@ pub enum Commands {
         /// Optionally specify a service name to check its status.
         #[arg(short, long)]
         service: Option<String>,
+
+        /// Project id to filter status by.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
 
         /// Show all services including orphaned state (services not in current config).
         #[arg(long)]
@@ -259,6 +275,10 @@ pub enum Commands {
         #[arg(short, long)]
         service: String,
 
+        /// Project id containing the inspected service.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+
         /// Emit machine-readable JSON output instead of a report.
         #[arg(long)]
         json: bool,
@@ -289,6 +309,10 @@ pub enum Commands {
         /// The name of the service whose logs should be displayed (optional).
         #[arg(short, long)]
         service: Option<String>,
+
+        /// Project id to filter logs by.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
 
         /// Number of lines to show (default: 50).
         #[arg(short, long, default_value = "50")]
@@ -359,6 +383,17 @@ mod tests {
     }
 
     #[test]
+    fn status_accepts_project_filter() {
+        let cli = Cli::try_parse_from(["sysg", "status", "-p", "arbitration"]).unwrap();
+        match cli.command {
+            Commands::Status { project, .. } => {
+                assert_eq!(project.as_deref(), Some("arbitration"));
+            }
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
     fn inspect_accepts_stream() {
         let cli = Cli::try_parse_from([
             "sysg",
@@ -384,6 +419,18 @@ mod tests {
         match cli.command {
             Commands::Inspect { live, .. } => assert!(live),
             _ => panic!("expected inspect command"),
+        }
+    }
+
+    #[test]
+    fn logs_accepts_project_filter() {
+        let cli =
+            Cli::try_parse_from(["sysg", "logs", "--project", "arbitration"]).unwrap();
+        match cli.command {
+            Commands::Logs { project, .. } => {
+                assert_eq!(project.as_deref(), Some("arbitration"));
+            }
+            _ => panic!("expected logs command"),
         }
     }
 

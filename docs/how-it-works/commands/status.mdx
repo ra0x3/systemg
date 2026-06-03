@@ -38,6 +38,7 @@ The selected row is highlighted with a white background for easy visibility.
 |-------|------|-------------|
 | `-c` | `--config` | Path to configuration file |
 | `-s` | `--service` | Show specific service details |
+| `-p` | `--project` | Filter by stable project id |
 | `-` | `--all` | Show all services including orphaned state (services not in current config) |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--json` | Emit machine-readable JSON output instead of a table (disables interactive mode) |
@@ -77,6 +78,14 @@ CPU: 1.2%
 Memory: 4.5%
 Command: python app.py
 ```
+
+### View a project
+
+```sh
+$ sysg status --project arbitration
+```
+
+Project filters use `project.id`, not the renameable project display name.
 
 ### Stream status updates
 

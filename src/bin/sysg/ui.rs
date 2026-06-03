@@ -6,6 +6,7 @@ struct StatusRenderOptions<'a> {
     full_cmd: bool,
     include_orphans: bool,
     service_filter: Option<&'a str>,
+    project_filter: Option<&'a str>,
 }
 
 /// Represents inspect render options.
@@ -62,7 +63,9 @@ struct Column {
     align: Alignment,
 }
 
+/// Render-ready status units grouped under one project display label.
 type StatusProjectGroup<'a> = (String, Vec<(usize, &'a UnitStatus)>);
+/// Internal grouping state that keeps the stable project id separate from the display label.
 type WorkingStatusProjectGroup<'a> = (String, String, Vec<(usize, &'a UnitStatus)>);
 
 /// Fetches a status snapshot from the live supervisor, falling back to the
@@ -154,6 +157,7 @@ fn render_service_logs_from_snapshot(
     manager: &LogManager,
     snapshot: &StatusSnapshot,
     service_name: &str,
+    project: Option<&str>,
     lines: usize,
     kind: Option<&str>,
     snapshot_mode: bool,
@@ -161,7 +165,7 @@ fn render_service_logs_from_snapshot(
     let unit = snapshot
         .units
         .iter()
-        .find(|unit| unit.name == service_name || unit.hash == service_name);
+        .find(|unit| status_unit_matches_selector(unit, Some(service_name), project));
 
     if let Some(unit) = unit {
         if let Some(process_pid) = live_unit_pid(unit) {
@@ -183,6 +187,11 @@ fn render_service_logs_from_snapshot(
         } else {
             manager.show_inactive_log(service_name, lines, kind)?;
         }
+        return Ok(());
+    }
+
+    if project.is_some() {
+        warn!("Service '{service_name}' is not present in the requested project");
         return Ok(());
     }
 
@@ -213,28 +222,53 @@ fn render_service_logs_from_snapshot(
 fn render_all_logs_from_snapshot(
     manager: &LogManager,
     snapshot: &StatusSnapshot,
+    project: Option<&str>,
     lines: usize,
     kind: Option<&str>,
     snapshot_mode: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let grouped_units = grouped_log_units(snapshot);
+    let mut filtered_snapshot = snapshot.clone();
+    if project.is_some() {
+        filtered_snapshot
+            .units
+            .retain(|unit| status_project_matches(unit, project));
+    }
+    let project_groups = status_project_groups(&filtered_snapshot.units);
+    let render_project_groups = should_render_project_groups(&project_groups);
 
-    if grouped_units.is_empty() {
+    if project_groups.is_empty() {
         println!("No active services");
         return Ok(());
     }
 
-    for (section, service_names) in grouped_units {
-        write_log_section_header(io::stdout(), section)?;
-        for service_name in service_names {
-            render_service_logs_from_snapshot(
-                manager,
-                snapshot,
-                service_name,
-                lines,
-                kind,
-                snapshot_mode,
-            )?;
+    for (index, (label, group_units)) in project_groups.iter().enumerate() {
+        let mut group_snapshot = filtered_snapshot.clone();
+        group_snapshot.units = group_units.iter().map(|(_, unit)| (*unit).clone()).collect();
+        let grouped_units = grouped_log_units(&group_snapshot);
+        if grouped_units.is_empty() {
+            continue;
+        }
+
+        if render_project_groups {
+            if index > 0 {
+                println!();
+            }
+            println!("Project: {label}");
+        }
+
+        for (section, service_names) in grouped_units {
+            write_log_section_header(io::stdout(), section)?;
+            for service_name in service_names {
+                render_service_logs_from_snapshot(
+                    manager,
+                    &group_snapshot,
+                    service_name,
+                    project,
+                    lines,
+                    kind,
+                    snapshot_mode,
+                )?;
+            }
         }
     }
 
@@ -407,9 +441,12 @@ fn compute_status_preferred_widths(
     no_color: bool,
 ) -> [usize; STATUS_COLUMN_COUNT] {
     let mut widths = STATUS_COLUMN_TITLES.map(visible_length);
+    let render_project_indent = should_render_project_groups(&status_project_groups(units));
 
     for unit in units {
-        widths[STATUS_COL_UNIT] = widths[STATUS_COL_UNIT].max(visible_length(&unit.name));
+        let unit_name_width =
+            visible_length(&unit.name) + usize::from(render_project_indent) * 2;
+        widths[STATUS_COL_UNIT] = widths[STATUS_COL_UNIT].max(unit_name_width);
         widths[STATUS_COL_KIND] = widths[STATUS_COL_KIND].max(4);
         widths[STATUS_COL_STATE] = widths[STATUS_COL_STATE]
             .max(visible_length(&unit_state_label(unit, no_color)));
@@ -495,8 +532,10 @@ fn render_status_interactive(
         .cloned()
         .collect();
 
-    if let Some(filter) = opts.service_filter {
-        units.retain(|unit| unit.name == filter || unit.hash == filter);
+    if opts.service_filter.is_some() || opts.project_filter.is_some() {
+        units.retain(|unit| {
+            status_unit_matches_selector(unit, opts.service_filter, opts.project_filter)
+        });
     }
 
     if units.is_empty() {
@@ -609,14 +648,18 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
+                            let mut args = vec![
+                                "inspect",
+                                "--config",
+                                config_path,
+                                "--service",
+                                selected_unit.name.as_str(),
+                            ];
+                            if let Some(project) = selected_unit.project.as_ref() {
+                                args.extend(["--project", project.id.as_str()]);
+                            }
                             run_status_child_view(
-                                &[
-                                    "inspect",
-                                    "--config",
-                                    config_path,
-                                    "--service",
-                                    &selected_unit.name,
-                                ],
+                                &args,
                                 snapshot,
                                 &units,
                                 opts,
@@ -631,18 +674,22 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
+                            let mut args = vec![
+                                "logs",
+                                "--config",
+                                config_path,
+                                "--service",
+                                selected_unit.name.as_str(),
+                                "--lines",
+                                "100",
+                                "--stream",
+                                "2",
+                            ];
+                            if let Some(project) = selected_unit.project.as_ref() {
+                                args.extend(["--project", project.id.as_str()]);
+                            }
                             run_status_child_view(
-                                &[
-                                    "logs",
-                                    "--config",
-                                    config_path,
-                                    "--service",
-                                    &selected_unit.name,
-                                    "--lines",
-                                    "100",
-                                    "--stream",
-                                    "2",
-                                ],
+                                &args,
                                 snapshot,
                                 &units,
                                 opts,
@@ -799,30 +846,37 @@ fn render_status_table_with_selection(
             columns,
         )
     );
-
-    println!("{}", make_separator_border(columns));
-    println!("{}", format_header_row(columns));
-    println!("{}", make_separator_border(columns));
+    println!("{}", make_bottom_border(columns));
+    println!();
 
     let groups = status_project_groups(units);
-    let render_groups = groups.len() > 1;
+    let render_groups = should_render_project_groups(&groups);
     for (group_index, (label, group_units)) in groups.iter().enumerate() {
         if render_groups {
             if group_index > 0 {
-                println!("{}", make_separator_border(columns));
+                println!();
             }
-            println!("{}", format_banner(&format!(" Project: {label}"), columns));
-            println!("{}", make_separator_border(columns));
+            println!("Project: {label}");
         }
+
+        println!("{}", make_top_border(columns));
+        println!("{}", format_header_row(columns));
+        println!("{}", make_separator_border(columns));
 
         for (index, unit) in group_units {
             if *index == selected_row {
                 print!("\x1b[47m\x1b[30m");
-                let row_content = format_unit_row(unit, columns, true);
+                let row_content =
+                    format_unit_row_with_project_indent(unit, columns, true, render_groups);
                 print!("{}", row_content);
                 println!("\x1b[0m");
             } else {
-                let row_content = format_unit_row(unit, columns, opts.no_color);
+                let row_content = format_unit_row_with_project_indent(
+                    unit,
+                    columns,
+                    opts.no_color,
+                    render_groups,
+                );
                 println!("{}", row_content);
             }
 
@@ -830,10 +884,9 @@ fn render_status_table_with_selection(
                 render_spawn_rows(unit, columns, opts.no_color);
             }
         }
-    }
 
-    println!("{}", make_separator_border(columns));
-    println!("{}", make_bottom_border(columns));
+        println!("{}", make_bottom_border(columns));
+    }
 
     println!(
         "\nTab/↓\x1b[41;97m Next \x1b[0m  Shift+Tab/↑\x1b[41;97m Prev \x1b[0m  Enter\x1b[41;97m Inspect \x1b[0m  L\x1b[41;97m Logs \x1b[0m  q/ESC\x1b[41;97m Quit \x1b[0m"
@@ -871,8 +924,10 @@ fn render_status_non_interactive(
         .cloned()
         .collect();
 
-    if let Some(filter) = opts.service_filter {
-        units.retain(|unit| unit.name == filter || unit.hash == filter);
+    if opts.service_filter.is_some() || opts.project_filter.is_some() {
+        units.retain(|unit| {
+            status_unit_matches_selector(unit, opts.service_filter, opts.project_filter)
+        });
     }
 
     if units.is_empty() {
@@ -989,32 +1044,40 @@ fn render_status_non_interactive(
             columns,
         )
     );
-
-    println!("{}", make_separator_border(columns));
-    println!("{}", format_header_row(columns));
-    println!("{}", make_separator_border(columns));
+    println!("{}", make_bottom_border(columns));
+    println!();
 
     let groups = status_project_groups(&units);
-    let render_groups = groups.len() > 1;
+    let render_groups = should_render_project_groups(&groups);
     for (group_index, (label, group_units)) in groups.iter().enumerate() {
         if render_groups {
             if group_index > 0 {
-                println!("{}", make_separator_border(columns));
+                println!();
             }
-            println!("{}", format_banner(&format!(" Project: {label}"), columns));
-            println!("{}", make_separator_border(columns));
+            println!("Project: {label}");
         }
 
+        println!("{}", make_top_border(columns));
+        println!("{}", format_header_row(columns));
+        println!("{}", make_separator_border(columns));
+
         for (_, unit) in group_units {
-            println!("{}", format_unit_row(unit, columns, opts.no_color));
+            println!(
+                "{}",
+                format_unit_row_with_project_indent(
+                    unit,
+                    columns,
+                    opts.no_color,
+                    render_groups
+                )
+            );
             if !unit.spawned_children.is_empty() {
                 render_spawn_rows(unit, columns, opts.no_color);
             }
         }
-    }
 
-    println!("{}", make_separator_border(columns));
-    println!("{}", make_bottom_border(columns));
+        println!("{}", make_bottom_border(columns));
+    }
 
     let _ = io::stdout().flush();
     Ok(health)
@@ -1373,8 +1436,15 @@ fn total_inner_width(columns: &[Column]) -> usize {
 
 /// Builds top border.
 fn make_top_border(columns: &[Column]) -> String {
-    let inner_width = total_inner_width(columns);
-    format!("╭{}╮", "─".repeat(inner_width))
+    let mut line = String::from("╭");
+    for (i, column) in columns.iter().enumerate() {
+        line.push_str(&"─".repeat(column.width + 2));
+        if i < columns.len() - 1 {
+            line.push('┬');
+        }
+    }
+    line.push('╮');
+    line
 }
 
 /// Builds overview top border.
@@ -1422,6 +1492,7 @@ fn format_banner(text: &str, columns: &[Column]) -> String {
     format!("│{}│", content)
 }
 
+/// Groups status units by project while preserving the incoming unit order.
 fn status_project_groups(units: &[UnitStatus]) -> Vec<StatusProjectGroup<'_>> {
     let mut groups: Vec<WorkingStatusProjectGroup<'_>> = Vec::new();
 
@@ -1430,11 +1501,7 @@ fn status_project_groups(units: &[UnitStatus]) -> Vec<StatusProjectGroup<'_>> {
             .project
             .as_ref()
             .map(|project| {
-                let label = if project.name == project.id {
-                    project.name.clone()
-                } else {
-                    format!("{} ({})", project.name, project.id)
-                };
+                let label = format_project_label(&project.name, &project.id);
                 (project.id.clone(), label)
             })
             .unwrap_or_else(|| ("__orphans__".to_string(), "Ungrouped".to_string()));
@@ -1453,6 +1520,55 @@ fn status_project_groups(units: &[UnitStatus]) -> Vec<StatusProjectGroup<'_>> {
         .into_iter()
         .map(|(_, label, units)| (label, units))
         .collect()
+}
+
+/// Formats a project display label from a renameable name and stable id.
+fn format_project_label(name: &str, id: &str) -> String {
+    if name == id {
+        name.to_string()
+    } else {
+        format!("{name} ({id})")
+    }
+}
+
+/// Returns whether status output should show explicit project headings.
+fn should_render_project_groups(groups: &[StatusProjectGroup<'_>]) -> bool {
+    groups.len() > 1 || groups.iter().any(|(label, _)| label != "Ungrouped")
+}
+
+/// Splits a qualified unit selector of the form `project_id/service_name`.
+fn split_status_project_selector(selector: &str) -> Option<(&str, &str)> {
+    let (project, service) = selector.split_once('/')?;
+    if project.is_empty() || service.is_empty() {
+        None
+    } else {
+        Some((project, service))
+    }
+}
+
+/// Returns whether a status unit belongs to the requested project id.
+fn status_project_matches(unit: &UnitStatus, project: Option<&str>) -> bool {
+    project.is_none_or(|project_id| {
+        unit.project.as_ref().map(|project| project.id.as_str()) == Some(project_id)
+    })
+}
+
+/// Returns whether a status unit matches optional service and project filters.
+fn status_unit_matches_selector(
+    unit: &UnitStatus,
+    service: Option<&str>,
+    project: Option<&str>,
+) -> bool {
+    let (selector_project, service_selector) = service
+        .and_then(split_status_project_selector)
+        .map(|(project_id, service_name)| (Some(project_id), Some(service_name)))
+        .unwrap_or((None, service));
+    let requested_project = project.or(selector_project);
+
+    status_project_matches(unit, requested_project)
+        && service_selector
+            .map(|service_name| unit.name == service_name || unit.hash == service_name)
+            .unwrap_or(true)
 }
 
 /// Counts states and health.
@@ -1603,6 +1719,22 @@ fn format_header_row(columns: &[Column]) -> String {
         row.push('│');
     }
     row
+}
+
+/// Formats a unit row, optionally indenting the unit name beneath a project heading.
+fn format_unit_row_with_project_indent(
+    unit: &UnitStatus,
+    columns: &[Column],
+    no_color: bool,
+    indent: bool,
+) -> String {
+    if !indent {
+        return format_unit_row(unit, columns, no_color);
+    }
+
+    let mut indented = unit.clone();
+    indented.name = format!("  {}", unit.name);
+    format_unit_row(&indented, columns, no_color)
 }
 
 /// Formats unit row.
@@ -2170,12 +2302,14 @@ fn format_bytes(bytes: u64) -> String {
 fn fetch_inspect(
     config_path: &str,
     unit: &str,
+    project: Option<&str>,
     samples: usize,
     live: bool,
 ) -> Result<InspectPayload, Box<dyn Error>> {
     let limit = samples.min(u32::MAX as usize) as u32;
     match ipc::send_command(&ControlCommand::Inspect {
         unit: unit.to_string(),
+        project: project.map(str::to_string),
         samples: limit,
         live,
     }) {
@@ -2191,7 +2325,7 @@ fn fetch_inspect(
             let unit_status = snapshot
                 .units
                 .into_iter()
-                .find(|status| status.name == unit || status.hash == unit);
+                .find(|status| status_unit_matches_selector(status, Some(unit), project));
             Ok(InspectPayload {
                 unit: unit_status,
                 samples: Vec::new(),
@@ -2716,6 +2850,19 @@ fn collect_inspect_lines(
     let empty_label = pad_ansi_str("", label_width);
     let mut overview_lines = vec![
         colorize(&format!("Unit: {}", unit.name), CYAN, opts.no_color),
+        unit.project
+            .as_ref()
+            .map(|project| {
+                colorize(
+                    &format!(
+                        "Project: {}",
+                        format_project_label(&project.name, &project.id)
+                    ),
+                    CYAN,
+                    opts.no_color,
+                )
+            })
+            .unwrap_or_default(),
         format!(
             "{} │ {}",
             pad_ansi_str(&status_label, label_width),
@@ -2752,6 +2899,7 @@ fn collect_inspect_lines(
             pad_ansi_str(&format!("{}: {}", exit_label, exit_str), data_width)
         ),
     ];
+    overview_lines.retain(|line| !line.is_empty());
 
     if unit.command.is_some() || unit.runtime_command.is_some() {
         if let Some(command) = &unit.command {
