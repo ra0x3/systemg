@@ -21,9 +21,10 @@ fresh snapshot for that request.
 By default, `sysg status` displays an interactive table where you can:
 - **Tab** or **↓** (Down arrow) - Move to the next service
 - **Shift+Tab** or **↑** (Up arrow) - Move to the previous service
-- **Enter** - Open the inspect view for the selected service
+- **Enter** or **I** - Open the inspect view for the selected service
 - **L** - Open a live log snapshot stream for the selected service
-- **q** or **ESC** - Exit the status view
+- **R** - Restart the selected service
+- **q**, **ESC**, or **Ctrl+C** - Exit the status view
 
 The selected row is highlighted with a white background for easy visibility.
 
@@ -31,6 +32,11 @@ The selected row is highlighted with a white background for easy visibility.
 > without leaving the status workflow. The shortcut runs
 > `sysg logs -s <UNIT> -l 100 --stream 2`, giving you the latest 100 log lines
 > and refreshing the snapshot every 2 seconds.
+
+> **Info:** Press **R** while a UNIT row is selected to run
+> `sysg restart -s <UNIT>` for that unit. When the row belongs to a project,
+> the shortcut also passes `--project <PROJECT_ID>` so only that project's unit
+> is restarted.
 
 ## Options
 

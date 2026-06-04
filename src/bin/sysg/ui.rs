@@ -644,7 +644,7 @@ fn render_status_interactive(
                         }
                     }
                     KeyEvent {
-                        code: KeyCode::Enter,
+                        code: KeyCode::Enter | KeyCode::Char('i') | KeyCode::Char('I'),
                         ..
                     } => {
                         if !units.is_empty() {
@@ -685,6 +685,32 @@ fn render_status_interactive(
                                 "100",
                                 "--stream",
                                 "2",
+                            ];
+                            if let Some(project) = selected_unit.project.as_ref() {
+                                args.extend(["--project", project.id.as_str()]);
+                            }
+                            run_status_child_view(
+                                &args,
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                health,
+                            )?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('r') | KeyCode::Char('R'),
+                        ..
+                    } => {
+                        if !units.is_empty() {
+                            let selected_unit = &units[selected_row];
+                            let mut args = vec![
+                                "restart",
+                                "--config",
+                                config_path,
+                                "--service",
+                                selected_unit.name.as_str(),
                             ];
                             if let Some(project) = selected_unit.project.as_ref() {
                                 args.extend(["--project", project.id.as_str()]);
