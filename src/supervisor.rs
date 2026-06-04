@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
+    collections::BTreeMap,
     fs, io,
     io::Write,
     os::unix::net::UnixListener,
@@ -32,7 +33,7 @@ use crate::{
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
-        StatusCache, StatusError, StatusRefresher, StatusSnapshot,
+        OverallHealth, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
         collect_runtime_snapshot,
     },
 };
@@ -73,6 +74,12 @@ pub struct Supervisor {
     metrics_collector: Option<MetricsCollector>,
     spawn_manager: DynamicSpawnManager,
     pipe_stderr: bool,
+    extra_projects: BTreeMap<String, ProjectRuntime>,
+}
+
+/// Runtime state for an additional project managed by the resident supervisor.
+struct ProjectRuntime {
+    daemon: Daemon,
 }
 
 /// Parameters for spawning a child process.
@@ -227,6 +234,171 @@ impl Supervisor {
         Ok(order)
     }
 
+    /// Registers dynamic spawn limits from a project config.
+    fn register_spawn_limits_for_config(
+        spawn_manager: &DynamicSpawnManager,
+        config: &Config,
+    ) -> Result<(), SupervisorError> {
+        for (service_name, service_config) in &config.services {
+            if let Some(spawn_config) = &service_config.spawn
+                && let Some(limits) = &spawn_config.limits
+            {
+                spawn_manager.register_service(service_name.clone(), limits)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Starts services for a project daemon without blocking the supervisor control loop.
+    fn start_project_services(
+        daemon: &Daemon,
+        config: &Config,
+        service_filter: Option<&str>,
+        spawn_manager: &DynamicSpawnManager,
+    ) -> Result<(), SupervisorError> {
+        let service_order = Self::startup_service_order(config, service_filter)?;
+        for service_name in service_order {
+            let Some(service_config) = config.services.get(&service_name) else {
+                continue;
+            };
+
+            if service_config.cron.is_some() {
+                continue;
+            }
+
+            if let Some(skip_config) = &service_config.skip {
+                match skip_config {
+                    SkipConfig::Flag(true) => {
+                        info!("Skipping service '{service_name}' due to skip flag");
+                        daemon.mark_service_skipped(&service_name)?;
+                        continue;
+                    }
+                    SkipConfig::Flag(false) => {}
+                    SkipConfig::Command(skip_command) => {
+                        match daemon.evaluate_skip_condition(&service_name, skip_command)
+                        {
+                            Ok(true) => {
+                                info!(
+                                    "Skipping service '{service_name}' due to skip condition"
+                                );
+                                daemon.mark_service_skipped(&service_name)?;
+                                continue;
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                warn!(
+                                    "Failed to evaluate skip condition for '{service_name}': {err}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            daemon.start_service(&service_name, service_config)?;
+
+            if let Some(ref spawn) = service_config.spawn
+                && let Some(SpawnMode::Dynamic) = spawn.mode
+                && let Ok(pid_file) = daemon.pid_file_handle().lock()
+                && let Some(&pid) = pid_file.services().get(&service_name)
+            {
+                spawn_manager.register_service_pid(service_name.clone(), pid);
+            }
+        }
+
+        daemon.ensure_monitoring()?;
+        Ok(())
+    }
+
+    /// Combines per-project snapshots into the supervisor status view.
+    fn aggregate_snapshots(mut snapshots: Vec<StatusSnapshot>) -> StatusSnapshot {
+        let Some(mut aggregate) = snapshots.first().cloned() else {
+            return StatusSnapshot::empty();
+        };
+
+        aggregate.units.clear();
+        for snapshot in snapshots.drain(..) {
+            aggregate.units.extend(snapshot.units);
+        }
+
+        aggregate.overall_health = if aggregate
+            .units
+            .iter()
+            .any(|unit| matches!(unit.health, crate::status::UnitHealth::Failing))
+        {
+            OverallHealth::Failing
+        } else if aggregate
+            .units
+            .iter()
+            .any(|unit| matches!(unit.health, crate::status::UnitHealth::Degraded))
+        {
+            OverallHealth::Degraded
+        } else {
+            OverallHealth::Healthy
+        };
+
+        aggregate
+    }
+
+    /// Collects a status snapshot for one project daemon.
+    fn collect_daemon_snapshot(
+        daemon: &Daemon,
+        metrics_store: &MetricsHandle,
+        spawn_manager: &DynamicSpawnManager,
+        mode: StatusSnapshotMode,
+    ) -> Result<StatusSnapshot, SupervisorError> {
+        let config = daemon.config();
+        let pid_handle = daemon.pid_file_handle();
+        let state_handle = daemon.service_state_handle();
+
+        collect_runtime_snapshot(
+            Arc::clone(&config),
+            &pid_handle,
+            &state_handle,
+            Some(metrics_store),
+            Some(spawn_manager),
+            mode,
+        )
+        .map_err(SupervisorError::Status)
+    }
+
+    /// Collects a fresh aggregate snapshot across all loaded projects.
+    fn collect_aggregate_snapshot(
+        &self,
+        live_request: bool,
+    ) -> Result<StatusSnapshot, SupervisorError> {
+        let primary_config = self.daemon.config();
+        let primary_mode = if live_request {
+            Self::live_status_snapshot_mode(primary_config.as_ref())
+        } else {
+            Self::status_snapshot_mode(primary_config.as_ref())
+        };
+        let mut snapshots = vec![Self::collect_daemon_snapshot(
+            &self.daemon,
+            &self.metrics_store,
+            &self.spawn_manager,
+            primary_mode,
+        )?];
+
+        for project in self.extra_projects.values() {
+            let config = project.daemon.config();
+            let mode = if live_request {
+                Self::live_status_snapshot_mode(config.as_ref())
+            } else {
+                Self::status_snapshot_mode(config.as_ref())
+            };
+            snapshots.push(Self::collect_daemon_snapshot(
+                &project.daemon,
+                &self.metrics_store,
+                &self.spawn_manager,
+                mode,
+            )?);
+        }
+
+        Ok(Self::aggregate_snapshots(snapshots))
+    }
+
     /// Validates a requested project id and strips any project prefix from the service selector.
     fn normalize_service_target(
         &self,
@@ -314,6 +486,7 @@ impl Supervisor {
             metrics_collector: None,
             spawn_manager,
             pipe_stderr: false,
+            extra_projects: BTreeMap::new(),
         })
     }
 
@@ -321,6 +494,9 @@ impl Supervisor {
     pub fn set_pipe_stderr(&mut self, pipe_stderr: bool) {
         self.pipe_stderr = pipe_stderr;
         self.daemon.set_pipe_stderr(pipe_stderr);
+        for project in self.extra_projects.values_mut() {
+            project.daemon.set_pipe_stderr(pipe_stderr);
+        }
     }
 
     /// Runs the event loop.
@@ -1081,6 +1257,12 @@ impl Supervisor {
                     Ok(ControlResponse::Message("All services started".into()))
                 }
             }
+            ControlCommand::AddProject { config, service } => {
+                let project_id = self.add_project_config(Path::new(&config), service)?;
+                Ok(ControlResponse::Message(format!(
+                    "Project '{project_id}' loaded"
+                )))
+            }
             ControlCommand::Stop { service, project } => {
                 let service =
                     self.normalize_service_target(service, project.as_deref())?;
@@ -1182,6 +1364,10 @@ impl Supervisor {
                 }
             }
             ControlCommand::Shutdown => {
+                for project in self.extra_projects.values() {
+                    project.daemon.stop_services()?;
+                    project.daemon.shutdown_monitor();
+                }
                 self.daemon.stop_services()?;
                 self.refresh_status_cache();
                 Ok(ControlResponse::Message("Supervisor shutting down".into()))
@@ -1447,6 +1633,65 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Adds another project config to the resident supervisor and starts its services.
+    fn add_project_config(
+        &mut self,
+        path: &Path,
+        service_filter: Option<String>,
+    ) -> Result<String, SupervisorError> {
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
+        };
+        let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
+        let project_id = config.project.id.clone();
+        let primary_project = self.daemon.config().project.id.clone();
+
+        if project_id == primary_project {
+            Self::start_project_services(
+                &self.daemon,
+                self.daemon.config().as_ref(),
+                service_filter.as_deref(),
+                &self.spawn_manager,
+            )?;
+            self.refresh_status_cache();
+            return Ok(project_id);
+        }
+
+        if !self.extra_projects.contains_key(&project_id) {
+            Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
+            let mut daemon = Daemon::new(
+                config.clone(),
+                self.daemon.pid_file_handle(),
+                self.daemon.service_state_handle(),
+                self.detach_children,
+            );
+            daemon.set_pipe_stderr(self.pipe_stderr);
+            self.extra_projects
+                .insert(project_id.clone(), ProjectRuntime { daemon });
+        }
+
+        let project = self.extra_projects.get(&project_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{project_id}' was not registered"),
+            )
+        })?;
+        Self::start_project_services(
+            &project.daemon,
+            project.daemon.config().as_ref(),
+            service_filter.as_deref(),
+            &self.spawn_manager,
+        )?;
+
+        if let Some(refresher) = self.status_refresher.take() {
+            refresher.stop();
+        }
+        self.refresh_status_cache();
+        Ok(project_id)
+    }
+
     /// Restarts single service.
     fn restart_single_service(&self, name: &str) -> Result<(), SupervisorError> {
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
@@ -1464,7 +1709,7 @@ impl Supervisor {
 
     /// Handles refresh status cache.
     fn refresh_status_cache(&mut self) {
-        match self.collect_live_snapshot() {
+        match self.collect_aggregate_snapshot(false) {
             Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to refresh status snapshot: {err}"),
         }
@@ -1472,38 +1717,14 @@ impl Supervisor {
 
     /// Collects a fresh runtime snapshot directly from daemon state and process inspection.
     fn collect_live_snapshot(&self) -> Result<StatusSnapshot, SupervisorError> {
-        let config = self.daemon.config();
-        let mode = Self::status_snapshot_mode(config.as_ref());
-        self.collect_live_snapshot_with_mode(mode)
+        self.collect_aggregate_snapshot(false)
     }
 
     /// Collects a fresh runtime snapshot for an explicit live command request.
     fn collect_live_snapshot_for_request(
         &self,
     ) -> Result<StatusSnapshot, SupervisorError> {
-        let config = self.daemon.config();
-        let mode = Self::live_status_snapshot_mode(config.as_ref());
-        self.collect_live_snapshot_with_mode(mode)
-    }
-
-    /// Collects a fresh runtime snapshot directly from daemon state using the supplied mode.
-    fn collect_live_snapshot_with_mode(
-        &self,
-        mode: StatusSnapshotMode,
-    ) -> Result<StatusSnapshot, SupervisorError> {
-        let config = self.daemon.config();
-        let pid_handle = self.daemon.pid_file_handle();
-        let state_handle = self.daemon.service_state_handle();
-
-        collect_runtime_snapshot(
-            config,
-            &pid_handle,
-            &state_handle,
-            Some(&self.metrics_store),
-            Some(&self.spawn_manager),
-            mode,
-        )
-        .map_err(SupervisorError::from)
+        self.collect_aggregate_snapshot(true)
     }
 
     /// Handles shutdown runtime.
@@ -1513,6 +1734,10 @@ impl Supervisor {
         }
         if let Some(refresher) = self.status_refresher.take() {
             refresher.stop();
+        }
+        for project in self.extra_projects.values() {
+            project.daemon.stop_services()?;
+            project.daemon.shutdown_monitor();
         }
         self.daemon.stop_services()?;
         self.daemon.shutdown_monitor();
@@ -1825,7 +2050,109 @@ services:
                 std::env::remove_var("HOME");
             }
         }
+    }
+
+    #[test]
+    fn add_project_config_makes_second_project_visible_in_status() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
         runtime::init(runtime::RuntimeMode::User);
         runtime::set_drop_privileges(false);
+
+        let alpha_config = temp.path().join("alpha.yaml");
+        let beta_config = temp.path().join("beta.yaml");
+        fs::write(
+            &alpha_config,
+            r#"
+version: "1"
+project:
+  id: alpha
+  name: Alpha
+services:
+  alpha_worker:
+    command: "/bin/sleep 30"
+"#,
+        )
+        .expect("write alpha config");
+        fs::write(
+            &beta_config,
+            r#"
+version: "1"
+project:
+  id: beta
+  name: Beta
+services:
+  beta_worker:
+    command: "/bin/sleep 30"
+"#,
+        )
+        .expect("write beta config");
+
+        let mut supervisor =
+            Supervisor::new(alpha_config, false, None).expect("create supervisor");
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: beta_config.to_string_lossy().to_string(),
+                service: None,
+            })
+            .expect("add beta project");
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("status response")
+        {
+            ControlResponse::Status(snapshot) => {
+                let projects: std::collections::HashSet<_> = snapshot
+                    .units
+                    .iter()
+                    .filter_map(|unit| {
+                        unit.project.as_ref().map(|project| project.id.as_str())
+                    })
+                    .collect();
+                assert!(
+                    projects.contains("alpha"),
+                    "alpha project missing from status"
+                );
+                assert!(
+                    projects.contains("beta"),
+                    "beta project missing from status"
+                );
+                assert!(
+                    snapshot
+                        .units
+                        .iter()
+                        .any(|unit| unit.name == "alpha_worker"),
+                    "alpha service missing from status"
+                );
+                assert!(
+                    snapshot.units.iter().any(|unit| unit.name == "beta_worker"),
+                    "beta service missing from status"
+                );
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
     }
 }

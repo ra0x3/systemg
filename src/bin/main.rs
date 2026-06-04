@@ -353,9 +353,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         };
                         send_control_command(command)?;
                     } else {
-                        warn!(
-                            "systemg supervisor already running; aborting duplicate start"
-                        );
+                        let command = ControlCommand::AddProject {
+                            config: start_target
+                                .config_path
+                                .to_string_lossy()
+                                .to_string(),
+                            service: None,
+                        };
+                        send_control_command(command)?;
                     }
                     return Ok(());
                 }

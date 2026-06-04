@@ -46,6 +46,13 @@ pub enum ControlCommand {
         /// Optional project id to target.
         project: Option<String>,
     },
+    /// Add another project configuration to the resident supervisor.
+    AddProject {
+        /// Path to the project configuration file.
+        config: String,
+        /// Optional service name to start from the added project.
+        service: Option<String>,
+    },
     /// Stop one or all services.
     Stop {
         /// Optional service name to stop. If None, stops all services.
