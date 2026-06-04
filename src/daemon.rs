@@ -1412,6 +1412,7 @@ impl DaemonContext {
 }
 
 /// Service manager daemon.
+#[derive(Clone)]
 pub struct Daemon {
     /// Running processes.
     processes: Arc<Mutex<HashMap<String, Child>>>,

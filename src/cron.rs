@@ -311,6 +311,15 @@ pub struct CronJobState {
     pub timezone_label: String,
 }
 
+/// A cron job that is due to execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronDueJob {
+    /// Name of the service this cron job manages.
+    pub service_name: String,
+    /// Configuration hash of the service, used to resolve project ownership.
+    pub service_hash: String,
+}
+
 impl CronJobState {
     /// Creates a new cron job state, optionally restoring from persisted state.
     pub fn new(
@@ -495,42 +504,52 @@ impl CronManager {
 
     /// Replace all cron jobs using the provided configuration, pruning any that no longer exist.
     pub fn sync_from_config(&self, config: &Config) -> Result<(), ProcessManagerError> {
+        self.sync_from_configs(std::iter::once(config))
+    }
+
+    /// Replace all cron jobs using the provided configurations.
+    pub fn sync_from_configs<'a, I>(&self, configs: I) -> Result<(), ProcessManagerError>
+    where
+        I: IntoIterator<Item = &'a Config>,
+    {
         let mut active_jobs = Vec::new();
         let mut active_hashes = HashSet::new();
 
-        for (service_name, service_config) in &config.services {
-            if let Some(cron_config) = &service_config.cron {
-                let service_hash = service_config.compute_hash();
-                let (job_state, normalized, normalized_expression) =
-                    self.build_job_state(service_name, &service_hash, cron_config)?;
-                let timezone_label = job_state.timezone_label.clone();
+        for config in configs {
+            for (service_name, service_config) in &config.services {
+                if let Some(cron_config) = &service_config.cron {
+                    let service_hash = service_config.compute_hash();
+                    let (job_state, normalized, normalized_expression) =
+                        self.build_job_state(service_name, &service_hash, cron_config)?;
+                    let timezone_label = job_state.timezone_label.clone();
 
-                self.persist_job_state(&job_state);
-                if normalized {
-                    debug!(
-                        "Cron job '{}' expression normalized to '{}'",
-                        service_name, normalized_expression
-                    );
+                    self.persist_job_state(&job_state);
+                    if normalized {
+                        debug!(
+                            "Cron job '{}' expression normalized to '{}'",
+                            service_name, normalized_expression
+                        );
+                    }
+
+                    if let Some(next_exec) = job_state.next_execution {
+                        let now = SystemTime::now();
+                        let next_dt: chrono::DateTime<Utc> = next_exec.into();
+                        let now_dt: chrono::DateTime<Utc> = now.into();
+                        debug!(
+                            "Cron job '{}' scheduled with timezone {}. Next execution: {} (now: {})",
+                            service_name, timezone_label, next_dt, now_dt
+                        );
+                    } else {
+                        debug!(
+                            "Cron job '{}' scheduled with timezone {} but next_execution is None",
+                            service_name, timezone_label
+                        );
+                    }
+
+                    active_hashes.insert(service_hash);
+                    info!("Registered cron job for service '{}'", service_name);
+                    active_jobs.push(job_state);
                 }
-
-                if let Some(next_exec) = job_state.next_execution {
-                    let now = SystemTime::now();
-                    let next_dt: chrono::DateTime<Utc> = next_exec.into();
-                    let now_dt: chrono::DateTime<Utc> = now.into();
-                    debug!(
-                        "Cron job '{}' scheduled with timezone {}. Next execution: {} (now: {})",
-                        service_name, timezone_label, next_dt, now_dt
-                    );
-                } else {
-                    debug!(
-                        "Cron job '{}' scheduled with timezone {} but next_execution is None",
-                        service_name, timezone_label
-                    );
-                }
-
-                active_hashes.insert(service_hash);
-                info!("Registered cron job for service '{}'", service_name);
-                active_jobs.push(job_state);
             }
         }
 
@@ -544,8 +563,16 @@ impl CronManager {
         Ok(())
     }
 
-    /// Check if any cron jobs are due to run and return their names.
+    /// Check if any cron jobs are due to run and return their service names.
     pub fn get_due_jobs(&self) -> Vec<String> {
+        self.get_due_job_refs()
+            .into_iter()
+            .map(|job| job.service_name)
+            .collect()
+    }
+
+    /// Check if any cron jobs are due to run and return their stable identities.
+    pub fn get_due_job_refs(&self) -> Vec<CronDueJob> {
         let mut jobs = self.jobs.lock().unwrap();
         let now = SystemTime::now();
         let mut due_jobs = Vec::new();
@@ -580,7 +607,10 @@ impl CronManager {
                     job.update_next_execution();
                     self.persist_job_state(job);
                 } else {
-                    due_jobs.push(job.service_name.clone());
+                    due_jobs.push(CronDueJob {
+                        service_name: job.service_name.clone(),
+                        service_hash: job.service_hash.clone(),
+                    });
                     job.currently_running = true;
                     job.last_execution = Some(now);
 
@@ -612,8 +642,42 @@ impl CronManager {
         exit_code: Option<i32>,
         metrics: Vec<crate::metrics::MetricSample>,
     ) {
+        self.mark_job_completed_by(
+            |job| job.service_name == service_name,
+            status,
+            exit_code,
+            metrics,
+        );
+    }
+
+    /// Mark a cron job as completed by service hash.
+    pub fn mark_job_completed_by_hash(
+        &self,
+        service_hash: &str,
+        status: CronExecutionStatus,
+        exit_code: Option<i32>,
+        metrics: Vec<crate::metrics::MetricSample>,
+    ) {
+        self.mark_job_completed_by(
+            |job| job.service_hash == service_hash,
+            status,
+            exit_code,
+            metrics,
+        );
+    }
+
+    /// Mark a cron job matching predicate as completed.
+    fn mark_job_completed_by<F>(
+        &self,
+        matches_job: F,
+        status: CronExecutionStatus,
+        exit_code: Option<i32>,
+        metrics: Vec<crate::metrics::MetricSample>,
+    ) where
+        F: Fn(&CronJobState) -> bool,
+    {
         let mut jobs = self.jobs.lock().unwrap();
-        if let Some(job) = jobs.iter_mut().find(|j| j.service_name == service_name) {
+        if let Some(job) = jobs.iter_mut().find(|job| matches_job(job)) {
             job.currently_running = false;
 
             if let Some(record) = job.execution_history.back_mut() {
@@ -623,7 +687,7 @@ impl CronManager {
                 record.metrics = metrics;
             }
 
-            debug!("Cron job '{}' completed", service_name);
+            debug!("Cron job '{}' completed", job.service_name);
             self.persist_job_state(job);
         }
     }
@@ -636,8 +700,42 @@ impl CronManager {
         user: Option<String>,
         command: Option<String>,
     ) {
+        self.annotate_job_execution_by(
+            |job| job.service_name == service_name,
+            pid,
+            user,
+            command,
+        );
+    }
+
+    /// Annotate the most recent execution record by service hash.
+    pub fn annotate_job_execution_by_hash(
+        &self,
+        service_hash: &str,
+        pid: Option<u32>,
+        user: Option<String>,
+        command: Option<String>,
+    ) {
+        self.annotate_job_execution_by(
+            |job| job.service_hash == service_hash,
+            pid,
+            user,
+            command,
+        );
+    }
+
+    /// Annotate the most recent execution record matching predicate.
+    fn annotate_job_execution_by<F>(
+        &self,
+        matches_job: F,
+        pid: Option<u32>,
+        user: Option<String>,
+        command: Option<String>,
+    ) where
+        F: Fn(&CronJobState) -> bool,
+    {
         let mut jobs = self.jobs.lock().unwrap();
-        if let Some(job) = jobs.iter_mut().find(|j| j.service_name == service_name)
+        if let Some(job) = jobs.iter_mut().find(|job| matches_job(job))
             && let Some(record) = job.execution_history.back_mut()
         {
             if pid.is_some() {
