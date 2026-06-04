@@ -1347,13 +1347,12 @@ impl Supervisor {
                 service,
                 project,
             } => {
-                let service =
-                    self.normalize_service_target(service, project.as_deref())?;
                 if let Some(service) = service {
-                    if let Some(path) = config {
-                        self.reload_config(Path::new(&path))?;
-                    }
-                    self.restart_single_service(&service)?;
+                    self.restart_single_service_target(
+                        &service,
+                        project.as_deref(),
+                        config.as_deref().map(Path::new),
+                    )?;
                     self.refresh_status_cache();
                     Ok(ControlResponse::Message(format!(
                         "Service '{service}' restarted"
@@ -1764,18 +1763,88 @@ impl Supervisor {
         Ok(project_id)
     }
 
-    /// Restarts single service.
-    fn restart_single_service(&self, name: &str) -> Result<(), SupervisorError> {
-        let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
-        let Some(service_config) = config.services.get(name) else {
-            return Err(ProcessManagerError::DependencyError {
-                service: name.into(),
-                dependency: "service not defined".into(),
-            }
+    /// Restarts one service in the selected project without reloading unrelated projects.
+    fn restart_single_service_target(
+        &self,
+        selector: &str,
+        project: Option<&str>,
+        config_path: Option<&Path>,
+    ) -> Result<(), SupervisorError> {
+        let (selector_project, service_name) = split_project_selector(selector)
+            .map(|(project_id, service_name)| (Some(project_id), service_name))
+            .unwrap_or((None, selector));
+
+        if let (Some(flag), Some(selector_project)) = (project, selector_project)
+            && flag != selector_project
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project flag '{flag}' does not match service selector project '{selector_project}'"
+                ),
+            )
+            .into());
+        }
+
+        let override_config = if let Some(path) = config_path {
+            Some(load_config(Some(path.to_string_lossy().as_ref()))?)
+        } else {
+            None
+        };
+        let config_project = override_config
+            .as_ref()
+            .map(|config| config.project.id.as_str());
+        let requested_project = project.or(selector_project).or(config_project);
+
+        if let (Some(requested), Some(config_project)) =
+            (requested_project, config_project)
+            && requested != config_project
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project '{requested}' does not match config project '{config_project}'"
+                ),
+            )
+            .into());
+        }
+
+        let primary_project = self.daemon.config().project.id.clone();
+        let target_project = requested_project.unwrap_or(primary_project.as_str());
+
+        if target_project == primary_project {
+            let config_handle = self.daemon.config();
+            let service_config = override_config
+                .as_ref()
+                .and_then(|config| config.services.get(service_name))
+                .or_else(|| config_handle.services.get(service_name))
+                .ok_or_else(|| ProcessManagerError::DependencyError {
+                    service: service_name.into(),
+                    dependency: "service not defined".into(),
+                })?;
+            self.daemon.restart_service(service_name, service_config)?;
+            return Ok(());
+        }
+
+        let Some(project_runtime) = self.extra_projects.get(target_project) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{target_project}' is not managed by this supervisor"),
+            )
             .into());
         };
-
-        self.daemon.restart_service(name, service_config)?;
+        let config_handle = project_runtime.daemon.config();
+        let service_config = override_config
+            .as_ref()
+            .and_then(|config| config.services.get(service_name))
+            .or_else(|| config_handle.services.get(service_name))
+            .ok_or_else(|| ProcessManagerError::DependencyError {
+                service: service_name.into(),
+                dependency: "service not defined".into(),
+            })?;
+        project_runtime
+            .daemon
+            .restart_service(service_name, service_config)?;
         Ok(())
     }
 
@@ -2257,6 +2326,39 @@ services:
                     .and_then(|unit| unit.project.as_ref())
                     .map(|project| project.mode);
                 assert_eq!(beta_mode, Some(ProjectRunMode::Foreground));
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        supervisor
+            .handle_command(ControlCommand::Restart {
+                config: Some(beta_config.to_string_lossy().to_string()),
+                service: Some("beta_worker".into()),
+                project: None,
+            })
+            .expect("restart beta service from beta config");
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("status response after project-scoped restart")
+        {
+            ControlResponse::Status(snapshot) => {
+                assert!(
+                    snapshot.units.iter().any(|unit| {
+                        unit.name == "alpha_worker"
+                            && unit.project.as_ref().map(|project| project.id.as_str())
+                                == Some("alpha")
+                    }),
+                    "alpha project should remain visible after restarting beta service"
+                );
+                assert!(
+                    snapshot.units.iter().any(|unit| {
+                        unit.name == "beta_worker"
+                            && unit.project.as_ref().map(|project| project.id.as_str())
+                                == Some("beta")
+                    }),
+                    "beta project should remain visible after restarting beta service"
+                );
             }
             other => panic!("expected status response, got {other:?}"),
         }

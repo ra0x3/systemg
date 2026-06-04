@@ -384,7 +384,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         start_target.service,
                     )?;
                 } else {
-                    register_signal_handler()?;
                     start_foreground(
                         start_target.config_path,
                         start_target.service,
@@ -2415,106 +2414,6 @@ fn force_kill(pid: libc::pid_t) {
     let _ = wait_for_supervisor_exit(pid, Duration::from_secs(2));
 }
 
-/// Returns whether the tracked root PID is still alive.
-fn tracked_service_alive(pid: libc::pid_t) -> bool {
-    let target = Pid::from_raw(pid);
-    match signal::kill(target, None) {
-        Ok(_) => true,
-        Err(err) => err != nix::Error::from(nix::errno::Errno::ESRCH),
-    }
-}
-
-/// Waits for a tracked service root PID to exit.
-fn wait_for_tracked_service_exit(pid: libc::pid_t, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !tracked_service_alive(pid) {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    !tracked_service_alive(pid)
-}
-
-/// Sends a signal to a tracked service using its process group when available and falling back
-/// to the root PID when group signaling is not possible.
-fn signal_tracked_service(
-    service: &str,
-    pid: libc::pid_t,
-    pgid: Option<libc::pid_t>,
-    signal: libc::c_int,
-) {
-    let mut delivered = false;
-
-    if let Some(group_id) = pgid {
-        unsafe {
-            if libc::killpg(group_id, signal) == 0 {
-                delivered = true;
-            } else {
-                let err = std::io::Error::last_os_error();
-                match err.raw_os_error() {
-                    Some(code) if code == libc::ESRCH => {
-                        delivered = true;
-                    }
-                    Some(code) if code == libc::EPERM => {}
-                    _ => eprintln!(
-                        "systemg: failed to send signal {signal} to '{service}' (pgid {group_id}): {err}"
-                    ),
-                }
-            }
-        }
-    }
-
-    if delivered {
-        return;
-    }
-
-    unsafe {
-        if libc::kill(pid, signal) == -1 {
-            let err = std::io::Error::last_os_error();
-            match err.raw_os_error() {
-                Some(code) if code == libc::ESRCH => {}
-                _ => eprintln!(
-                    "systemg: failed to send signal {signal} to '{service}' (pid {pid}): {err}"
-                ),
-            }
-        }
-    }
-}
-
-/// Terminates tracked services from the pid file during foreground Ctrl-C shutdown.
-fn terminate_tracked_services_on_shutdown() {
-    let mut tracked: Vec<(String, libc::pid_t, Option<libc::pid_t>)> = Vec::new();
-    if let Ok(pid_file) = PidFile::load() {
-        for (service, pid) in pid_file.services() {
-            tracked.push((
-                service.clone(),
-                *pid as libc::pid_t,
-                pid_file.pgid_for(service).map(|group| group as libc::pid_t),
-            ));
-        }
-    }
-
-    for (service, pid, pgid) in &tracked {
-        signal_tracked_service(service, *pid, *pgid, libc::SIGTERM);
-    }
-
-    for (service, pid, pgid) in &tracked {
-        if wait_for_tracked_service_exit(*pid, Duration::from_secs(2)) {
-            continue;
-        }
-        signal_tracked_service(service, *pid, *pgid, libc::SIGKILL);
-    }
-
-    for (service, pid, _) in &tracked {
-        if !wait_for_tracked_service_exit(*pid, Duration::from_secs(2)) {
-            eprintln!(
-                "systemg: service '{service}' (pid {pid}) survived foreground shutdown"
-            );
-        }
-    }
-}
-
 /// Handles process exited.
 fn process_exited(pid: libc::pid_t) -> bool {
     let proc_root = PathBuf::from(format!("/proc/{pid}"));
@@ -2598,15 +2497,35 @@ fn start_foreground(
     service: Option<String>,
     pipe_stderr: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let mut supervisor = Supervisor::new_with_mode(
-        config_path,
-        false,
-        service,
-        ProjectRunMode::Foreground,
-    )?;
-    supervisor.set_pipe_stderr(pipe_stderr);
-    supervisor.run()?;
-    Ok(())
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+    let project_id = config.project.id.clone();
+
+    let child_pid = unsafe { libc::fork() };
+    if child_pid < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+
+    if child_pid == 0 {
+        unsafe {
+            libc::setsid();
+        }
+
+        let mut supervisor = Supervisor::new_with_mode(
+            config_path,
+            false,
+            service,
+            ProjectRunMode::Foreground,
+        )?;
+        supervisor.set_pipe_stderr(pipe_stderr);
+        if let Err(err) = supervisor.run() {
+            error!("Supervisor exited with error: {err}");
+            process::exit(1);
+        }
+        process::exit(0);
+    }
+
+    wait_for_supervisor_ready(child_pid)?;
+    wait_for_foreground_attachment(project_id)
 }
 
 /// Adds a foreground project to the resident supervisor and owns its terminal lifetime.
@@ -2623,26 +2542,104 @@ fn start_foreground_attached(
     };
     send_control_command(command)?;
 
+    wait_for_foreground_attachment(project_id)
+}
+
+/// Waits for Ctrl-C and then stops the foreground-owned project.
+fn wait_for_foreground_attachment(project_id: String) -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel();
     ctrlc::set_handler(move || {
         let _ = tx.send(());
     })?;
     let _ = rx.recv();
 
-    match ipc::send_command(&ControlCommand::StopProject {
-        project: project_id.clone(),
-    }) {
-        Ok(ControlResponse::Message(message)) => {
-            println!("{message}");
-            Ok(())
+    let stop_result: Result<(), Box<dyn Error>> =
+        match ipc::send_command(&ControlCommand::StopProject {
+            project: project_id.clone(),
+        }) {
+            Ok(ControlResponse::Message(message)) => {
+                println!("{message}");
+                Ok(())
+            }
+            Ok(ControlResponse::Ok) => Ok(()),
+            Ok(ControlResponse::Error(message)) => {
+                Err(ControlError::Server(message).into())
+            }
+            Ok(other) => Err(io::Error::other(format!(
+                "unexpected supervisor response: {:?}",
+                other
+            ))
+            .into()),
+            Err(err) => Err(err.into()),
+        };
+    stop_result?;
+
+    if !supervisor_has_daemon_projects()? {
+        match ipc::send_command(&ControlCommand::Shutdown) {
+            Ok(ControlResponse::Message(message)) => {
+                println!("{message}");
+            }
+            Ok(ControlResponse::Ok) => {}
+            Ok(ControlResponse::Error(message)) => {
+                return Err(ControlError::Server(message).into());
+            }
+            Ok(other) => {
+                return Err(io::Error::other(format!(
+                    "unexpected supervisor response: {:?}",
+                    other
+                ))
+                .into());
+            }
+            Err(ControlError::NotAvailable) => {}
+            Err(err) => return Err(err.into()),
         }
-        Ok(ControlResponse::Ok) => Ok(()),
+    }
+
+    Ok(())
+}
+
+/// Waits for a newly forked supervisor child to publish its control socket.
+fn wait_for_supervisor_ready(child_pid: libc::pid_t) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if supervisor_running() {
+            return Ok(());
+        }
+
+        let target = Pid::from_raw(child_pid);
+        if let Err(err) = signal::kill(target, None)
+            && err == nix::Error::from(nix::errno::Errno::ESRCH)
+        {
+            return Err(
+                io::Error::other("foreground supervisor exited during startup").into(),
+            );
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "timed out waiting for foreground supervisor to start",
+    )
+    .into())
+}
+
+/// Returns whether the resident supervisor still owns any daemon-mode project.
+fn supervisor_has_daemon_projects() -> Result<bool, Box<dyn Error>> {
+    match ipc::send_command(&ControlCommand::Status { live: true }) {
+        Ok(ControlResponse::Status(snapshot)) => Ok(snapshot.units.iter().any(|unit| {
+            unit.project
+                .as_ref()
+                .is_some_and(|project| project.mode == ProjectRunMode::Daemon)
+        })),
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Ok(other) => Err(io::Error::other(format!(
             "unexpected supervisor response: {:?}",
             other
         ))
         .into()),
+        Err(ControlError::NotAvailable) => Ok(false),
         Err(err) => Err(err.into()),
     }
 }
@@ -3068,18 +3065,6 @@ fn daemonize_systemg() -> std::io::Result<()> {
         let _ = libc::dup2(fd, libc::STDERR_FILENO);
         libc::close(fd);
     }
-
-    Ok(())
-}
-
-/// Registers signal handler.
-fn register_signal_handler() -> Result<(), Box<dyn Error>> {
-    ctrlc::set_handler(move || {
-        println!("systemg is shutting down... terminating child services");
-        terminate_tracked_services_on_shutdown();
-        let _ = ipc::cleanup_runtime();
-        std::process::exit(0);
-    })?;
 
     Ok(())
 }
