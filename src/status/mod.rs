@@ -591,6 +591,8 @@ pub struct UnitStatus {
 pub struct ProjectStatus {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub mode: ProjectRunMode,
 }
 
 impl From<&ProjectConfig> for ProjectStatus {
@@ -598,8 +600,20 @@ impl From<&ProjectConfig> for ProjectStatus {
         Self {
             id: project.id.clone(),
             name: project.name.clone(),
+            mode: ProjectRunMode::Daemon,
         }
     }
+}
+
+/// How a project is tied to the supervisor lifecycle.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectRunMode {
+    /// Project should continue running independently of any foreground client.
+    #[default]
+    Daemon,
+    /// Project lifetime is owned by a foreground client/session.
+    Foreground,
 }
 
 /// Summarized metrics attached to a unit entry.

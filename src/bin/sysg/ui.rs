@@ -233,7 +233,7 @@ fn render_all_logs_from_snapshot(
             .units
             .retain(|unit| status_project_matches(unit, project));
     }
-    let project_groups = status_project_groups(&filtered_snapshot.units);
+    let project_groups = status_project_groups(&filtered_snapshot.units, false);
     let render_project_groups = should_render_project_groups(&project_groups);
 
     if project_groups.is_empty() {
@@ -441,7 +441,8 @@ fn compute_status_preferred_widths(
     no_color: bool,
 ) -> [usize; STATUS_COLUMN_COUNT] {
     let mut widths = STATUS_COLUMN_TITLES.map(visible_length);
-    let render_project_indent = should_render_project_groups(&status_project_groups(units));
+    let render_project_indent =
+        should_render_project_groups(&status_project_groups(units, no_color));
 
     for unit in units {
         let unit_name_width =
@@ -849,7 +850,7 @@ fn render_status_table_with_selection(
     println!("{}", make_bottom_border(columns));
     println!();
 
-    let groups = status_project_groups(units);
+    let groups = status_project_groups(units, opts.no_color);
     let render_groups = should_render_project_groups(&groups);
     for (group_index, (label, group_units)) in groups.iter().enumerate() {
         if render_groups {
@@ -1047,7 +1048,7 @@ fn render_status_non_interactive(
     println!("{}", make_bottom_border(columns));
     println!();
 
-    let groups = status_project_groups(&units);
+    let groups = status_project_groups(&units, opts.no_color);
     let render_groups = should_render_project_groups(&groups);
     for (group_index, (label, group_units)) in groups.iter().enumerate() {
         if render_groups {
@@ -1493,7 +1494,7 @@ fn format_banner(text: &str, columns: &[Column]) -> String {
 }
 
 /// Groups status units by project while preserving the incoming unit order.
-fn status_project_groups(units: &[UnitStatus]) -> Vec<StatusProjectGroup<'_>> {
+fn status_project_groups(units: &[UnitStatus], no_color: bool) -> Vec<StatusProjectGroup<'_>> {
     let mut groups: Vec<WorkingStatusProjectGroup<'_>> = Vec::new();
 
     for (index, unit) in units.iter().enumerate() {
@@ -1501,7 +1502,8 @@ fn status_project_groups(units: &[UnitStatus]) -> Vec<StatusProjectGroup<'_>> {
             .project
             .as_ref()
             .map(|project| {
-                let label = format_project_label(&project.name, &project.id);
+                let label =
+                    format_project_label(&project.name, &project.id, project.mode, no_color);
                 (project.id.clone(), label)
             })
             .unwrap_or_else(|| ("__orphans__".to_string(), "Ungrouped".to_string()));
@@ -1522,13 +1524,23 @@ fn status_project_groups(units: &[UnitStatus]) -> Vec<StatusProjectGroup<'_>> {
         .collect()
 }
 
-/// Formats a project display label from a renameable name and stable id.
-fn format_project_label(name: &str, id: &str) -> String {
-    if name == id {
+/// Formats a project display label from a renameable name, stable id, and run mode.
+fn format_project_label(
+    name: &str,
+    id: &str,
+    mode: ProjectRunMode,
+    no_color: bool,
+) -> String {
+    let base = if name == id {
         name.to_string()
     } else {
         format!("{name} ({id})")
-    }
+    };
+    let mode = match mode {
+        ProjectRunMode::Daemon => colorize("daemon", DIM_CYAN, no_color),
+        ProjectRunMode::Foreground => colorize("foreground", YELLOW_BOLD, no_color),
+    };
+    format!("{base} [{mode}]")
 }
 
 /// Returns whether status output should show explicit project headings.
@@ -2856,7 +2868,12 @@ fn collect_inspect_lines(
                 colorize(
                     &format!(
                         "Project: {}",
-                        format_project_label(&project.name, &project.id)
+                        format_project_label(
+                            &project.name,
+                            &project.id,
+                            project.mode,
+                            opts.no_color
+                        )
                     ),
                     CYAN,
                     opts.no_color,

@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     metrics::MetricSample,
     runtime,
-    status::{StatusSnapshot, UnitStatus},
+    status::{ProjectRunMode, StatusSnapshot, UnitStatus},
 };
 
 /// Directory under `$HOME` where runtime artifacts (PID/socket files) are stored.
@@ -52,6 +52,14 @@ pub enum ControlCommand {
         config: String,
         /// Optional service name to start from the added project.
         service: Option<String>,
+        /// Requested project run mode.
+        #[serde(default)]
+        mode: ProjectRunMode,
+    },
+    /// Stop all services for one project.
+    StopProject {
+        /// Stable project id to stop.
+        project: String,
     },
     /// Stop one or all services.
     Stop {

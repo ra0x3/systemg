@@ -9,6 +9,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime},
@@ -41,9 +42,10 @@ use systemg::{
     runtime::{self, RuntimeMode},
     spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
-        CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, SpawnedProcessNode,
-        StatusSnapshot, UnitHealth, UnitKind, UnitMetricsSummary, UnitStatus, UptimeInfo,
-        collect_disk_snapshot, compute_overall_health, format_elapsed,
+        CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, ProjectRunMode,
+        SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitKind, UnitMetricsSummary,
+        UnitStatus, UptimeInfo, collect_disk_snapshot, compute_overall_health,
+        format_elapsed,
     },
     supervisor::Supervisor,
 };
@@ -359,6 +361,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .to_string_lossy()
                                 .to_string(),
                             service: None,
+                            mode: ProjectRunMode::Daemon,
                         };
                         send_control_command(command)?;
                     }
@@ -375,8 +378,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                     stderr,
                 )?;
             } else {
-                register_signal_handler()?;
-                start_foreground(start_target.config_path, start_target.service, stderr)?;
+                if supervisor_running() {
+                    start_foreground_attached(
+                        start_target.config_path,
+                        start_target.service,
+                    )?;
+                } else {
+                    register_signal_handler()?;
+                    start_foreground(
+                        start_target.config_path,
+                        start_target.service,
+                        stderr,
+                    )?;
+                }
             }
         }
         Commands::Stop {
@@ -1138,6 +1152,7 @@ mod tests {
                 project: Some(systemg::status::ProjectStatus {
                     id: "arbitration".to_string(),
                     name: "Arbitration".to_string(),
+                    mode: ProjectRunMode::Daemon,
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
@@ -1157,6 +1172,7 @@ mod tests {
                 project: Some(systemg::status::ProjectStatus {
                     id: "gamecast".to_string(),
                     name: "Gamecast".to_string(),
+                    mode: ProjectRunMode::Daemon,
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
@@ -1172,12 +1188,12 @@ mod tests {
             },
         ];
 
-        let groups = status_project_groups(&units);
+        let groups = status_project_groups(&units, true);
 
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].0, "Arbitration (arbitration)");
+        assert_eq!(groups[0].0, "Arbitration (arbitration) [daemon]");
         assert_eq!(groups[0].1[0].1.hash, "hash-a");
-        assert_eq!(groups[1].0, "Gamecast (gamecast)");
+        assert_eq!(groups[1].0, "Gamecast (gamecast) [daemon]");
         assert_eq!(groups[1].1[0].1.hash, "hash-b");
     }
 
@@ -2582,10 +2598,53 @@ fn start_foreground(
     service: Option<String>,
     pipe_stderr: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let mut supervisor = Supervisor::new(config_path, false, service)?;
+    let mut supervisor = Supervisor::new_with_mode(
+        config_path,
+        false,
+        service,
+        ProjectRunMode::Foreground,
+    )?;
     supervisor.set_pipe_stderr(pipe_stderr);
     supervisor.run()?;
     Ok(())
+}
+
+/// Adds a foreground project to the resident supervisor and owns its terminal lifetime.
+fn start_foreground_attached(
+    config_path: PathBuf,
+    service: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+    let project_id = config.project.id.clone();
+    let command = ControlCommand::AddProject {
+        config: config_path.to_string_lossy().to_string(),
+        service,
+        mode: ProjectRunMode::Foreground,
+    };
+    send_control_command(command)?;
+
+    let (tx, rx) = mpsc::channel();
+    ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    })?;
+    let _ = rx.recv();
+
+    match ipc::send_command(&ControlCommand::StopProject {
+        project: project_id.clone(),
+    }) {
+        Ok(ControlResponse::Message(message)) => {
+            println!("{message}");
+            Ok(())
+        }
+        Ok(ControlResponse::Ok) => Ok(()),
+        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
+        Ok(other) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {:?}",
+            other
+        ))
+        .into()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Starts supervisor daemon.

@@ -33,8 +33,8 @@ use crate::{
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
-        OverallHealth, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
-        collect_runtime_snapshot,
+        OverallHealth, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
+        StatusSnapshot, collect_runtime_snapshot,
     },
 };
 
@@ -74,12 +74,14 @@ pub struct Supervisor {
     metrics_collector: Option<MetricsCollector>,
     spawn_manager: DynamicSpawnManager,
     pipe_stderr: bool,
+    primary_project_mode: ProjectRunMode,
     extra_projects: BTreeMap<String, ProjectRuntime>,
 }
 
 /// Runtime state for an additional project managed by the resident supervisor.
 struct ProjectRuntime {
     daemon: Daemon,
+    mode: ProjectRunMode,
 }
 
 /// Parameters for spawning a child process.
@@ -179,11 +181,16 @@ fn log_project_groups<'a>(
             .project
             .as_ref()
             .map(|project| {
-                let label = if project.name == project.id {
+                let base = if project.name == project.id {
                     project.name.clone()
                 } else {
                     format!("{} ({})", project.name, project.id)
                 };
+                let mode = match project.mode {
+                    ProjectRunMode::Daemon => "daemon",
+                    ProjectRunMode::Foreground => "foreground",
+                };
+                let label = format!("{base} [{mode}]");
                 (project.id.clone(), label)
             })
             .unwrap_or_else(|| ("__orphans__".to_string(), "Ungrouped".to_string()));
@@ -341,18 +348,28 @@ impl Supervisor {
         aggregate
     }
 
+    /// Tags all project-backed units in a snapshot with the supervisor project mode.
+    fn apply_project_mode(snapshot: &mut StatusSnapshot, mode: ProjectRunMode) {
+        for unit in &mut snapshot.units {
+            if let Some(project) = unit.project.as_mut() {
+                project.mode = mode;
+            }
+        }
+    }
+
     /// Collects a status snapshot for one project daemon.
     fn collect_daemon_snapshot(
         daemon: &Daemon,
         metrics_store: &MetricsHandle,
         spawn_manager: &DynamicSpawnManager,
         mode: StatusSnapshotMode,
+        run_mode: ProjectRunMode,
     ) -> Result<StatusSnapshot, SupervisorError> {
         let config = daemon.config();
         let pid_handle = daemon.pid_file_handle();
         let state_handle = daemon.service_state_handle();
 
-        collect_runtime_snapshot(
+        let mut snapshot = collect_runtime_snapshot(
             Arc::clone(&config),
             &pid_handle,
             &state_handle,
@@ -360,7 +377,9 @@ impl Supervisor {
             Some(spawn_manager),
             mode,
         )
-        .map_err(SupervisorError::Status)
+        .map_err(SupervisorError::Status)?;
+        Self::apply_project_mode(&mut snapshot, run_mode);
+        Ok(snapshot)
     }
 
     /// Collects a fresh aggregate snapshot across all loaded projects.
@@ -379,6 +398,7 @@ impl Supervisor {
             &self.metrics_store,
             &self.spawn_manager,
             primary_mode,
+            self.primary_project_mode,
         )?];
 
         for project in self.extra_projects.values() {
@@ -393,6 +413,7 @@ impl Supervisor {
                 &self.metrics_store,
                 &self.spawn_manager,
                 mode,
+                project.mode,
             )?);
         }
 
@@ -452,6 +473,21 @@ impl Supervisor {
         detach_children: bool,
         service_filter: Option<String>,
     ) -> Result<Self, SupervisorError> {
+        Self::new_with_mode(
+            config_path,
+            detach_children,
+            service_filter,
+            ProjectRunMode::Daemon,
+        )
+    }
+
+    /// Creates supervisor with config and project mode.
+    pub fn new_with_mode(
+        config_path: PathBuf,
+        detach_children: bool,
+        service_filter: Option<String>,
+        primary_project_mode: ProjectRunMode,
+    ) -> Result<Self, SupervisorError> {
         let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
         let cron_manager = CronManager::new();
         cron_manager.sync_from_config(&config)?;
@@ -486,6 +522,7 @@ impl Supervisor {
             metrics_collector: None,
             spawn_manager,
             pipe_stderr: false,
+            primary_project_mode,
             extra_projects: BTreeMap::new(),
         })
     }
@@ -613,7 +650,10 @@ impl Supervisor {
             Some(&self.spawn_manager),
             Self::status_snapshot_mode(config_handle.as_ref()),
         ) {
-            Ok(snapshot) => self.status_cache.replace(snapshot),
+            Ok(mut snapshot) => {
+                Self::apply_project_mode(&mut snapshot, self.primary_project_mode);
+                self.status_cache.replace(snapshot);
+            }
             Err(err) => error!("failed to build initial status snapshot: {err}"),
         }
 
@@ -625,19 +665,22 @@ impl Supervisor {
         let spawn_manager_for_refresh = self.spawn_manager.clone();
         let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
         let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
+        let refresh_project_mode = self.primary_project_mode;
         if !matches!(refresh_mode, StatusSnapshotMode::Off) {
             self.status_refresher = Some(StatusRefresher::spawn(
                 cache_clone,
                 refresh_interval,
                 move || {
-                    collect_runtime_snapshot(
+                    let mut snapshot = collect_runtime_snapshot(
                         Arc::clone(&config_for_refresh),
                         &pid_for_refresh,
                         &state_for_refresh,
                         Some(&metrics_for_refresh),
                         Some(&spawn_manager_for_refresh),
                         refresh_mode,
-                    )
+                    )?;
+                    Supervisor::apply_project_mode(&mut snapshot, refresh_project_mode);
+                    Ok(snapshot)
                 },
             ));
         }
@@ -1257,13 +1300,34 @@ impl Supervisor {
                     Ok(ControlResponse::Message("All services started".into()))
                 }
             }
-            ControlCommand::AddProject { config, service } => {
-                let project_id = self.add_project_config(Path::new(&config), service)?;
+            ControlCommand::AddProject {
+                config,
+                service,
+                mode,
+            } => {
+                let project_id =
+                    self.add_project_config(Path::new(&config), service, mode)?;
                 Ok(ControlResponse::Message(format!(
                     "Project '{project_id}' loaded"
                 )))
             }
+            ControlCommand::StopProject { project } => {
+                self.stop_project(&project)?;
+                self.refresh_status_cache();
+                Ok(ControlResponse::Message(format!(
+                    "Project '{project}' stopped"
+                )))
+            }
             ControlCommand::Stop { service, project } => {
+                if service.is_none()
+                    && let Some(project_id) = project.as_deref()
+                {
+                    self.stop_project(project_id)?;
+                    self.refresh_status_cache();
+                    return Ok(ControlResponse::Message(format!(
+                        "Project '{project_id}' stopped"
+                    )));
+                }
                 let service =
                     self.normalize_service_target(service, project.as_deref())?;
                 if let Some(service) = service {
@@ -1588,7 +1652,7 @@ impl Supervisor {
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
-        if let Ok(snapshot) = collect_runtime_snapshot(
+        if let Ok(mut snapshot) = collect_runtime_snapshot(
             Arc::clone(&config_handle),
             &pid_handle,
             &state_handle,
@@ -1596,6 +1660,7 @@ impl Supervisor {
             Some(&self.spawn_manager),
             Self::status_snapshot_mode(config_handle.as_ref()),
         ) {
+            Self::apply_project_mode(&mut snapshot, self.primary_project_mode);
             self.status_cache.replace(snapshot);
         }
 
@@ -1607,19 +1672,22 @@ impl Supervisor {
         let refresh_spawn_manager = self.spawn_manager.clone();
         let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
         let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
+        let refresh_project_mode = self.primary_project_mode;
         if !matches!(refresh_mode, StatusSnapshotMode::Off) {
             self.status_refresher = Some(StatusRefresher::spawn(
                 cache_clone,
                 refresh_interval,
                 move || {
-                    collect_runtime_snapshot(
+                    let mut snapshot = collect_runtime_snapshot(
                         Arc::clone(&refresh_config),
                         &refresh_pid,
                         &refresh_state,
                         Some(&refresh_metrics),
                         Some(&refresh_spawn_manager),
                         refresh_mode,
-                    )
+                    )?;
+                    Supervisor::apply_project_mode(&mut snapshot, refresh_project_mode);
+                    Ok(snapshot)
                 },
             ));
         }
@@ -1638,6 +1706,7 @@ impl Supervisor {
         &mut self,
         path: &Path,
         service_filter: Option<String>,
+        mode: ProjectRunMode,
     ) -> Result<String, SupervisorError> {
         let resolved = if path.is_absolute() {
             path.to_path_buf()
@@ -1649,6 +1718,7 @@ impl Supervisor {
         let primary_project = self.daemon.config().project.id.clone();
 
         if project_id == primary_project {
+            self.primary_project_mode = mode;
             Self::start_project_services(
                 &self.daemon,
                 self.daemon.config().as_ref(),
@@ -1669,7 +1739,9 @@ impl Supervisor {
             );
             daemon.set_pipe_stderr(self.pipe_stderr);
             self.extra_projects
-                .insert(project_id.clone(), ProjectRuntime { daemon });
+                .insert(project_id.clone(), ProjectRuntime { daemon, mode });
+        } else if let Some(project) = self.extra_projects.get_mut(&project_id) {
+            project.mode = mode;
         }
 
         let project = self.extra_projects.get(&project_id).ok_or_else(|| {
@@ -1713,6 +1785,33 @@ impl Supervisor {
             Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to refresh status snapshot: {err}"),
         }
+    }
+
+    /// Stops every service in one managed project.
+    fn stop_project(&mut self, project_id: &str) -> Result<(), SupervisorError> {
+        let primary_project = self.daemon.config().project.id.clone();
+        if project_id == primary_project {
+            let services: Vec<String> =
+                self.daemon.config().services.keys().cloned().collect();
+            for service in services {
+                self.daemon.stop_service(&service)?;
+            }
+            return Ok(());
+        }
+
+        let Some(project) = self.extra_projects.get(project_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{project_id}' is not managed by this supervisor"),
+            )
+            .into());
+        };
+        let services: Vec<String> =
+            project.daemon.config().services.keys().cloned().collect();
+        for service in services {
+            project.daemon.stop_service(&service)?;
+        }
+        Ok(())
     }
 
     /// Collects a fresh runtime snapshot directly from daemon state and process inspection.
@@ -2081,7 +2180,7 @@ project:
   name: Alpha
 services:
   alpha_worker:
-    command: "/bin/sleep 30"
+    command: "/bin/sleep 31"
 "#,
         )
         .expect("write alpha config");
@@ -2094,7 +2193,7 @@ project:
   name: Beta
 services:
   beta_worker:
-    command: "/bin/sleep 30"
+    command: "/bin/sleep 32"
 "#,
         )
         .expect("write beta config");
@@ -2105,6 +2204,7 @@ services:
             .handle_command(ControlCommand::AddProject {
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
+                mode: ProjectRunMode::Foreground,
             })
             .expect("add beta project");
 
@@ -2139,6 +2239,24 @@ services:
                     snapshot.units.iter().any(|unit| unit.name == "beta_worker"),
                     "beta service missing from status"
                 );
+                let alpha_mode = snapshot
+                    .units
+                    .iter()
+                    .find(|unit| unit.name == "alpha_worker")
+                    .and_then(|unit| unit.project.as_ref())
+                    .map(|project| project.mode);
+                assert_eq!(alpha_mode, Some(ProjectRunMode::Daemon));
+                let beta_mode = snapshot
+                    .units
+                    .iter()
+                    .find(|unit| {
+                        unit.name == "beta_worker"
+                            && unit.project.as_ref().map(|project| project.id.as_str())
+                                == Some("beta")
+                    })
+                    .and_then(|unit| unit.project.as_ref())
+                    .map(|project| project.mode);
+                assert_eq!(beta_mode, Some(ProjectRunMode::Foreground));
             }
             other => panic!("expected status response, got {other:?}"),
         }
