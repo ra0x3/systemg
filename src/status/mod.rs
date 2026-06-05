@@ -801,14 +801,37 @@ pub fn collect_runtime_snapshot(
     spawn_manager: Option<&DynamicSpawnManager>,
     mode: StatusSnapshotMode,
 ) -> Result<StatusSnapshot, StatusError> {
+    collect_runtime_snapshot_with_cron_hashes(
+        config,
+        pid_file,
+        service_state,
+        metrics,
+        spawn_manager,
+        mode,
+        None,
+    )
+}
+
+/// Builds a fresh snapshot using a caller-provided set of valid cron hashes.
+pub(crate) fn collect_runtime_snapshot_with_cron_hashes(
+    config: Arc<Config>,
+    pid_file: &Arc<Mutex<PidFile>>,
+    service_state: &Arc<Mutex<ServiceStateFile>>,
+    metrics: Option<&MetricsHandle>,
+    spawn_manager: Option<&DynamicSpawnManager>,
+    mode: StatusSnapshotMode,
+    valid_cron_hashes: Option<&HashSet<String>>,
+) -> Result<StatusSnapshot, StatusError> {
     let mut cron_state = CronStateFile::load()?;
-    let valid_cron_hashes: HashSet<String> = config
-        .services
-        .iter()
-        .filter(|(_, svc)| svc.cron.is_some())
-        .map(|(_, svc)| svc.compute_hash())
-        .collect();
-    prune_orphaned_cron_jobs(&mut cron_state, &valid_cron_hashes)?;
+    let config_cron_hashes;
+    let valid_cron_hashes = match valid_cron_hashes {
+        Some(valid_cron_hashes) => valid_cron_hashes,
+        None => {
+            config_cron_hashes = cron_hashes_for_config(config.as_ref());
+            &config_cron_hashes
+        }
+    };
+    prune_orphaned_cron_jobs(&mut cron_state, valid_cron_hashes)?;
 
     let pid_guard = pid_file.lock().map_err(|_| StatusError::PidFilePoisoned)?;
     let mut state_guard = service_state
@@ -830,6 +853,16 @@ pub fn collect_runtime_snapshot(
     ))
 }
 
+/// Returns service hashes for cron-managed services in a config.
+pub(crate) fn cron_hashes_for_config(config: &Config) -> HashSet<String> {
+    config
+        .services
+        .iter()
+        .filter(|(_, svc)| svc.cron.is_some())
+        .map(|(_, svc)| svc.compute_hash())
+        .collect()
+}
+
 /// Builds a snapshot purely from persisted state on disk.
 pub fn collect_disk_snapshot(
     config: Option<Config>,
@@ -840,12 +873,7 @@ pub fn collect_disk_snapshot(
     let config_ref = config.as_ref();
 
     if let Some(cfg) = config_ref {
-        let valid_cron_hashes: HashSet<String> = cfg
-            .services
-            .iter()
-            .filter(|(_, svc)| svc.cron.is_some())
-            .map(|(_, svc)| svc.compute_hash())
-            .collect();
+        let valid_cron_hashes = cron_hashes_for_config(cfg);
         prune_orphaned_cron_jobs(&mut cron_state, &valid_cron_hashes)?;
     }
 

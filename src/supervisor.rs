@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs, io,
     io::Write,
     os::unix::net::UnixListener,
@@ -35,6 +35,7 @@ use crate::{
     status::{
         OverallHealth, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
         StatusSnapshot, collect_runtime_snapshot,
+        collect_runtime_snapshot_with_cron_hashes, cron_hashes_for_config,
     },
 };
 
@@ -373,22 +374,43 @@ impl Supervisor {
         spawn_manager: &DynamicSpawnManager,
         mode: StatusSnapshotMode,
         run_mode: ProjectRunMode,
+        valid_cron_hashes: Option<&HashSet<String>>,
     ) -> Result<StatusSnapshot, SupervisorError> {
         let config = daemon.config();
         let pid_handle = daemon.pid_file_handle();
         let state_handle = daemon.service_state_handle();
 
-        let mut snapshot = collect_runtime_snapshot(
-            Arc::clone(&config),
-            &pid_handle,
-            &state_handle,
-            Some(metrics_store),
-            Some(spawn_manager),
-            mode,
-        )
+        let mut snapshot = match valid_cron_hashes {
+            Some(valid_cron_hashes) => collect_runtime_snapshot_with_cron_hashes(
+                Arc::clone(&config),
+                &pid_handle,
+                &state_handle,
+                Some(metrics_store),
+                Some(spawn_manager),
+                mode,
+                Some(valid_cron_hashes),
+            ),
+            None => collect_runtime_snapshot(
+                Arc::clone(&config),
+                &pid_handle,
+                &state_handle,
+                Some(metrics_store),
+                Some(spawn_manager),
+                mode,
+            ),
+        }
         .map_err(SupervisorError::Status)?;
         Self::apply_project_mode(&mut snapshot, run_mode);
         Ok(snapshot)
+    }
+
+    /// Returns cron hashes for all projects currently managed by the supervisor.
+    fn managed_cron_hashes(&self) -> HashSet<String> {
+        let mut hashes = cron_hashes_for_config(self.daemon.config().as_ref());
+        for project in self.extra_projects.values() {
+            hashes.extend(cron_hashes_for_config(project.daemon.config().as_ref()));
+        }
+        hashes
     }
 
     /// Collects a fresh aggregate snapshot across all loaded projects.
@@ -402,12 +424,14 @@ impl Supervisor {
         } else {
             Self::status_snapshot_mode(primary_config.as_ref())
         };
+        let valid_cron_hashes = self.managed_cron_hashes();
         let mut snapshots = vec![Self::collect_daemon_snapshot(
             &self.daemon,
             &self.metrics_store,
             &self.spawn_manager,
             primary_mode,
             self.primary_project_mode,
+            Some(&valid_cron_hashes),
         )?];
 
         for project in self.extra_projects.values() {
@@ -423,6 +447,7 @@ impl Supervisor {
                 &self.spawn_manager,
                 mode,
                 project.mode,
+                Some(&valid_cron_hashes),
             )?);
         }
 
@@ -2626,6 +2651,140 @@ services:
                         .is_some_and(|service| service.compute_hash() == beta_hash)
             }),
             "extra project cron job should be routable to its project"
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn aggregate_status_preserves_cron_state_for_all_projects() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let alpha_config = temp.path().join("alpha.yaml");
+        let beta_config = temp.path().join("beta.yaml");
+        fs::write(
+            &alpha_config,
+            r#"
+version: "1"
+project:
+  id: alpha
+  name: Alpha
+services:
+  alpha_cron:
+    command: "/bin/true"
+    cron:
+      expression: "0 * * * *"
+      timezone: "UTC"
+"#,
+        )
+        .expect("write alpha config");
+        fs::write(
+            &beta_config,
+            r#"
+version: "1"
+project:
+  id: beta
+  name: Beta
+services:
+  beta_cron:
+    command: "/bin/true"
+    cron:
+      expression: "0 * * * *"
+      timezone: "UTC"
+"#,
+        )
+        .expect("write beta config");
+
+        let mut supervisor =
+            Supervisor::new(alpha_config, false, None).expect("create supervisor");
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: beta_config.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("add beta project");
+
+        let alpha_hash = supervisor
+            .daemon
+            .get_service_hash("alpha_cron")
+            .expect("alpha cron hash");
+        let beta_hash = supervisor
+            .extra_projects
+            .get("beta")
+            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .expect("beta cron hash");
+
+        let cron_state = crate::cron::CronStateFile::load().expect("load cron state");
+        assert!(
+            cron_state.jobs().contains_key(&alpha_hash),
+            "alpha cron should be persisted before aggregate status"
+        );
+        assert!(
+            cron_state.jobs().contains_key(&beta_hash),
+            "beta cron should be persisted before aggregate status"
+        );
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("status response")
+        {
+            ControlResponse::Status(snapshot) => {
+                assert!(
+                    snapshot.units.iter().any(|unit| {
+                        unit.name == "alpha_cron"
+                            && unit.cron.is_some()
+                            && unit.project.as_ref().map(|project| project.id.as_str())
+                                == Some("alpha")
+                    }),
+                    "alpha cron should retain cron status in aggregate snapshot"
+                );
+                assert!(
+                    snapshot.units.iter().any(|unit| {
+                        unit.name == "beta_cron"
+                            && unit.cron.is_some()
+                            && unit.project.as_ref().map(|project| project.id.as_str())
+                                == Some("beta")
+                    }),
+                    "beta cron should retain cron status in aggregate snapshot"
+                );
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        let cron_state = crate::cron::CronStateFile::load()
+            .expect("load cron state after aggregate status");
+        assert!(
+            cron_state.jobs().contains_key(&alpha_hash),
+            "aggregate status should not prune primary project cron state"
+        );
+        assert!(
+            cron_state.jobs().contains_key(&beta_hash),
+            "aggregate status should not prune extra project cron state"
         );
 
         supervisor
