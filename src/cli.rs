@@ -394,6 +394,32 @@ mod tests {
     }
 
     #[test]
+    fn stop_accepts_project_filter_with_log_level() {
+        let cli = Cli::try_parse_from([
+            "sysg",
+            "stop",
+            "-p",
+            "gamecast-dev",
+            "--log-level",
+            "DEBUG",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.log_level.as_ref().map(LogLevelArg::as_str),
+            Some("debug")
+        );
+        match cli.command {
+            Commands::Stop {
+                project, service, ..
+            } => {
+                assert_eq!(project.as_deref(), Some("gamecast-dev"));
+                assert!(service.is_none());
+            }
+            _ => panic!("expected stop command"),
+        }
+    }
+
+    #[test]
     fn inspect_accepts_stream() {
         let cli = Cli::try_parse_from([
             "sysg",

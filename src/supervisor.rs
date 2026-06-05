@@ -1409,16 +1409,21 @@ impl Supervisor {
                         "Project '{project_id}' stopped"
                     )));
                 }
-                let service =
-                    self.normalize_service_target(service, project.as_deref())?;
                 if let Some(service) = service {
-                    self.daemon.stop_service(&service)?;
+                    let (project_id, service_name) =
+                        self.stop_single_service_target(&service, project.as_deref())?;
                     self.refresh_status_cache();
-                    Ok(ControlResponse::Message(format!(
-                        "Service '{service}' stopped"
-                    )))
+                    if project.is_some() || split_project_selector(&service).is_some() {
+                        Ok(ControlResponse::Message(format!(
+                            "Service '{service_name}' stopped in project '{project_id}'"
+                        )))
+                    } else {
+                        Ok(ControlResponse::Message(format!(
+                            "Service '{service_name}' stopped"
+                        )))
+                    }
                 } else {
-                    self.daemon.stop_services()?;
+                    self.stop_all_projects()?;
                     self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services stopped".into()))
                 }
@@ -1931,6 +1936,63 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Stops one service in the selected project without touching unrelated projects.
+    fn stop_single_service_target(
+        &self,
+        selector: &str,
+        project: Option<&str>,
+    ) -> Result<(String, String), SupervisorError> {
+        let (selector_project, service_name) = split_project_selector(selector)
+            .map(|(project_id, service_name)| (Some(project_id), service_name))
+            .unwrap_or((None, selector));
+
+        if let (Some(flag), Some(selector_project)) = (project, selector_project)
+            && flag != selector_project
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project flag '{flag}' does not match service selector project '{selector_project}'"
+                ),
+            )
+            .into());
+        }
+
+        let primary_project = self.daemon.config().project.id.clone();
+        let target_project = project
+            .or(selector_project)
+            .unwrap_or(primary_project.as_str());
+
+        if target_project == primary_project {
+            self.daemon.stop_service(service_name)?;
+            return Ok((target_project.to_string(), service_name.to_string()));
+        }
+
+        let Some(project_runtime) = self.extra_projects.get(target_project) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{target_project}' is not managed by this supervisor"),
+            )
+            .into());
+        };
+
+        if !project_runtime
+            .daemon
+            .config()
+            .services
+            .contains_key(service_name)
+        {
+            return Err(ProcessManagerError::DependencyError {
+                service: service_name.into(),
+                dependency: "service not defined".into(),
+            }
+            .into());
+        }
+
+        project_runtime.daemon.stop_service(service_name)?;
+        Ok((target_project.to_string(), service_name.to_string()))
+    }
+
     /// Handles refresh status cache.
     fn refresh_status_cache(&mut self) {
         match self.collect_aggregate_snapshot(false) {
@@ -1963,6 +2025,20 @@ impl Supervisor {
         for service in services {
             project.daemon.stop_service(&service)?;
         }
+        project.daemon.shutdown_monitor();
+        self.extra_projects.remove(project_id);
+        self.sync_cron_projects()?;
+        Ok(())
+    }
+
+    /// Stops every service in every project managed by the supervisor.
+    fn stop_all_projects(&mut self) -> Result<(), SupervisorError> {
+        let extra_projects: Vec<String> = self.extra_projects.keys().cloned().collect();
+        for project_id in extra_projects {
+            self.stop_project(&project_id)?;
+        }
+
+        self.daemon.stop_services()?;
         Ok(())
     }
 
@@ -2551,6 +2627,143 @@ services:
             }),
             "extra project cron job should be routable to its project"
         );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn stop_extra_project_removes_status_and_cron_routing() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let alpha_config = temp.path().join("alpha.yaml");
+        let beta_config = temp.path().join("beta.yaml");
+        fs::write(
+            &alpha_config,
+            r#"
+version: "1"
+project:
+  id: alpha
+  name: Alpha
+services:
+  alpha_worker:
+    command: "/bin/true"
+"#,
+        )
+        .expect("write alpha config");
+        fs::write(
+            &beta_config,
+            r#"
+version: "1"
+project:
+  id: beta
+  name: Beta
+services:
+  beta_worker:
+    command: "/bin/sleep 31"
+  beta_cron:
+    command: "/bin/true"
+    cron:
+      expression: "0 * * * *"
+      timezone: "UTC"
+"#,
+        )
+        .expect("write beta config");
+
+        let mut supervisor =
+            Supervisor::new(alpha_config, false, None).expect("create supervisor");
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: beta_config.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("add beta project");
+        assert!(
+            supervisor.extra_projects.contains_key("beta"),
+            "beta should be registered before stop"
+        );
+        assert!(
+            supervisor
+                .get_cron_jobs()
+                .iter()
+                .any(|job| job.service_name == "beta_cron"),
+            "beta cron should be registered before stop"
+        );
+
+        let response = supervisor
+            .handle_command(ControlCommand::Stop {
+                service: None,
+                project: Some("beta".into()),
+            })
+            .expect("stop beta project");
+        match response {
+            ControlResponse::Message(message) => {
+                assert_eq!(message, "Project 'beta' stopped");
+            }
+            other => panic!("expected stop message response, got {other:?}"),
+        }
+        assert!(
+            !supervisor.extra_projects.contains_key("beta"),
+            "beta should be removed after stop"
+        );
+        assert!(
+            !supervisor
+                .get_cron_jobs()
+                .iter()
+                .any(|job| job.service_name == "beta_cron"),
+            "beta cron should be pruned after project stop"
+        );
+        let cron_projects = supervisor
+            .cron_projects
+            .read()
+            .expect("cron projects lock")
+            .clone();
+        assert!(
+            !cron_projects
+                .iter()
+                .any(|project| project.project_id == "beta"),
+            "beta should be removed from cron routing"
+        );
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("status after beta stop")
+        {
+            ControlResponse::Status(snapshot) => {
+                assert!(
+                    snapshot.units.iter().all(|unit| {
+                        unit.project.as_ref().map(|project| project.id.as_str())
+                            != Some("beta")
+                    }),
+                    "stopped extra project should not remain visible in status"
+                );
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
 
         supervisor
             .shutdown_runtime()
