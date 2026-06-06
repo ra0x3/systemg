@@ -26,6 +26,34 @@ use crate::{
 /// Maximum number of execution history entries to keep per cron job.
 const MAX_EXECUTION_HISTORY: usize = 10;
 
+/// Returns whether a process appears to still exist.
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    use nix::{errno::Errno, sys::signal, unistd::Pid};
+
+    match signal::kill(Pid::from_raw(pid as i32), None) {
+        Ok(()) => true,
+        Err(Errno::EPERM) => true,
+        Err(_) => false,
+    }
+}
+
+/// Returns whether a process appears to still exist.
+#[cfg(not(unix))]
+fn process_is_running(_pid: u32) -> bool {
+    false
+}
+
+/// Returns whether an execution record has not been completed.
+fn cron_record_is_incomplete(record: &CronExecutionRecord) -> bool {
+    record.completed_at.is_none() && record.status.is_none() && record.exit_code.is_none()
+}
+
+/// Returns whether a previously persisted in-progress execution is still live.
+fn incomplete_execution_is_live(record: &CronExecutionRecord) -> bool {
+    cron_record_is_incomplete(record) && record.pid.is_some_and(process_is_running)
+}
+
 /// Provides systemtime serde support.
 mod systemtime_serde {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -350,6 +378,10 @@ impl CronJobState {
             while state.execution_history.len() > MAX_EXECUTION_HISTORY {
                 state.execution_history.pop_front();
             }
+            state.currently_running = state
+                .execution_history
+                .back()
+                .is_some_and(incomplete_execution_is_live);
         }
 
         state
@@ -366,6 +398,19 @@ impl CronJobState {
     /// Recalculates the next execution time based on the cron schedule and timezone.
     pub fn update_next_execution(&mut self) {
         self.next_execution = compute_next_execution(&self.schedule, self.timezone);
+    }
+
+    /// Marks a stale unfinished execution as failed so the next due run can start.
+    fn close_stale_running_execution(&mut self, now: SystemTime) {
+        if let Some(record) = self.execution_history.back_mut()
+            && cron_record_is_incomplete(record)
+        {
+            record.completed_at = Some(now);
+            record.status = Some(CronExecutionStatus::Failed(
+                "Previous cron execution no longer has a live process".to_string(),
+            ));
+        }
+        self.currently_running = false;
     }
 }
 
@@ -589,24 +634,40 @@ impl CronManager {
                 );
 
                 if job.currently_running {
+                    let previous_execution_live = job
+                        .execution_history
+                        .back()
+                        .is_some_and(incomplete_execution_is_live);
+
+                    if previous_execution_live {
+                        warn!(
+                            "Cron job '{}' is scheduled to run but previous execution is still running",
+                            job.service_name
+                        );
+                        let record = CronExecutionRecord {
+                            started_at: now,
+                            completed_at: Some(now),
+                            status: Some(CronExecutionStatus::OverlapError),
+                            exit_code: None,
+                            pid: None,
+                            user: None,
+                            command: None,
+                            metrics: vec![],
+                        };
+                        job.add_execution_record(record);
+                        job.update_next_execution();
+                        self.persist_job_state(job);
+                        continue;
+                    }
+
                     warn!(
-                        "Cron job '{}' is scheduled to run but previous execution is still running",
+                        "Cron job '{}' had a stale running execution record; closing it before scheduling the next run",
                         job.service_name
                     );
-                    let record = CronExecutionRecord {
-                        started_at: now,
-                        completed_at: Some(now),
-                        status: Some(CronExecutionStatus::OverlapError),
-                        exit_code: None,
-                        pid: None,
-                        user: None,
-                        command: None,
-                        metrics: vec![],
-                    };
-                    job.add_execution_record(record);
-                    job.update_next_execution();
-                    self.persist_job_state(job);
-                } else {
+                    job.close_stale_running_execution(now);
+                }
+
+                {
                     due_jobs.push(CronDueJob {
                         service_name: job.service_name.clone(),
                         service_hash: job.service_hash.clone(),
@@ -1106,6 +1167,121 @@ mod tests {
         );
         let jobs = manager.get_all_jobs();
         assert!(jobs[0].next_execution.is_some());
+    }
+
+    #[test]
+    fn restores_running_state_for_live_persisted_execution() {
+        let schedule = Schedule::from_str("* * * * * *").expect("valid schedule");
+        let current_pid = std::process::id();
+        let mut history = VecDeque::new();
+        history.push_back(CronExecutionRecord {
+            started_at: SystemTime::now() - Duration::from_secs(30),
+            completed_at: None,
+            status: None,
+            exit_code: None,
+            pid: Some(current_pid),
+            user: Some("rashad".to_string()),
+            command: Some("/bin/true".to_string()),
+            metrics: vec![],
+        });
+
+        let state = CronJobState::new(
+            "live_service".to_string(),
+            "live-hash".to_string(),
+            schedule,
+            EffectiveTimezone::Utc,
+            "UTC".to_string(),
+            Some(PersistedCronJobState {
+                last_execution: Some(SystemTime::now() - Duration::from_secs(30)),
+                execution_history: history,
+                timezone_label: "UTC".to_string(),
+                timezone: Some("UTC".to_string()),
+            }),
+        );
+
+        assert!(
+            state.currently_running,
+            "a live unfinished persisted run should remain marked as running"
+        );
+    }
+
+    #[test]
+    fn due_job_closes_stale_running_record_before_rescheduling() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempfile::tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init_with_test_home(home);
+        crate::runtime::set_drop_privileges(false);
+
+        let manager = CronManager::new();
+        let schedule = Schedule::from_str("* * * * * *").expect("valid schedule");
+        let mut history = VecDeque::new();
+        history.push_back(CronExecutionRecord {
+            started_at: SystemTime::now() - Duration::from_secs(30),
+            completed_at: None,
+            status: None,
+            exit_code: None,
+            pid: Some(i32::MAX as u32),
+            user: Some("rashad".to_string()),
+            command: Some("/bin/true".to_string()),
+            metrics: vec![],
+        });
+        let mut job = CronJobState::new(
+            "stale_service".to_string(),
+            "stale-hash".to_string(),
+            schedule,
+            EffectiveTimezone::Utc,
+            "UTC".to_string(),
+            None,
+        );
+        job.currently_running = true;
+        job.next_execution = Some(SystemTime::now() - Duration::from_secs(1));
+        job.execution_history = history;
+
+        {
+            let mut jobs = manager.jobs.lock().unwrap();
+            jobs.push(job);
+        }
+
+        let due = manager.get_due_job_refs();
+
+        assert_eq!(
+            due,
+            vec![CronDueJob {
+                service_name: "stale_service".to_string(),
+                service_hash: "stale-hash".to_string(),
+            }]
+        );
+
+        let jobs = manager.jobs.lock().unwrap();
+        let job = jobs.first().expect("job present");
+        assert!(job.currently_running);
+        assert_eq!(job.execution_history.len(), 2);
+        let stale_record = job.execution_history.front().expect("stale record");
+        assert!(stale_record.completed_at.is_some());
+        assert!(matches!(
+            stale_record.status,
+            Some(CronExecutionStatus::Failed(_))
+        ));
+        let new_record = job.execution_history.back().expect("new record");
+        assert!(cron_record_is_incomplete(new_record));
+        assert_eq!(new_record.pid, None);
+
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
