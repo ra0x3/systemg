@@ -820,19 +820,9 @@ pub(crate) fn collect_runtime_snapshot_with_cron_hashes(
     metrics: Option<&MetricsHandle>,
     spawn_manager: Option<&DynamicSpawnManager>,
     mode: StatusSnapshotMode,
-    valid_cron_hashes: Option<&HashSet<String>>,
+    _valid_cron_hashes: Option<&HashSet<String>>,
 ) -> Result<StatusSnapshot, StatusError> {
     let mut cron_state = CronStateFile::load()?;
-    let config_cron_hashes;
-    let valid_cron_hashes = match valid_cron_hashes {
-        Some(valid_cron_hashes) => valid_cron_hashes,
-        None => {
-            config_cron_hashes = cron_hashes_for_config(config.as_ref());
-            &config_cron_hashes
-        }
-    };
-    prune_orphaned_cron_jobs(&mut cron_state, valid_cron_hashes)?;
-
     let pid_guard = pid_file.lock().map_err(|_| StatusError::PidFilePoisoned)?;
     let mut state_guard = service_state
         .lock()
@@ -872,11 +862,6 @@ pub fn collect_disk_snapshot(
     let mut cron_state = CronStateFile::load()?;
     let config_ref = config.as_ref();
 
-    if let Some(cfg) = config_ref {
-        let valid_cron_hashes = cron_hashes_for_config(cfg);
-        prune_orphaned_cron_jobs(&mut cron_state, &valid_cron_hashes)?;
-    }
-
     Ok(build_snapshot(
         config_ref,
         &pid_file,
@@ -886,22 +871,6 @@ pub fn collect_disk_snapshot(
         None,
         StatusSnapshotMode::Detailed,
     ))
-}
-
-/// Prunes orphaned cron jobs.
-fn prune_orphaned_cron_jobs(
-    cron_state: &mut CronStateFile,
-    valid_hashes: &HashSet<String>,
-) -> Result<(), StatusError> {
-    if cron_state.jobs().is_empty() {
-        return Ok(());
-    }
-
-    if cron_state.prune_jobs_not_in(valid_hashes) {
-        cron_state.save().map_err(StatusError::CronState)?;
-    }
-
-    Ok(())
 }
 
 /// Builds snapshot.

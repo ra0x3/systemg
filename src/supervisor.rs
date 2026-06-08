@@ -2936,4 +2936,162 @@ services:
             }
         }
     }
+
+    #[test]
+    fn stop_and_readd_extra_project_preserves_cron_history() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let alpha_config = temp.path().join("alpha.yaml");
+        let beta_config = temp.path().join("beta.yaml");
+        fs::write(
+            &alpha_config,
+            r#"
+version: "1"
+project:
+  id: alpha
+  name: Alpha
+services:
+  alpha_worker:
+    command: "/bin/true"
+"#,
+        )
+        .expect("write alpha config");
+        fs::write(
+            &beta_config,
+            r#"
+version: "1"
+project:
+  id: beta
+  name: Beta
+services:
+  beta_cron:
+    command: "/bin/true"
+    cron:
+      expression: "*/1 * * * * *"
+      timezone: "UTC"
+"#,
+        )
+        .expect("write beta config");
+
+        let mut supervisor =
+            Supervisor::new(alpha_config, false, None).expect("create supervisor");
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: beta_config.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("add beta project");
+
+        let beta_hash = supervisor
+            .extra_projects
+            .get("beta")
+            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .expect("beta cron hash");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let due_jobs = supervisor.cron_manager.get_due_job_refs();
+            if due_jobs.iter().any(|job| job.service_hash == beta_hash) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for beta cron to become due"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        supervisor.cron_manager.mark_job_completed_by_hash(
+            &beta_hash,
+            CronExecutionStatus::Success,
+            Some(0),
+            vec![],
+        );
+
+        let cron_state =
+            crate::cron::CronStateFile::load().expect("load cron state before stop");
+        assert_eq!(
+            cron_state
+                .jobs()
+                .get(&beta_hash)
+                .expect("beta cron state before stop")
+                .execution_history
+                .len(),
+            1,
+            "beta cron history should be recorded before stop"
+        );
+
+        supervisor
+            .handle_command(ControlCommand::Stop {
+                service: None,
+                project: Some("beta".into()),
+            })
+            .expect("stop beta project");
+
+        assert!(
+            !supervisor
+                .get_cron_jobs()
+                .iter()
+                .any(|job| job.service_name == "beta_cron"),
+            "stopped beta cron should leave active scheduler routing"
+        );
+        let cron_state =
+            crate::cron::CronStateFile::load().expect("load cron state after stop");
+        assert_eq!(
+            cron_state
+                .jobs()
+                .get(&beta_hash)
+                .expect("beta cron state after stop")
+                .execution_history
+                .len(),
+            1,
+            "stopping an extra project must not delete persisted cron history"
+        );
+
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: beta_config.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("re-add beta project");
+
+        let beta_job = supervisor
+            .get_cron_jobs()
+            .into_iter()
+            .find(|job| job.service_hash == beta_hash)
+            .expect("re-added beta cron job");
+        assert_eq!(
+            beta_job.execution_history.len(),
+            1,
+            "re-added beta cron should restore existing history for the same hash"
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
 }

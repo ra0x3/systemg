@@ -1,6 +1,6 @@
 //! Cron scheduling for services.
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     fs,
     path::PathBuf,
     str::FromStr,
@@ -558,7 +558,6 @@ impl CronManager {
         I: IntoIterator<Item = &'a Config>,
     {
         let mut active_jobs = Vec::new();
-        let mut active_hashes = HashSet::new();
 
         for config in configs {
             for (service_name, service_config) in &config.services {
@@ -591,7 +590,6 @@ impl CronManager {
                         );
                     }
 
-                    active_hashes.insert(service_hash);
                     info!("Registered cron job for service '{}'", service_name);
                     active_jobs.push(job_state);
                 }
@@ -602,8 +600,6 @@ impl CronManager {
             let mut jobs_guard = self.jobs.lock().unwrap();
             *jobs_guard = active_jobs;
         }
-
-        self.prune_inactive_jobs(&active_hashes);
 
         Ok(())
     }
@@ -851,20 +847,6 @@ impl CronManager {
         }
     }
 
-    /// Removes jobs that are no longer in the configuration.
-    fn prune_inactive_jobs(&self, active_hashes: &HashSet<String>) {
-        if let Ok(mut state) = self.state_file.lock() {
-            let original_len = state.jobs.len();
-            state.jobs.retain(|hash, _| active_hashes.contains(hash));
-
-            if state.jobs.len() != original_len
-                && let Err(err) = state.save()
-            {
-                warn!("Failed to persist pruned cron state: {}", err);
-            }
-        }
-    }
-
     /// Persists the state of a cron job to disk.
     fn persist_job_state(&self, job: &CronJobState) {
         if let Ok(mut state) = self.state_file.lock() {
@@ -989,13 +971,6 @@ impl CronStateFile {
     /// Keys are service configuration hashes (not service names).
     pub fn jobs(&self) -> &std::collections::BTreeMap<String, PersistedCronJobState> {
         &self.jobs
-    }
-
-    /// Prunes jobs not in.
-    pub(crate) fn prune_jobs_not_in(&mut self, valid_hashes: &HashSet<String>) -> bool {
-        let original_len = self.jobs.len();
-        self.jobs.retain(|hash, _| valid_hashes.contains(hash));
-        original_len != self.jobs.len()
     }
 }
 
@@ -1385,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_from_config_prunes_removed_jobs() {
+    fn sync_from_config_removes_inactive_jobs_without_deleting_history() {
         let _guard = crate::test_utils::env_lock();
 
         let base = std::env::current_dir()
@@ -1452,7 +1427,10 @@ mod tests {
         let state = CronStateFile::load().expect("load cron state");
         assert!(state.jobs().contains_key(&job_two_hash));
         assert!(state.jobs().contains_key(&job_three_hash));
-        assert!(!state.jobs().contains_key(&job_one_hash));
+        assert!(
+            state.jobs().contains_key(&job_one_hash),
+            "inactive cron state should remain persisted for history restoration"
+        );
 
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
