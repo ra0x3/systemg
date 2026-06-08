@@ -256,7 +256,7 @@ pub enum Commands {
         #[arg(long = "full-cmd")]
         full_cmd: bool,
 
-        /// Force the supervisor to recompute a fresh snapshot for this request.
+        /// Force immediate runtime collection instead of the configured snapshot mode.
         #[arg(long)]
         live: bool,
 
@@ -287,7 +287,7 @@ pub enum Commands {
         #[arg(long = "no-color")]
         no_color: bool,
 
-        /// Force the supervisor to recompute a fresh snapshot for this request.
+        /// Force immediate runtime collection instead of the configured snapshot mode.
         #[arg(long)]
         live: bool,
 

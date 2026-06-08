@@ -36,7 +36,7 @@ services:
 - **Backoff**: 5 seconds between restart attempts
 - **Environment**: Loads variables from `.env` file and defines `FOO=foo`
 - **Logs**: Captures stdout/stderr to systemg-managed files with local rotation
-- **Status**: Uses cached summary snapshots for inexpensive status/inspect views
+- **Status**: Uses summary runtime detail for inexpensive status/inspect views
 
 ## Usage
 

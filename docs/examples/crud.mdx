@@ -40,8 +40,8 @@ of the box. For production services whose output is already collected elsewhere,
 set `logs.sink: none`.
 
 Summary status snapshots keep `sysg status` and `sysg inspect` responsive by
-serving cached supervisor state instead of rebuilding live process details per
-command.
+reading current persisted state while avoiding detailed runtime process
+collection per command.
 
 ## Application code
 

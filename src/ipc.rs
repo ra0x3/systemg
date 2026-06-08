@@ -81,7 +81,7 @@ pub enum ControlCommand {
     Shutdown,
     /// Fetch a status snapshot from the supervisor.
     Status {
-        /// Whether to force a fresh snapshot instead of reading the cache.
+        /// Whether to force live runtime collection instead of the configured snapshot mode.
         #[serde(default)]
         live: bool,
     },
@@ -93,7 +93,7 @@ pub enum ControlCommand {
         project: Option<String>,
         /// Maximum number of samples to return.
         samples: u32,
-        /// Whether to force a fresh snapshot instead of reading the cache.
+        /// Whether to force live runtime collection instead of the configured snapshot mode.
         #[serde(default)]
         live: bool,
     },

@@ -10,11 +10,11 @@ View detailed metrics for a specific service.
 $ sysg inspect -s myservice
 ```
 
-When a supervisor is running, `sysg inspect` reads the cached status snapshot
-and attaches recent metric samples from the supervisor's metrics store. It does
-not rebuild the full process tree on every invocation unless
-`status.snapshot_mode` is configured as `detailed`. Use `--live` to force a
-fresh snapshot for a specific inspect request.
+When a supervisor is running, `sysg inspect` reads current persisted state such
+as cron history and attaches recent metric samples from the supervisor's metrics
+store. It does not rebuild the full process tree on every invocation unless
+`status.snapshot_mode` is configured as `detailed`. Use `--live` to force
+immediate runtime collection for a specific inspect request.
 
 ## Options
 
@@ -27,7 +27,7 @@ fresh snapshot for a specific inspect request.
 | `-` | `--json` | Emit machine-readable JSON output instead of a report |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--no-color` | Disable ANSI colors in output |
-| `-` | `--live` | Force a fresh supervisor snapshot instead of reading the cached snapshot |
+| `-` | `--live` | Force immediate runtime collection instead of the configured snapshot mode |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
 ## Examples
@@ -71,9 +71,9 @@ CPU: 45.2% (current)  Memory: 23.1% (current)
 $ sysg inspect -s api --stream 24h
 ```
 
-Stream mode reuses cached supervisor snapshots and recent metric samples. The
-rolling window controls the charted sample range, not how often systemg performs
-live process discovery.
+Stream mode refreshes inspect output using the configured snapshot mode and
+recent metric samples. The rolling window controls the charted sample range, not
+how much runtime detail systemg collects.
 
 ### Force fresh inspect data
 
@@ -81,10 +81,10 @@ live process discovery.
 $ sysg inspect -s api --live
 ```
 
-`--live` recomputes the status snapshot before selecting the inspected unit and
-loading recent metric samples. With `status.snapshot_mode: summary`, it remains
-a fresh summary snapshot; with `detailed`, it refreshes runtime command lines
-and process/spawn descendants.
+`--live` forces immediate runtime collection before selecting the inspected unit
+and loading recent metric samples. Regular inspect requests still read current
+persisted state such as cron history, while `status.snapshot_mode` controls
+runtime command lines and process/spawn descendants.
 
 ## Metrics shown
 

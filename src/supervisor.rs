@@ -54,7 +54,7 @@ pub enum SupervisorError {
     /// Metrics subsystem error.
     #[error(transparent)]
     Metrics(#[from] metrics::MetricsError),
-    /// Live status snapshot error.
+    /// Status snapshot error.
     #[error(transparent)]
     Status(#[from] StatusError),
     /// Log streaming error.
@@ -1155,7 +1155,7 @@ impl Supervisor {
                             follow,
                         } = command
                         {
-                            let snapshot = match self.collect_live_snapshot() {
+                            let snapshot = match self.collect_configured_snapshot() {
                                 Ok(snapshot) => {
                                     self.status_cache.replace(snapshot.clone());
                                     snapshot
@@ -1485,12 +1485,11 @@ impl Supervisor {
                 live,
             } => {
                 let snapshot = if live {
-                    let snapshot = self.collect_live_snapshot_for_request()?;
-                    self.status_cache.replace(snapshot.clone());
-                    snapshot
+                    self.collect_live_snapshot_for_request()?
                 } else {
-                    self.status_cache.snapshot()
+                    self.collect_configured_snapshot()?
                 };
+                self.status_cache.replace(snapshot.clone());
                 let limit = samples as usize;
                 let matching_unit = snapshot
                     .units
@@ -1548,12 +1547,11 @@ impl Supervisor {
             }
             ControlCommand::Status { live } => {
                 let snapshot = if live {
-                    let snapshot = self.collect_live_snapshot_for_request()?;
-                    self.status_cache.replace(snapshot.clone());
-                    snapshot
+                    self.collect_live_snapshot_for_request()?
                 } else {
-                    self.status_cache.snapshot()
+                    self.collect_configured_snapshot()?
                 };
+                self.status_cache.replace(snapshot.clone());
                 Ok(ControlResponse::Status(snapshot))
             }
         }
@@ -2067,12 +2065,12 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Collects a fresh runtime snapshot directly from daemon state and process inspection.
-    fn collect_live_snapshot(&self) -> Result<StatusSnapshot, SupervisorError> {
+    /// Collects a fresh status snapshot using each project's configured snapshot mode.
+    fn collect_configured_snapshot(&self) -> Result<StatusSnapshot, SupervisorError> {
         self.collect_aggregate_snapshot(false)
     }
 
-    /// Collects a fresh runtime snapshot for an explicit live command request.
+    /// Collects a fresh status snapshot with immediate runtime collection enabled.
     fn collect_live_snapshot_for_request(
         &self,
     ) -> Result<StatusSnapshot, SupervisorError> {
@@ -2298,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn status_and_inspect_commands_use_cached_snapshot() {
+    fn status_and_inspect_commands_refresh_configured_snapshot() {
         let _guard = crate::test_utils::env_lock();
 
         let base = std::env::current_dir()
@@ -2361,6 +2359,7 @@ services:
             ControlResponse::Status(snapshot) => {
                 assert_eq!(snapshot.units.len(), 1);
                 assert_eq!(snapshot.units[0].name, "cached");
+                assert_ne!(snapshot.units[0].hash, "cached-hash");
             }
             other => panic!("expected status response, got {other:?}"),
         }
@@ -2378,6 +2377,10 @@ services:
                 assert_eq!(
                     payload.unit.as_ref().map(|unit| unit.name.as_str()),
                     Some("cached")
+                );
+                assert_ne!(
+                    payload.unit.as_ref().map(|unit| unit.hash.as_str()),
+                    Some("cached-hash")
                 );
             }
             other => panic!("expected inspect response, got {other:?}"),
@@ -3022,6 +3025,67 @@ services:
             Some(0),
             vec![],
         );
+
+        supervisor.status_cache.replace(StatusSnapshot {
+            schema_version: crate::status::STATUS_SCHEMA_VERSION.into(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: Vec::new(),
+        });
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: false })
+            .expect("status response")
+        {
+            ControlResponse::Status(snapshot) => {
+                let beta_unit = snapshot
+                    .units
+                    .iter()
+                    .find(|unit| unit.hash == beta_hash)
+                    .expect("beta cron in non-live status");
+                assert_eq!(
+                    beta_unit
+                        .cron
+                        .as_ref()
+                        .expect("beta cron status")
+                        .recent_runs
+                        .len(),
+                    1,
+                    "non-live status should read current cron history"
+                );
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        supervisor.status_cache.replace(StatusSnapshot {
+            schema_version: crate::status::STATUS_SCHEMA_VERSION.into(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: Vec::new(),
+        });
+
+        match supervisor
+            .handle_command(ControlCommand::Inspect {
+                unit: "beta_cron".into(),
+                project: Some("beta".into()),
+                samples: 10,
+                live: false,
+            })
+            .expect("inspect response")
+        {
+            ControlResponse::Inspect(payload) => {
+                assert_eq!(
+                    payload
+                        .unit
+                        .as_ref()
+                        .and_then(|unit| unit.cron.as_ref())
+                        .map(|cron| cron.recent_runs.len()),
+                    Some(1),
+                    "non-live inspect should read current cron history"
+                );
+            }
+            other => panic!("expected inspect response, got {other:?}"),
+        }
 
         let cron_state =
             crate::cron::CronStateFile::load().expect("load cron state before stop");

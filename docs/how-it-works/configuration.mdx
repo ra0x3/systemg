@@ -143,7 +143,7 @@ Use `sink: none` for noisy production services when service output is already co
 
 ### `status`
 
-Optional defaults for cached `status` and `inspect` snapshots.
+Optional defaults for `status` and `inspect` runtime detail.
 
 ```yaml
 status:
@@ -160,7 +160,7 @@ Modes:
 
 - `summary`: default. Tracks service state, pid, health, last exit, cron state, and sampled metric summaries while skipping expensive process tree expansion.
 - `detailed`: includes runtime command details and process/spawn descendants for richer `inspect` output.
-- `off`: disables background live process snapshot refresh and uses persisted state plus pid files.
+- `off`: disables background runtime snapshot refresh and uses persisted state plus pid files.
 
 For large deployments, keep `summary` globally and use focused `inspect --service` workflows when deeper investigation is needed.
 

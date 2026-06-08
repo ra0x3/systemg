@@ -91,11 +91,12 @@ services:
 
 `sink: none` discards service output without creating systemg log-writer threads or files, which is useful when another production logging pipeline already collects process output.
 
-`status.snapshot_mode: summary` keeps `sysg status` and `sysg inspect` backed by
-a bounded supervisor snapshot cache. Use `detailed` only when you need process
-tree and runtime command details for diagnostics. Add `--live` to `sysg status`
-or `sysg inspect` when a single request should force a fresh snapshot instead of
-reading the cache.
+`status.snapshot_mode: summary` keeps `sysg status` and `sysg inspect`
+inexpensive while still reading current persisted state such as cron history.
+Use `detailed` only when you need process tree and runtime command details for
+diagnostics. Add `--live` to `sysg status` or `sysg inspect` when a single
+request should force immediate runtime collection instead of the configured
+snapshot mode.
 
 ---
 

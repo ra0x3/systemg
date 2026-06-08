@@ -50,7 +50,7 @@ For high-volume services, use `logs.sink: none` and rely on your normal logging
 pipeline.
 
 `status.snapshot_mode: summary` keeps status and inspect reads inexpensive by
-using cached summary snapshots.
+reading current persisted state without detailed runtime process collection.
 Count: 1
 Count: 2
 Count: 3
