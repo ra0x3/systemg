@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs, io,
     io::Write,
     os::unix::net::UnixListener,
@@ -450,63 +450,31 @@ impl Supervisor {
         Ok(Self::aggregate_snapshots(snapshots))
     }
 
-    /// Validates a requested project id and strips any project prefix from the service selector.
-    fn normalize_service_target(
-        &self,
-        service: Option<String>,
-        project: Option<&str>,
-    ) -> Result<Option<String>, SupervisorError> {
-        let config = self.daemon.config();
-        let active_project = config.project.id.as_str();
-        let (selector_project, selector_service) = match service {
-            Some(value) => split_project_selector(&value)
-                .map(|(project_id, service_name)| {
-                    (Some(project_id.to_string()), Some(service_name.to_string()))
-                })
-                .unwrap_or((None, Some(value))),
-            None => (None, None),
-        };
-
-        let requested_project = match (project, selector_project.as_deref()) {
-            (Some(flag), Some(selector)) if flag != selector => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "project flag '{flag}' does not match service selector project '{selector}'"
-                    ),
-                )
-                .into());
-            }
-            (Some(flag), _) => Some(flag),
-            (_, Some(selector)) => Some(selector),
-            (None, None) => None,
-        };
-
-        if let Some(requested) = requested_project
-            && requested != active_project
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project '{requested}' does not match running supervisor project '{active_project}'"
-                ),
-            )
-            .into());
+    /// Returns project ids whose loaded config defines the given service.
+    fn projects_containing_service(&self, service_name: &str) -> Vec<String> {
+        let mut projects = Vec::new();
+        let primary_config = self.daemon.config();
+        if primary_config.services.contains_key(service_name) {
+            projects.push(primary_config.project.id.clone());
         }
 
-        Ok(selector_service)
+        for (project_id, project) in &self.extra_projects {
+            if project.daemon.config().services.contains_key(service_name) {
+                projects.push(project_id.clone());
+            }
+        }
+
+        projects
     }
 
-    /// Starts one service in the selected project without loading or starting the whole project.
-    fn start_single_service_target(
+    /// Resolves the target project for a service request, rejecting ambiguous selectors.
+    fn resolve_service_target_project(
         &self,
-        selector: &str,
+        service_name: &str,
         project: Option<&str>,
-    ) -> Result<(String, String), SupervisorError> {
-        let (selector_project, service_name) = split_project_selector(selector)
-            .map(|(project_id, service_name)| (Some(project_id), service_name))
-            .unwrap_or((None, selector));
-
+        selector_project: Option<&str>,
+        config_project: Option<&str>,
+    ) -> Result<String, SupervisorError> {
         if let (Some(flag), Some(selector_project)) = (project, selector_project)
             && flag != selector_project
         {
@@ -519,10 +487,56 @@ impl Supervisor {
             .into());
         }
 
+        let requested_project = project.or(selector_project);
+        if let (Some(requested), Some(config_project)) =
+            (requested_project, config_project)
+            && requested != config_project
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project '{requested}' does not match config project '{config_project}'"
+                ),
+            )
+            .into());
+        }
+
+        if let Some(target_project) = requested_project.or(config_project) {
+            return Ok(target_project.to_string());
+        }
+
+        let matching_projects = self.projects_containing_service(service_name);
+        match matching_projects.as_slice() {
+            [project_id] => Ok(project_id.clone()),
+            [] => Ok(self.daemon.config().project.id.clone()),
+            projects => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "service '{service_name}' exists in multiple projects ({}); pass --project to choose one",
+                    projects.join(", ")
+                ),
+            )
+            .into()),
+        }
+    }
+
+    /// Starts one service in the selected project without loading or starting the whole project.
+    fn start_single_service_target(
+        &self,
+        selector: &str,
+        project: Option<&str>,
+    ) -> Result<(String, String), SupervisorError> {
+        let (selector_project, service_name) = split_project_selector(selector)
+            .map(|(project_id, service_name)| (Some(project_id), service_name))
+            .unwrap_or((None, selector));
+
+        let target_project = self.resolve_service_target_project(
+            service_name,
+            project,
+            selector_project,
+            None,
+        )?;
         let primary_project = self.daemon.config().project.id.clone();
-        let target_project = project
-            .or(selector_project)
-            .unwrap_or(primary_project.as_str());
 
         let (daemon, service_config) = if target_project == primary_project {
             let config_handle = self.daemon.config();
@@ -536,7 +550,7 @@ impl Supervisor {
                 })?;
             (&self.daemon, service_config)
         } else {
-            let Some(project_runtime) = self.extra_projects.get(target_project) else {
+            let Some(project_runtime) = self.extra_projects.get(&target_project) else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!(
@@ -578,7 +592,52 @@ impl Supervisor {
                 .register_service_pid(service_name.to_string(), pid);
         }
 
-        Ok((target_project.to_string(), service_name.to_string()))
+        Ok((target_project, service_name.to_string()))
+    }
+
+    /// Starts all non-cron services in one managed project.
+    fn start_project_target(&self, project_id: &str) -> Result<(), SupervisorError> {
+        let primary_project = self.daemon.config().project.id.clone();
+        if project_id == primary_project {
+            self.daemon.start_services_blocking()?;
+            return Ok(());
+        }
+
+        let Some(project_runtime) = self.extra_projects.get(project_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{project_id}' is not managed by this supervisor"),
+            )
+            .into());
+        };
+
+        Self::start_project_services(
+            &project_runtime.daemon,
+            project_runtime.daemon.config().as_ref(),
+            None,
+            &self.spawn_manager,
+        )?;
+        Ok(())
+    }
+
+    /// Restarts all non-cron services in one managed project.
+    fn restart_project_target(&self, project_id: &str) -> Result<(), SupervisorError> {
+        let primary_project = self.daemon.config().project.id.clone();
+        if project_id == primary_project {
+            self.daemon.restart_services()?;
+            return Ok(());
+        }
+
+        let Some(project_runtime) = self.extra_projects.get(project_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{project_id}' is not managed by this supervisor"),
+            )
+            .into());
+        };
+
+        project_runtime.daemon.restart_services()?;
+        Ok(())
     }
 
     /// Creates supervisor with config.
@@ -1338,11 +1397,35 @@ impl Supervisor {
         let requested_kind = request.kind;
 
         if let Some(service_name) = request.service {
-            let matching_unit = request.snapshot.units.iter().find(|unit| {
-                unit_matches_selector(unit, &service_name, request.project.as_deref())
-            });
+            let matching_units: Vec<_> = request
+                .snapshot
+                .units
+                .iter()
+                .filter(|unit| {
+                    unit_matches_selector(unit, &service_name, request.project.as_deref())
+                })
+                .collect();
 
-            if let Some(unit) = matching_unit {
+            if request.project.is_none() && matching_units.len() > 1 {
+                let projects = matching_units
+                    .iter()
+                    .filter_map(|unit| {
+                        unit.project.as_ref().map(|project| project.id.as_str())
+                    })
+                    .collect::<BTreeSet<_>>();
+                if projects.len() > 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "service '{service_name}' exists in multiple projects ({}); pass --project to choose one",
+                            projects.into_iter().collect::<Vec<_>>().join(", ")
+                        ),
+                    )
+                    .into());
+                }
+            }
+
+            if let Some(unit) = matching_units.first() {
                 let pid = unit.process.as_ref().and_then(|process| {
                     if matches!(process.state, crate::status::ProcessState::Running) {
                         Some(process.pid)
@@ -1486,7 +1569,13 @@ impl Supervisor {
                         )))
                     }
                 } else {
-                    self.normalize_service_target(None, project.as_deref())?;
+                    if let Some(project_id) = project.as_deref() {
+                        self.start_project_target(project_id)?;
+                        self.refresh_status_cache();
+                        return Ok(ControlResponse::Message(format!(
+                            "Project '{project_id}' started"
+                        )));
+                    }
                     self.daemon.start_services_blocking()?;
                     self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services started".into()))
@@ -1554,6 +1643,25 @@ impl Supervisor {
                     Ok(ControlResponse::Message(format!(
                         "Service '{service}' restarted"
                     )))
+                } else if let Some(project_id) = project.as_deref() {
+                    if let Some(config_path) = config.as_deref() {
+                        let config = load_config(Some(config_path))?;
+                        if config.project.id != project_id {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "project '{project_id}' does not match config project '{}'",
+                                    config.project.id
+                                ),
+                            )
+                            .into());
+                        }
+                    }
+                    self.restart_project_target(project_id)?;
+                    self.refresh_status_cache();
+                    Ok(ControlResponse::Message(format!(
+                        "Project '{project_id}' restarted"
+                    )))
                 } else {
                     let target_path = config
                         .as_ref()
@@ -1577,13 +1685,33 @@ impl Supervisor {
                 };
                 self.status_cache.replace(snapshot.clone());
                 let limit = samples as usize;
-                let matching_unit = snapshot
+                let matching_units: Vec<_> = snapshot
                     .units
                     .iter()
-                    .find(|status| {
+                    .filter(|status| {
                         unit_matches_selector(status, &unit, project.as_deref())
                     })
-                    .cloned();
+                    .cloned()
+                    .collect();
+                if project.is_none() && matching_units.len() > 1 {
+                    let projects = matching_units
+                        .iter()
+                        .filter_map(|unit| {
+                            unit.project.as_ref().map(|project| project.id.as_str())
+                        })
+                        .collect::<BTreeSet<_>>();
+                    if projects.len() > 1 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "service '{unit}' exists in multiple projects ({}); pass --project to choose one",
+                                projects.into_iter().collect::<Vec<_>>().join(", ")
+                            ),
+                        )
+                        .into());
+                    }
+                }
+                let matching_unit = matching_units.into_iter().next();
 
                 let metrics_samples = if let Some(ref unit_status) = matching_unit {
                     self.metrics_store
@@ -1988,18 +2116,6 @@ impl Supervisor {
             .map(|(project_id, service_name)| (Some(project_id), service_name))
             .unwrap_or((None, selector));
 
-        if let (Some(flag), Some(selector_project)) = (project, selector_project)
-            && flag != selector_project
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project flag '{flag}' does not match service selector project '{selector_project}'"
-                ),
-            )
-            .into());
-        }
-
         let override_config = if let Some(path) = config_path {
             Some(load_config(Some(path.to_string_lossy().as_ref()))?)
         } else {
@@ -2008,23 +2124,13 @@ impl Supervisor {
         let config_project = override_config
             .as_ref()
             .map(|config| config.project.id.as_str());
-        let requested_project = project.or(selector_project).or(config_project);
-
-        if let (Some(requested), Some(config_project)) =
-            (requested_project, config_project)
-            && requested != config_project
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project '{requested}' does not match config project '{config_project}'"
-                ),
-            )
-            .into());
-        }
-
+        let target_project = self.resolve_service_target_project(
+            service_name,
+            project,
+            selector_project,
+            config_project,
+        )?;
         let primary_project = self.daemon.config().project.id.clone();
-        let target_project = requested_project.unwrap_or(primary_project.as_str());
 
         if target_project == primary_project {
             let config_handle = self.daemon.config();
@@ -2040,7 +2146,7 @@ impl Supervisor {
             return Ok(());
         }
 
-        let Some(project_runtime) = self.extra_projects.get(target_project) else {
+        let Some(project_runtime) = self.extra_projects.get(&target_project) else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("project '{target_project}' is not managed by this supervisor"),
@@ -2072,29 +2178,20 @@ impl Supervisor {
             .map(|(project_id, service_name)| (Some(project_id), service_name))
             .unwrap_or((None, selector));
 
-        if let (Some(flag), Some(selector_project)) = (project, selector_project)
-            && flag != selector_project
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project flag '{flag}' does not match service selector project '{selector_project}'"
-                ),
-            )
-            .into());
-        }
-
+        let target_project = self.resolve_service_target_project(
+            service_name,
+            project,
+            selector_project,
+            None,
+        )?;
         let primary_project = self.daemon.config().project.id.clone();
-        let target_project = project
-            .or(selector_project)
-            .unwrap_or(primary_project.as_str());
 
         if target_project == primary_project {
             self.daemon.stop_service(service_name)?;
-            return Ok((target_project.to_string(), service_name.to_string()));
+            return Ok((target_project, service_name.to_string()));
         }
 
-        let Some(project_runtime) = self.extra_projects.get(target_project) else {
+        let Some(project_runtime) = self.extra_projects.get(&target_project) else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("project '{target_project}' is not managed by this supervisor"),
@@ -2116,7 +2213,7 @@ impl Supervisor {
         }
 
         project_runtime.daemon.stop_service(service_name)?;
-        Ok((target_project.to_string(), service_name.to_string()))
+        Ok((target_project, service_name.to_string()))
     }
 
     /// Handles refresh status cache.

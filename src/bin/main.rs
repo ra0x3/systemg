@@ -60,6 +60,7 @@ const FETCH_SPINNER_DELAY: Duration = Duration::from_millis(120);
 const FETCH_SPINNER_TICK: Duration = Duration::from_millis(80);
 const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 const RESTART_DAEMON_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+const DEFAULT_CONFIG_PATH: &str = "systemg.yaml";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectStreamAction {
@@ -321,6 +322,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             let start_target =
                 resolve_start_target(&config, service, name.as_deref(), command)?;
+            let command_project = resolve_command_project(
+                &config,
+                project.clone(),
+                start_target.service.as_deref(),
+            )?;
 
             if daemonize {
                 if supervisor_running() {
@@ -341,11 +347,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             start_target.config_path.display()
                         );
                     } else if let Some(service_name) = start_target.service {
-                        let target_project =
-                            project.clone().or(start_target.project_id.clone());
                         let command = ControlCommand::Start {
                             service: Some(service_name.clone()),
-                            project: target_project,
+                            project: command_project
+                                .clone()
+                                .or(start_target.project_id.clone()),
                         };
                         send_control_command(command)?;
                         info!(
@@ -384,11 +390,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if supervisor_running() {
                     match start_target.service {
                         Some(service_name) => {
-                            let target_project =
-                                project.clone().or(start_target.project_id);
                             let command = ControlCommand::Start {
                                 service: Some(service_name.clone()),
-                                project: target_project,
+                                project: command_project.or(start_target.project_id),
                             };
                             send_control_command(command)?;
                             info!(
@@ -415,15 +419,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => {
             let service_name = service.clone();
             if supervisor_running() {
+                let target_project = if service_name.is_some() {
+                    resolve_command_project(&config, project, service_name.as_deref())?
+                } else {
+                    project
+                };
                 let command = if let Some(name) = service_name.clone() {
                     ControlCommand::Stop {
                         service: Some(name),
-                        project,
+                        project: target_project,
                     }
-                } else if project.is_some() {
+                } else if target_project.is_some() {
                     ControlCommand::Stop {
                         service: None,
-                        project,
+                        project: target_project,
                     }
                 } else {
                     ControlCommand::Shutdown
@@ -481,7 +490,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         "--drop-privileges is managed by the running supervisor and has no effect for this restart request"
                     );
                 }
-                let config_override = if config.is_empty() {
+                let target_project = if service.is_some() {
+                    resolve_command_project(&config, project.clone(), service.as_deref())?
+                } else {
+                    project.clone()
+                };
+                let config_override = if config.is_empty()
+                    || (config == DEFAULT_CONFIG_PATH && project.is_some())
+                {
                     None
                 } else {
                     Some(resolve_config_path(&config)?.display().to_string())
@@ -490,7 +506,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let command = ControlCommand::Restart {
                     config: config_override.clone(),
                     service: service.clone(),
-                    project: project.clone(),
+                    project: target_project,
                 };
                 if daemonize {
                     let recycle_config_path = config_override
@@ -537,6 +553,11 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             {
                 effective_config = hint.to_string_lossy().to_string();
             }
+            let target_project = resolve_command_project(
+                &effective_config,
+                project.clone(),
+                service.as_deref(),
+            )?;
 
             let render_opts = StatusRenderOptions {
                 json,
@@ -544,7 +565,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 full_cmd,
                 include_orphans: all,
                 service_filter: service.as_deref(),
-                project_filter: project.as_deref(),
+                project_filter: target_project.as_deref(),
             };
 
             if let Some(stream_interval) = stream {
@@ -616,6 +637,11 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             {
                 effective_config = hint.to_string_lossy().to_string();
             }
+            let target_project = resolve_command_project(
+                &effective_config,
+                project.clone(),
+                Some(&service),
+            )?;
 
             let stream_seconds = match stream.as_deref() {
                 Some(value) => match parse_stream_duration(value) {
@@ -659,7 +685,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             let payload = fetch_inspect(
                                 &effective_config,
                                 &service,
-                                project.as_deref(),
+                                target_project.as_deref(),
                                 samples_limit,
                                 live,
                             )?;
@@ -693,7 +719,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     let payload = fetch_inspect(
                         &effective_config,
                         &service,
-                        project.as_deref(),
+                        target_project.as_deref(),
                         samples_limit,
                         live,
                     )?;
@@ -711,7 +737,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     fetch_inspect(
                         &effective_config,
                         &service,
-                        project.as_deref(),
+                        target_project.as_deref(),
                         samples_limit,
                         live,
                     )
@@ -749,12 +775,17 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     }
                 }
             };
+            let target_project = resolve_command_project(
+                &effective_config,
+                project.clone(),
+                service.as_deref(),
+            )?;
 
             let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
             let manager = LogManager::new(pid.clone());
 
             if purge {
-                if project.is_some() {
+                if target_project.is_some() {
                     let snapshot = with_progress_spinner("Purging logs", || {
                         fetch_status_snapshot(&effective_config, false)
                     })?;
@@ -765,7 +796,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             status_unit_matches_selector(
                                 unit,
                                 service.as_deref(),
-                                project.as_deref(),
+                                target_project.as_deref(),
                             )
                         })
                         .collect();
@@ -796,7 +827,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 |follow: bool| -> Result<(), Box<dyn Error>> {
                     let command = ControlCommand::Logs {
                         service: service.clone(),
-                        project: project.clone(),
+                        project: target_project.clone(),
                         lines,
                         kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
                         follow,
@@ -817,7 +848,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             &manager,
                             &snapshot,
                             service_name,
-                            project.as_deref(),
+                            target_project.as_deref(),
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
@@ -828,7 +859,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                         render_all_logs_from_snapshot(
                             &manager,
                             &snapshot,
-                            project.as_deref(),
+                            target_project.as_deref(),
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
@@ -865,7 +896,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     loop {
                         let command = ControlCommand::Logs {
                             service: service.clone(),
-                            project: project.clone(),
+                            project: target_project.clone(),
                             lines,
                             kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
                             follow: false,
@@ -3198,6 +3229,57 @@ fn shell_escape_arg(input: &str) -> String {
 /// Formats single quoted.
 fn yaml_single_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Strips an optional `project/service` selector prefix.
+fn service_selector_name(selector: &str) -> &str {
+    selector
+        .split_once('/')
+        .map(|(_, service)| service)
+        .unwrap_or(selector)
+}
+
+/// Resolves the project a command should target from an explicit project flag and config.
+fn resolve_command_project(
+    config_arg: &str,
+    explicit_project: Option<String>,
+    service: Option<&str>,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let config_path = resolve_config_path(config_arg)?;
+    let config_value = load_config(Some(config_path.to_string_lossy().as_ref())).ok();
+
+    if let Some(project) = explicit_project {
+        if config_arg != DEFAULT_CONFIG_PATH
+            && let Some(config) = config_value.as_ref()
+            && config.project.id != project
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project '{}' does not match config project '{}'",
+                    project, config.project.id
+                ),
+            )
+            .into());
+        }
+        return Ok(Some(project));
+    }
+
+    let Some(config) = config_value else {
+        return Ok(None);
+    };
+
+    if config_arg != DEFAULT_CONFIG_PATH {
+        return Ok(Some(config.project.id));
+    }
+
+    if let Some(service) = service
+        && config.services.contains_key(service_selector_name(service))
+    {
+        return Ok(Some(config.project.id));
+    }
+
+    Ok(None)
 }
 
 /// Resolves config path.
