@@ -33,9 +33,9 @@ use crate::{
     metrics::{self, MetricsCollector, MetricsHandle},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
-        OverallHealth, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
-        StatusSnapshot, collect_runtime_snapshot,
-        collect_runtime_snapshot_with_cron_hashes, cron_hashes_for_config,
+        ProjectRunMode, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
+        collect_runtime_snapshot, collect_runtime_snapshot_with_cron_hashes,
+        compute_overall_health, cron_hashes_for_config,
     },
 };
 
@@ -339,21 +339,7 @@ impl Supervisor {
             aggregate.units.extend(snapshot.units);
         }
 
-        aggregate.overall_health = if aggregate
-            .units
-            .iter()
-            .any(|unit| matches!(unit.health, crate::status::UnitHealth::Failing))
-        {
-            OverallHealth::Failing
-        } else if aggregate
-            .units
-            .iter()
-            .any(|unit| matches!(unit.health, crate::status::UnitHealth::Degraded))
-        {
-            OverallHealth::Degraded
-        } else {
-            OverallHealth::Healthy
-        };
+        aggregate.overall_health = compute_overall_health(&aggregate.units);
 
         aggregate
     }
@@ -2247,7 +2233,9 @@ mod tests {
             Version,
         },
         runtime,
-        status::{OverallHealth, UnitHealth, UnitKind, UnitStatus},
+        status::{
+            OverallHealth, UnitHealth, UnitIntent, UnitKind, UnitState, UnitStatus,
+        },
     };
 
     fn test_service(depends_on: &[&str]) -> ServiceConfig {
@@ -2380,6 +2368,8 @@ services:
             project: None,
             kind: UnitKind::Service,
             lifecycle: None,
+            state: UnitState::Unknown,
+            intent: UnitIntent::Manual,
             health: UnitHealth::Healthy,
             process: None,
             uptime: None,

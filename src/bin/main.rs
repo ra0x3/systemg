@@ -43,9 +43,9 @@ use systemg::{
     spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, ProjectRunMode,
-        SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitKind, UnitMetricsSummary,
-        UnitStatus, UptimeInfo, collect_disk_snapshot, compute_overall_health,
-        format_elapsed,
+        SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitIntent, UnitKind,
+        UnitMetricsSummary, UnitState, UnitStatus, UptimeInfo, collect_disk_snapshot,
+        compute_overall_health, format_elapsed,
     },
     supervisor::Supervisor,
 };
@@ -580,7 +580,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 
                 let exit_code = match health {
                     OverallHealth::Healthy => 0,
-                    OverallHealth::Degraded => 1,
+                    OverallHealth::Warn => 1,
                     OverallHealth::Failing => 2,
                 };
                 process::exit(exit_code);
@@ -709,7 +709,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 let health = render_inspect(&payload, &render_opts)?;
                 let exit_code = match health {
                     OverallHealth::Healthy => 0,
-                    OverallHealth::Degraded => 1,
+                    OverallHealth::Warn => 1,
                     OverallHealth::Failing => 2,
                 };
                 process::exit(exit_code);
@@ -1064,6 +1064,11 @@ mod tests {
                 align: Alignment::Left,
             },
             Column {
+                title: "INTENT",
+                width: 6,
+                align: Alignment::Left,
+            },
+            Column {
                 title: "USER",
                 width: 8,
                 align: Alignment::Left,
@@ -1111,6 +1116,8 @@ mod tests {
             project: None,
             kind: UnitKind::Service,
             lifecycle: Some(ServiceLifecycleStatus::Running),
+            state: UnitState::Running,
+            intent: UnitIntent::Serve,
             health: UnitHealth::Healthy,
             process: Some(systemg::status::ProcessRuntime {
                 pid: 1234,
@@ -1155,6 +1162,124 @@ mod tests {
     }
 
     #[test]
+    fn status_overview_uses_rail_layout_and_large_bullets() {
+        let columns = vec![
+            Column {
+                title: "UNIT",
+                width: 24,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "KIND",
+                width: 4,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "STATE",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "INTENT",
+                width: 6,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "USER",
+                width: 6,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "PID",
+                width: 5,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "CPU",
+                width: 5,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "RSS",
+                width: 6,
+                align: Alignment::Right,
+            },
+            Column {
+                title: "UPTIME",
+                width: 8,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "CMD",
+                width: 20,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "LAST_EXIT",
+                width: 9,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "HEALTH",
+                width: 8,
+                align: Alignment::Left,
+            },
+        ];
+        let units = vec![
+            UnitStatus {
+                name: "api".to_string(),
+                hash: "api".to_string(),
+                project: None,
+                kind: UnitKind::Service,
+                lifecycle: Some(ServiceLifecycleStatus::Running),
+                state: UnitState::Running,
+                intent: UnitIntent::Serve,
+                health: UnitHealth::Healthy,
+                process: None,
+                uptime: None,
+                last_exit: None,
+                cron: None,
+                metrics: None,
+                command: None,
+                runtime_command: None,
+                spawned_children: vec![],
+            },
+            UnitStatus {
+                name: "worker".to_string(),
+                hash: "worker".to_string(),
+                project: None,
+                kind: UnitKind::Service,
+                lifecycle: Some(ServiceLifecycleStatus::Stopped),
+                state: UnitState::Lost,
+                intent: UnitIntent::Serve,
+                health: UnitHealth::Warn,
+                process: None,
+                uptime: None,
+                last_exit: None,
+                cron: None,
+                metrics: None,
+                command: None,
+                runtime_command: None,
+                spawned_children: vec![],
+            },
+        ];
+
+        let lines = status_overview_lines(&columns, &units, OverallHealth::Warn, true);
+        let rendered = lines.join("\n");
+
+        assert!(rendered.contains("Status: WARN"));
+        assert!(rendered.contains("╟───────────────┬"));
+        assert!(rendered.contains("Health"));
+        assert!(rendered.contains("Healthy 1"));
+        assert!(rendered.contains("•"));
+        assert!(rendered.contains("State"));
+        assert!(rendered.contains("Running 1"));
+        assert!(rendered.contains("Lost 1"));
+        assert!(rendered.contains("Intent"));
+        assert!(rendered.contains("Serve 2"));
+    }
+
+    #[test]
     fn inspect_overview_renders_state_under_kind() {
         let unit = UnitStatus {
             name: "orchestrator".to_string(),
@@ -1162,6 +1287,8 @@ mod tests {
             project: None,
             kind: UnitKind::Service,
             lifecycle: Some(ServiceLifecycleStatus::Running),
+            state: UnitState::Running,
+            intent: UnitIntent::Serve,
             health: UnitHealth::Healthy,
             process: Some(systemg::status::ProcessRuntime {
                 pid: 1234,
@@ -1217,6 +1344,8 @@ mod tests {
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
+                state: UnitState::Unknown,
+                intent: UnitIntent::Manual,
                 health: UnitHealth::Healthy,
                 process: None,
                 uptime: None,
@@ -1237,6 +1366,8 @@ mod tests {
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
+                state: UnitState::Unknown,
+                intent: UnitIntent::Manual,
                 health: UnitHealth::Healthy,
                 process: None,
                 uptime: None,
@@ -1274,6 +1405,11 @@ mod tests {
             Column {
                 title: "STATE",
                 width: 7,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "INTENT",
+                width: 6,
                 align: Alignment::Left,
             },
             Column {
@@ -1375,6 +1511,11 @@ mod tests {
                 align: Alignment::Left,
             },
             Column {
+                title: "INTENT",
+                width: 6,
+                align: Alignment::Left,
+            },
+            Column {
                 title: "USER",
                 width: 8,
                 align: Alignment::Left,
@@ -1466,6 +1607,8 @@ mod tests {
             project: None,
             kind: UnitKind::Service,
             lifecycle: Some(ServiceLifecycleStatus::Running),
+            state: UnitState::Unknown,
+            intent: UnitIntent::Manual,
             health: UnitHealth::Healthy,
             process: Some(systemg::status::ProcessRuntime {
                 pid: 1234,
@@ -1503,6 +1646,11 @@ mod tests {
             Column {
                 title: "STATE",
                 width: 7,
+                align: Alignment::Left,
+            },
+            Column {
+                title: "INTENT",
+                width: 6,
                 align: Alignment::Left,
             },
             Column {
@@ -1773,14 +1921,14 @@ mod tests {
 
     #[test]
     fn status_widths_fit_terminal_width() {
-        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
+        let mut widths = [30, 4, 7, 6, 8, 7, 6, 8, 10, 30, 20, 8];
         shrink_status_widths_to_fit(&mut widths, 120);
         assert!(status_row_width(&widths) <= 120);
     }
 
     #[test]
     fn status_widths_fit_target_table_width() {
-        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
+        let mut widths = [30, 4, 7, 6, 8, 7, 6, 8, 10, 30, 20, 8];
         let target_width = target_table_width(120);
         shrink_status_widths_to_fit(&mut widths, target_width);
         assert!(status_row_width(&widths) <= target_width);
@@ -1821,7 +1969,7 @@ mod tests {
 
     #[test]
     fn status_width_shrink_priority_preserves_critical_columns() {
-        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
+        let mut widths = [30, 4, 7, 6, 8, 7, 6, 8, 10, 30, 20, 8];
         let original = widths;
         shrink_status_widths_to_fit(&mut widths, 120);
 
@@ -1840,6 +1988,8 @@ mod tests {
             project: None,
             kind: UnitKind::Service,
             lifecycle: Some(ServiceLifecycleStatus::Running),
+            state: UnitState::Unknown,
+            intent: UnitIntent::Manual,
             health: UnitHealth::Healthy,
             process: None,
             uptime: None,
@@ -1858,7 +2008,7 @@ mod tests {
 
     #[test]
     fn status_widths_balance_unit_and_cmd_columns() {
-        let mut widths = [8, 4, 7, 8, 7, 6, 8, 10, 90, 20, 8];
+        let mut widths = [8, 4, 7, 6, 8, 7, 6, 8, 10, 90, 20, 8];
         shrink_status_widths_to_fit(&mut widths, 120);
 
         let diff = widths[STATUS_COL_UNIT].abs_diff(widths[STATUS_COL_CMD]);

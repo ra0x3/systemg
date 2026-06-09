@@ -77,7 +77,7 @@ services:
     );
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
-    assert_eq!(payload["overall_health"], "healthy");
+    assert_eq!(payload["overall_health"], "warn");
     assert!(
         output.stderr.is_empty(),
         "status json output should not emit progress noise on stderr in non-interactive mode"
@@ -417,7 +417,7 @@ services:
         serde_json::from_slice(&output.stdout).expect("parse status json");
     let expected_exit = match payload["overall_health"].as_str() {
         Some("healthy") => 0,
-        Some("degraded") => 1,
+        Some("warn") => 1,
         Some("failing") => 2,
         _ => 2,
     };
@@ -516,13 +516,11 @@ services:
         serde_json::from_slice(&output.stdout).expect("parse status json");
     let expected_exit = match payload["overall_health"].as_str() {
         Some("healthy") => 0,
-        Some("degraded") => 1,
+        Some("warn") => 1,
         Some("failing") => 2,
         _ => 1,
     };
     assert_eq!(output.status.code(), Some(expected_exit));
-    // Skipped services are treated as Healthy to keep health labels within
-    // Healthy/Degraded/Failing.
     assert_eq!(payload["overall_health"].as_str(), Some("healthy"));
 
     let units = payload["units"].as_array().expect("units array");
@@ -531,7 +529,9 @@ services:
         .find(|entry| entry["name"].as_str() == Some("skipped_service"))
         .expect("skipped service unit present");
     assert_eq!(unit["lifecycle"].as_str(), Some("skipped"));
-    assert_eq!(unit["health"].as_str(), Some("healthy"));
+    assert_eq!(unit["state"].as_str(), Some("skipped"));
+    assert_eq!(unit["intent"].as_str(), Some("skip"));
+    assert_eq!(unit["health"].as_str(), Some("idle"));
     assert!(
         unit.get("process").is_none() || unit["process"].is_null(),
         "skipped service should not report a running process"
@@ -581,7 +581,7 @@ services:
         serde_json::from_slice(&output.stdout).expect("parse status json");
     let expected_exit = match payload["overall_health"].as_str() {
         Some("healthy") => 0,
-        Some("degraded") => 1,
+        Some("warn") => 1,
         Some("failing") => 2,
         _ => 0,
     };
@@ -594,7 +594,9 @@ services:
         .find(|entry| entry["name"].as_str() == Some("oneshot"))
         .expect("oneshot unit present");
     assert_eq!(unit["lifecycle"].as_str(), Some("exited_successfully"));
-    assert_eq!(unit["health"].as_str(), Some("healthy"));
+    assert_eq!(unit["state"].as_str(), Some("done"));
+    assert_eq!(unit["intent"].as_str(), Some("once"));
+    assert_eq!(unit["health"].as_str(), Some("idle"));
     assert_eq!(
         unit["last_exit"]["exit_code"].as_i64(),
         Some(0),

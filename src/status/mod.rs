@@ -75,11 +75,11 @@ pub enum StatusError {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OverallHealth {
-    /// All services are running as expected.
+    /// No unit currently requires operator attention.
     Healthy,
-    /// Some services are not functioning properly, but system is operational.
-    Degraded,
-    /// Critical services are failing, system health is compromised.
+    /// At least one unit is impaired or suspicious, but no unit is known to have failed.
+    Warn,
+    /// At least one unit is in a known failed condition requiring action.
     Failing,
 }
 
@@ -95,18 +95,77 @@ pub enum UnitKind {
     Orphaned,
 }
 
-/// Health classification for a specific unit.
+/// Admin-facing factual state for a unit.
+///
+/// `UnitState` answers "what is this unit doing, or what happened most
+/// recently?" It is intentionally separate from [`UnitIntent`] and
+/// [`UnitHealth`]: a `Stopped` unit may be acceptable when its intent is
+/// `Manual`, while a `Lost` unit is suspicious because the supervisor expected
+/// to find a tracked process and could not.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitState {
+    /// A live process is currently observed.
+    Running,
+    /// The unit completed successfully and is not expected to stay alive.
+    Done,
+    /// The unit exited unsuccessfully or reported a failed cron run.
+    Failed,
+    /// The unit was intentionally stopped.
+    Stopped,
+    /// The unit was intentionally skipped by configuration.
+    Skipped,
+    /// A previously tracked or expected process is no longer present.
+    Lost,
+    /// The process is defunct and waiting to be reaped.
+    Zombie,
+    /// A cron unit is scheduled but has not completed a run yet.
+    Queued,
+    /// A cron execution was blocked by an already-running prior execution.
+    Overlap,
+    /// The supervisor does not have enough evidence to classify the unit.
+    #[default]
+    Unknown,
+}
+
+/// Admin-facing intent for a unit.
+///
+/// `UnitIntent` answers "what should this unit normally do?" This gives state
+/// labels their operational meaning: `Stopped` + `Serve` is a warning, while
+/// `Stopped` + `Manual` is expected.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitIntent {
+    /// Long-running service expected to remain available.
+    Serve,
+    /// One-shot service expected to complete and exit.
+    Once,
+    /// Cron-scheduled unit expected to run on its configured schedule.
+    Cron,
+    /// Manually controlled unit that is allowed to be stopped.
+    #[default]
+    Manual,
+    /// Unit skipped by configuration.
+    Skip,
+    /// Persisted runtime state that no longer has a matching configuration.
+    Orphan,
+}
+
+/// Admin-facing health classification for a specific unit.
+///
+/// `UnitHealth` answers "does this unit need operator attention?" It is not a
+/// runtime state and does not say whether a process is currently running.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitHealth {
-    /// Unit is operating normally.
+    /// Unit is doing exactly what its intent requires.
     Healthy,
-    /// Unit is operational but experiencing issues.
-    Degraded,
-    /// Unit is not functioning properly.
+    /// Unit is acceptable but not active, such as a completed one-shot or queued cron.
+    Idle,
+    /// Unit is suspicious or not in the desired shape, but has not hard-failed.
+    Warn,
+    /// Unit is in a known failed condition requiring action.
     Failing,
-    /// Unit is currently inactive or stopped.
-    Inactive,
 }
 
 /// Machine-readable snapshot of supervisor state, cached by the resident daemon.
@@ -567,6 +626,10 @@ pub struct UnitStatus {
     pub kind: UnitKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<ServiceLifecycleStatus>,
+    #[serde(default)]
+    pub state: UnitState,
+    #[serde(default)]
+    pub intent: UnitIntent,
     pub health: UnitHealth,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process: Option<ProcessRuntime>,
@@ -1024,12 +1087,16 @@ fn build_snapshot(
 
         let service_config =
             config.and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")));
+        let state =
+            derive_unit_state(kind, lifecycle, process_runtime.as_ref(), cron.as_ref());
+        let intent = derive_unit_intent(kind, service_config);
         let health = derive_unit_health(
             kind,
+            state,
+            intent,
             lifecycle,
             process_runtime.as_ref(),
             cron.as_ref(),
-            service_config,
         );
         let metrics_summary = metrics_store
             .and_then(|store| store.summarize_unit(&hash))
@@ -1109,6 +1176,8 @@ fn build_snapshot(
             project: project_status.clone(),
             kind,
             lifecycle,
+            state,
+            intent,
             health,
             process: process_runtime,
             uptime,
@@ -1151,8 +1220,10 @@ fn build_snapshot(
         let health = match runtime.as_ref().map(|runtime| runtime.state) {
             Some(ProcessState::Running) => UnitHealth::Healthy,
             Some(ProcessState::Zombie | ProcessState::Missing) => UnitHealth::Failing,
-            None => UnitHealth::Inactive,
+            None => UnitHealth::Idle,
         };
+        let state = derive_unit_state(UnitKind::Orphaned, None, runtime.as_ref(), None);
+        let intent = UnitIntent::Orphan;
 
         let metrics_summary = metrics_store
             .and_then(|store| store.summarize_unit(service_name))
@@ -1187,6 +1258,8 @@ fn build_snapshot(
             project: None,
             kind: UnitKind::Orphaned,
             lifecycle: None,
+            state,
+            intent,
             health,
             process: runtime,
             uptime,
@@ -1221,15 +1294,86 @@ fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary 
     }
 }
 
-/// Derives the health classification for a unit from its lifecycle, runtime
-/// process state, and recent cron execution history. Cron units degrade once
-/// at least twenty percent of recent completed runs have failed.
-fn derive_unit_health(
+/// Derives the factual state shown to operators.
+fn derive_unit_state(
     kind: UnitKind,
     lifecycle: Option<ServiceLifecycleStatus>,
     runtime: Option<&ProcessRuntime>,
     cron: Option<&CronUnitStatus>,
+) -> UnitState {
+    if let Some(runtime) = runtime {
+        return match runtime.state {
+            ProcessState::Running => UnitState::Running,
+            ProcessState::Zombie => UnitState::Zombie,
+            ProcessState::Missing => UnitState::Lost,
+        };
+    }
+
+    if let Some(cron_status) = cron {
+        if let Some(last) = cron_status.last_run.as_ref()
+            && let Some(status) = &last.status
+        {
+            return match status {
+                CronExecutionStatus::Success => UnitState::Done,
+                CronExecutionStatus::Failed(reason) => {
+                    if reason.contains("Failed to get PID") {
+                        UnitState::Queued
+                    } else {
+                        UnitState::Failed
+                    }
+                }
+                CronExecutionStatus::OverlapError => UnitState::Overlap,
+            };
+        }
+
+        return UnitState::Queued;
+    }
+
+    match lifecycle {
+        Some(ServiceLifecycleStatus::Running) => UnitState::Running,
+        Some(ServiceLifecycleStatus::ExitedSuccessfully) => UnitState::Done,
+        Some(ServiceLifecycleStatus::ExitedWithError) => UnitState::Failed,
+        Some(ServiceLifecycleStatus::Stopped) => UnitState::Stopped,
+        Some(ServiceLifecycleStatus::Skipped) => UnitState::Skipped,
+        None if matches!(kind, UnitKind::Cron) => UnitState::Queued,
+        None => UnitState::Unknown,
+    }
+}
+
+/// Derives what the supervisor expects from a unit.
+fn derive_unit_intent(
+    kind: UnitKind,
     service_config: Option<&ServiceConfig>,
+) -> UnitIntent {
+    match kind {
+        UnitKind::Cron => UnitIntent::Cron,
+        UnitKind::Orphaned => UnitIntent::Orphan,
+        UnitKind::Service => {
+            let Some(service_config) = service_config else {
+                return UnitIntent::Manual;
+            };
+
+            if service_config.skip.is_some() {
+                return UnitIntent::Skip;
+            }
+
+            if matches!(service_config.restart_policy.as_deref(), Some("never")) {
+                return UnitIntent::Once;
+            }
+
+            UnitIntent::Serve
+        }
+    }
+}
+
+/// Derives the operator-action health classification for a unit.
+fn derive_unit_health(
+    kind: UnitKind,
+    state: UnitState,
+    intent: UnitIntent,
+    lifecycle: Option<ServiceLifecycleStatus>,
+    runtime: Option<&ProcessRuntime>,
+    cron: Option<&CronUnitStatus>,
 ) -> UnitHealth {
     if let Some(runtime) = runtime {
         match runtime.state {
@@ -1238,79 +1382,66 @@ fn derive_unit_health(
                 return UnitHealth::Failing;
             }
             ProcessState::Missing => {
-                return UnitHealth::Degraded;
+                return UnitHealth::Warn;
             }
         }
     }
 
     if let Some(cron_status) = cron {
-        let completed_runs: Vec<&CronExecutionSummary> = cron_status
-            .recent_runs
-            .iter()
-            .filter(|run| cron_run_is_complete(run))
-            .take(10)
-            .collect();
-
-        if completed_runs.is_empty() {
-            return UnitHealth::Degraded;
+        if let Some(last) = cron_status.last_run.as_ref()
+            && let Some(status) = &last.status
+        {
+            return match status {
+                CronExecutionStatus::Success => UnitHealth::Healthy,
+                CronExecutionStatus::Failed(reason) => {
+                    if reason.contains("Failed to get PID") {
+                        UnitHealth::Idle
+                    } else {
+                        UnitHealth::Failing
+                    }
+                }
+                CronExecutionStatus::OverlapError => UnitHealth::Warn,
+            };
         }
 
-        let failure_count = completed_runs
-            .iter()
-            .filter(|run| cron_run_is_failure(run))
-            .count();
-
-        if failure_count == 0 {
-            return UnitHealth::Healthy;
-        }
-
-        if failure_count * 5 >= completed_runs.len() {
-            return UnitHealth::Degraded;
-        }
-
-        return UnitHealth::Healthy;
+        return UnitHealth::Idle;
     }
 
     match lifecycle {
         Some(ServiceLifecycleStatus::ExitedWithError) => return UnitHealth::Failing,
         Some(ServiceLifecycleStatus::Running) => return UnitHealth::Healthy,
         Some(ServiceLifecycleStatus::Skipped) => {
-            return UnitHealth::Healthy;
+            return UnitHealth::Idle;
         }
         Some(ServiceLifecycleStatus::Stopped) => {
-            if service_expects_availability(service_config) {
-                return UnitHealth::Degraded;
+            if matches!(intent, UnitIntent::Serve) {
+                return UnitHealth::Warn;
             }
-            return UnitHealth::Healthy;
+            return UnitHealth::Idle;
         }
-        Some(ServiceLifecycleStatus::ExitedSuccessfully) => return UnitHealth::Healthy,
+        Some(ServiceLifecycleStatus::ExitedSuccessfully) => {
+            if matches!(intent, UnitIntent::Serve) {
+                return UnitHealth::Warn;
+            }
+            return UnitHealth::Idle;
+        }
         None => {}
     }
 
-    match kind {
-        UnitKind::Cron => UnitHealth::Degraded,
-        UnitKind::Service | UnitKind::Orphaned => UnitHealth::Degraded,
+    match (state, kind) {
+        (UnitState::Lost, _) => UnitHealth::Warn,
+        (UnitState::Zombie | UnitState::Failed, _) => UnitHealth::Failing,
+        (UnitState::Queued | UnitState::Stopped | UnitState::Skipped, _) => {
+            UnitHealth::Idle
+        }
+        (_, UnitKind::Cron | UnitKind::Service | UnitKind::Orphaned) => UnitHealth::Warn,
     }
-}
-
-fn service_expects_availability(service_config: Option<&ServiceConfig>) -> bool {
-    let Some(service_config) = service_config else {
-        return false;
-    };
-
-    service_config.restart_policy.as_deref() == Some("always")
-        || service_config
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.health_check.as_ref())
-            .is_some()
 }
 
 /// Computes overall health.
 pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
     if units
         .iter()
-        .filter(|unit| !matches!(unit.kind, UnitKind::Cron))
         .any(|unit| matches!(unit.health, UnitHealth::Failing))
     {
         return OverallHealth::Failing;
@@ -1318,52 +1449,12 @@ pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
 
     if units
         .iter()
-        .filter(|unit| !matches!(unit.kind, UnitKind::Cron))
-        .any(|unit| matches!(unit.health, UnitHealth::Degraded))
+        .any(|unit| matches!(unit.health, UnitHealth::Warn))
     {
-        return OverallHealth::Degraded;
-    }
-
-    if units
-        .iter()
-        .filter(|unit| matches!(unit.kind, UnitKind::Cron))
-        .any(|unit| matches!(unit.health, UnitHealth::Failing))
-    {
-        return OverallHealth::Failing;
-    }
-
-    if units
-        .iter()
-        .filter(|unit| matches!(unit.kind, UnitKind::Cron))
-        .any(|unit| matches!(unit.health, UnitHealth::Degraded))
-    {
-        return OverallHealth::Degraded;
+        return OverallHealth::Warn;
     }
 
     OverallHealth::Healthy
-}
-
-/// Handles cron run is complete.
-fn cron_run_is_complete(run: &CronExecutionSummary) -> bool {
-    run.completed_at.is_some() || run.status.is_some() || run.exit_code.is_some()
-}
-
-/// Handles cron run is failure.
-fn cron_run_is_failure(run: &CronExecutionSummary) -> bool {
-    match &run.status {
-        Some(CronExecutionStatus::Success) => false,
-        Some(CronExecutionStatus::OverlapError) => true,
-        Some(CronExecutionStatus::Failed(reason)) => {
-            if reason.starts_with("Failed to get PID") {
-                false
-            } else if let Some(code) = run.exit_code {
-                code != 0
-            } else {
-                run.completed_at.is_none()
-            }
-        }
-        None => run.exit_code.is_some_and(|code| code != 0),
-    }
 }
 
 /// Truncates hash.
@@ -2632,6 +2723,8 @@ services:
                 project: None,
                 kind: UnitKind::Service,
                 lifecycle: None,
+                state: UnitState::Unknown,
+                intent: UnitIntent::Manual,
                 health: UnitHealth::Healthy,
                 process: None,
                 uptime: None,
@@ -2648,6 +2741,8 @@ services:
                 project: None,
                 kind: UnitKind::Service,
                 lifecycle: None,
+                state: UnitState::Unknown,
+                intent: UnitIntent::Manual,
                 health: UnitHealth::Failing,
                 process: None,
                 uptime: None,
@@ -2683,73 +2778,21 @@ services:
             recent_runs: vec![summary],
         };
 
-        let health =
-            derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status), None);
+        let health = derive_unit_health(
+            UnitKind::Cron,
+            UnitState::Done,
+            UnitIntent::Cron,
+            None,
+            None,
+            Some(&cron_status),
+        );
         assert_eq!(health, UnitHealth::Healthy);
     }
 
     #[test]
-    fn derive_unit_health_for_cron_with_two_failures_in_ten_is_degraded() {
+    fn derive_unit_health_for_latest_failed_cron_is_failing() {
         let now = Utc::now();
-        let mut recent_runs = Vec::new();
-
-        for _ in 0..8 {
-            recent_runs.push(CronExecutionSummary {
-                started_at: now,
-                completed_at: Some(now),
-                status: Some(CronExecutionStatus::Success),
-                exit_code: Some(0),
-                pid: None,
-                user: None,
-                command: None,
-                metrics: vec![],
-            });
-        }
-
-        for _ in 0..2 {
-            recent_runs.push(CronExecutionSummary {
-                started_at: now,
-                completed_at: Some(now),
-                status: Some(CronExecutionStatus::Failed("exit status 1".into())),
-                exit_code: Some(1),
-                pid: None,
-                user: None,
-                command: None,
-                metrics: vec![],
-            });
-        }
-
-        let cron_status = CronUnitStatus {
-            timezone_label: "UTC".into(),
-            timezone: Some("UTC".into()),
-            last_run: recent_runs.first().cloned(),
-            recent_runs,
-        };
-
-        let health =
-            derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status), None);
-        assert_eq!(health, UnitHealth::Degraded);
-    }
-
-    #[test]
-    fn derive_unit_health_for_cron_with_one_failure_in_ten_is_healthy() {
-        let now = Utc::now();
-        let mut recent_runs = Vec::new();
-
-        for _ in 0..9 {
-            recent_runs.push(CronExecutionSummary {
-                started_at: now,
-                completed_at: Some(now),
-                status: Some(CronExecutionStatus::Success),
-                exit_code: Some(0),
-                pid: None,
-                user: None,
-                command: None,
-                metrics: vec![],
-            });
-        }
-
-        recent_runs.push(CronExecutionSummary {
+        let failed = CronExecutionSummary {
             started_at: now,
             completed_at: Some(now),
             status: Some(CronExecutionStatus::Failed("exit status 1".into())),
@@ -2758,26 +2801,53 @@ services:
             user: None,
             command: None,
             metrics: vec![],
-        });
+        };
 
         let cron_status = CronUnitStatus {
             timezone_label: "UTC".into(),
             timezone: Some("UTC".into()),
-            last_run: recent_runs.first().cloned(),
-            recent_runs,
+            last_run: Some(failed.clone()),
+            recent_runs: vec![failed],
         };
 
-        let health =
-            derive_unit_health(UnitKind::Cron, None, None, Some(&cron_status), None);
-        assert_eq!(health, UnitHealth::Healthy);
+        let health = derive_unit_health(
+            UnitKind::Cron,
+            UnitState::Failed,
+            UnitIntent::Cron,
+            None,
+            None,
+            Some(&cron_status),
+        );
+        assert_eq!(health, UnitHealth::Failing);
+    }
+
+    #[test]
+    fn derive_unit_health_for_queued_cron_is_idle() {
+        let cron_status = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: None,
+            recent_runs: vec![],
+        };
+
+        let health = derive_unit_health(
+            UnitKind::Cron,
+            UnitState::Queued,
+            UnitIntent::Cron,
+            None,
+            None,
+            Some(&cron_status),
+        );
+        assert_eq!(health, UnitHealth::Idle);
     }
 
     #[test]
     fn derive_unit_health_for_failed_service_is_failing() {
         let health = derive_unit_health(
             UnitKind::Service,
+            UnitState::Failed,
+            UnitIntent::Serve,
             Some(ServiceLifecycleStatus::ExitedWithError),
-            None,
             None,
             None,
         );
@@ -2785,39 +2855,30 @@ services:
     }
 
     #[test]
-    fn derive_unit_health_for_stopped_ordinary_service_is_healthy() {
-        let service = ServiceConfig {
-            command: "sleep 30".into(),
-            ..ServiceConfig::default()
-        };
-
+    fn derive_unit_health_for_stopped_serve_service_is_warn() {
         let health = derive_unit_health(
             UnitKind::Service,
+            UnitState::Stopped,
+            UnitIntent::Serve,
             Some(ServiceLifecycleStatus::Stopped),
             None,
             None,
-            Some(&service),
         );
 
-        assert_eq!(health, UnitHealth::Healthy);
+        assert_eq!(health, UnitHealth::Warn);
     }
 
     #[test]
-    fn derive_unit_health_for_stopped_always_restart_service_is_degraded() {
-        let service = ServiceConfig {
-            command: "sleep 30".into(),
-            restart_policy: Some("always".into()),
-            ..ServiceConfig::default()
-        };
-
+    fn derive_unit_health_for_completed_oneshot_is_idle() {
         let health = derive_unit_health(
             UnitKind::Service,
-            Some(ServiceLifecycleStatus::Stopped),
+            UnitState::Done,
+            UnitIntent::Once,
+            Some(ServiceLifecycleStatus::ExitedSuccessfully),
             None,
             None,
-            Some(&service),
         );
 
-        assert_eq!(health, UnitHealth::Degraded);
+        assert_eq!(health, UnitHealth::Idle);
     }
 }

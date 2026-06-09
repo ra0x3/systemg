@@ -61,11 +61,20 @@ $ sysg status
 ```
 
 ```
-UNIT       KIND  STATE    USER  PID    CPU   RSS    UPTIME  CMD            LAST_EXIT  HEALTH
-postgres   srvc  Running  app   14823  0.1%  92 MB  2h      postgres       -          Healthy
-redis      srvc  Running  app   14824  0.0%  18 MB  2h      redis-server   -          Healthy
-api        srvc  Running  app   14826  1.2%  64 MB  2h      python app.py  -          Healthy
-worker     srvc  Running  app   14827  0.3%  41 MB  2h      python worker  -          Healthy
+╔════════════════════════════════════════════════════════════════════════════════╗
+║  Status: HEALTHY                                                             ║
+╟───────────────┬──────────────────────────────────────────────────────────────╢
+║  Units        │ 4                                                            ║
+║  Health       │ Healthy 4  •  Idle 0     •  Warn 0     •  Failing 0         ║
+║  State        │ Running 4                                                   ║
+║  Intent       │ Serve 4                                                     ║
+╚═══════════════╧══════════════════════════════════════════════════════════════╝
+
+UNIT       KIND  STATE    INTENT  USER  PID    CPU   RSS    UPTIME  CMD            LAST_EXIT  HEALTH
+postgres   srvc  Running  Serve   app   14823  0.1%  92 MB  2h      postgres       -          Healthy
+redis      srvc  Running  Serve   app   14824  0.0%  18 MB  2h      redis-server   -          Healthy
+api        srvc  Running  Serve   app   14826  1.2%  64 MB  2h      python app.py  -          Healthy
+worker     srvc  Running  Serve   app   14827  0.3%  41 MB  2h      python worker  -          Healthy
 ```
 
 ### View specific service
@@ -126,11 +135,13 @@ process and spawn-tree detail in status/inspect views.
   or `orph` for orphaned state that no longer matches the current
   configuration.
 - **STATE** - Current observed runtime state or last persisted lifecycle
-  state. `STATE` answers "what is this unit doing, or what happened most
-  recently?" Common service values include `Running`, `Zombie`, `Missing`,
-  `Ok`, `NotOk`, `Stopped`, and `Skipped`. Cron units may also show values
-  such as `Scheduled`, `Idle`, `Failed`, `Overlap`, `OkWithErr`, or
-  `PartialSuccess`.
+  outcome. `STATE` answers "what is this unit doing, or what happened most
+  recently?" Values are `Running`, `Done`, `Failed`, `Stopped`, `Skipped`,
+  `Lost`, `Zombie`, `Queued`, `Overlap`, and `Unknown`.
+- **INTENT** - What systemg expects from the unit. Values are `Serve` for
+  long-running services, `Once` for one-shot services, `Cron` for scheduled
+  jobs, `Manual` for manually controlled units, `Skip` for skipped units, and
+  `Orphan` for persisted state without a matching config entry.
 - **USER** - Runtime process user when detailed runtime data is available.
 - **PID** - Runtime process ID when the unit has a tracked process.
 - **CPU** - Current CPU usage when runtime metrics are available.
@@ -139,18 +150,56 @@ process and spawn-tree detail in status/inspect views.
 - **CMD** - Configured command, or the live command line when detailed runtime
   data is available.
 - **LAST_EXIT** - Last recorded exit code or signal when the unit has exited.
-- **HEALTH** - Normalized health classification for the unit. `HEALTH`
-  answers "should this unit be considered OK, impaired, or failing?" It is
-  shown as `Healthy`, `Degraded`, or `Failing`.
+- **HEALTH** - Operator action signal. `HEALTH` answers "does this unit need
+  attention?" Values are `Healthy`, `Idle`, `Warn`, and `Failing`.
 
-`STATE` is intentionally more specific than `HEALTH`. For example, a stopped
-ordinary service can have `STATE` `Stopped` and `HEALTH` `Healthy`, while a
-service configured to be continuously available can have `STATE` `Stopped` and
-`HEALTH` `Degraded`.
+### State values
 
-The overview's **Overall Health** value is derived from unit health. Service
-health is considered before cron health, and any failing or degraded unit can
-raise the aggregate status to `Failing` or `Degraded`.
+| State | Meaning |
+| --- | --- |
+| `Running` | The unit has a live tracked process. |
+| `Done` | The unit completed successfully. |
+| `Failed` | The unit exited unsuccessfully or its latest cron run failed. |
+| `Stopped` | The unit was intentionally stopped and has no live process. |
+| `Skipped` | A configured skip rule prevented startup. |
+| `Lost` | systemg has PID state, but the process is no longer present. |
+| `Zombie` | The tracked process is a zombie. |
+| `Queued` | A cron unit is waiting for its next scheduled run. |
+| `Overlap` | A cron run was blocked by an existing run. |
+| `Unknown` | No reliable runtime or lifecycle fact is available. |
+
+### Intent values
+
+| Intent | Meaning |
+| --- | --- |
+| `Serve` | The unit is expected to stay available as a long-running service. |
+| `Once` | The unit is expected to run once and stop after success. |
+| `Cron` | The unit is schedule driven. |
+| `Manual` | systemg has no stronger configured expectation for the unit. |
+| `Skip` | The unit is configured to be skipped when its skip rule passes. |
+| `Orphan` | The state entry no longer matches a configured unit. |
+
+### Health values
+
+| Health | Meaning |
+| --- | --- |
+| `Healthy` | The unit is doing what systemg expects. |
+| `Idle` | The unit is inactive by design and does not require action. |
+| `Warn` | The unit is not in the expected state, but is not a hard failure. |
+| `Failing` | The unit failed or has a broken runtime condition. |
+
+`STATE`, `INTENT`, and `HEALTH` are separate on purpose. `STATE` is factual,
+`INTENT` explains what should normally happen, and `HEALTH` says whether an
+operator should act. For example, `Done` + `Once` is `Idle`, while `Stopped` +
+`Serve` is `Warn`.
+
+The overview's **Status** value is derived from unit health:
+
+- `Failing` if any unit is `Failing`
+- `Warn` if no unit is failing but at least one unit is `Warn`
+- `Healthy` otherwise
+
+`Idle` units do not lower overall status.
 
 ## See also
 

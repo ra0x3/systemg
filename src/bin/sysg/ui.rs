@@ -297,23 +297,25 @@ fn detect_target_table_width(default_terminal_width: usize) -> usize {
     target_table_width(terminal_width)
 }
 
-const STATUS_COLUMN_COUNT: usize = 11;
+const STATUS_COLUMN_COUNT: usize = 12;
 const STATUS_COL_UNIT: usize = 0;
 const STATUS_COL_KIND: usize = 1;
 const STATUS_COL_STATE: usize = 2;
-const STATUS_COL_USER: usize = 3;
-const STATUS_COL_PID: usize = 4;
-const STATUS_COL_CPU: usize = 5;
-const STATUS_COL_RSS: usize = 6;
-const STATUS_COL_UPTIME: usize = 7;
-const STATUS_COL_CMD: usize = 8;
-const STATUS_COL_LAST_EXIT: usize = 9;
-const STATUS_COL_HEALTH: usize = 10;
+const STATUS_COL_INTENT: usize = 3;
+const STATUS_COL_USER: usize = 4;
+const STATUS_COL_PID: usize = 5;
+const STATUS_COL_CPU: usize = 6;
+const STATUS_COL_RSS: usize = 7;
+const STATUS_COL_UPTIME: usize = 8;
+const STATUS_COL_CMD: usize = 9;
+const STATUS_COL_LAST_EXIT: usize = 10;
+const STATUS_COL_HEALTH: usize = 11;
 
 const STATUS_COLUMN_TITLES: [&str; STATUS_COLUMN_COUNT] = [
     "UNIT",
     "KIND",
     "STATE",
+    "INTENT",
     "USER",
     "PID",
     "CPU",
@@ -329,6 +331,7 @@ const STATUS_COLUMN_ALIGNS: [Alignment; STATUS_COLUMN_COUNT] = [
     Alignment::Left,
     Alignment::Left,
     Alignment::Left,
+    Alignment::Left,
     Alignment::Right,
     Alignment::Right,
     Alignment::Right,
@@ -339,9 +342,9 @@ const STATUS_COLUMN_ALIGNS: [Alignment; STATUS_COLUMN_COUNT] = [
 ];
 
 const STATUS_SOFT_MIN_WIDTHS: [usize; STATUS_COLUMN_COUNT] =
-    [12, 4, 5, 4, 3, 3, 3, 4, 12, 9, 6];
+    [12, 4, 5, 4, 4, 3, 3, 3, 4, 12, 9, 6];
 const STATUS_SHRINK_PRIORITY: [usize; STATUS_COLUMN_COUNT] =
-    [8, 9, 3, 2, 7, 1, 10, 0, 6, 5, 4];
+    [9, 10, 4, 2, 3, 8, 1, 11, 0, 7, 6, 5];
 const STATUS_UNIT_CMD_MAX_DIFF: usize = 4;
 
 #[cfg(test)]
@@ -451,6 +454,8 @@ fn compute_status_preferred_widths(
         widths[STATUS_COL_KIND] = widths[STATUS_COL_KIND].max(4);
         widths[STATUS_COL_STATE] = widths[STATUS_COL_STATE]
             .max(visible_length(&unit_state_label(unit, no_color)));
+        widths[STATUS_COL_INTENT] = widths[STATUS_COL_INTENT]
+            .max(visible_length(&unit_intent_label(unit.intent, no_color)));
         widths[STATUS_COL_USER] = widths[STATUS_COL_USER].max(visible_length(
             unit.process
                 .as_ref()
@@ -541,7 +546,7 @@ fn render_status_interactive(
 
     if units.is_empty() {
         println!("No matching units found.");
-        return Ok(OverallHealth::Degraded);
+        return Ok(OverallHealth::Warn);
     }
 
     let health = compute_overall_health(&units);
@@ -803,6 +808,11 @@ fn render_status_table_with_selection(
             align: STATUS_COLUMN_ALIGNS[STATUS_COL_STATE],
         },
         Column {
+            title: "INTENT",
+            width: widths[STATUS_COL_INTENT],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_INTENT],
+        },
+        Column {
             title: "USER",
             width: widths[STATUS_COL_USER],
             align: STATUS_COLUMN_ALIGNS[STATUS_COL_USER],
@@ -845,35 +855,9 @@ fn render_status_table_with_selection(
     ];
 
     let columns = &columns_array;
-    let (state_counts, health_counts) = count_states_and_health(units);
-    println!("{}", make_overview_top_border(columns));
-    println!("{}", format_overview_line(" Overview", columns));
-    println!("{}", make_overview_separator_border(columns));
-    println!(
-        "{}",
-        format_overview_line(
-            &format!(
-                " Overall Health: {}",
-                colorize(
-                    overall_health_label(health),
-                    overall_health_color(health),
-                    opts.no_color
-                )
-            ),
-            columns,
-        )
-    );
-    println!(
-        "{}",
-        format_overview_line(
-            &format!(
-                " {}",
-                format_flattened_breakdown(&state_counts, &health_counts, opts.no_color)
-            ),
-            columns,
-        )
-    );
-    println!("{}", make_bottom_border(columns));
+    for line in status_overview_lines(columns, units, health, opts.no_color) {
+        println!("{line}");
+    }
     println!();
 
     let groups = status_project_groups(units, opts.no_color);
@@ -959,7 +943,7 @@ fn render_status_non_interactive(
 
     if units.is_empty() {
         println!("No matching units found.");
-        return Ok(OverallHealth::Degraded);
+        return Ok(OverallHealth::Warn);
     }
 
     let health = compute_overall_health(&units);
@@ -999,6 +983,11 @@ fn render_status_non_interactive(
             title: "STATE",
             width: widths[STATUS_COL_STATE],
             align: STATUS_COLUMN_ALIGNS[STATUS_COL_STATE],
+        },
+        Column {
+            title: "INTENT",
+            width: widths[STATUS_COL_INTENT],
+            align: STATUS_COLUMN_ALIGNS[STATUS_COL_INTENT],
         },
         Column {
             title: "USER",
@@ -1043,35 +1032,9 @@ fn render_status_non_interactive(
     ];
 
     let columns = &columns_array;
-    let (state_counts, health_counts) = count_states_and_health(&units);
-    println!("{}", make_overview_top_border(columns));
-    println!("{}", format_overview_line(" Overview", columns));
-    println!("{}", make_overview_separator_border(columns));
-    println!(
-        "{}",
-        format_overview_line(
-            &format!(
-                " Overall Health: {}",
-                colorize(
-                    overall_health_label(health),
-                    overall_health_color(health),
-                    opts.no_color
-                )
-            ),
-            columns,
-        )
-    );
-    println!(
-        "{}",
-        format_overview_line(
-            &format!(
-                " {}",
-                format_flattened_breakdown(&state_counts, &health_counts, opts.no_color)
-            ),
-            columns,
-        )
-    );
-    println!("{}", make_bottom_border(columns));
+    for line in status_overview_lines(columns, &units, health, opts.no_color) {
+        println!("{line}");
+    }
     println!();
 
     let groups = status_project_groups(&units, opts.no_color);
@@ -1129,7 +1092,7 @@ fn colorize(text: &str, color: &str, no_color: bool) -> String {
 fn overall_health_label(health: OverallHealth) -> &'static str {
     match health {
         OverallHealth::Healthy => "Healthy",
-        OverallHealth::Degraded => "Degraded",
+        OverallHealth::Warn => "Warn",
         OverallHealth::Failing => "Failing",
     }
 }
@@ -1138,7 +1101,7 @@ fn overall_health_label(health: OverallHealth) -> &'static str {
 fn overall_health_color(health: OverallHealth) -> &'static str {
     match health {
         OverallHealth::Healthy => GREEN_BOLD,
-        OverallHealth::Degraded => ORANGE,
+        OverallHealth::Warn => ORANGE,
         OverallHealth::Failing => RED_BOLD,
     }
 }
@@ -1147,9 +1110,9 @@ fn overall_health_color(health: OverallHealth) -> &'static str {
 fn unit_health_label(health: UnitHealth) -> &'static str {
     match health {
         UnitHealth::Healthy => "Healthy",
-        UnitHealth::Degraded => "Degraded",
+        UnitHealth::Idle => "Idle",
+        UnitHealth::Warn => "Warn",
         UnitHealth::Failing => "Failing",
-        UnitHealth::Inactive => "Healthy",
     }
 }
 
@@ -1162,69 +1125,64 @@ fn health_label_extended(unit: &UnitStatus) -> String {
 fn unit_health_color(health: UnitHealth) -> &'static str {
     match health {
         UnitHealth::Healthy => GREEN_BOLD,
-        UnitHealth::Degraded => ORANGE,
+        UnitHealth::Idle => YELLOW,
+        UnitHealth::Warn => ORANGE,
         UnitHealth::Failing => RED_BOLD,
-        UnitHealth::Inactive => GREEN_BOLD,
     }
 }
 
 /// Builds the unit state label.
 fn unit_state_label(unit: &UnitStatus, no_color: bool) -> String {
-    if let Some(process) = &unit.process {
-        return match process.state {
-            ProcessState::Running => colorize("Running", BRIGHT_GREEN, no_color),
-            ProcessState::Zombie => colorize("Zombie", RED, no_color),
-            ProcessState::Missing => colorize("Missing", RED_BOLD, no_color),
-        };
+    let label = unit_state_plain_label(unit.state);
+    colorize(label, unit_state_color(unit.state), no_color)
+}
+
+fn unit_state_plain_label(state: UnitState) -> &'static str {
+    match state {
+        UnitState::Running => "Running",
+        UnitState::Done => "Done",
+        UnitState::Failed => "Failed",
+        UnitState::Stopped => "Stopped",
+        UnitState::Skipped => "Skipped",
+        UnitState::Lost => "Lost",
+        UnitState::Zombie => "Zombie",
+        UnitState::Queued => "Queued",
+        UnitState::Overlap => "Overlap",
+        UnitState::Unknown => "Unknown",
     }
+}
 
-    if let Some(lifecycle) = unit.lifecycle {
-        return match lifecycle {
-            ServiceLifecycleStatus::Running => {
-                colorize("Running", BRIGHT_GREEN, no_color)
-            }
-            ServiceLifecycleStatus::ExitedSuccessfully => colorize("Ok", GREEN, no_color),
-            ServiceLifecycleStatus::ExitedWithError => colorize("NotOk", RED, no_color),
-            ServiceLifecycleStatus::Stopped => colorize("Stopped", GRAY, no_color),
-            ServiceLifecycleStatus::Skipped => colorize("Skipped", GRAY, no_color),
-        };
+fn unit_state_color(state: UnitState) -> &'static str {
+    match state {
+        UnitState::Running => BRIGHT_GREEN,
+        UnitState::Done => DARK_GREEN,
+        UnitState::Failed | UnitState::Zombie => RED_BOLD,
+        UnitState::Lost | UnitState::Overlap => ORANGE,
+        UnitState::Stopped | UnitState::Queued => YELLOW,
+        UnitState::Skipped | UnitState::Unknown => GRAY,
     }
+}
 
-    if let Some(cron) = &unit.cron {
-        if let Some(last) = cron.last_run.as_ref() {
-            if let Some(status) = &last.status {
-                return match status {
-                    CronExecutionStatus::Success => match last.exit_code {
-                        Some(0) => colorize("Idle", GRAY, no_color),
-                        Some(_) => colorize("OkWithErr", DARK_GREEN, no_color),
-                        None => colorize("Idle", GRAY, no_color),
-                    },
-                    CronExecutionStatus::Failed(reason) => {
-                        if reason.contains("Failed to get PID") {
-                            colorize("Idle", GRAY, no_color)
-                        } else if let Some(exit_code) = last.exit_code {
-                            if exit_code == 0 {
-                                colorize("PartialSuccess", DARK_GREEN, no_color)
-                            } else {
-                                colorize("Failed", RED, no_color)
-                            }
-                        } else {
-                            colorize("Failed", RED, no_color)
-                        }
-                    }
-                    CronExecutionStatus::OverlapError => {
-                        colorize("Overlap", YELLOW_BOLD, no_color)
-                    }
-                };
-            }
+fn unit_intent_label(intent: UnitIntent, no_color: bool) -> String {
+    let label = match intent {
+        UnitIntent::Serve => "Serve",
+        UnitIntent::Once => "Once",
+        UnitIntent::Cron => "Cron",
+        UnitIntent::Manual => "Manual",
+        UnitIntent::Skip => "Skip",
+        UnitIntent::Orphan => "Orphan",
+    };
+    colorize(label, unit_intent_color(intent), no_color)
+}
 
-            return colorize("Running", BRIGHT_GREEN, no_color);
-        }
-
-        return colorize("Scheduled", YELLOW, no_color);
+fn unit_intent_color(intent: UnitIntent) -> &'static str {
+    match intent {
+        UnitIntent::Serve => CYAN,
+        UnitIntent::Once => GREEN,
+        UnitIntent::Cron => YELLOW,
+        UnitIntent::Manual => MID_GRAY,
+        UnitIntent::Skip | UnitIntent::Orphan => GRAY,
     }
-
-    colorize("Not running", GRAY, no_color)
 }
 
 /// Formats uptime column.
@@ -1480,10 +1438,13 @@ fn make_overview_top_border(columns: &[Column]) -> String {
     format!("╔{}╗", "═".repeat(inner_width))
 }
 
-/// Builds overview separator border.
-fn make_overview_separator_border(columns: &[Column]) -> String {
-    let inner_width = total_inner_width(columns);
-    format!("╟{}╢", "─".repeat(inner_width))
+fn make_overview_split_border(inner_width: usize, rail_width: usize) -> String {
+    let value_width = inner_width.saturating_sub(rail_width + 1);
+    format!(
+        "╟{}┬{}╢",
+        "─".repeat(rail_width),
+        "─".repeat(value_width)
+    )
 }
 
 /// Formats overview line.
@@ -1491,6 +1452,28 @@ fn format_overview_line(text: &str, columns: &[Column]) -> String {
     let inner_width = total_inner_width(columns);
     let content_width = inner_width.saturating_sub(2);
     format!("║ {} ║", ansi_pad(text, content_width, Alignment::Left))
+}
+
+fn format_overview_split_line(
+    label: &str,
+    value: &str,
+    rail_width: usize,
+    value_width: usize,
+) -> String {
+    format!(
+        "║{}│{}║",
+        ansi_pad(label, rail_width, Alignment::Left),
+        ansi_pad(&format!(" {value}"), value_width, Alignment::Left)
+    )
+}
+
+fn make_overview_bottom_border(inner_width: usize, rail_width: usize) -> String {
+    let value_width = inner_width.saturating_sub(rail_width + 1);
+    format!(
+        "╚{}╧{}╝",
+        "═".repeat(rail_width),
+        "═".repeat(value_width)
+    )
 }
 
 /// Builds bottom border.
@@ -1609,142 +1592,184 @@ fn status_unit_matches_selector(
             .unwrap_or(true)
 }
 
-/// Counts states and health.
-fn count_states_and_health(
-    units: &[UnitStatus],
-) -> (HashMap<String, usize>, HashMap<String, usize>) {
-    let mut state_counts: HashMap<String, usize> = HashMap::new();
-    let mut health_counts: HashMap<String, usize> = HashMap::new();
-
-    for unit in units {
-        let state_label = if let Some(process) = &unit.process {
-            match process.state {
-                ProcessState::Running => "Running",
-                ProcessState::Zombie => "Zombie",
-                ProcessState::Missing => "Missing",
-            }
-        } else if let Some(lifecycle) = unit.lifecycle {
-            match lifecycle {
-                ServiceLifecycleStatus::Running => "Running",
-                ServiceLifecycleStatus::ExitedSuccessfully => "Ok",
-                ServiceLifecycleStatus::ExitedWithError => "NotOk",
-                ServiceLifecycleStatus::Stopped => "Stopped",
-                ServiceLifecycleStatus::Skipped => "Skipped",
-            }
-        } else if unit.kind == UnitKind::Cron {
-            "Idle"
-        } else {
-            "Unknown"
-        };
-
-        *state_counts.entry(state_label.to_string()).or_insert(0) += 1;
-
-        let health_label = health_label_extended(unit);
-        *health_counts.entry(health_label).or_insert(0) += 1;
-    }
-
-    (state_counts, health_counts)
+#[derive(Clone, Copy)]
+enum OverviewMetric {
+    Health(UnitHealth),
+    State(UnitState),
+    Intent(UnitIntent),
 }
 
-#[allow(dead_code)]
-/// Formats breakdown banner.
-fn format_breakdown_banner(
-    state_counts: &HashMap<String, usize>,
-    health_counts: &HashMap<String, usize>,
+fn status_overview_lines(
     columns: &[Column],
+    units: &[UnitStatus],
+    health: OverallHealth,
     no_color: bool,
-) -> String {
-    let mut states: Vec<_> = state_counts.iter().collect();
-    states.sort_by_key(|(k, _)| k.as_str());
-    let state_str = states
-        .iter()
-        .map(|(state, count)| {
-            let color = match state.as_str() {
-                "Running" => BRIGHT_GREEN,
-                "Ok" => GREEN,
-                "NotOk" => RED,
-                "Zombie" | "Missing" => RED_BOLD,
-                "Stopped" | "Skipped" | "Idle" => GRAY,
-                _ => "",
-            };
-            format!("• {}: {}", colorize(state, color, no_color), count)
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
+) -> Vec<String> {
+    let inner_width = total_inner_width(columns);
+    let rail_width = 15usize.min(inner_width.saturating_sub(8));
+    let value_width = inner_width.saturating_sub(rail_width + 1);
+    let summary_rows = status_summary_rows(units, no_color);
+    let mut lines = Vec::new();
 
-    let mut healths: Vec<_> = health_counts.iter().collect();
-    healths.sort_by_key(|(k, _)| k.as_str());
-    let health_str = healths
-        .iter()
-        .map(|(health, count)| {
-            let color = if health.as_str() == "Healthy" {
-                GREEN_BOLD
-            } else if health.as_str() == "Degraded" {
-                ORANGE
-            } else if health.as_str() == "Failing" {
-                RED_BOLD
-            } else {
-                GRAY
-            };
-            format!("• {}: {}", colorize(health, color, no_color), count)
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-
-    let breakdown = if !state_str.is_empty() && !health_str.is_empty() {
-        format!("{}  {}  {}", state_str, "|", health_str)
-    } else if !state_str.is_empty() {
-        state_str
-    } else {
-        health_str
-    };
-    format_banner(&breakdown, columns)
+    lines.push(make_overview_top_border(columns));
+    lines.push(format_overview_line(
+        &format!(
+            " Status: {}",
+            colorize(
+                &overall_health_label(health).to_ascii_uppercase(),
+                overall_health_color(health),
+                no_color
+            )
+        ),
+        columns,
+    ));
+    lines.push(make_overview_split_border(inner_width, rail_width));
+    lines.push(format_overview_split_line(
+        "  Units",
+        &units.len().to_string(),
+        rail_width,
+        value_width,
+    ));
+    for (label, value) in summary_rows {
+        lines.push(format_overview_split_line(
+            &format!("  {label}"),
+            &value,
+            rail_width,
+            value_width,
+        ));
+    }
+    lines.push(make_overview_bottom_border(inner_width, rail_width));
+    lines
 }
 
-/// Formats flattened breakdown.
-fn format_flattened_breakdown(
-    state_counts: &HashMap<String, usize>,
-    health_counts: &HashMap<String, usize>,
+fn status_summary_rows(units: &[UnitStatus], no_color: bool) -> Vec<(&'static str, String)> {
+    let health_order = [
+        OverviewMetric::Health(UnitHealth::Healthy),
+        OverviewMetric::Health(UnitHealth::Idle),
+        OverviewMetric::Health(UnitHealth::Warn),
+        OverviewMetric::Health(UnitHealth::Failing),
+    ];
+    let state_order = [
+        OverviewMetric::State(UnitState::Running),
+        OverviewMetric::State(UnitState::Done),
+        OverviewMetric::State(UnitState::Stopped),
+        OverviewMetric::State(UnitState::Lost),
+        OverviewMetric::State(UnitState::Failed),
+        OverviewMetric::State(UnitState::Zombie),
+        OverviewMetric::State(UnitState::Queued),
+        OverviewMetric::State(UnitState::Overlap),
+        OverviewMetric::State(UnitState::Skipped),
+        OverviewMetric::State(UnitState::Unknown),
+    ];
+    let intent_order = [
+        OverviewMetric::Intent(UnitIntent::Serve),
+        OverviewMetric::Intent(UnitIntent::Once),
+        OverviewMetric::Intent(UnitIntent::Manual),
+        OverviewMetric::Intent(UnitIntent::Cron),
+        OverviewMetric::Intent(UnitIntent::Skip),
+        OverviewMetric::Intent(UnitIntent::Orphan),
+    ];
+
+    let health_items = overview_items(units, &health_order, true, no_color);
+    let state_items = overview_items(units, &state_order, false, no_color);
+    let intent_items = overview_items(units, &intent_order, false, no_color);
+    let column_widths = overview_item_column_widths([&health_items, &state_items, &intent_items]);
+
+    vec![
+        (
+            "Health",
+            format_overview_items(&health_items, &column_widths, no_color),
+        ),
+        (
+            "State",
+            format_overview_items(&state_items, &column_widths, no_color),
+        ),
+        (
+            "Intent",
+            format_overview_items(&intent_items, &column_widths, no_color),
+        ),
+    ]
+}
+
+fn overview_items(
+    units: &[UnitStatus],
+    order: &[OverviewMetric],
+    include_zero: bool,
     no_color: bool,
-) -> String {
-    let mut states: Vec<_> = state_counts.iter().collect();
-    states.sort_by_key(|(k, _)| k.as_str());
-    let state_str = states
+) -> Vec<String> {
+    order
         .iter()
-        .map(|(state, count)| {
-            let color = match state.as_str() {
-                "Running" => BRIGHT_GREEN,
-                "Ok" => GREEN,
-                "NotOk" => RED,
-                "Zombie" | "Missing" => RED_BOLD,
-                "Stopped" | "Skipped" | "Idle" => GRAY,
-                _ => "",
-            };
-            format!("{} {}", colorize(state, color, no_color), count)
+        .filter_map(|metric| {
+            let count = units
+                .iter()
+                .filter(|unit| overview_metric_matches(unit, *metric))
+                .count();
+            if count == 0 && !include_zero {
+                return None;
+            }
+            Some(colorize(
+                &format!("{} {}", overview_metric_label(*metric), count),
+                overview_metric_color(*metric),
+                no_color,
+            ))
+        })
+        .collect()
+}
+
+fn overview_metric_matches(unit: &UnitStatus, metric: OverviewMetric) -> bool {
+    match metric {
+        OverviewMetric::Health(health) => unit.health == health,
+        OverviewMetric::State(state) => unit.state == state,
+        OverviewMetric::Intent(intent) => unit.intent == intent,
+    }
+}
+
+fn overview_metric_label(metric: OverviewMetric) -> &'static str {
+    match metric {
+        OverviewMetric::Health(health) => unit_health_label(health),
+        OverviewMetric::State(state) => unit_state_plain_label(state),
+        OverviewMetric::Intent(intent) => match intent {
+            UnitIntent::Serve => "Serve",
+            UnitIntent::Once => "Once",
+            UnitIntent::Cron => "Cron",
+            UnitIntent::Manual => "Manual",
+            UnitIntent::Skip => "Skip",
+            UnitIntent::Orphan => "Orphan",
+        },
+    }
+}
+
+fn overview_metric_color(metric: OverviewMetric) -> &'static str {
+    match metric {
+        OverviewMetric::Health(health) => unit_health_color(health),
+        OverviewMetric::State(state) => unit_state_color(state),
+        OverviewMetric::Intent(intent) => unit_intent_color(intent),
+    }
+}
+
+fn overview_item_column_widths(rows: [&[String]; 3]) -> Vec<usize> {
+    let max_items = rows.iter().map(|row| row.len()).max().unwrap_or(0);
+    (0..max_items)
+        .map(|index| {
+            rows.iter()
+                .filter_map(|row| row.get(index))
+                .map(|item| visible_length(item))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn format_overview_items(items: &[String], widths: &[usize], no_color: bool) -> String {
+    let bullet = colorize("•", MID_GRAY, no_color);
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            pad_ansi_str(item, widths.get(index).copied().unwrap_or_default())
         })
         .collect::<Vec<_>>()
-        .join("  ");
-
-    let mut healths: Vec<_> = health_counts.iter().collect();
-    healths.sort_by_key(|(k, _)| k.as_str());
-    let health_str = healths
-        .iter()
-        .map(|(health, count)| {
-            let color = if health.as_str() == "Healthy" {
-                GREEN_BOLD
-            } else if health.as_str() == "Degraded" {
-                ORANGE
-            } else if health.as_str() == "Failing" {
-                RED_BOLD
-            } else {
-                GRAY
-            };
-            format!("{} {}", colorize(health, color, no_color), count)
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
-
-    format!("States: {}  |  Health: {}", state_str, health_str)
+        .join(&format!("  {bullet}  "))
 }
 
 /// Formats header row.
@@ -1790,6 +1815,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
     };
 
     let state = unit_state_label(unit, no_color);
+    let intent = unit_intent_label(unit.intent, no_color);
     let user = unit
         .process
         .as_ref()
@@ -1832,6 +1858,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         display_name,
         colored_kind_label,
         state,
+        intent,
         user,
         pid,
         cpu_col,
@@ -1910,9 +1937,9 @@ fn unit_row_tint_family(unit: &UnitStatus) -> RowTintFamily {
 
     match unit.health {
         UnitHealth::Healthy => RowTintFamily::Success,
-        UnitHealth::Degraded => RowTintFamily::Warning,
+        UnitHealth::Warn => RowTintFamily::Warning,
         UnitHealth::Failing => RowTintFamily::Failing,
-        UnitHealth::Inactive => RowTintFamily::Neutral,
+        UnitHealth::Idle => RowTintFamily::Neutral,
     }
 }
 
@@ -2063,8 +2090,9 @@ fn format_spawned_child_row(
             && exit.signal.is_none();
 
         let health = if succeeded { "Healthy" } else { "Failing" };
+        let state = if succeeded { "Done" } else { "Failed" };
 
-        ("Exited".to_string(), health.to_string())
+        (state.to_string(), health.to_string())
     } else {
         ("Running".to_string(), "Healthy".to_string())
     };
@@ -2100,6 +2128,7 @@ fn format_spawned_child_row(
         child_name,
         kind_label,
         state,
+        "Spawn".to_string(),
         user,
         pid,
         cpu_col,
@@ -2140,7 +2169,7 @@ fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
 }
 
 /// Formats row.
-fn format_row(values: &[String; 11], columns: &[Column]) -> String {
+fn format_row(values: &[String], columns: &[Column]) -> String {
     let mut row = String::from('│');
     for (value, column) in values.iter().zip(columns.iter()) {
         let sanitized = sanitize_table_cell(value);
@@ -2853,11 +2882,12 @@ fn collect_inspect_lines(
         UnitKind::Orphaned => colorize("orphaned", GRAY, opts.no_color),
     };
     let health_str = colorize(
-        overall_health_label(health),
-        overall_health_color(health),
+        unit_health_label(unit.health),
+        unit_health_color(unit.health),
         opts.no_color,
     );
     let state_str = unit_state_label(unit, opts.no_color);
+    let intent_str = unit_intent_label(unit.intent, opts.no_color);
     let pid_str = if let Some(process) = &unit.process {
         colorize(&process.pid.to_string(), BRIGHT_WHITE, opts.no_color)
     } else {
@@ -2881,6 +2911,7 @@ fn collect_inspect_lines(
     let status_label = colorize("Status", DIM_CYAN, opts.no_color);
     let kind_label = colorize("Kind", DIM_WHITE, opts.no_color);
     let state_label = colorize("State", DIM_WHITE, opts.no_color);
+    let intent_label = colorize("Intent", DIM_WHITE, opts.no_color);
     let health_label = colorize("Health", DIM_WHITE, opts.no_color);
     let pid_label = colorize("PID", DIM_WHITE, opts.no_color);
     let uptime_label = colorize("Uptime", DIM_WHITE, opts.no_color);
@@ -2933,7 +2964,10 @@ fn collect_inspect_lines(
                         &format!("{}: {}", state_label, state_str),
                         half_width
                     ),
-                    pad_ansi_str("", second_half_width)
+                    pad_ansi_str(
+                        &format!("{}: {}", intent_label, intent_str),
+                        second_half_width
+                    )
                 ),
                 data_width
             )
@@ -4355,8 +4389,8 @@ fn filter_samples(
 fn overall_health_from_unit(unit: &UnitStatus) -> OverallHealth {
     match unit.health {
         UnitHealth::Healthy => OverallHealth::Healthy,
-        UnitHealth::Degraded => OverallHealth::Degraded,
+        UnitHealth::Idle => OverallHealth::Healthy,
+        UnitHealth::Warn => OverallHealth::Warn,
         UnitHealth::Failing => OverallHealth::Failing,
-        UnitHealth::Inactive => OverallHealth::Healthy,
     }
 }
