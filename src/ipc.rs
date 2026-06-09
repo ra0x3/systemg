@@ -3,6 +3,7 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -42,8 +43,10 @@ pub enum ControlCommand {
     /// Start one or all services.
     Start {
         /// Optional service name to start. If None, starts all services.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         service: Option<String>,
         /// Optional project id to target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
     /// Add another project configuration to the resident supervisor.
@@ -51,6 +54,7 @@ pub enum ControlCommand {
         /// Path to the project configuration file.
         config: String,
         /// Optional service name to start from the added project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         service: Option<String>,
         /// Requested project run mode.
         #[serde(default)]
@@ -64,17 +68,22 @@ pub enum ControlCommand {
     /// Stop one or all services.
     Stop {
         /// Optional service name to stop. If None, stops all services.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         service: Option<String>,
         /// Optional project id to target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
     /// Restart services, optionally with a new configuration.
     Restart {
         /// Optional path to a new configuration file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         config: Option<String>,
         /// Optional service name to restart. If None, restarts all services.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         service: Option<String>,
         /// Optional project id to target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
     /// Shutdown the supervisor daemon.
@@ -90,6 +99,7 @@ pub enum ControlCommand {
         /// Name or hash of the unit to inspect.
         unit: String,
         /// Optional project id containing the inspected unit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
         /// Maximum number of samples to return.
         samples: u32,
@@ -100,12 +110,15 @@ pub enum ControlCommand {
     /// Stream logs for one or all services through the supervisor.
     Logs {
         /// Optional service name to stream. If None, streams all managed services.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         service: Option<String>,
         /// Optional project id to filter logs by.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
         /// Number of lines to include initially.
         lines: usize,
         /// Log kind to stream. None means merged stdout+stderr.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
         /// Whether to follow the log stream until the client disconnects.
         follow: bool,
@@ -119,8 +132,10 @@ pub enum ControlCommand {
         /// Command and arguments to execute.
         command: Vec<String>,
         /// Time-to-live in seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         ttl: Option<u64>,
         /// Optional log level for the spawned process.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         log_level: Option<String>,
     },
 }
@@ -143,6 +158,15 @@ pub enum ControlResponse {
         /// PID of the spawned child process.
         pid: u32,
     },
+}
+
+/// Result of sending a command with a short acknowledgement window.
+#[derive(Debug)]
+pub enum CommandAck {
+    /// The supervisor responded before the timeout elapsed.
+    Response(ControlResponse),
+    /// The command was written successfully, but no response was immediately available.
+    Pending,
 }
 
 /// Inspect response payload.
@@ -200,6 +224,36 @@ pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, Control
 pub fn send_command_detached(command: &ControlCommand) -> Result<(), ControlError> {
     let mut stream = connect_stream()?;
     write_command(&mut stream, command)
+}
+
+/// Sends a command and waits briefly for an immediate supervisor response.
+pub fn send_command_with_timeout(
+    command: &ControlCommand,
+    timeout: Duration,
+) -> Result<CommandAck, ControlError> {
+    let mut stream = connect_stream()?;
+    write_command(&mut stream, command)?;
+    stream.set_read_timeout(Some(timeout))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut response_line = String::new();
+    match reader.read_line(&mut response_line) {
+        Ok(0) => Err(ControlError::NotAvailable),
+        Ok(_) if response_line.trim().is_empty() => Err(ControlError::NotAvailable),
+        Ok(_) => {
+            let response: ControlResponse = serde_json::from_str(response_line.trim())?;
+            Ok(CommandAck::Response(response))
+        }
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(CommandAck::Pending)
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn connect_stream() -> Result<UnixStream, ControlError> {
@@ -391,6 +445,7 @@ mod tests {
         let json = serde_json::to_string(&restart).unwrap();
         assert!(json.contains("Restart"));
         assert!(json.contains("config.yaml"));
+        assert!(!json.contains("project"));
 
         let shutdown = ControlCommand::Shutdown;
         let json = serde_json::to_string(&shutdown).unwrap();
@@ -411,6 +466,47 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("Status"));
         assert!(json.contains("\"live\":true"));
+    }
+
+    #[test]
+    fn restart_omits_null_optional_fields() {
+        let restart = ControlCommand::Restart {
+            config: Some("sysg.config.yaml".to_string()),
+            service: None,
+            project: None,
+        };
+
+        let json = serde_json::to_string(&restart).expect("serialize restart");
+
+        assert_eq!(json, r#"{"Restart":{"config":"sysg.config.yaml"}}"#);
+    }
+
+    #[test]
+    fn restart_deserializes_missing_and_null_optional_fields() {
+        let missing = r#"{"Restart":{"config":"sysg.config.yaml"}}"#;
+        let parsed: ControlCommand =
+            serde_json::from_str(missing).expect("deserialize missing fields");
+        assert!(matches!(
+            parsed,
+            ControlCommand::Restart {
+                config: Some(_),
+                service: None,
+                project: None
+            }
+        ));
+
+        let explicit_null =
+            r#"{"Restart":{"config":"sysg.config.yaml","service":null,"project":null}}"#;
+        let parsed: ControlCommand =
+            serde_json::from_str(explicit_null).expect("deserialize null fields");
+        assert!(matches!(
+            parsed,
+            ControlCommand::Restart {
+                config: Some(_),
+                service: None,
+                project: None
+            }
+        ));
     }
 
     #[test]

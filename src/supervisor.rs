@@ -2132,36 +2132,48 @@ impl Supervisor {
         pid: u32,
         job_name: &str,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
+        Self::wait_for_cron_completion_with_timeout(
+            pid,
+            job_name,
+            Duration::from_secs(3600),
+            Duration::from_millis(100),
+        )
+    }
+
+    fn wait_for_cron_completion_with_timeout(
+        pid: u32,
+        job_name: &str,
+        max_wait_time: Duration,
+        poll_interval: Duration,
+    ) -> Result<CronCompletionOutcome, SupervisorError> {
         use nix::{
             sys::wait::{WaitPidFlag, WaitStatus, waitpid},
             unistd::Pid,
         };
 
-        let pid = Pid::from_raw(pid as i32);
-        const MAX_WAIT_TIME: Duration = Duration::from_secs(3600); // 1 hour max
-        const POLL_INTERVAL: Duration = Duration::from_millis(100);
+        let wait_pid = Pid::from_raw(pid as i32);
         let start = std::time::Instant::now();
 
         loop {
-            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            match waitpid(wait_pid, Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::StillAlive) => {
-                    if start.elapsed() > MAX_WAIT_TIME {
+                    if start.elapsed() > max_wait_time {
                         warn!(
-                            "Cron job '{}' exceeded maximum wait time of 1 hour",
-                            job_name
+                            "Cron job '{}' exceeded maximum wait time of {} seconds; terminating process tree",
+                            job_name,
+                            max_wait_time.as_secs()
                         );
-                        return Err(SupervisorError::Process(
-                            ProcessManagerError::ServiceStartError {
-                                service: job_name.to_string(),
-                                source: std::io::Error::new(
-                                    std::io::ErrorKind::TimedOut,
-                                    "Cron job exceeded maximum wait time",
-                                ),
-                            },
-                        ));
+                        Daemon::terminate_process_tree(job_name, pid, None)?;
+                        return Ok(CronCompletionOutcome {
+                            status: CronExecutionStatus::Failed(format!(
+                                "Cron job exceeded maximum wait time of {} seconds",
+                                max_wait_time.as_secs()
+                            )),
+                            exit_code: None,
+                        });
                     }
 
-                    thread::sleep(POLL_INTERVAL);
+                    thread::sleep(poll_interval);
                 }
                 Ok(WaitStatus::Exited(_, exit_code)) => {
                     debug!("Cron job '{}' exited with code {}", job_name, exit_code);
@@ -2190,12 +2202,12 @@ impl Supervisor {
                     });
                 }
                 Ok(WaitStatus::Stopped(..)) | Ok(WaitStatus::Continued(_)) => {
-                    thread::sleep(POLL_INTERVAL);
+                    thread::sleep(poll_interval);
                 }
                 #[cfg(any(target_os = "linux", target_os = "android"))]
                 Ok(WaitStatus::PtraceEvent(_, _, _))
                 | Ok(WaitStatus::PtraceSyscall(_)) => {
-                    thread::sleep(POLL_INTERVAL);
+                    thread::sleep(poll_interval);
                 }
                 Err(nix::errno::Errno::ECHILD) => {
                     debug!(
@@ -2293,6 +2305,39 @@ mod tests {
         let order = Supervisor::startup_service_order(&config, Some("worker")).unwrap();
 
         assert_eq!(order, vec!["worker"]);
+    }
+
+    #[test]
+    fn cron_completion_timeout_terminates_process_tree() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 10"])
+            .spawn()
+            .expect("spawn sleeping cron process");
+        let pid = child.id();
+
+        let outcome = Supervisor::wait_for_cron_completion_with_timeout(
+            pid,
+            "slow-cron",
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        )
+        .expect("timeout should terminate process tree and return failed outcome");
+
+        assert!(matches!(
+            outcome.status,
+            CronExecutionStatus::Failed(ref reason)
+                if reason.contains("exceeded maximum wait time")
+        ));
+        assert_eq!(outcome.exit_code, None);
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {}
+            Ok(None) => {
+                let _ = child.kill();
+                panic!("timed-out cron process should not remain running");
+            }
+            Err(err) => panic!("failed to inspect timed-out cron process: {err}"),
+        }
     }
 
     #[test]

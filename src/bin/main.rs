@@ -59,6 +59,7 @@ const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
 const FETCH_SPINNER_DELAY: Duration = Duration::from_millis(120);
 const FETCH_SPINNER_TICK: Duration = Duration::from_millis(80);
 const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+const RESTART_DAEMON_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectStreamAction {
@@ -472,12 +473,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
 
                 let command = ControlCommand::Restart {
-                    config: config_override,
-                    service,
-                    project,
+                    config: config_override.clone(),
+                    service: service.clone(),
+                    project: project.clone(),
                 };
                 if daemonize {
-                    ipc::send_command_detached(&command)?;
+                    let recycle_config_path = config_override
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            resolve_config_path(&config)
+                                .unwrap_or_else(|_| PathBuf::from(&config))
+                        });
+                    restart_daemonized(
+                        command,
+                        recycle_config_path,
+                        service.is_none() && project.is_none(),
+                    )?;
                 } else {
                     send_control_command(command)?;
                 }
@@ -2274,6 +2286,19 @@ mod tests {
     fn progress_spinner_clear_sequence_erases_the_active_line() {
         assert_eq!(clear_progress_spinner_line(), "\r\x1B[2K\r");
     }
+
+    #[test]
+    fn restart_protocol_mismatch_detection_matches_schema_errors_only() {
+        assert!(supervisor_error_is_protocol_mismatch(
+            "failed to serialise control message: invalid type: null, expected a string"
+        ));
+        assert!(supervisor_error_is_protocol_mismatch(
+            "missing field `project` at line 1 column 42"
+        ));
+        assert!(!supervisor_error_is_protocol_mismatch(
+            "failed to load config sysg.config.yaml"
+        ));
+    }
 }
 
 include!("sysg/ui.rs");
@@ -3086,6 +3111,79 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Sends daemonized restart and recycles the supervisor when an old IPC schema rejects it.
+fn restart_daemonized(
+    command: ControlCommand,
+    config_path: PathBuf,
+    allow_recycle: bool,
+) -> Result<(), Box<dyn Error>> {
+    match ipc::send_command_with_timeout(&command, RESTART_DAEMON_ACK_TIMEOUT) {
+        Ok(ipc::CommandAck::Pending) => Ok(()),
+        Ok(ipc::CommandAck::Response(ControlResponse::Message(_))) => Ok(()),
+        Ok(ipc::CommandAck::Response(ControlResponse::Ok)) => Ok(()),
+        Ok(ipc::CommandAck::Response(ControlResponse::Error(message))) => {
+            if allow_recycle && supervisor_error_is_protocol_mismatch(&message) {
+                recycle_supervisor_for_restart(config_path)
+            } else {
+                Err(ControlError::Server(message).into())
+            }
+        }
+        Ok(ipc::CommandAck::Response(other)) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {:?}",
+            other
+        ))
+        .into()),
+        Err(err) => {
+            if allow_recycle && control_error_is_restart_upgrade_boundary(&err) {
+                recycle_supervisor_for_restart(config_path)
+            } else {
+                Err(err.into())
+            }
+        }
+    }
+}
+
+/// Stops the resident supervisor and starts a fresh daemon with the requested config.
+fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
+    warn!(
+        "Restart IPC was rejected by the resident supervisor; recycling supervisor with config {:?}",
+        config_path
+    );
+    stop_supervisors();
+    let _ = ipc::cleanup_runtime();
+    start_supervisor_daemon(config_path, None, false)
+}
+
+fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {
+    match err {
+        ControlError::Serde(_) | ControlError::NotAvailable => true,
+        ControlError::Server(message) => supervisor_error_is_protocol_mismatch(message),
+        ControlError::MissingHome => false,
+        ControlError::Io(err) => matches!(
+            err.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::BrokenPipe
+        ),
+    }
+}
+
+fn supervisor_error_is_protocol_mismatch(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "serialise",
+        "serialize",
+        "deserialize",
+        "invalid type",
+        "missing field",
+        "unknown field",
+        "expected",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// Handles daemonize systemg.
