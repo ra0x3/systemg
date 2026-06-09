@@ -497,6 +497,90 @@ impl Supervisor {
         Ok(selector_service)
     }
 
+    /// Starts one service in the selected project without loading or starting the whole project.
+    fn start_single_service_target(
+        &self,
+        selector: &str,
+        project: Option<&str>,
+    ) -> Result<(String, String), SupervisorError> {
+        let (selector_project, service_name) = split_project_selector(selector)
+            .map(|(project_id, service_name)| (Some(project_id), service_name))
+            .unwrap_or((None, selector));
+
+        if let (Some(flag), Some(selector_project)) = (project, selector_project)
+            && flag != selector_project
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project flag '{flag}' does not match service selector project '{selector_project}'"
+                ),
+            )
+            .into());
+        }
+
+        let primary_project = self.daemon.config().project.id.clone();
+        let target_project = project
+            .or(selector_project)
+            .unwrap_or(primary_project.as_str());
+
+        let (daemon, service_config) = if target_project == primary_project {
+            let config_handle = self.daemon.config();
+            let service_config = config_handle
+                .services
+                .get(service_name)
+                .cloned()
+                .ok_or_else(|| ProcessManagerError::DependencyError {
+                    service: service_name.into(),
+                    dependency: "service not defined".into(),
+                })?;
+            (&self.daemon, service_config)
+        } else {
+            let Some(project_runtime) = self.extra_projects.get(target_project) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "project '{target_project}' is not managed by this supervisor"
+                    ),
+                )
+                .into());
+            };
+            let config_handle = project_runtime.daemon.config();
+            let service_config = config_handle
+                .services
+                .get(service_name)
+                .cloned()
+                .ok_or_else(|| ProcessManagerError::DependencyError {
+                    service: service_name.into(),
+                    dependency: "service not defined".into(),
+                })?;
+            (&project_runtime.daemon, service_config)
+        };
+
+        if service_config.cron.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cron unit '{service_name}' cannot be started directly; start or reload project '{target_project}' to schedule it"
+                ),
+            )
+            .into());
+        }
+
+        daemon.start_service(service_name, &service_config)?;
+
+        if let Some(ref spawn) = service_config.spawn
+            && let Some(SpawnMode::Dynamic) = spawn.mode
+            && let Ok(pid_file) = daemon.pid_file_handle().lock()
+            && let Some(&pid) = pid_file.services().get(service_name)
+        {
+            self.spawn_manager
+                .register_service_pid(service_name.to_string(), pid);
+        }
+
+        Ok((target_project.to_string(), service_name.to_string()))
+    }
+
     /// Creates supervisor with config.
     pub fn new(
         config_path: PathBuf,
@@ -726,7 +810,11 @@ impl Supervisor {
             Self::status_snapshot_mode(config_handle.as_ref()),
         ) {
             Ok(mut snapshot) => {
-                Self::apply_project_mode(&mut snapshot, self.primary_project_mode);
+                Self::apply_project_metadata(
+                    &mut snapshot,
+                    self.primary_project_mode,
+                    &self.config_path,
+                );
                 self.status_cache.replace(snapshot);
             }
             Err(err) => error!("failed to build initial status snapshot: {err}"),
@@ -741,6 +829,7 @@ impl Supervisor {
         let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
         let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
         let refresh_project_mode = self.primary_project_mode;
+        let refresh_config_path = self.config_path.clone();
         if !matches!(refresh_mode, StatusSnapshotMode::Off) {
             self.status_refresher = Some(StatusRefresher::spawn(
                 cache_clone,
@@ -754,7 +843,11 @@ impl Supervisor {
                         Some(&spawn_manager_for_refresh),
                         refresh_mode,
                     )?;
-                    Supervisor::apply_project_mode(&mut snapshot, refresh_project_mode);
+                    Supervisor::apply_project_metadata(
+                        &mut snapshot,
+                        refresh_project_mode,
+                        &refresh_config_path,
+                    );
                     Ok(snapshot)
                 },
             ));
@@ -1377,32 +1470,23 @@ impl Supervisor {
     ) -> Result<ControlResponse, SupervisorError> {
         match command {
             ControlCommand::Start { service, project } => {
-                let service =
-                    self.normalize_service_target(service, project.as_deref())?;
                 if let Some(service_name) = service {
-                    let config = self.daemon.config();
-                    if let Some(service_config) = config.services.get(&service_name) {
-                        self.daemon.start_service(&service_name, service_config)?;
-
-                        if let Some(ref spawn) = service_config.spawn
-                            && let Some(SpawnMode::Dynamic) = spawn.mode
-                            && let Ok(pid_file) = self.daemon.pid_file_handle().lock()
-                            && let Some(&pid) = pid_file.services().get(&service_name)
-                        {
-                            self.spawn_manager
-                                .register_service_pid(service_name.clone(), pid);
-                        }
-
-                        self.refresh_status_cache();
+                    let selector_has_project =
+                        split_project_selector(&service_name).is_some();
+                    let (project_id, service_name) = self
+                        .start_single_service_target(&service_name, project.as_deref())?;
+                    self.refresh_status_cache();
+                    if project.is_some() || selector_has_project {
+                        Ok(ControlResponse::Message(format!(
+                            "Service '{service_name}' started in project '{project_id}'"
+                        )))
+                    } else {
                         Ok(ControlResponse::Message(format!(
                             "Service '{service_name}' started"
                         )))
-                    } else {
-                        Ok(ControlResponse::Error(format!(
-                            "Service '{service_name}' not found in configuration"
-                        )))
                     }
                 } else {
+                    self.normalize_service_target(None, project.as_deref())?;
                     self.daemon.start_services_blocking()?;
                     self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services started".into()))
@@ -1770,7 +1854,11 @@ impl Supervisor {
             Some(&self.spawn_manager),
             Self::status_snapshot_mode(config_handle.as_ref()),
         ) {
-            Self::apply_project_mode(&mut snapshot, self.primary_project_mode);
+            Self::apply_project_metadata(
+                &mut snapshot,
+                self.primary_project_mode,
+                &self.config_path,
+            );
             self.status_cache.replace(snapshot);
         }
 
@@ -1783,6 +1871,7 @@ impl Supervisor {
         let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
         let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
         let refresh_project_mode = self.primary_project_mode;
+        let refresh_config_path = self.config_path.clone();
         if !matches!(refresh_mode, StatusSnapshotMode::Off) {
             self.status_refresher = Some(StatusRefresher::spawn(
                 cache_clone,
@@ -1796,7 +1885,11 @@ impl Supervisor {
                         Some(&refresh_spawn_manager),
                         refresh_mode,
                     )?;
-                    Supervisor::apply_project_mode(&mut snapshot, refresh_project_mode);
+                    Supervisor::apply_project_metadata(
+                        &mut snapshot,
+                        refresh_project_mode,
+                        &refresh_config_path,
+                    );
                     Ok(snapshot)
                 },
             ));
@@ -2509,12 +2602,16 @@ project:
 services:
   beta_worker:
     command: "/bin/sleep 32"
+  beta_cron:
+    command: "/bin/echo beta"
+    cron:
+      expression: "*/30 * * * *"
 "#,
         )
         .expect("write beta config");
 
-        let mut supervisor =
-            Supervisor::new(alpha_config, false, None).expect("create supervisor");
+        let mut supervisor = Supervisor::new(alpha_config.clone(), false, None)
+            .expect("create supervisor");
         supervisor
             .handle_command(ControlCommand::AddProject {
                 config: beta_config.to_string_lossy().to_string(),
@@ -2599,6 +2696,18 @@ services:
             }
             other => panic!("expected status response, got {other:?}"),
         }
+
+        let err = supervisor
+            .handle_command(ControlCommand::Start {
+                service: Some("beta_cron".into()),
+                project: Some("beta".into()),
+            })
+            .expect_err("direct cron unit start should be rejected");
+        assert!(
+            err.to_string()
+                .contains("cron unit 'beta_cron' cannot be started directly"),
+            "unexpected cron start error: {err}"
+        );
 
         supervisor
             .handle_command(ControlCommand::Restart {

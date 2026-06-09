@@ -341,9 +341,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             start_target.config_path.display()
                         );
                     } else if let Some(service_name) = start_target.service {
+                        let target_project =
+                            project.clone().or(start_target.project_id.clone());
                         let command = ControlCommand::Start {
                             service: Some(service_name.clone()),
-                            project: project.clone(),
+                            project: target_project,
                         };
                         send_control_command(command)?;
                         info!(
@@ -380,10 +382,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 )?;
             } else {
                 if supervisor_running() {
-                    start_foreground_attached(
-                        start_target.config_path,
-                        start_target.service,
-                    )?;
+                    match start_target.service {
+                        Some(service_name) => {
+                            let target_project =
+                                project.clone().or(start_target.project_id);
+                            let command = ControlCommand::Start {
+                                service: Some(service_name.clone()),
+                                project: target_project,
+                            };
+                            send_control_command(command)?;
+                            info!(
+                                "Service '{service_name}' start command sent to supervisor"
+                            );
+                        }
+                        None => {
+                            start_foreground_attached(start_target.config_path, None)?;
+                        }
+                    }
                 } else {
                     start_foreground(
                         start_target.config_path,
@@ -2899,6 +2914,7 @@ fn build_daemon(config_path: &str) -> Result<Daemon, Box<dyn Error>> {
 struct StartTarget {
     config_path: PathBuf,
     service: Option<String>,
+    project_id: Option<String>,
     ad_hoc: bool,
 }
 
@@ -2993,9 +3009,16 @@ fn resolve_start_target(
             )
             .into());
         }
+        let config_path = resolve_config_path(config)?;
+        let project_id = Some(
+            load_config(Some(config_path.to_string_lossy().as_ref()))?
+                .project
+                .id,
+        );
         return Ok(StartTarget {
-            config_path: resolve_config_path(config)?,
+            config_path,
             service,
+            project_id,
             ad_hoc: false,
         });
     }
@@ -3012,6 +3035,7 @@ fn resolve_start_target(
     Ok(StartTarget {
         config_path,
         service: None,
+        project_id: None,
         ad_hoc: true,
     })
 }
