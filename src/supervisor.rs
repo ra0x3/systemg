@@ -84,6 +84,7 @@ pub struct Supervisor {
 struct ProjectRuntime {
     daemon: Daemon,
     mode: ProjectRunMode,
+    config_path: PathBuf,
 }
 
 /// Runtime state used by the cron scheduler to route jobs to their project.
@@ -344,11 +345,17 @@ impl Supervisor {
         aggregate
     }
 
-    /// Tags all project-backed units in a snapshot with the supervisor project mode.
-    fn apply_project_mode(snapshot: &mut StatusSnapshot, mode: ProjectRunMode) {
+    /// Tags all project-backed units in a snapshot with supervisor project metadata.
+    fn apply_project_metadata(
+        snapshot: &mut StatusSnapshot,
+        mode: ProjectRunMode,
+        config_path: &Path,
+    ) {
+        let config_path = config_path.to_string_lossy().to_string();
         for unit in &mut snapshot.units {
             if let Some(project) = unit.project.as_mut() {
                 project.mode = mode;
+                project.config_path = Some(config_path.clone());
             }
         }
     }
@@ -360,6 +367,7 @@ impl Supervisor {
         spawn_manager: &DynamicSpawnManager,
         mode: StatusSnapshotMode,
         run_mode: ProjectRunMode,
+        config_path: &Path,
         valid_cron_hashes: Option<&HashSet<String>>,
     ) -> Result<StatusSnapshot, SupervisorError> {
         let config = daemon.config();
@@ -386,7 +394,7 @@ impl Supervisor {
             ),
         }
         .map_err(SupervisorError::Status)?;
-        Self::apply_project_mode(&mut snapshot, run_mode);
+        Self::apply_project_metadata(&mut snapshot, run_mode, config_path);
         Ok(snapshot)
     }
 
@@ -417,6 +425,7 @@ impl Supervisor {
             &self.spawn_manager,
             primary_mode,
             self.primary_project_mode,
+            &self.config_path,
             Some(&valid_cron_hashes),
         )?];
 
@@ -433,6 +442,7 @@ impl Supervisor {
                 &self.spawn_manager,
                 mode,
                 project.mode,
+                &project.config_path,
                 Some(&valid_cron_hashes),
             )?);
         }
@@ -508,6 +518,12 @@ impl Supervisor {
         service_filter: Option<String>,
         primary_project_mode: ProjectRunMode,
     ) -> Result<Self, SupervisorError> {
+        let config_path = if config_path.is_absolute() {
+            config_path
+        } else {
+            std::env::current_dir()?.join(config_path)
+        };
+        let config_path = config_path.canonicalize().unwrap_or(config_path);
         let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
         let cron_manager = CronManager::new();
         cron_manager.sync_from_config(&config)?;
@@ -1807,6 +1823,7 @@ impl Supervisor {
         } else {
             std::env::current_dir()?.join(path)
         };
+        let resolved = resolved.canonicalize().unwrap_or(resolved);
         let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
@@ -1833,10 +1850,17 @@ impl Supervisor {
                 self.detach_children,
             );
             daemon.set_pipe_stderr(self.pipe_stderr);
-            self.extra_projects
-                .insert(project_id.clone(), ProjectRuntime { daemon, mode });
+            self.extra_projects.insert(
+                project_id.clone(),
+                ProjectRuntime {
+                    daemon,
+                    mode,
+                    config_path: resolved.clone(),
+                },
+            );
         } else if let Some(project) = self.extra_projects.get_mut(&project_id) {
             project.mode = mode;
+            project.config_path = resolved.clone();
         }
 
         let project = self.extra_projects.get(&project_id).ok_or_else(|| {
@@ -2537,6 +2561,16 @@ services:
                     .and_then(|unit| unit.project.as_ref())
                     .map(|project| project.mode);
                 assert_eq!(alpha_mode, Some(ProjectRunMode::Daemon));
+                let alpha_config_path = snapshot
+                    .units
+                    .iter()
+                    .find(|unit| unit.name == "alpha_worker")
+                    .and_then(|unit| unit.project.as_ref())
+                    .and_then(|project| project.config_path.as_deref());
+                assert_eq!(
+                    alpha_config_path,
+                    Some(alpha_config.to_string_lossy().as_ref())
+                );
                 let beta_mode = snapshot
                     .units
                     .iter()
@@ -2548,6 +2582,20 @@ services:
                     .and_then(|unit| unit.project.as_ref())
                     .map(|project| project.mode);
                 assert_eq!(beta_mode, Some(ProjectRunMode::Foreground));
+                let beta_config_path = snapshot
+                    .units
+                    .iter()
+                    .find(|unit| {
+                        unit.name == "beta_worker"
+                            && unit.project.as_ref().map(|project| project.id.as_str())
+                                == Some("beta")
+                    })
+                    .and_then(|unit| unit.project.as_ref())
+                    .and_then(|project| project.config_path.as_deref());
+                assert_eq!(
+                    beta_config_path,
+                    Some(beta_config.to_string_lossy().as_ref())
+                );
             }
             other => panic!("expected status response, got {other:?}"),
         }

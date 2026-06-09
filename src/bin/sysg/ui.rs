@@ -118,6 +118,18 @@ fn live_unit_pid(unit: &UnitStatus) -> Option<u32> {
     })
 }
 
+/// Returns the config path that should be used for commands targeting a status row.
+fn status_unit_config_path<'a>(
+    unit: &'a UnitStatus,
+    fallback_config_path: &'a str,
+) -> &'a str {
+    unit.project
+        .as_ref()
+        .and_then(|project| project.config_path.as_deref())
+        .filter(|path| !path.is_empty())
+        .unwrap_or(fallback_config_path)
+}
+
 /// Groups unit names for the all-services log view so running services appear
 /// before inactive ones while preserving alphabetical order within each group.
 fn grouped_log_units(snapshot: &StatusSnapshot) -> Vec<(LogSection, Vec<&str>)> {
@@ -654,10 +666,12 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
+                            let selected_config_path =
+                                status_unit_config_path(selected_unit, config_path);
                             let mut args = vec![
                                 "inspect",
                                 "--config",
-                                config_path,
+                                selected_config_path,
                                 "--service",
                                 selected_unit.name.as_str(),
                             ];
@@ -680,10 +694,12 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
+                            let selected_config_path =
+                                status_unit_config_path(selected_unit, config_path);
                             let mut args = vec![
                                 "logs",
                                 "--config",
-                                config_path,
+                                selected_config_path,
                                 "--service",
                                 selected_unit.name.as_str(),
                                 "--lines",
@@ -710,10 +726,12 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
+                            let selected_config_path =
+                                status_unit_config_path(selected_unit, config_path);
                             let mut args = vec![
                                 "restart",
                                 "--config",
-                                config_path,
+                                selected_config_path,
                                 "--service",
                                 selected_unit.name.as_str(),
                             ];

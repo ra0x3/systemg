@@ -656,6 +656,8 @@ pub struct ProjectStatus {
     pub name: String,
     #[serde(default)]
     pub mode: ProjectRunMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
 }
 
 impl From<&ProjectConfig> for ProjectStatus {
@@ -664,6 +666,7 @@ impl From<&ProjectConfig> for ProjectStatus {
             id: project.id.clone(),
             name: project.name.clone(),
             mode: ProjectRunMode::Daemon,
+            config_path: None,
         }
     }
 }
