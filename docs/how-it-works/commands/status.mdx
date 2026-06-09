@@ -61,11 +61,11 @@ $ sysg status
 ```
 
 ```
-SERVICE    STATUS    PID     UPTIME  CPU%  MEM%
-postgres   running   14823   2h3m    0.1   2.3
-redis      running   14824   2h3m    0.0   0.8
-api        running   14826   2h3m    1.2   4.5
-worker     running   14827   2h3m    0.3   3.1
+UNIT       KIND  STATE    USER  PID    CPU   RSS    UPTIME  CMD            LAST_EXIT  HEALTH
+postgres   srvc  Running  app   14823  0.1%  92 MB  2h      postgres       -          Healthy
+redis      srvc  Running  app   14824  0.0%  18 MB  2h      redis-server   -          Healthy
+api        srvc  Running  app   14826  1.2%  64 MB  2h      python app.py  -          Healthy
+worker     srvc  Running  app   14827  0.3%  41 MB  2h      python worker  -          Healthy
 ```
 
 ### View specific service
@@ -76,7 +76,8 @@ $ sysg status --service api
 
 ```
 Service: api
-Status: running
+State: Running
+Health: Healthy
 PID: 14826
 Uptime: 2h3m
 CPU: 1.2%
@@ -120,12 +121,36 @@ process and spawn-tree detail in status/inspect views.
 
 ## Output fields
 
-- **SERVICE** - Service name from configuration
-- **STATUS** - `running`, `stopped`, or `failed`
-- **PID** - Process ID
-- **UPTIME** - Time since service started
-- **CPU%** - Current CPU usage
-- **MEM%** - Current memory usage
+- **UNIT** - Service, cron job, or orphaned state entry name.
+- **KIND** - Unit type: `srvc` for a managed service, `cron` for a cron job,
+  or `orph` for orphaned state that no longer matches the current
+  configuration.
+- **STATE** - Current observed runtime state or last persisted lifecycle
+  state. `STATE` answers "what is this unit doing, or what happened most
+  recently?" Common service values include `Running`, `Zombie`, `Missing`,
+  `Ok`, `NotOk`, `Stopped`, and `Skipped`. Cron units may also show values
+  such as `Scheduled`, `Idle`, `Failed`, `Overlap`, `OkWithErr`, or
+  `PartialSuccess`.
+- **USER** - Runtime process user when detailed runtime data is available.
+- **PID** - Runtime process ID when the unit has a tracked process.
+- **CPU** - Current CPU usage when runtime metrics are available.
+- **RSS** - Resident memory usage when runtime metrics are available.
+- **UPTIME** - Runtime process age when detailed runtime data is available.
+- **CMD** - Configured command, or the live command line when detailed runtime
+  data is available.
+- **LAST_EXIT** - Last recorded exit code or signal when the unit has exited.
+- **HEALTH** - Normalized health classification for the unit. `HEALTH`
+  answers "should this unit be considered OK, impaired, or failing?" It is
+  shown as `Healthy`, `Degraded`, or `Failing`.
+
+`STATE` is intentionally more specific than `HEALTH`. For example, a stopped
+ordinary service can have `STATE` `Stopped` and `HEALTH` `Healthy`, while a
+service configured to be continuously available can have `STATE` `Stopped` and
+`HEALTH` `Degraded`.
+
+The overview's **Overall Health** value is derived from unit health. Service
+health is considered before cron health, and any failing or degraded unit can
+raise the aggregate status to `Failing` or `Degraded`.
 
 ## See also
 

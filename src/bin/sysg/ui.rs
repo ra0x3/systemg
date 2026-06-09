@@ -2857,6 +2857,7 @@ fn collect_inspect_lines(
         overall_health_color(health),
         opts.no_color,
     );
+    let state_str = unit_state_label(unit, opts.no_color);
     let pid_str = if let Some(process) = &unit.process {
         colorize(&process.pid.to_string(), BRIGHT_WHITE, opts.no_color)
     } else {
@@ -2879,6 +2880,7 @@ fn collect_inspect_lines(
     let data_width = content_width.saturating_sub(label_width + 2);
     let status_label = colorize("Status", DIM_CYAN, opts.no_color);
     let kind_label = colorize("Kind", DIM_WHITE, opts.no_color);
+    let state_label = colorize("State", DIM_WHITE, opts.no_color);
     let health_label = colorize("Health", DIM_WHITE, opts.no_color);
     let pid_label = colorize("PID", DIM_WHITE, opts.no_color);
     let uptime_label = colorize("Uptime", DIM_WHITE, opts.no_color);
@@ -2917,6 +2919,21 @@ fn collect_inspect_lines(
                         &format!("{}: {}", health_label, health_str),
                         second_half_width
                     )
+                ),
+                data_width
+            )
+        ),
+        format!(
+            "{} │ {}",
+            empty_label,
+            pad_ansi_str(
+                &format!(
+                    "{} │ {}",
+                    pad_ansi_str(
+                        &format!("{}: {}", state_label, state_str),
+                        half_width
+                    ),
+                    pad_ansi_str("", second_half_width)
                 ),
                 data_width
             )

@@ -1143,6 +1143,56 @@ mod tests {
     }
 
     #[test]
+    fn inspect_overview_renders_state_under_kind() {
+        let unit = UnitStatus {
+            name: "orchestrator".to_string(),
+            hash: "abc123".to_string(),
+            project: None,
+            kind: UnitKind::Service,
+            lifecycle: Some(ServiceLifecycleStatus::Running),
+            health: UnitHealth::Healthy,
+            process: Some(systemg::status::ProcessRuntime {
+                pid: 1234,
+                state: ProcessState::Running,
+                user: Some("rashad".to_string()),
+            }),
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: None,
+            runtime_command: None,
+            spawned_children: vec![],
+        };
+        let payload = InspectPayload {
+            unit: Some(unit),
+            samples: Vec::new(),
+        };
+        let opts = InspectRenderOptions {
+            json: false,
+            no_color: true,
+            window_seconds: 5,
+            window_desc: "last 5s".to_string(),
+            samples_limit: 5,
+        };
+
+        let (_health, lines) =
+            collect_inspect_lines(&payload, &opts).expect("inspect lines");
+        let kind_index = lines
+            .iter()
+            .position(|line| line.contains("Kind: service"))
+            .expect("kind line");
+
+        assert!(
+            lines
+                .get(kind_index + 1)
+                .is_some_and(|line| line.contains("State: Running")),
+            "expected State row immediately under Kind row:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
     fn status_project_groups_preserve_project_boundaries() {
         let units = vec![
             UnitStatus {
