@@ -118,6 +118,7 @@ services:
 
     Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
         .arg("stop")
+        .arg("--supervisor")
         .assert()
         .success();
 
@@ -315,6 +316,7 @@ services:
 
     Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
         .arg("stop")
+        .arg("--supervisor")
         .assert()
         .success();
 }
@@ -579,6 +581,7 @@ fn start_daemonize_accepts_unit_command_without_config() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
         .arg("stop")
+        .arg("--supervisor")
         .assert()
         .success();
 }

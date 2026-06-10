@@ -71,7 +71,7 @@ type WorkingStatusProjectGroup<'a> = (String, String, Vec<(usize, &'a UnitStatus
 /// Fetches a status snapshot from the live supervisor, falling back to the
 /// persisted on-disk snapshot when no supervisor is available.
 fn fetch_status_snapshot(
-    config_path: &str,
+    config_path: Option<&str>,
     live: bool,
 ) -> Result<StatusSnapshot, Box<dyn Error>> {
     match ipc::send_command(&ControlCommand::Status { live }) {
@@ -82,6 +82,13 @@ fn fetch_status_snapshot(
         ))
         .into()),
         Err(ControlError::NotAvailable) => {
+            let Some(config_path) = config_path else {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "No running supervisor",
+                )
+                .into());
+            };
             let config = match load_config(Some(config_path)) {
                 Ok(config) => Some(config),
                 Err(primary_err) => {

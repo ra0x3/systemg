@@ -416,26 +416,32 @@ fn main() -> Result<(), Box<dyn Error>> {
             service,
             project,
             config,
+            supervisor,
         } => {
+            if supervisor {
+                send_control_command(ControlCommand::Shutdown)?;
+                return Ok(());
+            }
+
             let service_name = service.clone();
             if supervisor_running() {
                 let target_project = if service_name.is_some() {
                     resolve_command_project(&config, project, service_name.as_deref())?
-                } else {
+                } else if project.is_some() {
                     project
+                } else {
+                    Some(resolve_project_context_from_config(&config)?)
                 };
                 let command = if let Some(name) = service_name.clone() {
                     ControlCommand::Stop {
                         service: Some(name),
                         project: target_project,
                     }
-                } else if target_project.is_some() {
+                } else {
                     ControlCommand::Stop {
                         service: None,
                         project: target_project,
                     }
-                } else {
-                    ControlCommand::Shutdown
                 };
                 send_control_command(command)?;
             } else {
@@ -547,17 +553,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             live,
             stream,
         } => {
-            let mut effective_config = config.clone();
-            if load_config(Some(&config)).is_err()
-                && let Ok(Some(hint)) = ipc::read_config_hint()
-            {
-                effective_config = hint.to_string_lossy().to_string();
-            }
-            let target_project = resolve_command_project(
-                &effective_config,
-                project.clone(),
-                service.as_deref(),
-            )?;
+            let target_project =
+                resolve_status_project_filter(config.as_deref(), project.clone())?;
+            let render_config = config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH);
 
             let render_opts = StatusRenderOptions {
                 json,
@@ -581,13 +579,13 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 };
                 let sleep_interval = Duration::from_secs(stream_seconds);
                 loop {
-                    match fetch_status_snapshot(&effective_config, live) {
+                    match fetch_status_snapshot(config.as_deref(), live) {
                         Ok(snapshot) => {
                             if let Err(e) = render_status(
                                 &snapshot,
                                 &render_opts,
                                 true,
-                                &effective_config,
+                                render_config,
                             ) {
                                 eprintln!("Error rendering status: {}", e);
                                 thread::sleep(sleep_interval);
@@ -608,11 +606,11 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
             } else {
                 let snapshot = with_progress_spinner("Computing", || {
-                    fetch_status_snapshot(&effective_config, live)
+                    fetch_status_snapshot(config.as_deref(), live)
                 })?;
 
                 let health =
-                    render_status(&snapshot, &render_opts, false, &effective_config)?;
+                    render_status(&snapshot, &render_opts, false, render_config)?;
 
                 let exit_code = match health {
                     OverallHealth::Healthy => 0,
@@ -787,7 +785,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             if purge {
                 if target_project.is_some() {
                     let snapshot = with_progress_spinner("Purging logs", || {
-                        fetch_status_snapshot(&effective_config, false)
+                        fetch_status_snapshot(Some(&effective_config), false)
                     })?;
                     let matching_units: Vec<_> = snapshot
                         .units
@@ -838,7 +836,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
                 let snapshot = with_progress_spinner("Logging", || {
-                    fetch_status_snapshot(&effective_config, false)
+                    fetch_status_snapshot(Some(&effective_config), false)
                 })?;
 
                 match service.as_ref() {
@@ -1945,7 +1943,7 @@ mod tests {
             daemonize: false,
         }));
         assert!(!drop_privileges_applies_to_command(&Commands::Status {
-            config: "systemg.yaml".to_string(),
+            config: None,
             service: None,
             project: None,
             all: false,
@@ -3237,6 +3235,45 @@ fn service_selector_name(selector: &str) -> &str {
         .split_once('/')
         .map(|(_, service)| service)
         .unwrap_or(selector)
+}
+
+/// Resolves the project represented by a required config-backed command context.
+fn resolve_project_context_from_config(
+    config_arg: &str,
+) -> Result<String, Box<dyn Error>> {
+    let config_path = resolve_config_path(config_arg)?;
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+    Ok(config.project.id)
+}
+
+/// Resolves the project filter for status without treating the default config as mandatory.
+fn resolve_status_project_filter(
+    config_arg: Option<&str>,
+    explicit_project: Option<String>,
+) -> Result<Option<String>, Box<dyn Error>> {
+    match (config_arg, explicit_project) {
+        (Some(config_arg), Some(project)) => {
+            let config_path = resolve_config_path(config_arg)?;
+            let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+            if config.project.id != project {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "project '{}' does not match config project '{}'",
+                        project, config.project.id
+                    ),
+                )
+                .into());
+            }
+            Ok(Some(project))
+        }
+        (Some(config_arg), None) => {
+            let config_path = resolve_config_path(config_arg)?;
+            let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+            Ok(Some(config.project.id))
+        }
+        (None, project) => Ok(project),
+    }
 }
 
 /// Resolves the project a command should target from an explicit project flag and config.

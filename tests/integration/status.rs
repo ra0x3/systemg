@@ -29,6 +29,35 @@ use systemg::{
 use tempfile::tempdir;
 
 #[test]
+fn status_without_config_reports_missing_supervisor_not_missing_manifest() {
+    let temp = tempdir().expect("create tempdir");
+    let home_guard = HomeEnvGuard::set(temp.path());
+
+    let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
+    let output = Command::new(sysg_bin)
+        .arg("status")
+        .arg("--json")
+        .output()
+        .expect("run sysg status");
+
+    assert!(
+        !output.status.success(),
+        "status should fail when no supervisor is running and no config was requested"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No running supervisor"),
+        "stderr should explain the missing supervisor, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("systemg.yaml"),
+        "plain status should not try to load a default manifest, got: {stderr}"
+    );
+
+    drop(home_guard);
+}
+
+#[test]
 fn status_json_falls_back_to_snapshot_without_supervisor() {
     let temp = tempdir().expect("create tempdir");
     let home_guard = HomeEnvGuard::set(temp.path());

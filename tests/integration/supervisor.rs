@@ -62,7 +62,7 @@ services:
     thread::sleep(Duration::from_secs(1));
 
     let mut stop_cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
-    stop_cmd.arg("stop").assert().success();
+    stop_cmd.arg("stop").arg("--supervisor").assert().success();
 
     thread::sleep(Duration::from_millis(500));
 

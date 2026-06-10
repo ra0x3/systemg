@@ -205,6 +205,10 @@ pub enum Commands {
         /// Project id to target.
         #[arg(short = 'p', long)]
         project: Option<String>,
+
+        /// Shut down the resident supervisor and all registered projects.
+        #[arg(long)]
+        supervisor: bool,
     },
 
     /// Restart the process manager, optionally specifying a new configuration file.
@@ -228,9 +232,9 @@ pub enum Commands {
 
     /// Show the status of currently running services.
     Status {
-        /// Path to the configuration file (defaults to `systemg.yaml`).
-        #[arg(short, long, default_value = "systemg.yaml")]
-        config: String,
+        /// Optional configuration file used to scope status output.
+        #[arg(short, long)]
+        config: Option<String>,
 
         /// Optionally specify a service name to check its status.
         #[arg(short, long)]
@@ -390,6 +394,35 @@ mod tests {
                 assert_eq!(project.as_deref(), Some("arbitration"));
             }
             _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn status_config_is_optional() {
+        let cli = Cli::try_parse_from(["sysg", "status"]).unwrap();
+        match cli.command {
+            Commands::Status { config, .. } => assert!(config.is_none()),
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn status_accepts_explicit_config_scope() {
+        let cli = Cli::try_parse_from(["sysg", "status", "-c", "foo.yaml"]).unwrap();
+        match cli.command {
+            Commands::Status { config, .. } => {
+                assert_eq!(config.as_deref(), Some("foo.yaml"));
+            }
+            _ => panic!("expected status command"),
+        }
+    }
+
+    #[test]
+    fn stop_accepts_supervisor_shutdown_flag() {
+        let cli = Cli::try_parse_from(["sysg", "stop", "--supervisor"]).unwrap();
+        match cli.command {
+            Commands::Stop { supervisor, .. } => assert!(supervisor),
+            _ => panic!("expected stop command"),
         }
     }
 
