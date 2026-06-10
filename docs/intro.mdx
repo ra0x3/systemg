@@ -31,7 +31,8 @@ services:
     on_failure: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
 ```
 
-Run `sysg start` and your entire stack is running. Run `sysg stop` and everything shuts down cleanly.
+Run `sysg start` and your entire stack is running. Run `sysg stop` and the
+services in that project shut down cleanly.
 
 ## Built for production
 

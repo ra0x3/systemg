@@ -70,7 +70,7 @@ System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/
 | `sysg start` | Start the default `systemg.yaml` in the foreground. |
 | `sysg start --config my.yaml` | Start a specific config file. |
 | `sysg start --daemonize` | Launch the supervisor in the background. |
-| `sysg status` | Check current service state. |
+| `sysg status` | Check the running supervisor's service state. |
 | `sysg logs --service api` | View logs for a specific service. |
 | `sysg restart --service api` | Restart one service without restarting everything. |
 

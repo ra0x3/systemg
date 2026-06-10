@@ -40,7 +40,9 @@ Maps services to process IDs:
 
 ### config_hint
 
-Stores the last config path so you don't need `--config` on every command.
+Stores the last config path for commands that need a config-backed project
+context. `sysg status` does not require this hint when a supervisor is running;
+it asks the supervisor for the aggregate status view.
 
 ### state.xml
 

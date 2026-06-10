@@ -4,16 +4,22 @@ title: status
 
 # status
 
-Check the health of running services with an interactive table interface.
+Check the health of services known to the running supervisor.
 
 ```sh
 $ sysg status
 ```
 
-When a supervisor is running, `sysg status` reads current persisted state such
-as cron history and uses the configured `status.snapshot_mode` for runtime
-detail. Use `--live` when you need systemg to force immediate runtime
-collection for that request.
+When a supervisor is running, `sysg status` asks that supervisor for an
+aggregate view of every registered project. It reads current persisted state
+such as cron history and uses each project's configured `status.snapshot_mode`
+for runtime detail. Use `--live` when you need systemg to force immediate
+runtime collection for that request.
+
+`sysg status` does not require a config file. If no supervisor is running and
+you do not provide `--config`, it reports `No running supervisor`. Use
+`--config` only when you want to scope status to a specific config/project or
+when you explicitly want the no-supervisor disk fallback for that config.
 
 ## Interactive Mode
 
@@ -41,10 +47,10 @@ The selected row is highlighted with a white background for easy visibility.
 
 | Short | Long | Description |
 |-------|------|-------------|
-| `-c` | `--config` | Path to configuration file |
-| `-s` | `--service` | Show specific service details |
+| `-c` | `--config` | Scope output to the project represented by this configuration file |
+| `-s` | `--service` | Show a specific service/unit |
 | `-p` | `--project` | Filter by stable project id |
-| `-` | `--all` | Show all services including orphaned state (services not in current config) |
+| `-` | `--all` | Show all services including orphaned state outside the selected project/config set |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--json` | Emit machine-readable JSON output instead of a table (disables interactive mode) |
 | `-` | `--no-color` | Disable ANSI colors in output |
@@ -54,7 +60,7 @@ The selected row is highlighted with a white background for easy visibility.
 
 ## Examples
 
-### View all services
+### View all registered projects
 
 ```sh
 $ sysg status
@@ -83,6 +89,9 @@ worker     srvc  Running  Serve   app   14827  0.3%  41 MB  2h      python worke
 $ sysg status --service api
 ```
 
+When multiple registered projects contain the same service name, combine
+`--service` with `--project`.
+
 ```
 Service: api
 State: Running
@@ -101,6 +110,16 @@ $ sysg status --project arbitration
 ```
 
 Project filters use `project.id`, not the renameable project display name.
+
+### View the project from a config
+
+```sh
+$ sysg status --config ./systemg.yaml
+```
+
+This loads the config to find its `project.id`, then filters the supervisor
+status view to that project. If no supervisor is running, systemg falls back to
+the persisted disk state for that config.
 
 ### Stream status updates
 
