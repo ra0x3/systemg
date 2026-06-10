@@ -6,7 +6,7 @@
   "favicon": "/static/img/favicon/favicon.ico",
   "logo": {
     "light": "/static/img/full-logo-colored-cropped.webp",
-    "dark": "/static/img/full-logo-colored-cropped.webp"
+    "dark": "/static/img/full-logo-colored-cropped-darkmode.webp"
   },
   "colors": {
     "primary": "#497bd8",

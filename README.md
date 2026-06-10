@@ -5,7 +5,11 @@ A general-purpose program orchestrator.
 <br/><br/>
 
 <div align="center" >
-  <img src="https://i.imgur.com/13cCBze.png" alt="systemg" width="320" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://i.imgur.com/lkKPMoX.png" />
+    <source media="(prefers-color-scheme: light)" srcset="https://i.imgur.com/13cCBze.png" />
+    <img src="https://i.imgur.com/13cCBze.png" alt="systemg" width="320" />
+  </picture>
 </div>
 
 <br/><br/>

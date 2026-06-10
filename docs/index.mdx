@@ -4,11 +4,21 @@ description: A general-purpose program composer.
 ---
 
 <p align="center">
-  <img
-    src="./static/img/full-logo-colored-cropped.webp"
-    alt="systemg"
-    width="420"
-  />
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcSet="./static/img/full-logo-colored-cropped-darkmode.webp"
+    />
+    <source
+      media="(prefers-color-scheme: light)"
+      srcSet="./static/img/full-logo-colored-cropped.webp"
+    />
+    <img
+      src="./static/img/full-logo-colored-cropped.webp"
+      alt="systemg"
+      width="420"
+    />
+  </picture>
 </p>
 
 systemg runs your service graph from a single YAML file.
