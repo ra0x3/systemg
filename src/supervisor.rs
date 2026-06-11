@@ -621,7 +621,40 @@ impl Supervisor {
     }
 
     /// Restarts all non-cron services in one managed project.
-    fn restart_project_target(&self, project_id: &str) -> Result<(), SupervisorError> {
+    fn restart_project_target(
+        &mut self,
+        project_id: &str,
+        config_path: Option<&Path>,
+    ) -> Result<(), SupervisorError> {
+        if let Some(config_path) = config_path {
+            let resolved = if config_path.is_absolute() {
+                config_path.to_path_buf()
+            } else {
+                std::env::current_dir()?.join(config_path)
+            };
+            let resolved = resolved.canonicalize().unwrap_or(resolved);
+            let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
+            if config.project.id != project_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "project '{project_id}' does not match config project '{}'",
+                        config.project.id
+                    ),
+                )
+                .into());
+            }
+
+            let primary_project = self.daemon.config().project.id.clone();
+            if project_id == primary_project {
+                self.reload_config(&resolved)?;
+                return Ok(());
+            }
+
+            self.replace_extra_project_runtime(config, resolved)?;
+            return Ok(());
+        }
+
         let primary_project = self.daemon.config().project.id.clone();
         if project_id == primary_project {
             self.daemon.restart_services()?;
@@ -637,6 +670,57 @@ impl Supervisor {
         };
 
         project_runtime.daemon.restart_services()?;
+        Ok(())
+    }
+
+    /// Replaces an extra project with a freshly loaded runtime and starts it.
+    fn replace_extra_project_runtime(
+        &mut self,
+        config: Config,
+        config_path: PathBuf,
+    ) -> Result<(), SupervisorError> {
+        let project_id = config.project.id.clone();
+        let Some(existing) = self.extra_projects.remove(&project_id) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{project_id}' is not managed by this supervisor"),
+            )
+            .into());
+        };
+        let mode = existing.mode;
+        existing.daemon.stop_services()?;
+        existing.daemon.shutdown_monitor();
+
+        Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
+        let mut daemon = Daemon::new(
+            config,
+            self.daemon.pid_file_handle(),
+            self.daemon.service_state_handle(),
+            self.detach_children,
+        );
+        daemon.set_pipe_stderr(self.pipe_stderr);
+        self.extra_projects.insert(
+            project_id.clone(),
+            ProjectRuntime {
+                daemon,
+                mode,
+                config_path,
+            },
+        );
+
+        let project = self.extra_projects.get(&project_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("project '{project_id}' was not registered"),
+            )
+        })?;
+        Self::start_project_services(
+            &project.daemon,
+            project.daemon.config().as_ref(),
+            None,
+            &self.spawn_manager,
+        )?;
+        self.sync_cron_projects()?;
         Ok(())
     }
 
@@ -1657,7 +1741,10 @@ impl Supervisor {
                             .into());
                         }
                     }
-                    self.restart_project_target(project_id)?;
+                    self.restart_project_target(
+                        project_id,
+                        config.as_deref().map(Path::new),
+                    )?;
                     self.refresh_status_cache();
                     Ok(ControlResponse::Message(format!(
                         "Project '{project_id}' restarted"
@@ -2676,6 +2763,7 @@ services:
 
         let alpha_config = temp.path().join("alpha.yaml");
         let beta_config = temp.path().join("beta.yaml");
+        let beta_updated_config = temp.path().join("beta-updated.yaml");
         fs::write(
             &alpha_config,
             r#"
@@ -2706,6 +2794,19 @@ services:
 "#,
         )
         .expect("write beta config");
+        fs::write(
+            &beta_updated_config,
+            r#"
+version: "1"
+project:
+  id: beta
+  name: Beta Updated
+services:
+  beta_worker:
+    command: "/bin/sleep 33"
+"#,
+        )
+        .expect("write updated beta config");
 
         let mut supervisor = Supervisor::new(alpha_config.clone(), false, None)
             .expect("create supervisor");
@@ -2838,6 +2939,35 @@ services:
             }
             other => panic!("expected status response, got {other:?}"),
         }
+
+        supervisor
+            .handle_command(ControlCommand::Restart {
+                config: Some(beta_updated_config.to_string_lossy().to_string()),
+                service: None,
+                project: Some("beta".into()),
+            })
+            .expect("restart beta project from updated config");
+
+        let beta_runtime = supervisor
+            .extra_projects
+            .get("beta")
+            .expect("beta runtime after project restart");
+        assert_eq!(beta_runtime.daemon.config().project.name, "Beta Updated");
+        assert_eq!(
+            beta_runtime
+                .daemon
+                .config()
+                .services
+                .get("beta_worker")
+                .map(|service| service.command.as_str()),
+            Some("/bin/sleep 33")
+        );
+        assert_eq!(
+            beta_runtime.config_path,
+            beta_updated_config
+                .canonicalize()
+                .unwrap_or_else(|_| beta_updated_config.clone())
+        );
 
         supervisor
             .shutdown_runtime()

@@ -60,6 +60,12 @@ $ sysg spawn --name api_worker \
 
 ## Requirements
 
+:::info
+The parent service must opt into dynamic spawning before it can create
+children. Without `spawn: mode: dynamic`, spawn requests from that process are
+rejected because SystemG has no authorized spawn tree for the parent.
+:::
+
 Parent service must be configured with:
 
 ```yaml
@@ -68,10 +74,13 @@ services:
     command: "porki --role orchestrator --instructions instructions/INSTRUCTIONS.md"
     spawn:
       mode: dynamic
-      limit: 10
+      limits:
+        children: 10
+        depth: 3
+        descendants: 50
 ```
 
-The parent can then spawn up to 10 child processes dynamically.
+The parent can then spawn child processes dynamically within those limits.
 
 ## See also
 
