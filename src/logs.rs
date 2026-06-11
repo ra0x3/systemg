@@ -1360,7 +1360,7 @@ impl LogManager {
     /// Clears all known service and supervisor log files.
     pub fn clear_all_logs(&self) -> Result<(), LogsManagerError> {
         let log_dir = runtime::log_dir();
-        fs::create_dir_all(&log_dir)?;
+        runtime::create_private_dir(&log_dir)?;
 
         for entry in fs::read_dir(&log_dir)? {
             let path = entry?.path();

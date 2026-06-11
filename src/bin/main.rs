@@ -2728,7 +2728,7 @@ fn init_logging(args: &Cli, use_file: bool) {
 
     if use_file {
         let log_dir = runtime::log_dir();
-        if let Err(err) = fs::create_dir_all(&log_dir) {
+        if let Err(err) = runtime::create_private_dir(&log_dir) {
             eprintln!("Failed to create log directory {:?}: {}", log_dir, err);
         }
         let log_path = log_dir.join("supervisor.log");
@@ -3455,7 +3455,7 @@ fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {
     match err {
         ControlError::Serde(_) | ControlError::NotAvailable => true,
         ControlError::Server(message) => supervisor_error_is_protocol_mismatch(message),
-        ControlError::MissingHome => false,
+        ControlError::MissingHome | ControlError::Unauthorized(_) => false,
         ControlError::Io(err) => matches!(
             err.kind(),
             io::ErrorKind::UnexpectedEof

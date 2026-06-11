@@ -136,6 +136,85 @@ pub fn log_dir() -> PathBuf {
         .clone()
 }
 
+/// Creates a directory (and parents) restricted to the owner (mode `0700` on Unix).
+///
+/// The final component's permissions are tightened after creation so existing
+/// directories are also re-secured. Parent components are created with the
+/// process umask; only the leaf is guaranteed owner-only.
+pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(crate::constants::PRIVATE_DIR_MODE),
+        )?;
+    }
+    Ok(())
+}
+
+/// Writes `contents` to `path`, restricting the file to the owner (mode `0600` on Unix).
+pub fn write_private_file(
+    path: &std::path::Path,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(crate::constants::PRIVATE_FILE_MODE),
+        )?;
+    }
+    Ok(())
+}
+
+/// Rejects a config path that an untrusted user could control.
+///
+/// Loading a config executes the commands it declares with the supervisor's
+/// privileges, so a path supplied over the control socket must not be writable
+/// by anyone other than the supervisor's owner (or root). On Unix this rejects
+/// files that are group/other-writable or owned by a different non-root user.
+/// Non-Unix targets accept the path as-is.
+#[cfg(unix)]
+pub fn ensure_trusted_config(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let owner = unsafe { libc::getuid() };
+    let metadata = std::fs::metadata(path)?;
+    let mode = metadata.mode();
+
+    if mode & 0o022 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to load config {path:?}: writable by group or others (mode {:o})",
+                mode & 0o777
+            ),
+        ));
+    }
+
+    let file_owner = metadata.uid();
+    if file_owner != owner && file_owner != 0 && owner != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to load config {path:?}: owned by uid {file_owner}, not the supervisor owner ({owner})"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Rejects a config path that an untrusted user could control.
+#[cfg(not(unix))]
+pub fn ensure_trusted_config(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Config search paths.
 pub fn config_dirs() -> Vec<PathBuf> {
     context_lock()
@@ -214,12 +293,31 @@ pub fn capture_socket_activation() {
     };
 
     let fds: Vec<UnixRawFd> = (0..fd_count).map(|offset| 3 + offset).collect();
+
+    // Mark inherited activation sockets close-on-exec so they are not leaked
+    // into spawned (and possibly lower-privileged) service processes.
+    for fd in &fds {
+        set_cloexec(*fd);
+    }
+
     set_activation_fds(fds);
 
     unsafe {
         env::remove_var("LISTEN_PID");
         env::remove_var("LISTEN_FDS");
         env::remove_var("LISTEN_FDNAMES");
+    }
+}
+
+/// Sets the close-on-exec flag on `fd`, leaving other descriptor flags intact.
+#[cfg(unix)]
+fn set_cloexec(fd: RawFd) {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return;
+    }
+    unsafe {
+        libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
     }
 }
 
@@ -278,6 +376,42 @@ mod tests {
         assert_eq!(log_dir(), PathBuf::from("/var/log/systemg"));
         assert_eq!(config_dirs(), vec![PathBuf::from("/etc/systemg")]);
         assert!(!should_drop_privileges());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dir_and_file_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let dir = temp.path().join("state");
+        create_private_dir(&dir).expect("create private dir");
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, crate::constants::PRIVATE_DIR_MODE);
+
+        let file = dir.join("secret");
+        write_private_file(&file, b"data").expect("write private file");
+        let file_mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, crate::constants::PRIVATE_FILE_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_trusted_config_rejects_group_or_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("tempdir");
+        let path = temp.path().join("sysg.yaml");
+        std::fs::write(&path, b"version: 1\n").expect("write config");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod owner-only");
+        assert!(ensure_trusted_config(&path).is_ok());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+            .expect("chmod world-writable");
+        let err = ensure_trusted_config(&path).expect_err("world-writable rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]

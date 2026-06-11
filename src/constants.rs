@@ -5,6 +5,19 @@
 
 use std::{cmp::Ordering, str::FromStr, time::Duration};
 
+/// Permission mode for runtime directories: owner read/write/execute only (`rwx------`).
+///
+/// Applied to state and log directories so other local users cannot traverse or
+/// read the control socket, PID file, or logs.
+#[cfg(unix)]
+pub const PRIVATE_DIR_MODE: u32 = 0o700;
+
+/// Permission mode for sensitive runtime files: owner read/write only (`rw-------`).
+///
+/// Applied to the supervisor PID file, config hint, and control socket.
+#[cfg(unix)]
+pub const PRIVATE_FILE_MODE: u32 = 0o600;
+
 /// Typed lock abstraction for enforcing proper lock acquisition order in the daemon.
 ///
 /// This enum ensures that locks are always acquired in a consistent order to prevent

@@ -18,13 +18,38 @@ use crate::{
 /// Directory under `$HOME` where runtime artifacts (PID/socket files) are stored.
 fn runtime_dir() -> Result<PathBuf, ControlError> {
     let path = runtime::state_dir();
-    fs::create_dir_all(&path)?;
+    runtime::create_private_dir(&path)?;
     Ok(path)
 }
 
 /// Returns the unix socket path used to communicate with the resident supervisor.
 pub fn socket_path() -> Result<PathBuf, ControlError> {
     Ok(runtime_dir()?.join("control.sock"))
+}
+
+/// Binds the control socket and restricts it to the owner (mode `0600` on Unix).
+///
+/// Removes any stale socket file first. The socket is the sole control channel,
+/// so tightening its permissions prevents other local users from issuing
+/// commands to the supervisor.
+pub fn bind_control_socket() -> Result<std::os::unix::net::UnixListener, ControlError> {
+    let path = socket_path()?;
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+
+    let listener = std::os::unix::net::UnixListener::bind(&path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(crate::constants::PRIVATE_FILE_MODE),
+        )?;
+    }
+
+    Ok(listener)
 }
 
 /// Returns the path where the supervisor PID is recorded.
@@ -197,6 +222,65 @@ pub enum ControlError {
     /// Control socket not available or supervisor not running.
     #[error("control socket not available")]
     NotAvailable,
+    /// The connecting peer is not authorized to use the control socket.
+    #[error("unauthorized control socket peer (uid {0})")]
+    Unauthorized(u32),
+}
+
+/// Returns the UID of the peer connected on `stream`.
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut ucred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let res = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ucred.uid)
+}
+
+/// Returns the UID of the peer connected on `stream`.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let res = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+/// Rejects control-socket peers other than the supervisor's own user or root.
+///
+/// The control socket grants full control over managed services, so only the
+/// user running the supervisor (and root, which can bypass any check anyway) is
+/// permitted to issue commands.
+#[cfg(unix)]
+pub fn authenticate_peer(stream: &UnixStream) -> Result<(), ControlError> {
+    let peer = peer_uid(stream)?;
+    let owner = unsafe { libc::getuid() };
+    if peer == owner || peer == 0 {
+        Ok(())
+    } else {
+        Err(ControlError::Unauthorized(peer))
+    }
 }
 
 /// Sends a command to the supervisor and waits for a response.
@@ -342,9 +426,9 @@ pub fn write_response(
 pub fn write_supervisor_pid(pid: libc::pid_t) -> Result<(), ControlError> {
     let path = supervisor_pid_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        runtime::create_private_dir(parent)?;
     }
-    fs::write(path, pid.to_string())?;
+    runtime::write_private_file(&path, pid.to_string())?;
     Ok(())
 }
 
@@ -352,10 +436,10 @@ pub fn write_supervisor_pid(pid: libc::pid_t) -> Result<(), ControlError> {
 pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
     let hint_path = config_hint_path()?;
     if let Some(parent) = hint_path.parent() {
-        fs::create_dir_all(parent)?;
+        runtime::create_private_dir(parent)?;
     }
     let config_str = config.to_string_lossy();
-    fs::write(hint_path, config_str.as_bytes())?;
+    runtime::write_private_file(&hint_path, config_str.as_bytes())?;
     Ok(())
 }
 
@@ -419,6 +503,35 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_control_socket_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        let listener = bind_control_socket().expect("bind control socket");
+        drop(listener);
+        let path = socket_path().unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, crate::constants::PRIVATE_FILE_MODE);
+
+        cleanup_runtime().unwrap();
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
 
     #[test]
     fn control_command_serialization() {
