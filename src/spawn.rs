@@ -47,7 +47,7 @@ impl SpawnTree {
             memory_quota: config
                 .total_memory
                 .as_ref()
-                .and_then(|m| parse_memory_limit(m)),
+                .and_then(|m| parse_byte_size(m)),
             memory_used: 0,
             termination_policy: config
                 .termination_policy
@@ -461,6 +461,8 @@ impl DynamicSpawnManager {
             return Ok((service_name.clone(), tree));
         }
 
+        let pid_is_tracked_child = children.contains_key(&pid);
+
         let mut current_pid = pid;
         while let Some(child_info) = children.get(&current_pid) {
             if let Some(parent_service) = service_pids.get(&child_info.parent_pid)
@@ -478,7 +480,12 @@ impl DynamicSpawnManager {
             return Ok((service_name.clone(), tree));
         }
 
+        // Single-tree fallback: only authorize when the requesting pid is actually
+        // linked to the manager (a registered service pid or a tracked child).
+        // An arbitrary, unrelated pid must not be auto-authorized just because one
+        // tree happens to exist.
         if trees.len() == 1
+            && (pid_is_tracked_child || service_pids.contains_key(&pid))
             && let Some((name, tree)) = trees.iter().next()
         {
             return Ok((name.clone(), tree));
@@ -533,8 +540,8 @@ impl DynamicSpawnManager {
     }
 }
 
-/// Parses a memory limit string into bytes.
-fn parse_memory_limit(input: &str) -> Option<u64> {
+/// Parses a byte-size string (e.g. `256M`, `2G`) into bytes.
+fn parse_byte_size(input: &str) -> Option<u64> {
     let trimmed = input.trim();
     let normalized = trimmed.replace('_', "");
     let without_bytes = normalized.trim_end_matches(&['B', 'b'][..]);
@@ -555,7 +562,10 @@ fn parse_memory_limit(input: &str) -> Option<u64> {
         _ => (without_bytes.trim(), 1u64),
     };
 
-    number_part.parse::<u64>().ok().map(|v| v * factor)
+    number_part
+        .parse::<u64>()
+        .ok()
+        .and_then(|v| v.checked_mul(factor))
 }
 
 impl Default for DynamicSpawnManager {
@@ -570,6 +580,37 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn parse_byte_size_handles_overflow() {
+        assert_eq!(parse_byte_size("256M"), Some(256 * (1u64 << 20)));
+        assert_eq!(parse_byte_size("99999999999999999999G"), None);
+    }
+
+    #[test]
+    fn authorize_spawn_rejects_unrelated_pid_with_single_tree() {
+        let manager = DynamicSpawnManager::new();
+        let limits = SpawnLimitsConfig {
+            children: Some(10),
+            depth: Some(6),
+            descendants: Some(50),
+            total_memory: None,
+            termination_policy: Some(TerminationPolicy::Cascade),
+        };
+        manager
+            .register_service("svc".to_string(), &limits)
+            .unwrap();
+        manager.register_service_pid("svc".to_string(), 1);
+
+        assert!(
+            manager.authorize_spawn(1, "child").is_ok(),
+            "registered service pid should be authorized"
+        );
+        assert!(
+            manager.authorize_spawn(99999, "child").is_err(),
+            "unrelated pid must not be authorized via single-tree fallback"
+        );
+    }
 
     #[test]
     fn record_spawn_completes_without_deadlock() {

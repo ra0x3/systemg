@@ -1109,13 +1109,24 @@ impl Config {
 /// Expands environment variables within a string.
 fn expand_env_vars(input: &str) -> Result<String, ProcessManagerError> {
     let re = Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
+    let mut missing = None;
     let result = re.replace_all(input, |caps: &regex::Captures| {
         let var_name = &caps[1];
         match env::var(var_name) {
             Ok(value) => value,
-            Err(_) => panic!("Missing environment variable: {var_name}"),
+            Err(_) => {
+                if missing.is_none() {
+                    missing = Some(var_name.to_string());
+                }
+                String::new()
+            }
         }
     });
+
+    if let Some(var_name) = missing {
+        return Err(ProcessManagerError::MissingEnvVar(var_name));
+    }
+
     Ok(result.to_string())
 }
 
@@ -1236,6 +1247,19 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn expand_env_vars_errors_on_missing_variable() {
+        let _guard = crate::test_utils::env_lock();
+        unsafe {
+            env::remove_var("SYSTEMG_DEFINITELY_UNSET_VAR");
+        }
+        let err = expand_env_vars("value: ${SYSTEMG_DEFINITELY_UNSET_VAR}")
+            .expect_err("missing variable should error");
+        assert!(
+            matches!(err, ProcessManagerError::MissingEnvVar(name) if name == "SYSTEMG_DEFINITELY_UNSET_VAR")
+        );
+    }
 
     #[test]
     fn parse_manifest_accepts_string_version() {

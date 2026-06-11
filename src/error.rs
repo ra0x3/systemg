@@ -12,6 +12,10 @@ pub enum ProcessManagerError {
     #[error("Invalid YAML format: {0}")]
     ConfigParseError(#[from] serde_yaml::Error),
 
+    /// A referenced environment variable was not set during config expansion.
+    #[error("Missing environment variable '{0}' referenced in config")]
+    MissingEnvVar(String),
+
     /// Error spawning a service process.
     #[error("Failed to start service '{service}': {source}")]
     ServiceStartError {

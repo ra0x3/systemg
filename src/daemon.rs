@@ -408,7 +408,7 @@ impl PidFile {
     /// Gets exclusive lock (auto-releases on drop).
     fn acquire_lock() -> Result<File, PidFileError> {
         let lock_path = Self::lock_path();
-        fs::create_dir_all(lock_path.parent().unwrap())?;
+        runtime::create_private_dir(lock_path.parent().unwrap())?;
 
         let lock_file = File::options()
             .read(true)
@@ -465,8 +465,8 @@ impl PidFile {
         let _lock = Self::acquire_lock()?;
 
         let path = Self::path();
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -495,8 +495,8 @@ impl PidFile {
             self.service_groups.insert(service.to_string(), group);
         }
 
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -514,8 +514,8 @@ impl PidFile {
             return Err(PidFileError::ServiceNotFound);
         }
 
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -566,8 +566,8 @@ impl PidFile {
 
         let _ = self.service_groups.remove(service);
 
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -601,8 +601,8 @@ impl PidFile {
         self.spawn_depth.insert(child_pid, depth);
         self.spawn_metadata.insert(child_pid, metadata);
 
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -624,8 +624,8 @@ impl PidFile {
             metadata.last_exit = Some(exit.clone());
         }
 
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -650,8 +650,8 @@ impl PidFile {
         self.spawn_depth.remove(&child_pid);
         self.spawn_metadata.remove(&child_pid);
 
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 
@@ -670,8 +670,8 @@ impl PidFile {
 
         let removed = self.remove_spawn_subtree_in_memory(root_pid);
 
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
 
         Ok(removed)
     }
@@ -1047,9 +1047,9 @@ impl ServiceStateFile {
     pub fn save(&self) -> Result<(), ServiceStateError> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            runtime::create_private_dir(parent)?;
         }
-        fs::write(&path, xml_to_string(self)?)?;
+        runtime::write_private_file(&path, xml_to_string(self)?)?;
         Ok(())
     }
 

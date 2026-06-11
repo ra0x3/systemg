@@ -284,7 +284,11 @@ impl PrivilegeContext {
             return Ok(());
         }
 
-        if !self.user.supplementary.is_empty() {
+        // Always reset the supplementary group list when switching identity so
+        // the child does not inherit the supervisor's (typically root's) groups.
+        // The list is set to exactly the configured supplementary groups plus the
+        // target gid; with no configuration it collapses to just the target gid.
+        if self.user.uid.is_some() || self.user.gid.is_some() {
             let mut buf = self.user.supplementary.clone();
             buf.insert(0, self.user.gid.unwrap_or_else(|| getgid().as_raw()));
             #[cfg(target_os = "linux")]
@@ -674,6 +678,58 @@ mod tests {
         let err = PrivilegeContext::from_service("demo", &service)
             .expect_err("user switch should fail without root");
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn user_switch_resets_supplementary_groups() {
+        if !getuid().is_root() {
+            return;
+        }
+
+        let Ok(Some(user)) = User::from_name("nobody") else {
+            return;
+        };
+
+        let ctx = PrivilegeContext {
+            user: UserContext {
+                uid: Some(user.uid.as_raw()),
+                gid: Some(user.gid.as_raw()),
+                ..UserContext::default()
+            },
+            ..PrivilegeContext::default()
+        };
+
+        match unsafe { libc::fork() } {
+            -1 => panic!("fork failed"),
+            0 => {
+                let code = match unsafe { ctx.apply_user_switch() } {
+                    Ok(()) => {
+                        let mut groups = [0 as libc::gid_t; 64];
+                        let n = unsafe {
+                            libc::getgroups(groups.len() as c_int, groups.as_mut_ptr())
+                        };
+                        if n < 0 {
+                            2
+                        } else if groups[..n as usize].contains(&0) {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    Err(_) => 3,
+                };
+                unsafe { libc::_exit(code) };
+            }
+            pid => {
+                let mut status = 0;
+                unsafe { libc::waitpid(pid, &mut status, 0) };
+                let exit_code = (status >> 8) & 0xff;
+                assert_eq!(
+                    exit_code, 0,
+                    "child should have dropped root supplementary groups"
+                );
+            }
+        }
     }
 
     #[test]

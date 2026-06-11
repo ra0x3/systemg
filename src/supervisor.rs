@@ -2,9 +2,8 @@
 use std::os::unix::process::ExitStatusExt;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
-    fs, io,
+    io,
     io::Write,
-    os::unix::net::UnixListener,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
     thread,
@@ -31,6 +30,7 @@ use crate::{
         spawn_dynamic_child_log_writer, write_log_section_header,
     },
     metrics::{self, MetricsCollector, MetricsHandle},
+    runtime,
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
         ProjectRunMode, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
@@ -633,6 +633,7 @@ impl Supervisor {
                 std::env::current_dir()?.join(config_path)
             };
             let resolved = resolved.canonicalize().unwrap_or(resolved);
+            runtime::ensure_trusted_config(&resolved)?;
             let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
             if config.project.id != project_id {
                 return Err(io::Error::new(
@@ -860,12 +861,7 @@ impl Supervisor {
     fn run_internal(&mut self) -> Result<(), SupervisorError> {
         ipc::cleanup_runtime()?;
         ipc::write_config_hint(&self.config_path)?;
-        let socket_path = ipc::socket_path()?;
-        if socket_path.exists() {
-            fs::remove_file(&socket_path)?;
-        }
-
-        let listener = UnixListener::bind(&socket_path)?;
+        let listener = ipc::bind_control_socket()?;
         ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
         let service_order =
@@ -1374,93 +1370,109 @@ impl Supervisor {
             }
         });
 
-        info!("systemg supervisor listening on {:?}", socket_path);
+        if let Ok(socket_path) = ipc::socket_path() {
+            info!("systemg supervisor listening on {:?}", socket_path);
+        }
 
         let mut shutdown_requested = false;
         listener.set_nonblocking(false)?;
 
         while !shutdown_requested {
             match listener.accept() {
-                Ok((mut stream, _addr)) => match ipc::read_command(&mut stream) {
-                    Ok(command) => {
-                        let should_shutdown = matches!(command, ControlCommand::Shutdown);
-                        debug!("Supervisor received command: {:?}", command);
-                        if let ControlCommand::Logs {
-                            service,
-                            project,
-                            lines,
-                            kind,
-                            follow,
-                        } = command
-                        {
-                            let snapshot = match self.collect_configured_snapshot() {
-                                Ok(snapshot) => {
-                                    self.status_cache.replace(snapshot.clone());
-                                    snapshot
-                                }
-                                Err(err) => {
-                                    error!("Supervisor logs command failed: {err}");
-                                    let _ = writeln!(stream, "{err}");
-                                    continue;
-                                }
-                            };
-                            let pid_file = self.daemon.pid_file_handle();
-                            let mut log_stream = match stream.try_clone() {
-                                Ok(stream) => stream,
-                                Err(err) => {
-                                    error!(
-                                        "Failed to clone supervisor log stream: {err}"
-                                    );
-                                    continue;
-                                }
-                            };
-                            thread::spawn(move || {
-                                let request = SupervisorLogRequest {
-                                    snapshot,
-                                    pid_file,
-                                    service,
-                                    project,
-                                    lines,
-                                    kind: kind.as_deref(),
-                                    follow,
-                                    stream: &log_stream,
-                                };
-                                if let Err(err) = Supervisor::handle_logs_command(request)
-                                {
-                                    error!("Supervisor logs command failed: {err}");
-                                    let _ = writeln!(log_stream, "{err}");
-                                }
-                            });
-                            continue;
-                        }
-                        match self.handle_command(command) {
-                            Ok(response) => {
-                                if let Err(err) =
-                                    ipc::write_response(&mut stream, &response)
-                                {
-                                    error!("Failed to write supervisor response: {err}");
-                                }
-                                if should_shutdown {
-                                    shutdown_requested = true;
-                                }
-                            }
-                            Err(err) => {
-                                error!("Supervisor command failed: {err}");
-                                let _ = ipc::write_response(
-                                    &mut stream,
-                                    &ControlResponse::Error(err.to_string()),
-                                );
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        warn!("Invalid supervisor command: {err}");
+                Ok((mut stream, _addr)) => {
+                    if let Err(err) = ipc::authenticate_peer(&stream) {
+                        warn!("Rejected unauthorized control connection: {err}");
                         let _ = ipc::write_response(
                             &mut stream,
                             &ControlResponse::Error(err.to_string()),
                         );
+                        continue;
                     }
-                },
+                    match ipc::read_command(&mut stream) {
+                        Ok(command) => {
+                            let should_shutdown =
+                                matches!(command, ControlCommand::Shutdown);
+                            debug!("Supervisor received command: {:?}", command);
+                            if let ControlCommand::Logs {
+                                service,
+                                project,
+                                lines,
+                                kind,
+                                follow,
+                            } = command
+                            {
+                                let snapshot = match self.collect_configured_snapshot() {
+                                    Ok(snapshot) => {
+                                        self.status_cache.replace(snapshot.clone());
+                                        snapshot
+                                    }
+                                    Err(err) => {
+                                        error!("Supervisor logs command failed: {err}");
+                                        let _ = writeln!(stream, "{err}");
+                                        continue;
+                                    }
+                                };
+                                let pid_file = self.daemon.pid_file_handle();
+                                let mut log_stream = match stream.try_clone() {
+                                    Ok(stream) => stream,
+                                    Err(err) => {
+                                        error!(
+                                            "Failed to clone supervisor log stream: {err}"
+                                        );
+                                        continue;
+                                    }
+                                };
+                                thread::spawn(move || {
+                                    let request = SupervisorLogRequest {
+                                        snapshot,
+                                        pid_file,
+                                        service,
+                                        project,
+                                        lines,
+                                        kind: kind.as_deref(),
+                                        follow,
+                                        stream: &log_stream,
+                                    };
+                                    if let Err(err) =
+                                        Supervisor::handle_logs_command(request)
+                                    {
+                                        error!("Supervisor logs command failed: {err}");
+                                        let _ = writeln!(log_stream, "{err}");
+                                    }
+                                });
+                                continue;
+                            }
+                            match self.handle_command(command) {
+                                Ok(response) => {
+                                    if let Err(err) =
+                                        ipc::write_response(&mut stream, &response)
+                                    {
+                                        error!(
+                                            "Failed to write supervisor response: {err}"
+                                        );
+                                    }
+                                    if should_shutdown {
+                                        shutdown_requested = true;
+                                    }
+                                }
+                                Err(err) => {
+                                    error!("Supervisor command failed: {err}");
+                                    let _ = ipc::write_response(
+                                        &mut stream,
+                                        &ControlResponse::Error(err.to_string()),
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            warn!("Invalid supervisor command: {err}");
+                            let _ = ipc::write_response(
+                                &mut stream,
+                                &ControlResponse::Error(err.to_string()),
+                            );
+                        }
+                    }
+                }
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => {
                     error!("Supervisor listener error: {err}");
@@ -1729,6 +1741,7 @@ impl Supervisor {
                     )))
                 } else if let Some(project_id) = project.as_deref() {
                     if let Some(config_path) = config.as_deref() {
+                        runtime::ensure_trusted_config(Path::new(config_path))?;
                         let config = load_config(Some(config_path))?;
                         if config.project.id != project_id {
                             return Err(io::Error::new(
@@ -1860,12 +1873,19 @@ impl Supervisor {
 
     /// Handles handle spawn.
     fn handle_spawn(&mut self, params: SpawnParams) -> Result<u32, SupervisorError> {
+        let Some(program) = params.command.first() else {
+            return Err(SupervisorError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "spawn command must not be empty",
+            )));
+        };
+
         let spawn_auth = self
             .spawn_manager
             .authorize_spawn(params.parent_pid, &params.name)?;
         let depth = spawn_auth.depth;
 
-        let mut cmd = std::process::Command::new(&params.command[0]);
+        let mut cmd = std::process::Command::new(program);
         if params.command.len() > 1 {
             cmd.args(&params.command[1..]);
         }
@@ -2031,6 +2051,7 @@ impl Supervisor {
         };
 
         info!("Reloading configuration from {:?}", resolved);
+        runtime::ensure_trusted_config(&resolved)?;
         let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
 
         if let Some(collector) = self.metrics_collector.take() {
@@ -2132,6 +2153,7 @@ impl Supervisor {
             std::env::current_dir()?.join(path)
         };
         let resolved = resolved.canonicalize().unwrap_or(resolved);
+        runtime::ensure_trusted_config(&resolved)?;
         let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
@@ -2204,6 +2226,7 @@ impl Supervisor {
             .unwrap_or((None, selector));
 
         let override_config = if let Some(path) = config_path {
+            runtime::ensure_trusted_config(path)?;
             Some(load_config(Some(path.to_string_lossy().as_ref()))?)
         } else {
             None
