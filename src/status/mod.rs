@@ -2653,6 +2653,23 @@ services:
 
     #[test]
     fn build_snapshot_summary_omits_expensive_process_details() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base directory");
+        let temp = tempdir_in(&base).expect("create temp home");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home directory");
+
+        let original_home = env::var("HOME").ok();
+        unsafe {
+            env::set_var("HOME", &home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
         let mut services = std::collections::HashMap::new();
         let service = crate::config::ServiceConfig {
             command: "/bin/sleep 30".into(),
@@ -2715,6 +2732,16 @@ services:
         assert!(unit.uptime.is_none());
         assert!(unit.runtime_command.is_none());
         assert!(unit.spawned_children.is_empty());
+
+        unsafe {
+            if let Some(home) = original_home {
+                env::set_var("HOME", home);
+            } else {
+                env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
     }
 
     #[test]
