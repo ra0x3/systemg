@@ -353,7 +353,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .clone()
                                 .or(start_target.project_id.clone()),
                         };
-                        send_control_command(command)?;
+                        with_progress_spinner("Starting", || {
+                            send_control_command(command)
+                        })?;
                         info!(
                             "Service '{service_name}' start command sent to supervisor"
                         );
@@ -362,7 +364,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             service: None,
                             project: project.clone(),
                         };
-                        send_control_command(command)?;
+                        with_progress_spinner("Starting", || {
+                            send_control_command(command)
+                        })?;
                     } else {
                         let command = ControlCommand::AddProject {
                             config: start_target
@@ -372,7 +376,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                             service: None,
                             mode: ProjectRunMode::Daemon,
                         };
-                        send_control_command(command)?;
+                        with_progress_spinner("Starting", || {
+                            send_control_command(command)
+                        })?;
                     }
                     return Ok(());
                 }
@@ -394,7 +400,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 service: Some(service_name.clone()),
                                 project: command_project.or(start_target.project_id),
                             };
-                            send_control_command(command)?;
+                            with_progress_spinner("Starting", || {
+                                send_control_command(command)
+                            })?;
                             info!(
                                 "Service '{service_name}' start command sent to supervisor"
                             );
@@ -528,7 +536,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                         service.is_none() && project.is_none(),
                     )?;
                 } else {
-                    send_control_command(command)?;
+                    with_progress_spinner("Restarting", || {
+                        send_control_command(command)
+                    })?;
                 }
             } else if daemonize {
                 let config_path = resolve_config_path(&config)?;
@@ -539,7 +549,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 Use --daemonize in deployment scripts to ensure daemonized supervision is restored if detection fails."
                 );
                 let daemon = build_daemon(&config)?;
-                daemon.restart_services()?;
+                with_progress_spinner("Restarting", || {
+                    daemon
+                        .restart_services()
+                        .map_err(|err| Box::new(err) as Box<dyn Error>)
+                })?;
             }
         }
         Commands::Status {
@@ -2476,6 +2490,14 @@ mod tests {
             format_progress_spinner_frame("⠙", "Inspecting"),
             "\r⠙ Inspecting\x1B[K"
         );
+        assert_eq!(
+            format_progress_spinner_frame("⠹", "Starting"),
+            "\r⠹ Starting\x1B[K"
+        );
+        assert_eq!(
+            format_progress_spinner_frame("⠸", "Restarting"),
+            "\r⠸ Restarting\x1B[K"
+        );
     }
 
     #[test]
@@ -2795,7 +2817,7 @@ fn start_foreground(
         process::exit(0);
     }
 
-    wait_for_supervisor_ready(child_pid)?;
+    with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid))?;
     wait_for_foreground_attachment(project_id)
 }
 
@@ -2811,7 +2833,7 @@ fn start_foreground_attached(
         service,
         mode: ProjectRunMode::Foreground,
     };
-    send_control_command(command)?;
+    with_progress_spinner("Starting", || send_control_command(command))?;
 
     wait_for_foreground_attachment(project_id)
 }
