@@ -24,14 +24,50 @@ when you explicitly want the no-supervisor disk fallback for that config.
 ## Interactive Mode
 
 By default, `sysg status` displays an interactive table where you can:
-- **Tab** or **↓** (Down arrow) - Move to the next service
-- **Shift+Tab** or **↑** (Up arrow) - Move to the previous service
-- **Enter** or **I** - Open the inspect view for the selected service
+- **↓** / **Tab** (Down) - Move to the next service
+- **↑** / **Shift+Tab** (Up) - Move to the previous service
+- **→** / **←** (Right / Left) - Move the focused cell across columns in the
+  selected row
+- **I** or **Enter** - Open the inspect view for the selected service
+- **H** - Open the health report explaining why the selected unit is `Warn` or
+  `Failing` (see below)
 - **L** - Open a live log snapshot stream for the selected service
 - **R** - Restart the selected service
 - **q**, **ESC**, or **Ctrl+C** - Exit the status view
 
-The selected row is highlighted with a white background for easy visibility.
+The focused cell in the selected row is drawn in reverse video, so it stands
+out as lighter on a dark terminal and darker on a light terminal. This makes it
+obvious which cell you are on as you tab across the row.
+
+## Why is it `Warn` or `Failing`?
+
+The `HEALTH` column is a verdict, not an explanation. To see *why* a unit holds
+its health, select it and press **H**. systemg opens a full-screen, README-style
+health report in the same window:
+
+```
+# 'api' is stopped but should be serving
+
+Severity: 5/10 (Warn)
+
+TLDR: A long-running service is intentionally stopped.
+
+## Description
+
+'api' has intent 'Serve', meaning it is expected to stay available, but it is
+currently stopped. Nothing is serving requests for this unit right now.
+
+## Recommended Fix
+
+Start it again if it should be up:
+
+    sysg restart -s api --log-level debug
+
+If it is meant to stay down, this is expected and can be ignored.
+```
+
+The report wraps to at most 80 columns, narrowing to 80% of the terminal width
+on smaller terminals. Press any key to return to the status table.
 
 > **Info:** Press **L** while a UNIT row is selected to open that unit's logs
 > without leaving the status workflow. The shortcut runs
@@ -170,7 +206,9 @@ process and spawn-tree detail in status/inspect views.
   data is available.
 - **LAST_EXIT** - Last recorded exit code or signal when the unit has exited.
 - **HEALTH** - Operator action signal. `HEALTH` answers "does this unit need
-  attention?" Values are `Healthy`, `Idle`, `Warn`, and `Failing`.
+  attention?" Values are `Healthy`, `Idle`, `Warn`, and `Failing`. Press **H**
+  on a selected unit to open a health report explaining the verdict and how to
+  fix it.
 
 ### State values
 

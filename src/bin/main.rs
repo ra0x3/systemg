@@ -45,7 +45,7 @@ use systemg::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, ProjectRunMode,
         SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitIntent, UnitKind,
         UnitMetricsSummary, UnitState, UnitStatus, UptimeInfo, collect_disk_snapshot,
-        compute_overall_health, format_elapsed,
+        compute_overall_health, explain_unit_health, format_elapsed,
     },
     supervisor::Supervisor,
 };
@@ -1190,7 +1190,7 @@ mod tests {
             runtime_command: None,
             spawned_children: vec![],
         };
-        let unit_row = format_unit_row(&unit, &columns, true);
+        let unit_row = format_unit_row_focus(&unit, &columns, true, None);
         assert!(unit_row.contains("srvc"));
         assert!(unit_row.contains("rashad"));
 
@@ -2246,6 +2246,71 @@ mod tests {
         shrink_inspect_cron_widths_to_fit(&mut widths, 60);
         assert!(widths[5] < original_cmd);
         assert!(widths[3] >= INSPECT_CRON_SOFT_MIN_WIDTHS[3]);
+    }
+
+    #[test]
+    fn format_inspect_cron_status_colors_by_outcome() {
+        let success =
+            format_inspect_cron_status(Some(&CronExecutionStatus::Success), false);
+        assert!(success.contains("success"));
+        assert!(success.contains(BRIGHT_GREEN));
+
+        let running = format_inspect_cron_status(None, false);
+        assert!(running.contains("running"));
+        assert!(running.contains(LIGHT_BLUE));
+
+        let failed = format_inspect_cron_status(
+            Some(&CronExecutionStatus::Failed("boom".into())),
+            false,
+        );
+        assert!(failed.contains("failed: boom"));
+        assert!(failed.contains(RED_BOLD));
+    }
+
+    #[test]
+    fn format_inspect_cron_status_respects_no_color() {
+        let success =
+            format_inspect_cron_status(Some(&CronExecutionStatus::Success), true);
+        assert_eq!(success, "success");
+    }
+
+    #[test]
+    fn wrap_paragraph_respects_width_and_keeps_words_whole() {
+        let text = "the quick brown fox jumps over the lazy dog";
+        let lines = wrap_paragraph(text, 20);
+        assert!(lines.iter().all(|line| visible_length(line) <= 20));
+        let rejoined = lines.join(" ");
+        assert_eq!(rejoined, text);
+    }
+
+    #[test]
+    fn render_health_report_includes_required_sections() {
+        let mut unit = UnitStatus {
+            name: "api".into(),
+            hash: "hash".into(),
+            project: None,
+            kind: UnitKind::Service,
+            lifecycle: Some(ServiceLifecycleStatus::Stopped),
+            state: UnitState::Stopped,
+            intent: UnitIntent::Serve,
+            health: UnitHealth::Warn,
+            process: None,
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: None,
+            runtime_command: None,
+            spawned_children: Vec::new(),
+        };
+        unit.intent = UnitIntent::Serve;
+
+        let rendered = render_health_report(&unit, true).join("\n");
+        assert!(rendered.contains("# "));
+        assert!(rendered.contains("Severity:"));
+        assert!(rendered.contains("TLDR:"));
+        assert!(rendered.contains("## Description"));
+        assert!(rendered.contains("## Recommended Fix"));
     }
 
     #[test]
