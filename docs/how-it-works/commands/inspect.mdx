@@ -94,6 +94,18 @@ runtime command lines and process/spawn descendants.
 - **Average duration** - For completed processes
 - **Success rate** - For cron jobs
 
+## Cron run history
+
+For cron units, inspect prints a `Cron Run History` table. The `STATUS` column is
+color-coded so outcomes are obvious at a glance:
+
+- `success` - light green
+- `running` - light blue (the run is still in progress)
+- `failed` / `failed: <reason>` - red
+- `overlap` - yellow (a run was skipped because the previous one was still going)
+
+Pass `--no-color` to disable the coloring.
+
 ## Snapshot detail
 
 The default `status.snapshot_mode: summary` is intended for production-scale

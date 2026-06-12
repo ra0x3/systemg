@@ -1441,6 +1441,368 @@ fn derive_unit_health(
     }
 }
 
+/// Human-readable explanation of why a unit holds its current [`UnitHealth`].
+///
+/// Each field maps onto a section of the README-style health report rendered by
+/// the `sysg status` interactive view: a title, a 0-10 severity, a one-line
+/// summary, a longer description of the cause, and a concrete recommended fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealthReport {
+    /// Health classification the report explains.
+    pub health: UnitHealth,
+    /// Coarse 0-10 urgency, increasing from healthy to hard failure.
+    pub severity: u8,
+    /// Short title summarizing the condition.
+    pub title: String,
+    /// One-line summary suitable for a `TLDR:` line.
+    pub tldr: String,
+    /// Longer prose describing what happened and why it carries this health.
+    pub description: String,
+    /// Concrete next step, including the command to run and why it helps.
+    pub recommended_fix: String,
+}
+
+/// Formats the recorded exit of a unit as a short human phrase.
+fn describe_exit(exit: Option<&ExitMetadata>) -> Option<String> {
+    let exit = exit?;
+    if let Some(signal) = exit.signal {
+        Some(format!("terminated by signal {signal}"))
+    } else {
+        exit.exit_code
+            .map(|code| format!("exited with code {code}"))
+    }
+}
+
+/// Builds a human-readable explanation of a unit's current health.
+///
+/// The branch order mirrors `derive_unit_health` so the explanation always
+/// matches the verdict shown in the status table.
+pub fn explain_unit_health(unit: &UnitStatus) -> HealthReport {
+    let name = unit.name.as_str();
+    let restart = format!("sysg restart -s {name} --log-level debug");
+    let logs = format!("sysg logs -s {name} -l 200");
+
+    if let Some(runtime) = unit.process.as_ref() {
+        match runtime.state {
+            ProcessState::Running => {
+                return HealthReport {
+                    health: UnitHealth::Healthy,
+                    severity: 0,
+                    title: format!("'{name}' is healthy"),
+                    tldr: "The tracked process is alive and doing its job.".to_string(),
+                    description: format!(
+                        "systemg observed a live process (PID {}) for '{name}', \
+which matches its intent. Nothing requires attention.",
+                        runtime.pid
+                    ),
+                    recommended_fix: "No action needed.".to_string(),
+                };
+            }
+            ProcessState::Zombie => {
+                return HealthReport {
+                    health: UnitHealth::Failing,
+                    severity: 8,
+                    title: format!("'{name}' is a zombie process"),
+                    tldr: "The process died but was never reaped by its parent."
+                        .to_string(),
+                    description: format!(
+                        "The tracked process (PID {}) for '{name}' is defunct: it \
+has exited but its parent has not collected the exit status, so it lingers in \
+the process table. A zombie cannot do work and usually signals that the \
+supervising parent is stuck or mis-handling child reaping.",
+                        runtime.pid
+                    ),
+                    recommended_fix: format!(
+                        "Restart the unit so systemg respawns a clean process:\n\n    \
+{restart}\n\nIf zombies keep reappearing, inspect the parent process; a \
+parent that never calls wait() will keep leaking them."
+                    ),
+                };
+            }
+            ProcessState::Missing => {
+                return HealthReport {
+                    health: UnitHealth::Warn,
+                    severity: 5,
+                    title: format!("'{name}' has a tracked PID but no process"),
+                    tldr: "systemg expected a running process and could not find it."
+                        .to_string(),
+                    description: format!(
+                        "systemg still holds PID {} for '{name}', but that PID is no \
+longer present in the process table. The process likely crashed or was killed \
+out from under the supervisor without a clean lifecycle transition.",
+                        runtime.pid
+                    ),
+                    recommended_fix: format!(
+                        "Check why the process vanished, then restart it:\n\n    \
+{logs}\n    {restart}"
+                    ),
+                };
+            }
+        }
+    }
+
+    if let Some(cron_status) = unit.cron.as_ref() {
+        if let Some(last) = cron_status.last_run.as_ref()
+            && let Some(status) = &last.status
+        {
+            return match status {
+                CronExecutionStatus::Success => HealthReport {
+                    health: UnitHealth::Healthy,
+                    severity: 0,
+                    title: format!("'{name}' last cron run succeeded"),
+                    tldr: "The most recent scheduled run completed cleanly.".to_string(),
+                    description: format!(
+                        "The last run of '{name}' finished successfully and the unit \
+is waiting for its next scheduled trigger."
+                    ),
+                    recommended_fix: "No action needed.".to_string(),
+                },
+                CronExecutionStatus::Failed(reason)
+                    if reason.contains("Failed to get PID") =>
+                {
+                    HealthReport {
+                        health: UnitHealth::Idle,
+                        severity: 2,
+                        title: format!("'{name}' cron run finished too fast to track"),
+                        tldr: "The job exited before systemg could capture its PID."
+                            .to_string(),
+                        description: format!(
+                            "systemg could not attach a PID to the last run of '{name}' \
+because it completed almost immediately. This is usually harmless for very \
+short jobs, but it means runtime metrics were not collected for that run."
+                        ),
+                        recommended_fix: format!(
+                            "If the job is meant to be short-lived, no action is needed. \
+To confirm it did its work, check the output:\n\n    {logs}"
+                        ),
+                    }
+                }
+                CronExecutionStatus::Failed(reason) => {
+                    let detail = if reason.trim().is_empty() {
+                        "no failure reason was recorded".to_string()
+                    } else {
+                        format!("the recorded reason was: {reason}")
+                    };
+                    HealthReport {
+                        health: UnitHealth::Failing,
+                        severity: 7,
+                        title: format!("'{name}' last cron run failed"),
+                        tldr: "The most recent scheduled run ended in failure."
+                            .to_string(),
+                        description: format!(
+                            "The last run of '{name}' failed and {detail}. The unit will \
+still fire on its next schedule, but the failed run did not complete its work."
+                        ),
+                        recommended_fix: format!(
+                            "Read the run output to find the root cause, then trigger a \
+manual run once fixed:\n\n    {logs}\n    {restart}"
+                        ),
+                    }
+                }
+                CronExecutionStatus::OverlapError => HealthReport {
+                    health: UnitHealth::Warn,
+                    severity: 4,
+                    title: format!("'{name}' cron run overlapped a prior run"),
+                    tldr:
+                        "A new run was skipped because the previous one was still going."
+                            .to_string(),
+                    description: format!(
+                        "A scheduled run of '{name}' was blocked because the previous \
+run had not finished. The job is taking longer than its interval, so runs are \
+piling up against each other."
+                    ),
+                    recommended_fix: format!(
+                        "Either widen the schedule interval or make the job faster. \
+Inspect how long runs take:\n\n    {logs}"
+                    ),
+                },
+            };
+        }
+
+        return HealthReport {
+            health: UnitHealth::Idle,
+            severity: 1,
+            title: format!("'{name}' has no completed cron runs yet"),
+            tldr: "The cron unit is scheduled but has not run.".to_string(),
+            description: format!(
+                "'{name}' is registered as a cron unit but has not completed a run \
+yet, so there is nothing to evaluate. It will run at its next scheduled time."
+            ),
+            recommended_fix: "No action needed; wait for the next scheduled run."
+                .to_string(),
+        };
+    }
+
+    match unit.lifecycle {
+        Some(ServiceLifecycleStatus::ExitedWithError) => {
+            let exit = describe_exit(unit.last_exit.as_ref())
+                .map(|phrase| format!(" It {phrase}."))
+                .unwrap_or_default();
+            return HealthReport {
+                health: UnitHealth::Failing,
+                severity: 8,
+                title: format!("'{name}' exited with an error"),
+                tldr: "The service stopped because it failed.".to_string(),
+                description: format!(
+                    "'{name}' is no longer running because it exited unsuccessfully.{exit} \
+A service that should stay available has crashed or returned a non-zero status."
+                ),
+                recommended_fix: format!(
+                    "Read the logs to find why it failed, then restart it:\n\n    \
+{logs}\n    {restart}"
+                ),
+            };
+        }
+        Some(ServiceLifecycleStatus::Running) => {
+            return HealthReport {
+                health: UnitHealth::Healthy,
+                severity: 0,
+                title: format!("'{name}' is running"),
+                tldr: "The service is up and matches its intent.".to_string(),
+                description: format!("'{name}' is running normally."),
+                recommended_fix: "No action needed.".to_string(),
+            };
+        }
+        Some(ServiceLifecycleStatus::Skipped) => {
+            return HealthReport {
+                health: UnitHealth::Idle,
+                severity: 1,
+                title: format!("'{name}' was skipped"),
+                tldr: "A skip rule kept this unit from starting.".to_string(),
+                description: format!(
+                    "'{name}' did not start because a configured skip rule matched. \
+This is intentional and does not indicate a problem."
+                ),
+                recommended_fix: "No action needed unless you expected it to run; \
+in that case review the unit's skip condition in your config."
+                    .to_string(),
+            };
+        }
+        Some(ServiceLifecycleStatus::Stopped) => {
+            if matches!(unit.intent, UnitIntent::Serve) {
+                return HealthReport {
+                    health: UnitHealth::Warn,
+                    severity: 5,
+                    title: format!("'{name}' is stopped but should be serving"),
+                    tldr: "A long-running service is intentionally stopped.".to_string(),
+                    description: format!(
+                        "'{name}' has intent 'Serve', meaning it is expected to stay \
+available, but it is currently stopped. Nothing is serving requests for this \
+unit right now."
+                    ),
+                    recommended_fix: format!(
+                        "Start it again if it should be up:\n\n    {restart}\n\nIf it is \
+meant to stay down, this is expected and can be ignored."
+                    ),
+                };
+            }
+            return HealthReport {
+                health: UnitHealth::Idle,
+                severity: 1,
+                title: format!("'{name}' is stopped"),
+                tldr: "The unit is stopped, which is allowed for its intent.".to_string(),
+                description: format!(
+                    "'{name}' is stopped and its intent does not require it to stay \
+running, so this is an acceptable resting state."
+                ),
+                recommended_fix: "No action needed.".to_string(),
+            };
+        }
+        Some(ServiceLifecycleStatus::ExitedSuccessfully) => {
+            if matches!(unit.intent, UnitIntent::Serve) {
+                return HealthReport {
+                    health: UnitHealth::Warn,
+                    severity: 4,
+                    title: format!("'{name}' exited though it should keep serving"),
+                    tldr: "A long-running service exited cleanly but is now down."
+                        .to_string(),
+                    description: format!(
+                        "'{name}' has intent 'Serve' but exited successfully and is no \
+longer running. A clean exit is not an error, yet a service meant to stay \
+available should not have stopped on its own."
+                    ),
+                    recommended_fix: format!(
+                        "Restart it so it stays available:\n\n    {restart}\n\nIf this unit \
+is really one-shot, set its intent to 'Once' so systemg stops warning about it."
+                    ),
+                };
+            }
+            return HealthReport {
+                health: UnitHealth::Idle,
+                severity: 1,
+                title: format!("'{name}' completed successfully"),
+                tldr: "The one-shot unit finished its work and exited cleanly."
+                    .to_string(),
+                description: format!(
+                    "'{name}' ran to completion and exited successfully. For a one-shot \
+unit this is the expected end state."
+                ),
+                recommended_fix: "No action needed.".to_string(),
+            };
+        }
+        None => {}
+    }
+
+    match (unit.state, unit.kind) {
+        (UnitState::Lost, _) => HealthReport {
+            health: UnitHealth::Warn,
+            severity: 5,
+            title: format!("'{name}' was lost"),
+            tldr: "systemg expected a tracked process and can no longer find it."
+                .to_string(),
+            description: format!(
+                "systemg held state for '{name}' but the process it expected is gone, \
+with no clean lifecycle transition recorded. It may have been killed externally."
+            ),
+            recommended_fix: format!(
+                "Check the logs and restart to get back to a known state:\n\n    \
+{logs}\n    {restart}"
+            ),
+        },
+        (UnitState::Zombie | UnitState::Failed, _) => HealthReport {
+            health: UnitHealth::Failing,
+            severity: 8,
+            title: format!("'{name}' is in a failed state"),
+            tldr: "The unit failed or is defunct.".to_string(),
+            description: format!(
+                "'{name}' is in a failed or defunct state and is not doing its job. \
+This requires attention to recover."
+            ),
+            recommended_fix: format!(
+                "Inspect the logs and restart:\n\n    {logs}\n    {restart}"
+            ),
+        },
+        (UnitState::Queued | UnitState::Stopped | UnitState::Skipped, _) => {
+            HealthReport {
+                health: UnitHealth::Idle,
+                severity: 1,
+                title: format!("'{name}' is idle"),
+                tldr: "The unit is inactive by design.".to_string(),
+                description: format!(
+                    "'{name}' is queued, stopped, or skipped and does not currently \
+require any action."
+                ),
+                recommended_fix: "No action needed.".to_string(),
+            }
+        }
+        (_, UnitKind::Cron | UnitKind::Service | UnitKind::Orphaned) => HealthReport {
+            health: UnitHealth::Warn,
+            severity: 4,
+            title: format!("'{name}' is not in its expected state"),
+            tldr: "systemg has no clear evidence the unit is doing its job.".to_string(),
+            description: format!(
+                "systemg could not match '{name}' to a healthy condition. There is no \
+reliable runtime or lifecycle fact confirming it is doing what its intent \
+requires, so it is flagged for a look."
+            ),
+            recommended_fix: format!(
+                "Inspect the unit and its logs to confirm its state:\n\n    \
+sysg inspect -s {name}\n    {logs}"
+            ),
+        },
+    }
+}
+
 /// Computes overall health.
 pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
     if units
@@ -2910,5 +3272,116 @@ services:
         );
 
         assert_eq!(health, UnitHealth::Idle);
+    }
+
+    fn unit_for_health(name: &str) -> UnitStatus {
+        UnitStatus {
+            name: name.into(),
+            hash: "hash".into(),
+            project: None,
+            kind: UnitKind::Service,
+            lifecycle: None,
+            state: UnitState::Unknown,
+            intent: UnitIntent::Manual,
+            health: UnitHealth::Healthy,
+            process: None,
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: None,
+            runtime_command: None,
+            spawned_children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn explain_unit_health_matches_running_verdict() {
+        let mut unit = unit_for_health("api");
+        unit.process = Some(ProcessRuntime {
+            pid: 1234,
+            state: ProcessState::Running,
+            user: None,
+        });
+
+        let report = explain_unit_health(&unit);
+        assert_eq!(report.health, UnitHealth::Healthy);
+        assert_eq!(report.severity, 0);
+        assert!(report.title.contains("api"));
+    }
+
+    #[test]
+    fn explain_unit_health_for_stopped_serve_explains_warn() {
+        let mut unit = unit_for_health("api");
+        unit.intent = UnitIntent::Serve;
+        unit.lifecycle = Some(ServiceLifecycleStatus::Stopped);
+        unit.state = UnitState::Stopped;
+
+        let report = explain_unit_health(&unit);
+        assert_eq!(report.health, UnitHealth::Warn);
+        assert!(report.severity >= 4 && report.severity <= 6);
+        assert!(report.recommended_fix.contains("sysg restart -s api"));
+    }
+
+    #[test]
+    fn explain_unit_health_for_error_exit_includes_exit_detail() {
+        let mut unit = unit_for_health("worker");
+        unit.intent = UnitIntent::Serve;
+        unit.lifecycle = Some(ServiceLifecycleStatus::ExitedWithError);
+        unit.last_exit = Some(ExitMetadata {
+            exit_code: Some(2),
+            signal: None,
+        });
+
+        let report = explain_unit_health(&unit);
+        assert_eq!(report.health, UnitHealth::Failing);
+        assert!(report.severity >= 7);
+        assert!(report.description.contains("exited with code 2"));
+    }
+
+    #[test]
+    fn explain_unit_health_for_failed_cron_surfaces_reason() {
+        let failed = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Failed("boom".into())),
+            exit_code: Some(1),
+            pid: None,
+            user: None,
+            command: None,
+            metrics: vec![],
+        };
+        let mut unit = unit_for_health("nightly");
+        unit.kind = UnitKind::Cron;
+        unit.cron = Some(CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(failed.clone()),
+            recent_runs: vec![failed],
+        });
+
+        let report = explain_unit_health(&unit);
+        assert_eq!(report.health, UnitHealth::Failing);
+        assert!(report.description.contains("boom"));
+    }
+
+    #[test]
+    fn explain_unit_health_agrees_with_derive_unit_health() {
+        let mut unit = unit_for_health("svc");
+        unit.process = Some(ProcessRuntime {
+            pid: 9,
+            state: ProcessState::Zombie,
+            user: None,
+        });
+
+        let derived = derive_unit_health(
+            unit.kind,
+            unit.state,
+            unit.intent,
+            unit.lifecycle,
+            unit.process.as_ref(),
+            unit.cron.as_ref(),
+        );
+        assert_eq!(explain_unit_health(&unit).health, derived);
     }
 }

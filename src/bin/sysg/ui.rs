@@ -22,6 +22,7 @@ const GREEN_BOLD: &str = "\x1b[1;32m";
 const GREEN: &str = "\x1b[32m";
 const DARK_GREEN: &str = "\x1b[38;5;22m";
 const BRIGHT_GREEN: &str = "\x1b[92m";
+const LIGHT_BLUE: &str = "\x1b[94m";
 const YELLOW_BOLD: &str = "\x1b[1;33m";
 const RED_BOLD: &str = "\x1b[1;31m";
 const RED: &str = "\x1b[31m";
@@ -550,6 +551,7 @@ fn render_status_interactive(
     config_path: &str,
 ) -> Result<OverallHealth, Box<dyn Error>> {
     let mut selected_row: usize = 0;
+    let mut selected_col: usize = 0;
     let mut units: Vec<UnitStatus> = snapshot
         .units
         .iter()
@@ -578,7 +580,14 @@ fn render_status_interactive(
         return render_status_non_interactive(snapshot, opts, false);
     }
 
-    render_status_table_with_selection(snapshot, &units, opts, selected_row, health)?;
+    render_status_table_with_focus(
+        snapshot,
+        &units,
+        opts,
+        selected_row,
+        selected_col,
+        health,
+    )?;
 
     terminal::enable_raw_mode()?;
 
@@ -597,11 +606,12 @@ fn render_status_interactive(
                             selected_row += 1;
                             terminal::disable_raw_mode()?;
                             clear_terminal_output()?;
-                            render_status_table_with_selection(
+                            render_status_table_with_focus(
                                 snapshot,
                                 &units,
                                 opts,
                                 selected_row,
+                                selected_col,
                                 health,
                             )?;
                             terminal::enable_raw_mode()?;
@@ -615,11 +625,12 @@ fn render_status_interactive(
                             selected_row += 1;
                             terminal::disable_raw_mode()?;
                             clear_terminal_output()?;
-                            render_status_table_with_selection(
+                            render_status_table_with_focus(
                                 snapshot,
                                 &units,
                                 opts,
                                 selected_row,
+                                selected_col,
                                 health,
                             )?;
                             terminal::enable_raw_mode()?;
@@ -639,11 +650,12 @@ fn render_status_interactive(
                             selected_row = new_row;
                             terminal::disable_raw_mode()?;
                             clear_terminal_output()?;
-                            render_status_table_with_selection(
+                            render_status_table_with_focus(
                                 snapshot,
                                 &units,
                                 opts,
                                 selected_row,
+                                selected_col,
                                 health,
                             )?;
                             terminal::enable_raw_mode()?;
@@ -657,11 +669,52 @@ fn render_status_interactive(
                             selected_row = new_row;
                             terminal::disable_raw_mode()?;
                             clear_terminal_output()?;
-                            render_status_table_with_selection(
+                            render_status_table_with_focus(
                                 snapshot,
                                 &units,
                                 opts,
                                 selected_row,
+                                selected_col,
+                                health,
+                            )?;
+                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Right,
+                        ..
+                    } => {
+                        let new_col = (selected_col + 1).min(STATUS_COLUMN_COUNT - 1);
+                        if new_col != selected_col {
+                            selected_col = new_col;
+                            terminal::disable_raw_mode()?;
+                            clear_terminal_output()?;
+                            render_status_table_with_focus(
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                selected_col,
+                                health,
+                            )?;
+                            terminal::enable_raw_mode()?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Left,
+                        ..
+                    } => {
+                        let new_col = selected_col.saturating_sub(1);
+                        if new_col != selected_col {
+                            selected_col = new_col;
+                            terminal::disable_raw_mode()?;
+                            clear_terminal_output()?;
+                            render_status_table_with_focus(
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                selected_col,
                                 health,
                             )?;
                             terminal::enable_raw_mode()?;
@@ -691,6 +744,7 @@ fn render_status_interactive(
                                 &units,
                                 opts,
                                 selected_row,
+                                selected_col,
                                 health,
                             )?;
                         }
@@ -723,6 +777,7 @@ fn render_status_interactive(
                                 &units,
                                 opts,
                                 selected_row,
+                                selected_col,
                                 health,
                             )?;
                         }
@@ -751,6 +806,24 @@ fn render_status_interactive(
                                 &units,
                                 opts,
                                 selected_row,
+                                selected_col,
+                                health,
+                            )?;
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('h') | KeyCode::Char('H'),
+                        ..
+                    } => {
+                        if !units.is_empty() {
+                            let selected_unit = units[selected_row].clone();
+                            run_status_health_view(
+                                &selected_unit,
+                                snapshot,
+                                &units,
+                                opts,
+                                selected_row,
+                                selected_col,
                                 health,
                             )?;
                         }
@@ -776,6 +849,7 @@ fn run_status_child_view(
     units: &[UnitStatus],
     opts: &StatusRenderOptions,
     selected_row: usize,
+    selected_col: usize,
     health: OverallHealth,
 ) -> Result<(), Box<dyn Error>> {
     terminal::disable_raw_mode()?;
@@ -798,18 +872,166 @@ fn run_status_child_view(
     }
 
     clear_terminal_output()?;
-    render_status_table_with_selection(snapshot, units, opts, selected_row, health)?;
+    render_status_table_with_focus(
+        snapshot,
+        units,
+        opts,
+        selected_row,
+        selected_col,
+        health,
+    )?;
     terminal::enable_raw_mode()?;
 
     Ok(())
 }
 
-/// Renders the status table with a selected row highlighted.
-fn render_status_table_with_selection(
+/// Returns the wrap width for the health report: at most 80 columns, and no
+/// more than 80% of the terminal width on narrower terminals.
+fn health_report_wrap_width() -> usize {
+    let terminal_width = terminal_size::terminal_size()
+        .map(|(width, _)| width.0 as usize)
+        .unwrap_or(80);
+    let soft = terminal_width.saturating_mul(8).saturating_div(10);
+    soft.clamp(20, 80)
+}
+
+/// Word-wraps a paragraph to `width` columns, preserving existing line breaks
+/// and never splitting a single word across lines.
+fn wrap_paragraph(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for raw_line in text.split('\n') {
+        if raw_line.trim().is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let indent: String = raw_line
+            .chars()
+            .take_while(|ch| *ch == ' ')
+            .collect();
+        let mut current = indent.clone();
+        for word in raw_line.split_whitespace() {
+            let candidate = if current.trim().is_empty() {
+                format!("{indent}{word}")
+            } else {
+                format!("{current} {word}")
+            };
+            if visible_length(&candidate) > width && current.trim() != "" {
+                lines.push(current);
+                current = format!("{indent}{word}");
+            } else {
+                current = candidate;
+            }
+        }
+        lines.push(current);
+    }
+    lines
+}
+
+/// Renders a README-style health report for a single unit, explaining why it
+/// holds its current health and how to address it.
+fn render_health_report(unit: &UnitStatus, no_color: bool) -> Vec<String> {
+    let report = explain_unit_health(unit);
+    let width = health_report_wrap_width();
+    let mut lines = Vec::new();
+
+    lines.push(colorize(
+        &format!("# {}", report.title),
+        BRIGHT_WHITE,
+        no_color,
+    ));
+    lines.push(String::new());
+
+    let severity_color = severity_color(report.severity);
+    lines.push(format!(
+        "{}  {}",
+        colorize("Severity:", BRIGHT_WHITE, no_color),
+        colorize(
+            &format!(
+                "{}/10 ({})",
+                report.severity,
+                unit_health_label(report.health)
+            ),
+            severity_color,
+            no_color,
+        ),
+    ));
+    lines.push(String::new());
+
+    for line in wrap_paragraph(&format!("TLDR: {}", report.tldr), width) {
+        lines.push(line);
+    }
+    lines.push(String::new());
+
+    lines.push(colorize("## Description", CYAN, no_color));
+    lines.push(String::new());
+    for line in wrap_paragraph(&report.description, width) {
+        lines.push(line);
+    }
+    lines.push(String::new());
+
+    lines.push(colorize("## Recommended Fix", CYAN, no_color));
+    lines.push(String::new());
+    for line in wrap_paragraph(&report.recommended_fix, width) {
+        lines.push(line);
+    }
+
+    lines
+}
+
+/// Maps a 0-10 severity score onto a display color.
+fn severity_color(severity: u8) -> &'static str {
+    match severity {
+        0..=2 => GREEN_BOLD,
+        3..=5 => ORANGE,
+        _ => RED_BOLD,
+    }
+}
+
+/// Runs the health report view in place, then returns to the status table.
+fn run_status_health_view(
+    unit: &UnitStatus,
+    snapshot: &StatusSnapshot,
+    units: &[UnitStatus],
+    opts: &StatusRenderOptions,
+    selected_row: usize,
+    selected_col: usize,
+    health: OverallHealth,
+) -> Result<(), Box<dyn Error>> {
+    terminal::disable_raw_mode()?;
+    clear_terminal_output()?;
+
+    println!();
+    for line in render_health_report(unit, opts.no_color) {
+        println!("{line}");
+    }
+    println!("\n\nPress any key to return to status view...");
+
+    terminal::enable_raw_mode()?;
+    let _ = event::read();
+    terminal::disable_raw_mode()?;
+
+    clear_terminal_output()?;
+    render_status_table_with_focus(
+        snapshot,
+        units,
+        opts,
+        selected_row,
+        selected_col,
+        health,
+    )?;
+    terminal::enable_raw_mode()?;
+
+    Ok(())
+}
+
+/// Renders the status table with a selected row and a focused cell highlighted.
+fn render_status_table_with_focus(
     _snapshot: &StatusSnapshot,
     units: &[UnitStatus],
     opts: &StatusRenderOptions,
     selected_row: usize,
+    selected_col: usize,
     health: OverallHealth,
 ) -> Result<(), Box<dyn Error>> {
     let terminal_width = detect_target_table_width(120);
@@ -901,11 +1123,14 @@ fn render_status_table_with_selection(
 
         for (index, unit) in group_units {
             if *index == selected_row {
-                print!("\x1b[47m\x1b[30m");
-                let row_content =
-                    format_unit_row_with_project_indent(unit, columns, true, render_groups);
-                print!("{}", row_content);
-                println!("\x1b[0m");
+                let row_content = format_unit_row_with_project_indent_focus(
+                    unit,
+                    columns,
+                    opts.no_color,
+                    render_groups,
+                    Some(selected_col),
+                );
+                println!("{}", row_content);
             } else {
                 let row_content = format_unit_row_with_project_indent(
                     unit,
@@ -925,7 +1150,7 @@ fn render_status_table_with_selection(
     }
 
     println!(
-        "\nTab/↓\x1b[41;97m Next \x1b[0m  Shift+Tab/↑\x1b[41;97m Prev \x1b[0m  Enter\x1b[41;97m Inspect \x1b[0m  L\x1b[41;97m Logs \x1b[0m  q/ESC\x1b[41;97m Quit \x1b[0m"
+        "\n↑↓\x1b[41;97m Row \x1b[0m  ←→\x1b[41;97m Cell \x1b[0m  i\x1b[41;97m Inspect \x1b[0m  h\x1b[41;97m Why \x1b[0m  L\x1b[41;97m Logs \x1b[0m  R\x1b[41;97m Restart \x1b[0m  q/ESC\x1b[41;97m Quit \x1b[0m"
     );
 
     Ok(())
@@ -1816,17 +2041,33 @@ fn format_unit_row_with_project_indent(
     no_color: bool,
     indent: bool,
 ) -> String {
+    format_unit_row_with_project_indent_focus(unit, columns, no_color, indent, None)
+}
+
+/// Formats a unit row with optional project indent and a focused cell.
+fn format_unit_row_with_project_indent_focus(
+    unit: &UnitStatus,
+    columns: &[Column],
+    no_color: bool,
+    indent: bool,
+    focused_col: Option<usize>,
+) -> String {
     if !indent {
-        return format_unit_row(unit, columns, no_color);
+        return format_unit_row_focus(unit, columns, no_color, focused_col);
     }
 
     let mut indented = unit.clone();
     indented.name = format!("  {}", unit.name);
-    format_unit_row(&indented, columns, no_color)
+    format_unit_row_focus(&indented, columns, no_color, focused_col)
 }
 
-/// Formats unit row.
-fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> String {
+/// Formats a unit row, optionally marking one cell as focused.
+fn format_unit_row_focus(
+    unit: &UnitStatus,
+    columns: &[Column],
+    no_color: bool,
+    focused_col: Option<usize>,
+) -> String {
     let kind_label = match unit.kind {
         UnitKind::Service => "srvc",
         UnitKind::Cron => "cron",
@@ -1894,7 +2135,7 @@ fn format_unit_row(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Str
         health_label,
     ];
 
-    format_row(&values, columns)
+    format_row_with_focus(&values, columns, focused_col)
 }
 
 /// Handles depth tint color.
@@ -2195,11 +2436,27 @@ fn format_spawn_exit(exit: Option<&SpawnedExit>) -> String {
 
 /// Formats row.
 fn format_row(values: &[String], columns: &[Column]) -> String {
+    format_row_with_focus(values, columns, None)
+}
+
+/// Formats a row, optionally rendering one cell in high-contrast reverse video
+/// to mark it as the focused cell during interactive navigation.
+fn format_row_with_focus(
+    values: &[String],
+    columns: &[Column],
+    focused_col: Option<usize>,
+) -> String {
     let mut row = String::from('│');
-    for (value, column) in values.iter().zip(columns.iter()) {
+    for (index, (value, column)) in values.iter().zip(columns.iter()).enumerate() {
         let sanitized = sanitize_table_cell(value);
         row.push(' ');
-        row.push_str(&ansi_pad(&sanitized, column.width, column.align));
+        if focused_col == Some(index) {
+            let plain = strip_ansi(&sanitized);
+            let padded = ansi_pad(&plain, column.width, column.align);
+            row.push_str(&format!("\x1b[7m{padded}\x1b[0m"));
+        } else {
+            row.push_str(&ansi_pad(&sanitized, column.width, column.align));
+        }
         row.push(' ');
         row.push('│');
     }
@@ -3274,7 +3531,10 @@ fn collect_inspect_lines(
                             .with_timezone(&Local)
                             .format("%Y-%m-%d %H:%M:%S")
                             .to_string(),
-                        status: format_inspect_cron_status(run.status.as_ref()),
+                        status: format_inspect_cron_status(
+                            run.status.as_ref(),
+                            opts.no_color,
+                        ),
                         user: run.user.clone().unwrap_or_else(|| "-".to_string()),
                         pid: run
                             .pid
@@ -3402,15 +3662,24 @@ struct InspectCronRunRow {
     command: String,
 }
 
-fn format_inspect_cron_status(status: Option<&CronExecutionStatus>) -> String {
+fn format_inspect_cron_status(
+    status: Option<&CronExecutionStatus>,
+    no_color: bool,
+) -> String {
     match status {
-        Some(CronExecutionStatus::Success) => "success".to_string(),
-        Some(CronExecutionStatus::Failed(reason)) if reason.trim().is_empty() => {
-            "failed".to_string()
+        Some(CronExecutionStatus::Success) => {
+            colorize("success", BRIGHT_GREEN, no_color)
         }
-        Some(CronExecutionStatus::Failed(reason)) => format!("failed: {reason}"),
-        Some(CronExecutionStatus::OverlapError) => "overlap".to_string(),
-        None => "running".to_string(),
+        Some(CronExecutionStatus::Failed(reason)) if reason.trim().is_empty() => {
+            colorize("failed", RED_BOLD, no_color)
+        }
+        Some(CronExecutionStatus::Failed(reason)) => {
+            colorize(&format!("failed: {reason}"), RED_BOLD, no_color)
+        }
+        Some(CronExecutionStatus::OverlapError) => {
+            colorize("overlap", YELLOW, no_color)
+        }
+        None => colorize("running", LIGHT_BLUE, no_color),
     }
 }
 
