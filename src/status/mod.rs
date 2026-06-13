@@ -1423,10 +1423,7 @@ fn derive_unit_health(
             return UnitHealth::Idle;
         }
         Some(ServiceLifecycleStatus::ExitedSuccessfully) => {
-            if matches!(intent, UnitIntent::Serve) {
-                return UnitHealth::Warn;
-            }
-            return UnitHealth::Idle;
+            return UnitHealth::Healthy;
         }
         None => {}
     }
@@ -1709,33 +1706,14 @@ running, so this is an acceptable resting state."
             };
         }
         Some(ServiceLifecycleStatus::ExitedSuccessfully) => {
-            if matches!(unit.intent, UnitIntent::Serve) {
-                return HealthReport {
-                    health: UnitHealth::Warn,
-                    severity: 4,
-                    title: format!("'{name}' exited though it should keep serving"),
-                    tldr: "A long-running service exited cleanly but is now down."
-                        .to_string(),
-                    description: format!(
-                        "'{name}' has intent 'Serve' but exited successfully and is no \
-longer running. A clean exit is not an error, yet a service meant to stay \
-available should not have stopped on its own."
-                    ),
-                    recommended_fix: format!(
-                        "Restart it so it stays available:\n\n    {restart}\n\nIf this unit \
-is really one-shot, set its intent to 'Once' so systemg stops warning about it."
-                    ),
-                };
-            }
             return HealthReport {
-                health: UnitHealth::Idle,
-                severity: 1,
+                health: UnitHealth::Healthy,
+                severity: 0,
                 title: format!("'{name}' completed successfully"),
-                tldr: "The one-shot unit finished its work and exited cleanly."
-                    .to_string(),
+                tldr: "The unit exited cleanly with status 0.".to_string(),
                 description: format!(
-                    "'{name}' ran to completion and exited successfully. For a one-shot \
-unit this is the expected end state."
+                    "'{name}' ran to completion and exited successfully. A clean exit \
+does not require operator action."
                 ),
                 recommended_fix: "No action needed.".to_string(),
             };
@@ -3261,7 +3239,7 @@ services:
     }
 
     #[test]
-    fn derive_unit_health_for_completed_oneshot_is_idle() {
+    fn derive_unit_health_for_completed_oneshot_is_healthy() {
         let health = derive_unit_health(
             UnitKind::Service,
             UnitState::Done,
@@ -3271,7 +3249,21 @@ services:
             None,
         );
 
-        assert_eq!(health, UnitHealth::Idle);
+        assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn derive_unit_health_for_completed_serve_service_is_healthy() {
+        let health = derive_unit_health(
+            UnitKind::Service,
+            UnitState::Done,
+            UnitIntent::Serve,
+            Some(ServiceLifecycleStatus::ExitedSuccessfully),
+            None,
+            None,
+        );
+
+        assert_eq!(health, UnitHealth::Healthy);
     }
 
     fn unit_for_health(name: &str) -> UnitStatus {
@@ -3337,6 +3329,23 @@ services:
         assert_eq!(report.health, UnitHealth::Failing);
         assert!(report.severity >= 7);
         assert!(report.description.contains("exited with code 2"));
+    }
+
+    #[test]
+    fn explain_unit_health_for_successful_serve_exit_is_healthy() {
+        let mut unit = unit_for_health("worker");
+        unit.intent = UnitIntent::Serve;
+        unit.lifecycle = Some(ServiceLifecycleStatus::ExitedSuccessfully);
+        unit.state = UnitState::Done;
+        unit.last_exit = Some(ExitMetadata {
+            exit_code: Some(0),
+            signal: None,
+        });
+
+        let report = explain_unit_health(&unit);
+        assert_eq!(report.health, UnitHealth::Healthy);
+        assert_eq!(report.severity, 0);
+        assert!(report.tldr.contains("status 0"));
     }
 
     #[test]

@@ -106,7 +106,7 @@ services:
     );
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
-    assert_eq!(payload["overall_health"], "warn");
+    assert_eq!(payload["overall_health"], "healthy");
     assert!(
         output.stderr.is_empty(),
         "status json output should not emit progress noise on stderr in non-interactive mode"
