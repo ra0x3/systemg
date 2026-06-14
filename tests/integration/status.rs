@@ -625,7 +625,7 @@ services:
     assert_eq!(unit["lifecycle"].as_str(), Some("exited_successfully"));
     assert_eq!(unit["state"].as_str(), Some("done"));
     assert_eq!(unit["intent"].as_str(), Some("once"));
-    assert_eq!(unit["health"].as_str(), Some("idle"));
+    assert_eq!(unit["health"].as_str(), Some("healthy"));
     assert_eq!(
         unit["last_exit"]["exit_code"].as_i64(),
         Some(0),
