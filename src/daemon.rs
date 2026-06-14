@@ -2829,6 +2829,7 @@ impl Daemon {
 
         let order = self.config.service_start_order()?;
         let mut restarted_services = Vec::new();
+        let mut completed_services = HashSet::new();
 
         for service_name in order {
             let service = match self.config.services.get(&service_name) {
@@ -2857,16 +2858,26 @@ impl Daemon {
 
             match strategy {
                 DeploymentStrategy::Rolling => {
-                    self.rolling_restart_service(&service_name, service)?;
+                    if matches!(
+                        self.rolling_restart_service(&service_name, service)?,
+                        ServiceReadyState::CompletedSuccess
+                    ) {
+                        completed_services.insert(service_name.clone());
+                    }
                 }
                 DeploymentStrategy::Immediate => {
-                    self.immediate_restart_service(&service_name, service)?;
+                    if matches!(
+                        self.immediate_restart_service(&service_name, service)?,
+                        ServiceReadyState::CompletedSuccess
+                    ) {
+                        completed_services.insert(service_name.clone());
+                    }
                 }
             }
         }
 
         self.spawn_monitor_thread()?;
-        self.verify_services_running(&restarted_services)?;
+        self.verify_services_running(&restarted_services, &completed_services)?;
         info!("All services restarted successfully.");
         Ok(())
     }
@@ -2886,16 +2897,20 @@ impl Daemon {
             .and_then(|s| DeploymentStrategy::from_str(s).ok())
             .unwrap_or_default();
 
-        match strategy {
-            DeploymentStrategy::Rolling => {
-                self.rolling_restart_service(name, service)?;
-            }
+        let start_state = match strategy {
+            DeploymentStrategy::Rolling => self.rolling_restart_service(name, service)?,
             DeploymentStrategy::Immediate => {
-                self.immediate_restart_service(name, service)?;
+                self.immediate_restart_service(name, service)?
             }
-        }
+        };
 
-        self.verify_services_running(&[name.to_string()])?;
+        let completed_services =
+            if matches!(start_state, ServiceReadyState::CompletedSuccess) {
+                HashSet::from([name.to_string()])
+            } else {
+                HashSet::new()
+            };
+        self.verify_services_running(&[name.to_string()], &completed_services)?;
 
         Ok(())
     }
@@ -2906,7 +2921,7 @@ impl Daemon {
         &self,
         name: &str,
         service: &ServiceConfig,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
         if let Some(blue_green) = service
             .deployment
             .as_ref()
@@ -3019,7 +3034,7 @@ impl Daemon {
             self.terminate_service(name, detached)?;
         }
 
-        Ok(())
+        Ok(start_state)
     }
 
     /// Performs a blue/green restart by launching a candidate on the inactive slot, switching traffic,
@@ -3029,7 +3044,7 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
         blue_green: &BlueGreenDeploymentConfig,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
         info!("Performing blue/green rolling restart for service: {name}");
 
         if blue_green.slots.len() != 2 {
@@ -3161,7 +3176,7 @@ impl Daemon {
         }
 
         self.write_blue_green_active_index(name, blue_green, candidate_idx)?;
-        Ok(())
+        Ok(start_state)
     }
 
     /// Performs an immediate restart by stopping and starting the service sequentially.
@@ -3169,7 +3184,7 @@ impl Daemon {
         &self,
         name: &str,
         service: &ServiceConfig,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
         info!("Performing immediate restart for service: {name}");
 
         self.stop_service_with_intent(name, false)?;
@@ -3179,7 +3194,7 @@ impl Daemon {
             info!("Service '{name}' completed successfully immediately after restart.");
         }
 
-        Ok(())
+        Ok(start_state)
     }
 
     /// Runs the configured pre-start command prior to launching a replacement service instance.
@@ -3639,10 +3654,15 @@ impl Daemon {
     fn verify_services_running(
         &self,
         services: &[String],
+        completed_services: &HashSet<String>,
     ) -> Result<(), ProcessManagerError> {
         let mut failed = Vec::new();
 
         for service_name in services {
+            if completed_services.contains(service_name) {
+                continue;
+            }
+
             let Some(service_cfg) = self.config.services.get(service_name) else {
                 continue;
             };
@@ -4947,6 +4967,30 @@ fi
                 other => panic!("unexpected error: {other:?}"),
             }
 
+            daemon.shutdown_monitor();
+        });
+    }
+
+    #[test]
+    fn restart_services_allows_successful_one_shot_without_restart_policy() {
+        with_temp_home(|dir| {
+            fs::write(dir.join("check.sh"), "exit 0\n").unwrap();
+            fs::write(
+                dir.join("app.sh"),
+                "trap 'exit 0' TERM\nwhile true; do sleep 1; done\n",
+            )
+            .unwrap();
+
+            let mut services = HashMap::new();
+            services.insert("check".into(), make_service("sh check.sh", &[]));
+            services.insert("app".into(), make_service("sh app.sh", &["check"]));
+
+            let daemon = create_daemon(dir, services);
+            daemon.start_services().unwrap();
+
+            daemon.restart_services().unwrap();
+
+            daemon.stop_services().ok();
             daemon.shutdown_monitor();
         });
     }
