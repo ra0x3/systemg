@@ -90,6 +90,143 @@ pub fn get_service_log_path(service: &str) -> PathBuf {
     resolve_combined_log_path(service)
 }
 
+/// Returns the path to the supervisor's own log file.
+pub fn supervisor_log_path() -> PathBuf {
+    runtime::log_dir().join("supervisor.log")
+}
+
+/// Summary of the files removed by a prune run.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PruneSummary {
+    /// Number of log files removed.
+    pub removed_files: usize,
+    /// Total bytes reclaimed by the prune.
+    pub reclaimed_bytes: u64,
+}
+
+/// Parses a human-friendly byte size such as `500MB`, `2g`, or `1048576`.
+pub fn parse_byte_size(value: &str) -> Result<u64, LogsManagerError> {
+    let trimmed = value.trim();
+    let split = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(split);
+    let number: f64 = number
+        .parse()
+        .map_err(|_| LogsManagerError::InvalidPruneArg(value.to_string()))?;
+
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" => 1024.0,
+        "m" | "mb" => 1024.0 * 1024.0,
+        "g" | "gb" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return Err(LogsManagerError::InvalidPruneArg(value.to_string())),
+    };
+
+    Ok((number * multiplier) as u64)
+}
+
+/// Parses a human-friendly duration such as `7d`, `12h`, or `30m` into seconds.
+pub fn parse_age_seconds(value: &str) -> Result<u64, LogsManagerError> {
+    let trimmed = value.trim();
+    let split = trimmed
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(split);
+    let number: u64 = number
+        .parse()
+        .map_err(|_| LogsManagerError::InvalidPruneArg(value.to_string()))?;
+
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        "w" => 7 * 24 * 60 * 60,
+        _ => return Err(LogsManagerError::InvalidPruneArg(value.to_string())),
+    };
+
+    Ok(number * multiplier)
+}
+
+/// Returns whether a file is a rotated backup (e.g. `supervisor.log.2`).
+fn is_rotated_backup(file_name: &str) -> bool {
+    file_name.rsplit_once('.').is_some_and(|(stem, suffix)| {
+        stem.ends_with(".log") && suffix.parse::<usize>().is_ok()
+    })
+}
+
+/// Prunes rotated log files by age and total size, keeping active `.log` files intact.
+pub fn prune_logs(
+    max_size: Option<&str>,
+    max_age: Option<&str>,
+) -> Result<PruneSummary, LogsManagerError> {
+    let max_bytes = max_size.map(parse_byte_size).transpose()?;
+    let max_age_secs = max_age.map(parse_age_seconds).transpose()?;
+
+    let log_dir = runtime::log_dir();
+    if !log_dir.exists() {
+        return Ok(PruneSummary::default());
+    }
+
+    let mut backups: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    for entry in fs::read_dir(&log_dir)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_rotated_backup(file_name) {
+            continue;
+        }
+        let metadata = fs::metadata(&path)?;
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        backups.push((path, metadata.len(), modified));
+    }
+
+    backups.sort_by_key(|(_, _, modified)| *modified);
+
+    let mut summary = PruneSummary::default();
+
+    if let Some(max_age_secs) = max_age_secs {
+        let now = std::time::SystemTime::now();
+        backups.retain(|(path, len, modified)| {
+            let age = now
+                .duration_since(*modified)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if age > max_age_secs {
+                if fs::remove_file(path).is_ok() {
+                    summary.removed_files += 1;
+                    summary.reclaimed_bytes += len;
+                }
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    if let Some(max_bytes) = max_bytes {
+        let mut total: u64 = backups.iter().map(|(_, len, _)| *len).sum();
+        for (path, len, _) in &backups {
+            if total <= max_bytes {
+                break;
+            }
+            if fs::remove_file(path).is_ok() {
+                summary.removed_files += 1;
+                summary.reclaimed_bytes += len;
+                total = total.saturating_sub(*len);
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
 /// Returns the legacy path to the log file for a given service and kind.
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     resolve_log_path(service, kind)
@@ -506,14 +643,79 @@ impl ActiveLogFile {
     }
 }
 
+/// Shared, rotation-aware writer for the supervisor's own tracing output.
+#[derive(Clone)]
+pub struct RotatingLogWriter {
+    inner: Arc<Mutex<ActiveLogFile>>,
+}
+
+impl RotatingLogWriter {
+    /// Opens a rotating writer for the supervisor log at `path`.
+    pub fn open(path: PathBuf, settings: EffectiveLogsConfig) -> std::io::Result<Self> {
+        Ok(Self {
+            inner: Arc::new(Mutex::new(ActiveLogFile::open(path, settings)?)),
+        })
+    }
+}
+
+impl Write for RotatingLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let payload = truncate_log_payload(buf);
+        let mut file = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("supervisor log writer poisoned"))?;
+        file.write_line(&payload)?;
+        file.flush()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut file = self
+            .inner
+            .lock()
+            .map_err(|_| std::io::Error::other("supervisor log writer poisoned"))?;
+        file.flush()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for RotatingLogWriter {
+    type Writer = RotatingLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Maximum size, in bytes, of a single persisted log event before it is truncated.
+const MAX_LOG_LINE_BYTES: usize = 16 * 1024;
+
 /// Returns the current capture timestamp for persisted service output.
 fn capture_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
+/// Truncates an oversized log payload, appending a marker noting the dropped byte count.
+fn truncate_log_payload(line: &[u8]) -> Vec<u8> {
+    if line.len() <= MAX_LOG_LINE_BYTES {
+        return line.to_vec();
+    }
+
+    let dropped = line.len() - MAX_LOG_LINE_BYTES;
+    let mut boundary = MAX_LOG_LINE_BYTES;
+    while boundary > 0 && (line[boundary] & 0b1100_0000) == 0b1000_0000 {
+        boundary -= 1;
+    }
+
+    let mut truncated = line[..boundary].to_vec();
+    truncated.extend_from_slice(format!("…[truncated {dropped} bytes]").as_bytes());
+    truncated
+}
+
 /// Formats a captured stdout/stderr line.
 fn format_captured_log_line(kind: &str, line: &[u8]) -> Vec<u8> {
-    let line = String::from_utf8_lossy(line);
+    let line = truncate_log_payload(line);
+    let line = String::from_utf8_lossy(&line);
     format!("{} {} {}\n", capture_timestamp(), kind, line).into_bytes()
 }
 
@@ -2080,6 +2282,132 @@ mod tests {
             .expect("rotated log exists");
         assert_eq!(rotated, "first\n");
         assert!(active.contains(" stdout second\n"));
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn truncate_log_payload_leaves_small_lines_untouched() {
+        let line = b"short line";
+        assert_eq!(truncate_log_payload(line), line);
+    }
+
+    #[test]
+    fn truncate_log_payload_caps_oversized_lines() {
+        let line = vec![b'a'; MAX_LOG_LINE_BYTES + 4096];
+        let truncated = truncate_log_payload(&line);
+        assert!(truncated.len() < line.len());
+        let text = String::from_utf8(truncated).expect("valid utf8");
+        assert!(text.contains("[truncated 4096 bytes]"));
+    }
+
+    #[test]
+    fn parse_byte_size_handles_units() {
+        assert_eq!(parse_byte_size("1024").unwrap(), 1024);
+        assert_eq!(parse_byte_size("1kb").unwrap(), 1024);
+        assert_eq!(parse_byte_size("2MB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_byte_size("1g").unwrap(), 1024 * 1024 * 1024);
+        assert!(parse_byte_size("nonsense").is_err());
+    }
+
+    #[test]
+    fn parse_age_seconds_handles_units() {
+        assert_eq!(parse_age_seconds("30").unwrap(), 30);
+        assert_eq!(parse_age_seconds("5m").unwrap(), 300);
+        assert_eq!(parse_age_seconds("2h").unwrap(), 7200);
+        assert_eq!(parse_age_seconds("7d").unwrap(), 7 * 24 * 60 * 60);
+        assert!(parse_age_seconds("12x").is_err());
+    }
+
+    #[test]
+    fn is_rotated_backup_matches_numbered_files_only() {
+        assert!(is_rotated_backup("supervisor.log.1"));
+        assert!(is_rotated_backup("api.log.12"));
+        assert!(!is_rotated_backup("api.log"));
+        assert!(!is_rotated_backup("api.log.bak"));
+    }
+
+    #[test]
+    fn prune_logs_trims_backups_by_size() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        let log_dir = crate::runtime::log_dir();
+        fs::create_dir_all(&log_dir).unwrap();
+        fs::write(log_dir.join("svc.log"), vec![b'a'; 100]).unwrap();
+        fs::write(log_dir.join("svc.log.1"), vec![b'a'; 100]).unwrap();
+        fs::write(log_dir.join("svc.log.2"), vec![b'a'; 100]).unwrap();
+
+        let summary = super::prune_logs(Some("150"), None).unwrap();
+
+        assert!(summary.removed_files >= 1);
+        assert!(log_dir.join("svc.log").exists());
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn rotating_log_writer_rotates_supervisor_output() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+
+        let path = supervisor_log_path();
+        fs::create_dir_all(path.parent().expect("log parent")).unwrap();
+        let settings = EffectiveLogsConfig {
+            sink: crate::config::LogSink::File,
+            max_bytes: 8,
+            max_files: 1,
+        };
+        let mut writer = RotatingLogWriter::open(path.clone(), settings).unwrap();
+        writer.write_all(b"first\n").unwrap();
+        writer.write_all(b"second\n").unwrap();
+        writer.flush().unwrap();
+
+        let active = fs::read_to_string(&path).expect("active log exists");
+        let rotated =
+            fs::read_to_string(rotated_log_path(&path, 1)).expect("rotated log exists");
+        assert_eq!(rotated, "first\n");
+        assert_eq!(active, "second\n");
 
         unsafe {
             if let Some(home) = original_home {

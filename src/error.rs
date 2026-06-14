@@ -196,4 +196,8 @@ pub enum LogsManagerError {
     /// Error when the log file is unavailable.
     #[error("Unsupported platform for log tailing")]
     UnsupportedPlatform,
+
+    /// Error parsing a `logs prune` size or age argument.
+    #[error("Invalid prune argument: {0}")]
+    InvalidPruneArg(String),
 }
