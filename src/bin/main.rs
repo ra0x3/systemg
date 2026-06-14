@@ -30,13 +30,13 @@ use sysinfo::{Pid as SysPid, ProcessRefreshKind, ProcessesToUpdate, System, User
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
     cli::{Cli, Commands, parse_args},
-    config::load_config,
+    config::{EffectiveLogsConfig, load_config},
     cron::{CronExecutionStatus, CronStateFile},
     daemon::{Daemon, PidFile, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
     logs::{
-        LogManager, LogSection, get_service_log_path, resolve_log_path,
-        write_log_section_header,
+        LogManager, LogSection, RotatingLogWriter, get_service_log_path, prune_logs,
+        resolve_log_path, supervisor_log_path, write_log_section_header,
     },
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
@@ -771,12 +771,29 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
         Commands::Logs {
             config,
             purge,
+            prune,
+            max_size,
+            max_age,
             service,
             project,
             lines,
             kind,
             stream,
         } => {
+            if prune {
+                if max_size.is_none() && max_age.is_none() {
+                    eprintln!(
+                        "Specify --max-size and/or --max-age to prune rotated logs."
+                    );
+                    process::exit(2);
+                }
+                let summary = prune_logs(max_size.as_deref(), max_age.as_deref())?;
+                println!(
+                    "Pruned {} rotated log file(s), reclaimed {} bytes.",
+                    summary.removed_files, summary.reclaimed_bytes
+                );
+                return Ok(());
+            }
             let effective_config = match load_config(Some(&config)) {
                 Ok(_) => config.clone(),
                 Err(_) => {
@@ -2818,14 +2835,13 @@ fn init_logging(args: &Cli, use_file: bool) {
         if let Err(err) = runtime::create_private_dir(&log_dir) {
             eprintln!("Failed to create log directory {:?}: {}", log_dir, err);
         }
-        let log_path = log_dir.join("supervisor.log");
+        let log_path = supervisor_log_path();
 
-        let file = match fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(file) => file,
+        let writer = match RotatingLogWriter::open(
+            log_path.clone(),
+            EffectiveLogsConfig::default(),
+        ) {
+            Ok(writer) => writer,
             Err(e) => {
                 eprintln!("Failed to open supervisor log file {:?}: {}", log_path, e);
                 let _ = tracing_subscriber::fmt()
@@ -2838,7 +2854,7 @@ fn init_logging(args: &Cli, use_file: bool) {
 
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
-            .with_writer(move || file.try_clone().unwrap())
+            .with_writer(writer)
             .with_ansi(false)
             .try_init();
     } else {

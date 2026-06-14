@@ -310,6 +310,18 @@ pub enum Commands {
         #[arg(long)]
         purge: bool,
 
+        /// Prune rotated log backups instead of displaying logs.
+        #[arg(long)]
+        prune: bool,
+
+        /// When pruning, cap total rotated-backup size (e.g. "500MB", "2g").
+        #[arg(long, value_name = "SIZE")]
+        max_size: Option<String>,
+
+        /// When pruning, remove rotated backups older than this (e.g. "7d", "12h").
+        #[arg(long, value_name = "AGE")]
+        max_age: Option<String>,
+
         /// The name of the service whose logs should be displayed (optional).
         #[arg(short, long)]
         service: Option<String>,

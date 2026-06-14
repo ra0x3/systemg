@@ -21,6 +21,9 @@ $ sysg logs
 |-------|------|-------------|
 | `-c` | `--config` | Path to configuration file |
 | `-` | `--purge` | Reset log files instead of displaying them |
+| `-` | `--prune` | Delete rotated log backups instead of displaying logs (requires `--max-size` and/or `--max-age`) |
+| `-` | `--max-size` | When pruning, cap total rotated-backup size (e.g. `500MB`, `2g`) |
+| `-` | `--max-age` | When pruning, remove rotated backups older than this (e.g. `7d`, `12h`) |
 | `-s` | `--service` | The name of the service whose logs should be displayed (optional) |
 | `-p` | `--project` | Filter logs by stable project id |
 | `-l` | `--lines` | Number of lines to show (default: 50) |
@@ -98,11 +101,38 @@ $ sysg logs --service api --lines 200 --stream 2
 
 In stream mode, each refresh prints a new snapshot of the latest `--lines` entries.
 
+### Prune rotated backups
+
+```sh
+$ sysg logs --prune --max-size 500MB --max-age 7d
+```
+
+Deletes rotated backup files (`{name}.log.1`, `{name}.log.2`, …) older than
+`--max-age` and then trims the remaining backups oldest-first until their total
+size is under `--max-size`. Active `.log` files are never touched. At least one
+of `--max-size` or `--max-age` is required.
+
 ## Log files
 
 Logs are stored in `~/.local/share/systemg/logs/`:
 - `{service}.log` - Canonical stdout+stderr stream in capture order
 - `{service}_stdout.log` / `{service}_stderr.log` - Legacy split-stream files from older systemg versions, still read as a fallback when no canonical log exists
+- `supervisor.log` - systemg's own log output
+
+### Rotation and retention
+
+Every active log file (service logs and `supervisor.log`) is size-capped. When
+an active file would exceed `logs.max_bytes` (default 10&nbsp;MiB) it is rotated
+to `{name}.log.1`, older backups shift up, and at most `logs.max_files`
+(default 5) numbered backups are retained. A single log event larger than
+16&nbsp;KiB is truncated with a `…[truncated N bytes]` marker before it is
+written, so one oversized payload cannot blow past the size cap. Tune the caps
+with the `logs.max_bytes` / `logs.max_files` config keys, globally or per
+service.
+
+systemg's own verbosity is `info` by default and honors per-crate `RUST_LOG`
+directives (for example `RUST_LOG=mycrate=debug,noisycrate=warn`), so enabling
+debug for one target does not pull in dependency-wide debug noise.
 
 Each captured service line is stored with a systemg capture timestamp and stream
 label:
