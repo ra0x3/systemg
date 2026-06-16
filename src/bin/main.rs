@@ -1139,11 +1139,6 @@ mod tests {
                 align: Alignment::Left,
             },
             Column {
-                title: "INTENT",
-                width: 6,
-                align: Alignment::Left,
-            },
-            Column {
                 title: "USER",
                 width: 8,
                 align: Alignment::Left,
@@ -1252,11 +1247,6 @@ mod tests {
             Column {
                 title: "STATE",
                 width: 8,
-                align: Alignment::Left,
-            },
-            Column {
-                title: "INTENT",
-                width: 6,
                 align: Alignment::Left,
             },
             Column {
@@ -1485,11 +1475,6 @@ mod tests {
                 align: Alignment::Left,
             },
             Column {
-                title: "INTENT",
-                width: 6,
-                align: Alignment::Left,
-            },
-            Column {
                 title: "USER",
                 width: 8,
                 align: Alignment::Left,
@@ -1585,11 +1570,6 @@ mod tests {
             Column {
                 title: "STATE",
                 width: 7,
-                align: Alignment::Left,
-            },
-            Column {
-                title: "INTENT",
-                width: 6,
                 align: Alignment::Left,
             },
             Column {
@@ -1723,11 +1703,6 @@ mod tests {
             Column {
                 title: "STATE",
                 width: 7,
-                align: Alignment::Left,
-            },
-            Column {
-                title: "INTENT",
-                width: 6,
                 align: Alignment::Left,
             },
             Column {
@@ -1998,14 +1973,14 @@ mod tests {
 
     #[test]
     fn status_widths_fit_terminal_width() {
-        let mut widths = [30, 4, 7, 6, 8, 7, 6, 8, 10, 30, 20, 8];
+        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
         shrink_status_widths_to_fit(&mut widths, 120);
         assert!(status_row_width(&widths) <= 120);
     }
 
     #[test]
     fn status_widths_fit_target_table_width() {
-        let mut widths = [30, 4, 7, 6, 8, 7, 6, 8, 10, 30, 20, 8];
+        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
         let target_width = target_table_width(120);
         shrink_status_widths_to_fit(&mut widths, target_width);
         assert!(status_row_width(&widths) <= target_width);
@@ -2046,7 +2021,7 @@ mod tests {
 
     #[test]
     fn status_width_shrink_priority_preserves_critical_columns() {
-        let mut widths = [30, 4, 7, 6, 8, 7, 6, 8, 10, 30, 20, 8];
+        let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
         let original = widths;
         shrink_status_widths_to_fit(&mut widths, 120);
 
@@ -2085,7 +2060,7 @@ mod tests {
 
     #[test]
     fn status_widths_balance_unit_and_cmd_columns() {
-        let mut widths = [8, 4, 7, 6, 8, 7, 6, 8, 10, 90, 20, 8];
+        let mut widths = [8, 4, 7, 8, 7, 6, 8, 10, 90, 20, 8];
         shrink_status_widths_to_fit(&mut widths, 120);
 
         let diff = widths[STATUS_COL_UNIT].abs_diff(widths[STATUS_COL_CMD]);

@@ -317,25 +317,23 @@ fn detect_target_table_width(default_terminal_width: usize) -> usize {
     target_table_width(terminal_width)
 }
 
-const STATUS_COLUMN_COUNT: usize = 12;
+const STATUS_COLUMN_COUNT: usize = 11;
 const STATUS_COL_UNIT: usize = 0;
 const STATUS_COL_KIND: usize = 1;
 const STATUS_COL_STATE: usize = 2;
-const STATUS_COL_INTENT: usize = 3;
-const STATUS_COL_USER: usize = 4;
-const STATUS_COL_PID: usize = 5;
-const STATUS_COL_CPU: usize = 6;
-const STATUS_COL_RSS: usize = 7;
-const STATUS_COL_UPTIME: usize = 8;
-const STATUS_COL_CMD: usize = 9;
-const STATUS_COL_LAST_EXIT: usize = 10;
-const STATUS_COL_HEALTH: usize = 11;
+const STATUS_COL_USER: usize = 3;
+const STATUS_COL_PID: usize = 4;
+const STATUS_COL_CPU: usize = 5;
+const STATUS_COL_RSS: usize = 6;
+const STATUS_COL_UPTIME: usize = 7;
+const STATUS_COL_CMD: usize = 8;
+const STATUS_COL_LAST_EXIT: usize = 9;
+const STATUS_COL_HEALTH: usize = 10;
 
 const STATUS_COLUMN_TITLES: [&str; STATUS_COLUMN_COUNT] = [
     "UNIT",
     "KIND",
     "STATE",
-    "INTENT",
     "USER",
     "PID",
     "CPU",
@@ -351,7 +349,6 @@ const STATUS_COLUMN_ALIGNS: [Alignment; STATUS_COLUMN_COUNT] = [
     Alignment::Left,
     Alignment::Left,
     Alignment::Left,
-    Alignment::Left,
     Alignment::Right,
     Alignment::Right,
     Alignment::Right,
@@ -362,9 +359,9 @@ const STATUS_COLUMN_ALIGNS: [Alignment; STATUS_COLUMN_COUNT] = [
 ];
 
 const STATUS_SOFT_MIN_WIDTHS: [usize; STATUS_COLUMN_COUNT] =
-    [12, 4, 5, 4, 4, 3, 3, 3, 4, 12, 9, 6];
+    [12, 4, 5, 4, 3, 3, 3, 4, 12, 9, 6];
 const STATUS_SHRINK_PRIORITY: [usize; STATUS_COLUMN_COUNT] =
-    [9, 10, 4, 2, 3, 8, 1, 11, 0, 7, 6, 5];
+    [8, 9, 3, 2, 7, 1, 10, 0, 6, 5, 4];
 const STATUS_UNIT_CMD_MAX_DIFF: usize = 4;
 
 #[cfg(test)]
@@ -474,8 +471,6 @@ fn compute_status_preferred_widths(
         widths[STATUS_COL_KIND] = widths[STATUS_COL_KIND].max(4);
         widths[STATUS_COL_STATE] = widths[STATUS_COL_STATE]
             .max(visible_length(&unit_state_label(unit, no_color)));
-        widths[STATUS_COL_INTENT] = widths[STATUS_COL_INTENT]
-            .max(visible_length(&unit_intent_label(unit.intent, no_color)));
         widths[STATUS_COL_USER] = widths[STATUS_COL_USER].max(visible_length(
             unit.process
                 .as_ref()
@@ -1055,11 +1050,6 @@ fn render_status_table_with_focus(
             align: STATUS_COLUMN_ALIGNS[STATUS_COL_STATE],
         },
         Column {
-            title: "INTENT",
-            width: widths[STATUS_COL_INTENT],
-            align: STATUS_COLUMN_ALIGNS[STATUS_COL_INTENT],
-        },
-        Column {
             title: "USER",
             width: widths[STATUS_COL_USER],
             align: STATUS_COLUMN_ALIGNS[STATUS_COL_USER],
@@ -1233,11 +1223,6 @@ fn render_status_non_interactive(
             title: "STATE",
             width: widths[STATUS_COL_STATE],
             align: STATUS_COLUMN_ALIGNS[STATUS_COL_STATE],
-        },
-        Column {
-            title: "INTENT",
-            width: widths[STATUS_COL_INTENT],
-            align: STATUS_COLUMN_ALIGNS[STATUS_COL_INTENT],
         },
         Column {
             title: "USER",
@@ -2081,7 +2066,6 @@ fn format_unit_row_focus(
     };
 
     let state = unit_state_label(unit, no_color);
-    let intent = unit_intent_label(unit.intent, no_color);
     let user = unit
         .process
         .as_ref()
@@ -2124,7 +2108,6 @@ fn format_unit_row_focus(
         display_name,
         colored_kind_label,
         state,
-        intent,
         user,
         pid,
         cpu_col,
@@ -2394,7 +2377,6 @@ fn format_spawned_child_row(
         child_name,
         kind_label,
         state,
-        "Spawn".to_string(),
         user,
         pid,
         cpu_col,
