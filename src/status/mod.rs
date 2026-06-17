@@ -1385,7 +1385,9 @@ fn derive_unit_health(
                 return UnitHealth::Failing;
             }
             ProcessState::Missing => {
-                return UnitHealth::Warn;
+                if matches!(intent, UnitIntent::Serve) {
+                    return UnitHealth::Warn;
+                }
             }
         }
     }
@@ -1517,23 +1519,25 @@ parent that never calls wait() will keep leaking them."
                 };
             }
             ProcessState::Missing => {
-                return HealthReport {
-                    health: UnitHealth::Warn,
-                    severity: 5,
-                    title: format!("'{name}' has a tracked PID but no process"),
-                    tldr: "systemg expected a running process and could not find it."
-                        .to_string(),
-                    description: format!(
-                        "systemg still holds PID {} for '{name}', but that PID is no \
+                if matches!(unit.intent, UnitIntent::Serve) {
+                    return HealthReport {
+                        health: UnitHealth::Warn,
+                        severity: 5,
+                        title: format!("'{name}' has a tracked PID but no process"),
+                        tldr: "systemg expected a running process and could not find it."
+                            .to_string(),
+                        description: format!(
+                            "systemg still holds PID {} for '{name}', but that PID is no \
 longer present in the process table. The process likely crashed or was killed \
 out from under the supervisor without a clean lifecycle transition.",
-                        runtime.pid
-                    ),
-                    recommended_fix: format!(
-                        "Check why the process vanished, then restart it:\n\n    \
+                            runtime.pid
+                        ),
+                        recommended_fix: format!(
+                            "Check why the process vanished, then restart it:\n\n    \
 {logs}\n    {restart}"
-                    ),
-                };
+                        ),
+                    };
+                }
             }
         }
     }
@@ -3266,6 +3270,79 @@ services:
         assert_eq!(health, UnitHealth::Healthy);
     }
 
+    #[test]
+    fn derive_unit_health_for_missing_cron_pid_defers_to_success() {
+        let summary = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            pid: Some(17165),
+            user: None,
+            command: None,
+            metrics: vec![],
+        };
+        let cron_status = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(summary.clone()),
+            recent_runs: vec![summary],
+        };
+        let runtime = ProcessRuntime {
+            pid: 17165,
+            state: ProcessState::Missing,
+            user: None,
+        };
+
+        let health = derive_unit_health(
+            UnitKind::Cron,
+            UnitState::Done,
+            UnitIntent::Cron,
+            None,
+            Some(&runtime),
+            Some(&cron_status),
+        );
+        assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn derive_unit_health_for_missing_oneshot_pid_defers_to_exit() {
+        let runtime = ProcessRuntime {
+            pid: 17165,
+            state: ProcessState::Missing,
+            user: None,
+        };
+
+        let health = derive_unit_health(
+            UnitKind::Service,
+            UnitState::Done,
+            UnitIntent::Once,
+            Some(ServiceLifecycleStatus::ExitedSuccessfully),
+            Some(&runtime),
+            None,
+        );
+        assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn derive_unit_health_for_missing_serve_pid_is_warn() {
+        let runtime = ProcessRuntime {
+            pid: 17165,
+            state: ProcessState::Missing,
+            user: None,
+        };
+
+        let health = derive_unit_health(
+            UnitKind::Service,
+            UnitState::Lost,
+            UnitIntent::Serve,
+            Some(ServiceLifecycleStatus::Running),
+            Some(&runtime),
+            None,
+        );
+        assert_eq!(health, UnitHealth::Warn);
+    }
+
     fn unit_for_health(name: &str) -> UnitStatus {
         UnitStatus {
             name: name.into(),
@@ -3375,12 +3452,98 @@ services:
     }
 
     #[test]
+    fn explain_unit_health_for_missing_cron_pid_reports_success() {
+        let summary = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            pid: Some(17165),
+            user: None,
+            command: None,
+            metrics: vec![],
+        };
+        let mut unit = unit_for_health("curate_tiktok");
+        unit.kind = UnitKind::Cron;
+        unit.intent = UnitIntent::Cron;
+        unit.process = Some(ProcessRuntime {
+            pid: 17165,
+            state: ProcessState::Missing,
+            user: None,
+        });
+        unit.cron = Some(CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(summary.clone()),
+            recent_runs: vec![summary],
+        });
+
+        let report = explain_unit_health(&unit);
+        assert_eq!(report.health, UnitHealth::Healthy);
+        assert_eq!(report.severity, 0);
+    }
+
+    #[test]
+    fn explain_unit_health_for_missing_serve_pid_explains_warn() {
+        let mut unit = unit_for_health("api");
+        unit.intent = UnitIntent::Serve;
+        unit.process = Some(ProcessRuntime {
+            pid: 17165,
+            state: ProcessState::Missing,
+            user: None,
+        });
+
+        let report = explain_unit_health(&unit);
+        assert_eq!(report.health, UnitHealth::Warn);
+        assert_eq!(report.severity, 5);
+        assert!(report.title.contains("tracked PID but no process"));
+    }
+
+    #[test]
     fn explain_unit_health_agrees_with_derive_unit_health() {
         let mut unit = unit_for_health("svc");
         unit.process = Some(ProcessRuntime {
             pid: 9,
             state: ProcessState::Zombie,
             user: None,
+        });
+
+        let derived = derive_unit_health(
+            unit.kind,
+            unit.state,
+            unit.intent,
+            unit.lifecycle,
+            unit.process.as_ref(),
+            unit.cron.as_ref(),
+        );
+        assert_eq!(explain_unit_health(&unit).health, derived);
+    }
+
+    #[test]
+    fn explain_unit_health_agrees_for_missing_cron_pid() {
+        let summary = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            pid: Some(17165),
+            user: None,
+            command: None,
+            metrics: vec![],
+        };
+        let mut unit = unit_for_health("curate_tiktok");
+        unit.kind = UnitKind::Cron;
+        unit.intent = UnitIntent::Cron;
+        unit.process = Some(ProcessRuntime {
+            pid: 17165,
+            state: ProcessState::Missing,
+            user: None,
+        });
+        unit.cron = Some(CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(summary.clone()),
+            recent_runs: vec![summary],
         });
 
         let derived = derive_unit_health(
