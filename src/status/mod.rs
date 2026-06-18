@@ -1012,7 +1012,7 @@ fn build_snapshot(
             pid = pid_file.pid_for(name);
         }
 
-        let process_runtime = if matches!(mode, StatusSnapshotMode::Off) {
+        let mut process_runtime = if matches!(mode, StatusSnapshotMode::Off) {
             None
         } else {
             pid.map(|pid| ProcessRuntime {
@@ -1090,9 +1090,17 @@ fn build_snapshot(
 
         let service_config =
             config.and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")));
+        let intent = derive_unit_intent(kind, service_config);
+
+        if let Some(runtime) = process_runtime.as_ref()
+            && matches!(runtime.state, ProcessState::Missing)
+            && missing_pid_is_expected(kind, intent, lifecycle, cron.as_ref())
+        {
+            process_runtime = None;
+        }
+
         let state =
             derive_unit_state(kind, lifecycle, process_runtime.as_ref(), cron.as_ref());
-        let intent = derive_unit_intent(kind, service_config);
         let health = derive_unit_health(
             kind,
             state,
@@ -1295,6 +1303,38 @@ fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary 
         command: record.command.clone(),
         metrics: record.metrics.clone(),
     }
+}
+
+/// Returns whether a missing PID is expected for a unit that has already
+/// finished its work.
+///
+/// Cron jobs and one-shot services are not meant to keep a process alive, so a
+/// PID that has since exited is stale runtime evidence rather than a fault. Once
+/// such a unit has terminal lifecycle state or recorded cron history, its state
+/// and health should be derived from those facts instead of the dead PID.
+fn missing_pid_is_expected(
+    kind: UnitKind,
+    intent: UnitIntent,
+    lifecycle: Option<ServiceLifecycleStatus>,
+    cron: Option<&CronUnitStatus>,
+) -> bool {
+    if matches!(kind, UnitKind::Cron) {
+        return cron.is_some_and(|cron| cron.last_run.is_some());
+    }
+
+    if matches!(intent, UnitIntent::Once) {
+        return matches!(
+            lifecycle,
+            Some(
+                ServiceLifecycleStatus::ExitedSuccessfully
+                    | ServiceLifecycleStatus::ExitedWithError
+                    | ServiceLifecycleStatus::Stopped
+                    | ServiceLifecycleStatus::Skipped
+            )
+        );
+    }
+
+    false
 }
 
 /// Derives the factual state shown to operators.
@@ -2993,6 +3033,259 @@ services:
             orphan_cron_units.is_empty(),
             "orphaned cron entries should be pruned from status"
         );
+    }
+
+    #[test]
+    fn build_snapshot_completed_cron_with_stale_pid_renders_done() {
+        let mut services = std::collections::HashMap::new();
+        let service = crate::config::ServiceConfig {
+            command: "/bin/echo hi".into(),
+            cron: Some(crate::config::CronConfig {
+                expression: "* * * * *".into(),
+                timezone: None,
+            }),
+            ..crate::config::ServiceConfig::default()
+        };
+        let hash = service.compute_hash();
+        services.insert("nightly".into(), service);
+        let config = Config {
+            version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
+            services,
+            project_dir: None,
+            env: None,
+            metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
+        };
+
+        let mut pid_file = PidFile::default();
+        pid_file
+            .insert("nightly", 2_000_000_000)
+            .expect("insert pid");
+
+        let mut service_state = ServiceStateFile::default();
+        let cron_state_json = json!({
+            "jobs": [{
+                "hash": hash,
+                "state": {
+                    "last_execution": 1,
+                    "execution_history": [{
+                        "started_at": 1,
+                        "completed_at": 2,
+                        "status": "Success",
+                        "exit_code": 0,
+                        "pid": 2_000_000_000u32,
+                    }],
+                    "timezone_label": "UTC",
+                    "timezone": "UTC"
+                }
+            }]
+        });
+        let mut cron_state: CronStateFile =
+            serde_json::from_value(cron_state_json).expect("deserialize cron state");
+
+        let snapshot = build_snapshot(
+            Some(&config),
+            &pid_file,
+            &mut service_state,
+            &mut cron_state,
+            None,
+            None,
+            StatusSnapshotMode::Summary,
+        );
+
+        let unit = snapshot
+            .units
+            .iter()
+            .find(|unit| unit.name == "nightly")
+            .expect("nightly unit");
+
+        assert!(
+            unit.process.is_none(),
+            "stale missing PID should not attach to a completed cron unit"
+        );
+        assert_eq!(unit.state, UnitState::Done);
+        assert_eq!(unit.health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn build_snapshot_completed_oneshot_with_stale_pid_renders_done() {
+        let mut services = std::collections::HashMap::new();
+        let service = crate::config::ServiceConfig {
+            command: "/bin/echo hi".into(),
+            restart_policy: Some("never".into()),
+            ..crate::config::ServiceConfig::default()
+        };
+        let hash = service.compute_hash();
+        services.insert("migrate".into(), service);
+        let config = Config {
+            version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
+            services,
+            project_dir: None,
+            env: None,
+            metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
+        };
+
+        let mut pid_file = PidFile::default();
+        pid_file
+            .insert("migrate", 2_000_000_000)
+            .expect("insert pid");
+
+        let mut service_state = ServiceStateFile::default();
+        service_state
+            .set(
+                &hash,
+                ServiceLifecycleStatus::ExitedSuccessfully,
+                Some(2_000_000_000),
+                Some(0),
+                None,
+            )
+            .expect("set state");
+        let mut cron_state = CronStateFile::default();
+
+        let snapshot = build_snapshot(
+            Some(&config),
+            &pid_file,
+            &mut service_state,
+            &mut cron_state,
+            None,
+            None,
+            StatusSnapshotMode::Summary,
+        );
+
+        let unit = snapshot
+            .units
+            .iter()
+            .find(|unit| unit.name == "migrate")
+            .expect("migrate unit");
+
+        assert!(
+            unit.process.is_none(),
+            "stale missing PID should not attach to a completed one-shot unit"
+        );
+        assert_eq!(unit.state, UnitState::Done);
+        assert_eq!(unit.health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn build_snapshot_serve_service_with_stale_pid_renders_lost() {
+        let mut services = std::collections::HashMap::new();
+        let service = crate::config::ServiceConfig {
+            command: "/bin/sleep 30".into(),
+            restart_policy: Some("always".into()),
+            ..crate::config::ServiceConfig::default()
+        };
+        let hash = service.compute_hash();
+        services.insert("api".into(), service);
+        let config = Config {
+            version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
+            services,
+            project_dir: None,
+            env: None,
+            metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
+        };
+
+        let mut pid_file = PidFile::default();
+        pid_file.insert("api", 2_000_000_000).expect("insert pid");
+
+        let mut service_state = ServiceStateFile::default();
+        service_state
+            .set(
+                &hash,
+                ServiceLifecycleStatus::Running,
+                Some(2_000_000_000),
+                None,
+                None,
+            )
+            .expect("set state");
+        let mut cron_state = CronStateFile::default();
+
+        let snapshot = build_snapshot(
+            Some(&config),
+            &pid_file,
+            &mut service_state,
+            &mut cron_state,
+            None,
+            None,
+            StatusSnapshotMode::Summary,
+        );
+
+        let unit = snapshot
+            .units
+            .iter()
+            .find(|unit| unit.name == "api")
+            .expect("api unit");
+
+        assert!(
+            unit.process.is_some(),
+            "a serving service with a missing PID should keep its runtime evidence"
+        );
+        assert_eq!(unit.state, UnitState::Lost);
+        assert_eq!(unit.health, UnitHealth::Warn);
+    }
+
+    #[test]
+    fn missing_pid_is_expected_only_for_finished_cron_and_oneshot() {
+        let success = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            pid: Some(123),
+            user: None,
+            command: None,
+            metrics: vec![],
+        };
+        let completed_cron = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(success.clone()),
+            recent_runs: vec![success],
+        };
+        let queued_cron = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: None,
+            recent_runs: vec![],
+        };
+
+        assert!(missing_pid_is_expected(
+            UnitKind::Cron,
+            UnitIntent::Cron,
+            None,
+            Some(&completed_cron),
+        ));
+        assert!(!missing_pid_is_expected(
+            UnitKind::Cron,
+            UnitIntent::Cron,
+            None,
+            Some(&queued_cron),
+        ));
+        assert!(missing_pid_is_expected(
+            UnitKind::Service,
+            UnitIntent::Once,
+            Some(ServiceLifecycleStatus::ExitedSuccessfully),
+            None,
+        ));
+        assert!(!missing_pid_is_expected(
+            UnitKind::Service,
+            UnitIntent::Once,
+            Some(ServiceLifecycleStatus::Running),
+            None,
+        ));
+        assert!(!missing_pid_is_expected(
+            UnitKind::Service,
+            UnitIntent::Serve,
+            Some(ServiceLifecycleStatus::ExitedSuccessfully),
+            None,
+        ));
     }
 
     #[test]
