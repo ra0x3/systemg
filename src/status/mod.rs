@@ -609,7 +609,7 @@ fn sample_process_metrics(
         && let Some(process) = system.process(SysPid::from_u32(pid))
     {
         let cpu = Some(process.cpu_usage());
-        let rss = Some(process.memory() * 1024);
+        let rss = Some(process.memory());
         (cpu, rss)
     } else {
         (None, None)
