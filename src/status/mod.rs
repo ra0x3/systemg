@@ -2076,12 +2076,20 @@ impl StatusManager {
     /// other than the recorded PID itself. A wrapper shell can exit while the real worker keeps
     /// running (reparented to PID 1 but retaining the original group); in that case the recorded
     /// PID reads as a zombie even though the service is genuinely healthy.
+    ///
+    /// This only applies when the recorded PID is its own process-group leader (`pid == pgid`),
+    /// which systemg guarantees for service wrappers via `setpgid(0, 0)`. A bare process that
+    /// merely inherited an unrelated group (e.g. the supervisor's own) is a genuine zombie.
     #[cfg(target_os = "linux")]
     fn process_group_has_live_member(pid: u32) -> bool {
         let Ok(pgid) = getpgid(Some(Pid::from_raw(pid as i32))) else {
             return false;
         };
         let pgid = pgid.as_raw();
+
+        if pgid != pid as i32 {
+            return false;
+        }
 
         let Ok(entries) = fs::read_dir("/proc") else {
             return false;
