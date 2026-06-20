@@ -4619,7 +4619,8 @@ impl Daemon {
             warn!("Restarting '{name}' after {backoff} seconds...");
             thread::sleep(Duration::from_secs(backoff));
 
-            if ctx.restart_suppressed
+            if ctx
+                .restart_suppressed
                 .lock()
                 .map(|guard| guard.contains(&name))
                 .unwrap_or(false)
@@ -4633,7 +4634,8 @@ impl Daemon {
                 return;
             }
 
-            if ctx.manual_stop_flags
+            if ctx
+                .manual_stop_flags
                 .lock()
                 .map(|mut guard| guard.remove(&name))
                 .unwrap_or(false)
@@ -4656,11 +4658,7 @@ impl Daemon {
 
             match restart_result {
                 Ok(pid) => {
-                    match Self::wait_for_ready(
-                        &name,
-                        &ctx.processes,
-                        &ctx.pid_file,
-                    ) {
+                    match Self::wait_for_ready(&name, &ctx.processes, &ctx.pid_file) {
                         Ok(ServiceReadyState::Running) => {
                             if let Ok(mut counts) = ctx.lock_restart_counts() {
                                 counts.insert(name.clone(), 0);
@@ -4681,8 +4679,8 @@ impl Daemon {
                             }
 
                             if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) =
-                                    hooks_cfg.action(HookStage::OnStart, HookOutcome::Success)
+                                && let Some(action) = hooks_cfg
+                                    .action(HookStage::OnStart, HookOutcome::Success)
                             {
                                 run_hook(
                                     action,
@@ -4695,8 +4693,8 @@ impl Daemon {
                             }
 
                             if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) =
-                                    hooks_cfg.action(HookStage::OnRestart, HookOutcome::Success)
+                                && let Some(action) = hooks_cfg
+                                    .action(HookStage::OnRestart, HookOutcome::Success)
                             {
                                 run_hook(
                                     action,
@@ -4737,8 +4735,8 @@ impl Daemon {
                             }
 
                             if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) =
-                                    hooks_cfg.action(HookStage::OnStart, HookOutcome::Success)
+                                && let Some(action) = hooks_cfg
+                                    .action(HookStage::OnStart, HookOutcome::Success)
                             {
                                 run_hook(
                                     action,
@@ -4751,8 +4749,8 @@ impl Daemon {
                             }
 
                             if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) =
-                                    hooks_cfg.action(HookStage::OnRestart, HookOutcome::Success)
+                                && let Some(action) = hooks_cfg
+                                    .action(HookStage::OnRestart, HookOutcome::Success)
                             {
                                 run_hook(
                                     action,
@@ -4773,8 +4771,8 @@ impl Daemon {
                             );
 
                             if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) =
-                                    hooks_cfg.action(HookStage::OnStart, HookOutcome::Error)
+                                && let Some(action) = hooks_cfg
+                                    .action(HookStage::OnStart, HookOutcome::Error)
                             {
                                 run_hook(
                                     action,
@@ -4787,8 +4785,8 @@ impl Daemon {
                             }
 
                             if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) =
-                                    hooks_cfg.action(HookStage::OnRestart, HookOutcome::Error)
+                                && let Some(action) = hooks_cfg
+                                    .action(HookStage::OnRestart, HookOutcome::Error)
                             {
                                 run_hook(
                                     action,
@@ -4834,8 +4832,7 @@ impl Daemon {
                     }
                 }
             }
-        })
-        .join();
+        });
     }
 }
 
