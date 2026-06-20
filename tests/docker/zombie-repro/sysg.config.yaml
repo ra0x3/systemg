@@ -1,0 +1,26 @@
+version: "1"
+project:
+  id: zombie-repro
+  name: Zombie Repro
+services:
+  plain_foreground:
+    command: "sleep 100000"
+    backoff: "5s"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"
+      grace_period: "5s"
+  env_wrapped:
+    command: "env FOO=bar sleep 100000"
+    backoff: "5s"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"
+      grace_period: "5s"
+  multiword_chain:
+    command: "env A=1 B=2 RUST_LOG=info sleep 100000"
+    backoff: "5s"
+    restart_policy: "always"
+    deployment:
+      strategy: "rolling"
+      grace_period: "5s"

@@ -1,0 +1,14 @@
+ARG RUST_IMAGE=rust:1.96.0-bullseye
+FROM ${RUST_IMAGE}
+
+RUN apt-get update && apt-get install -y procps python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+# Build the regression test binary ahead of time so `docker run` just executes it.
+RUN cargo test --test process --no-run
+
+ENTRYPOINT ["cargo", "test", "--test", "process"]
+CMD ["restart_reaps_orphaned_group_member_linux", "--", "--nocapture"]

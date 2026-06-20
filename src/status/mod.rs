@@ -2047,6 +2047,9 @@ impl StatusManager {
             if let Some(state) = Self::read_proc_state(pid)
                 && matches!(state, 'Z' | 'X')
             {
+                if Self::process_group_has_live_member(pid) {
+                    return ProcessState::Running;
+                }
                 return ProcessState::Zombie;
             }
 
@@ -2067,6 +2070,54 @@ impl StatusManager {
                 }
             }
         }
+    }
+
+    /// Returns true when the recorded PID's process group still has a live, non-zombie member
+    /// other than the recorded PID itself. A wrapper shell can exit while the real worker keeps
+    /// running (reparented to PID 1 but retaining the original group); in that case the recorded
+    /// PID reads as a zombie even though the service is genuinely healthy.
+    #[cfg(target_os = "linux")]
+    fn process_group_has_live_member(pid: u32) -> bool {
+        let Ok(pgid) = getpgid(Some(Pid::from_raw(pid as i32))) else {
+            return false;
+        };
+        let pgid = pgid.as_raw();
+
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return false;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let Some(other) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if other == pid {
+                continue;
+            }
+            let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let Some(close_paren) = stat.rfind(')') else {
+                continue;
+            };
+            let mut fields = stat[close_paren + 1..].split_whitespace();
+            let state = fields.next().and_then(|raw| raw.chars().next());
+            if matches!(state, Some('Z') | Some('X')) {
+                continue;
+            }
+            let _ppid = fields.next();
+            let Some(group) = fields.next().and_then(|raw| raw.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if group == pgid {
+                return true;
+            }
+        }
+        false
     }
 
     #[cfg(target_os = "linux")]

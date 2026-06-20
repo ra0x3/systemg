@@ -1922,6 +1922,44 @@ impl Daemon {
         }
     }
 
+    /// Terminates any live members still lingering in a service's previous process group before
+    /// it is restarted. When a wrapper shell exits while its real worker keeps running, the worker
+    /// is reparented to PID 1 but retains the original process group. Without this cleanup a restart
+    /// would spawn a fresh instance alongside the surviving orphan, leaking duplicate workers.
+    fn reap_orphaned_group_before_restart(
+        service_name: &str,
+        recorded_pgid: Option<libc::pid_t>,
+    ) {
+        let supervisor_pgid = unsafe { libc::getpgid(0) };
+        let Some(pgid) = recorded_pgid else {
+            return;
+        };
+        if pgid < 0 || pgid == supervisor_pgid {
+            return;
+        }
+
+        let survivors = Self::collect_process_group_members(pgid);
+        if survivors.is_empty() {
+            return;
+        }
+
+        warn!(
+            "Found {} orphaned process(es) in previous group {} for '{}'; terminating before restart",
+            survivors.len(),
+            pgid,
+            service_name
+        );
+
+        if let Err(err) =
+            Self::terminate_process_tree(service_name, pgid as u32, Some(pgid))
+        {
+            warn!(
+                "Failed to fully terminate orphaned group {} for '{}' before restart: {}",
+                pgid, service_name, err
+            );
+        }
+    }
+
     /// Persists service state to the state file using the service's configuration hash as the key.
     /// Logs a warning if the service is not found in the config. This is the low-level function
     /// that writes state directly to disk.
@@ -2797,7 +2835,7 @@ impl Daemon {
                     drop(processes_guard);
 
                     let mut pid_guard = pid_file.lock()?;
-                    if let Err(err) = pid_guard.remove(service_name)
+                    if let Err(err) = pid_guard.clear_pid(service_name)
                         && !matches!(err, PidFileError::ServiceNotFound)
                     {
                         return Err(err.into());
@@ -4032,21 +4070,21 @@ impl Daemon {
     ) -> Result<(), ProcessManagerError> {
         let (pid, service_group_id) = {
             let mut processes_guard = processes.lock()?;
+            let persisted_group = pid_file
+                .lock()
+                .ok()
+                .and_then(|guard| guard.pgid_for(service_name))
+                .map(|id| id as libc::pid_t);
+
             if let Some(child) = processes_guard.get_mut(service_name) {
                 let process_id = child.id();
-                let group_id = Self::process_group_for_pid(process_id).or_else(|| {
-                    pid_file
-                        .lock()
-                        .ok()
-                        .and_then(|guard| guard.pgid_for(service_name))
-                        .map(|id| id as libc::pid_t)
-                });
+                let group_id =
+                    persisted_group.or_else(|| Self::process_group_for_pid(process_id));
                 (Some(process_id), group_id)
             } else {
                 let guard = pid_file.lock()?;
                 let stored_pid = guard.get(service_name);
-                let mut group_id =
-                    guard.pgid_for(service_name).map(|id| id as libc::pid_t);
+                let mut group_id = persisted_group;
 
                 if stored_pid.is_some() && group_id.is_none() {
                     group_id = stored_pid.and_then(Self::process_group_for_pid);
@@ -4347,7 +4385,7 @@ impl Daemon {
     fn monitor_loop(ctx: DaemonContext) {
         while ctx.running.load(Ordering::SeqCst) {
             let mut exited_services = Vec::new();
-            let mut restarted_services = Vec::new();
+            let mut restarted_services: Vec<(String, Option<libc::pid_t>)> = Vec::new();
             let mut failed_services = Vec::new();
             let mut active_services = 0;
 
@@ -4378,6 +4416,8 @@ impl Daemon {
                 for (name, exit_status) in exited_services {
                     #[cfg(target_os = "linux")]
                     ctx.cancel_service_thread(&name);
+
+                    let recorded_pgid = pid_file_guard.pgid_for(&name);
 
                     let manually_stopped = {
                         let mut manual_guard = ctx.lock_manual_stop_flags().unwrap();
@@ -4479,7 +4519,7 @@ impl Daemon {
 
                         if should_restart {
                             warn!("Service '{name}' crashed. Restarting...");
-                            restarted_services.push(name.clone());
+                            restarted_services.push((name.clone(), recorded_pgid));
                         } else {
                             warn!(
                                 "Service '{name}' crashed but restart_policy does not allow restart."
@@ -4533,7 +4573,8 @@ impl Daemon {
                 debug!("No active services detected in monitor loop.");
             }
 
-            for name in restarted_services {
+            for (name, recorded_pgid) in restarted_services {
+                Self::reap_orphaned_group_before_restart(&name, recorded_pgid);
                 if let Some(service) = ctx.config.services.get(&name) {
                     Self::handle_restart(&name, service, ctx.clone());
                 }

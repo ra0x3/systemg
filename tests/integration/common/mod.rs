@@ -202,3 +202,41 @@ pub fn wait_for_latest_pid(pid_dir: &Path, min_runs: usize) -> u32 {
         thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// Counts the live (non-zombie) processes currently assigned to `pgid` by reading `/proc`.
+#[cfg(target_os = "linux")]
+pub fn live_process_group_members(pgid: i32) -> usize {
+    let mut count = 0;
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let Some(_pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(close_paren) = stat.rfind(')') else {
+            continue;
+        };
+        let mut fields = stat[close_paren + 1..].split_whitespace();
+        let state = fields.next().and_then(|raw| raw.chars().next());
+        if matches!(state, Some('Z') | Some('X')) {
+            continue;
+        }
+        let _ppid = fields.next();
+        let Some(process_group) = fields.next().and_then(|raw| raw.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if process_group == pgid {
+            count += 1;
+        }
+    }
+    count
+}

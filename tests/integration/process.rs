@@ -612,6 +612,111 @@ while true; do sleep 1; done
     assert_restart_replaces_worker("steady_worker", "steady_worker.sh", script, false);
 }
 
+/// Regression for the production zombie/leak bug: when a service's wrapper leader exits
+/// while the real worker keeps running (reparented to PID 1 but retaining the original
+/// process group), restarting the service must terminate that surviving orphan instead of
+/// leaving it alongside the replacement. Asserted on process-group membership so it captures
+/// the leak directly rather than racing individual PIDs.
+#[cfg(target_os = "linux")]
+#[test]
+fn restart_reaps_orphaned_group_member_linux() {
+    use std::time::Instant;
+
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let pgid_marker = dir.join("worker.pgid");
+    let script = dir.join("leader_exits.sh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+# Background a worker that survives the leader, then let the leader exit.
+# The worker stays in the same process group, reparented to PID 1.
+(
+  trap 'exit 0' TERM INT
+  python3 -c "import os; open('$WORKER_PGID_PATH','w').write(str(os.getpgrp()))"
+  while true; do sleep 1; done
+) &
+exit 0
+"#,
+    )
+    .expect("failed to write script");
+    let mut perms = fs::metadata(&script).expect("metadata").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod script");
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        format!(
+            r#"version: "1"
+services:
+  leader_exits:
+    command: "{}"
+    restart_policy: "never"
+    backoff: "1s"
+    env:
+      vars:
+        WORKER_PGID_PATH: "{}"
+    deployment:
+      strategy: "immediate"
+"#,
+            script.display(),
+            pgid_marker.display(),
+        ),
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let service_cfg = config
+        .services
+        .get("leader_exits")
+        .expect("service present")
+        .clone();
+    let daemon = Daemon::from_config(config, false).expect("daemon from config");
+
+    daemon.start_services().expect("start services");
+    common::wait_for_path(&pgid_marker);
+    let original_pgid: i32 = fs::read_to_string(&pgid_marker)
+        .expect("read pgid")
+        .trim()
+        .parse()
+        .expect("parse pgid");
+
+    assert!(
+        common::live_process_group_members(original_pgid) >= 1,
+        "orphaned worker should be alive in original group before restart"
+    );
+
+    // Clear the marker so we can detect the replacement worker writing a fresh pgid.
+    let _ = fs::remove_file(&pgid_marker);
+
+    daemon
+        .restart_service("leader_exits", &service_cfg)
+        .expect("restart service");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut orphan_reaped = false;
+    while Instant::now() < deadline {
+        if common::live_process_group_members(original_pgid) == 0 {
+            orphan_reaped = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        orphan_reaped,
+        "orphaned worker in original group {original_pgid} should be terminated by restart, not leaked"
+    );
+
+    daemon.stop_service("leader_exits").expect("stop service");
+    daemon.shutdown_monitor();
+}
+
 /// This test is skipped due to persistent flakiness in CI environments.
 ///
 /// The test attempts to verify that orphaned child processes are properly terminated
