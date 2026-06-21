@@ -658,7 +658,8 @@ impl Supervisor {
 
         let primary_project = self.daemon.config().project.id.clone();
         if project_id == primary_project {
-            self.daemon.restart_services()?;
+            let stored = self.config_path.clone();
+            self.reload_config(&stored)?;
             return Ok(());
         }
 
@@ -670,7 +671,20 @@ impl Supervisor {
             .into());
         };
 
-        project_runtime.daemon.restart_services()?;
+        let stored = project_runtime.config_path.clone();
+        runtime::ensure_trusted_config(&stored)?;
+        let config = load_config(Some(stored.to_string_lossy().as_ref()))?;
+        if config.project.id != project_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "project '{project_id}' stored config now declares project '{}'",
+                    config.project.id
+                ),
+            )
+            .into());
+        }
+        self.replace_extra_project_runtime(config, stored)?;
         Ok(())
     }
 
@@ -2160,6 +2174,10 @@ impl Supervisor {
 
         if project_id == primary_project {
             self.primary_project_mode = mode;
+            if service_filter.is_none() {
+                self.reload_config(&resolved)?;
+                return Ok(project_id);
+            }
             Self::start_project_services(
                 &self.daemon,
                 self.daemon.config().as_ref(),
@@ -2990,6 +3008,353 @@ services:
             beta_updated_config
                 .canonicalize()
                 .unwrap_or_else(|_| beta_updated_config.clone())
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn project_service_names(snapshot: &StatusSnapshot, project_id: &str) -> Vec<String> {
+        snapshot
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.project.as_ref().map(|project| project.id.as_str())
+                    == Some(project_id)
+            })
+            .map(|unit| unit.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn restart_primary_project_without_config_reloads_stored_manifest() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("primary.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "1"
+project:
+  id: primary
+services:
+  alpha:
+    command: "/bin/sleep 45"
+  beta:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write config");
+
+        let mut supervisor =
+            Supervisor::new(config_path.clone(), false, None).expect("create supervisor");
+
+        fs::write(
+            &config_path,
+            r#"
+version: "1"
+project:
+  id: primary
+services:
+  alpha:
+    command: "/bin/sleep 60"
+  gamma:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("rewrite config");
+
+        supervisor
+            .handle_command(ControlCommand::Restart {
+                config: None,
+                service: None,
+                project: Some("primary".into()),
+            })
+            .expect("restart primary project without config");
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("status after restart")
+        {
+            ControlResponse::Status(snapshot) => {
+                let names = project_service_names(&snapshot, "primary");
+                assert!(
+                    names.contains(&"gamma".to_string()),
+                    "added service missing"
+                );
+                assert!(
+                    !names.contains(&"beta".to_string()),
+                    "removed service lingered"
+                );
+                assert!(names.contains(&"alpha".to_string()), "kept service missing");
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        assert_eq!(
+            supervisor
+                .daemon
+                .config()
+                .services
+                .get("alpha")
+                .map(|service| service.command.as_str()),
+            Some("/bin/sleep 60")
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn restart_extra_project_without_config_reloads_stored_manifest() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let alpha_config = temp.path().join("alpha.yaml");
+        fs::write(
+            &alpha_config,
+            r#"
+version: "1"
+project:
+  id: alpha
+services:
+  alpha_worker:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write alpha config");
+
+        let beta_config = temp.path().join("beta.yaml");
+        fs::write(
+            &beta_config,
+            r#"
+version: "1"
+project:
+  id: beta
+services:
+  beta_worker:
+    command: "/bin/sleep 45"
+  beta_legacy:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write beta config");
+
+        let mut supervisor =
+            Supervisor::new(alpha_config, false, None).expect("create supervisor");
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: beta_config.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("add beta project");
+
+        fs::write(
+            &beta_config,
+            r#"
+version: "1"
+project:
+  id: beta
+services:
+  beta_worker:
+    command: "/bin/sleep 60"
+  beta_added:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("rewrite beta config");
+
+        supervisor
+            .handle_command(ControlCommand::Restart {
+                config: None,
+                service: None,
+                project: Some("beta".into()),
+            })
+            .expect("restart beta project without config");
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("status after restart")
+        {
+            ControlResponse::Status(snapshot) => {
+                let names = project_service_names(&snapshot, "beta");
+                assert!(
+                    names.contains(&"beta_added".to_string()),
+                    "added service missing"
+                );
+                assert!(
+                    !names.contains(&"beta_legacy".to_string()),
+                    "removed service lingered"
+                );
+                assert!(
+                    names.contains(&"beta_worker".to_string()),
+                    "kept service missing"
+                );
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        let beta_runtime = supervisor
+            .extra_projects
+            .get("beta")
+            .expect("beta runtime after restart");
+        assert_eq!(
+            beta_runtime
+                .daemon
+                .config()
+                .services
+                .get("beta_worker")
+                .map(|service| service.command.as_str()),
+            Some("/bin/sleep 60")
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn add_project_for_primary_reloads_manifest_after_stop() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("primary.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "1"
+project:
+  id: primary
+services:
+  alpha:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write config");
+
+        let mut supervisor =
+            Supervisor::new(config_path.clone(), false, None).expect("create supervisor");
+
+        supervisor
+            .handle_command(ControlCommand::Stop {
+                service: None,
+                project: Some("primary".into()),
+            })
+            .expect("stop primary project");
+
+        fs::write(
+            &config_path,
+            r#"
+version: "1"
+project:
+  id: primary
+services:
+  alpha:
+    command: "/bin/sleep 60"
+  delta:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("rewrite config");
+
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: config_path.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("re-add primary project");
+
+        match supervisor
+            .handle_command(ControlCommand::Status { live: true })
+            .expect("status after re-add")
+        {
+            ControlResponse::Status(snapshot) => {
+                let names = project_service_names(&snapshot, "primary");
+                assert!(
+                    names.contains(&"delta".to_string()),
+                    "added service missing"
+                );
+                assert!(names.contains(&"alpha".to_string()), "kept service missing");
+            }
+            other => panic!("expected status response, got {other:?}"),
+        }
+
+        assert_eq!(
+            supervisor
+                .daemon
+                .config()
+                .services
+                .get("alpha")
+                .map(|service| service.command.as_str()),
+            Some("/bin/sleep 60")
         );
 
         supervisor
