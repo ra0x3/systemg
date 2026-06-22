@@ -44,6 +44,18 @@ $ sysg restart --config production.yaml
 
 Reloads configuration and restarts all services.
 
+### Restart a project and reload its stored manifest
+
+```sh
+$ sysg restart --project arbitration
+```
+
+When `--config` is omitted, `restart --project` reuses the config path the
+running supervisor already recorded for that project and reloads it from disk.
+Manifest changes are applied: services added since the last load start, services
+removed from the manifest stop, and changed commands take effect. You do not
+need to pass `--config` again if the project already has a known config path.
+
 ## Deployment strategies
 
 Services configured with `deployment.strategy: rolling` get zero-downtime restarts:

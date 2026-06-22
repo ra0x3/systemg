@@ -66,10 +66,15 @@ services:
     depends_on: ["redis"]
   backup:
     command: "pg_dump mydb > /backups/db-$(date +%Y%m%d).sql"
-    cron: "0 2 * * *"
-    timezone: "America/New_York"
-    on_success: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup completed successfully\"}'"
-    on_failure: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
+    cron:
+      expression: "0 0 2 * * *"
+      timezone: "America/New_York"
+    hooks:
+      on_stop:
+        success:
+          command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup completed successfully\"}'"
+        error:
+          command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
 ```
 
 ## Built for production

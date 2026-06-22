@@ -3,7 +3,13 @@ name = "systemg"
 version = "0.46.0"
 edition = "2024"
 license = "MIT"
-description = "A simple process manager."
+description = "A general-purpose program composer."
+homepage = "https://sysg.dev"
+documentation = "https://sysg.dev"
+repository = "https://github.com/ra0x3/systemg"
+readme = "README.md"
+keywords = ["process-manager", "supervisor", "orchestrator", "cron", "service"]
+categories = ["command-line-utilities", "development-tools", "os"]
 rust-version = "1.96.0"
 
 [package.metadata.docs.rs]
