@@ -1,6 +1,6 @@
 # systemg
 
-A general-purpose program orchestrator.
+A general-purpose program composer.
 
 <br/><br/>
 

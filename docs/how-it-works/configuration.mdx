@@ -68,7 +68,8 @@ services:
     command: >
       pg_dump mydb >
       /backups/db-$(date +%Y%m%d).sql
-    cron: "0 2 * * *"
+    cron:
+      expression: "0 0 2 * * *"
 ```
 
 ## Configuration sections
@@ -294,7 +295,8 @@ services:
     command: >
       pg_dump mydb >
       /backups/db-$(date +%Y%m%d).sql
-    cron: "0 2 * * *"
+    cron:
+      expression: "0 0 2 * * *"
 ```
 
 ### `deployment`
