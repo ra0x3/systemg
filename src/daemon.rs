@@ -35,8 +35,8 @@ use crate::{
         DEFAULT_SHELL, DaemonLock, DeploymentStrategy, MAX_STATUS_LOG_LINES,
         PID_FILE_NAME, PID_LOCK_SUFFIX, POST_RESTART_VERIFY_ATTEMPTS,
         POST_RESTART_VERIFY_DELAY, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
-        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SHELL_COMMAND_FLAG,
-        STATE_FILE_NAME,
+        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
+        SHELL_COMMAND_FLAG, STATE_FILE_NAME,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_service_log_writers},
@@ -2232,6 +2232,20 @@ impl Daemon {
             }
         }
 
+        let to_strip = match &service_config.env {
+            Some(env_config) => env_config.vars_to_strip(),
+            None => SESSION_SCOPED_ENV_VARS
+                .iter()
+                .map(|v| v.to_string())
+                .collect(),
+        };
+        if !to_strip.is_empty() {
+            debug!("Stripping inherited environment variables: {:?}", to_strip);
+            for key in to_strip {
+                cmd.env_remove(key);
+            }
+        }
+
         let privilege_clone = privilege.clone();
 
         unsafe {
@@ -3491,6 +3505,8 @@ impl Daemon {
         let mut env_cfg = cloned.env.take().unwrap_or(EnvConfig {
             file: None,
             vars: None,
+            clear_session_vars: None,
+            strip: None,
         });
         let mut vars = env_cfg.vars.take().unwrap_or_default();
         vars.insert(key.to_string(), value.to_string());

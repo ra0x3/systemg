@@ -854,6 +854,11 @@ pub struct EnvConfig {
     pub file: Option<String>,
     /// Key-value pairs of environment variables.
     pub vars: Option<HashMap<String, String>>,
+    /// Whether to strip caller/session-scoped variables (e.g. `SSH_AUTH_SOCK`)
+    /// from the service environment. Defaults to `true`.
+    pub clear_session_vars: Option<bool>,
+    /// Additional inherited variables to remove from the service environment.
+    pub strip: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -863,6 +868,10 @@ struct RawEnvConfig {
     file: Option<String>,
     /// Explicit nested environment variables.
     vars: Option<HashMap<String, String>>,
+    /// Whether to strip caller/session-scoped variables from the service env.
+    clear_session_vars: Option<bool>,
+    /// Additional inherited variables to remove from the service env.
+    strip: Option<Vec<String>>,
     /// Direct key/value pairs provided alongside `file` or instead of `vars`.
     #[serde(flatten)]
     entries: HashMap<String, String>,
@@ -885,6 +894,8 @@ impl<'de> Deserialize<'de> for EnvConfig {
         Ok(Self {
             file: raw.file,
             vars: if vars.is_empty() { None } else { Some(vars) },
+            clear_session_vars: raw.clear_session_vars,
+            strip: raw.strip,
         })
     }
 }
@@ -900,6 +911,34 @@ impl EnvConfig {
                 base.join(path)
             }
         })
+    }
+
+    /// Returns the inherited environment variables that must be removed from a
+    /// service process. Session-scoped variables are stripped unless
+    /// `clear_session_vars` is `false`; `strip` entries are always removed.
+    /// A variable explicitly set in `vars` is never stripped.
+    pub fn vars_to_strip(&self) -> Vec<String> {
+        let mut to_strip: Vec<String> = Vec::new();
+
+        if self.clear_session_vars.unwrap_or(true) {
+            to_strip.extend(
+                crate::constants::SESSION_SCOPED_ENV_VARS
+                    .iter()
+                    .map(|var| var.to_string()),
+            );
+        }
+
+        if let Some(extra) = &self.strip {
+            to_strip.extend(extra.iter().cloned());
+        }
+
+        if let Some(vars) = &self.vars {
+            to_strip.retain(|var| !vars.contains_key(var));
+        }
+
+        to_strip.sort();
+        to_strip.dedup();
+        to_strip
     }
 
     /// Merges two EnvConfig instances, with the service-level config taking precedence.
@@ -919,12 +958,25 @@ impl EnvConfig {
                 }
                 let file = service_cfg.file.clone().or_else(|| root_cfg.file.clone());
 
+                let mut merged_strip = root_cfg.strip.clone().unwrap_or_default();
+                if let Some(service_strip) = &service_cfg.strip {
+                    merged_strip.extend(service_strip.clone());
+                }
+
                 Some(EnvConfig {
                     file,
                     vars: if merged_vars.is_empty() {
                         None
                     } else {
                         Some(merged_vars)
+                    },
+                    clear_session_vars: service_cfg
+                        .clear_session_vars
+                        .or(root_cfg.clear_session_vars),
+                    strip: if merged_strip.is_empty() {
+                        None
+                    } else {
+                        Some(merged_strip)
                     },
                 })
             }
@@ -1412,6 +1464,8 @@ services:
             env: Some(EnvConfig {
                 file: Some(".env".into()),
                 vars: Some(HashMap::from([("RUST_LOG".into(), "debug".into())])),
+                clear_session_vars: None,
+                strip: None,
             }),
             metrics: MetricsConfig {
                 retention_minutes: 30,
@@ -1745,6 +1799,8 @@ services:
         let root = EnvConfig {
             file: Some("root.env".into()),
             vars: Some(HashMap::from([("ROOT_VAR".into(), "root_value".into())])),
+            clear_session_vars: None,
+            strip: None,
         };
 
         let result = EnvConfig::merge(Some(&root), None).unwrap();
@@ -1763,6 +1819,8 @@ services:
                 "SERVICE_VAR".into(),
                 "service_value".into(),
             )])),
+            clear_session_vars: None,
+            strip: None,
         };
 
         let result = EnvConfig::merge(None, Some(&service)).unwrap();
@@ -1781,6 +1839,8 @@ services:
                 ("SHARED_VAR".into(), "root_value".into()),
                 ("ROOT_ONLY".into(), "root_only_value".into()),
             ])),
+            clear_session_vars: None,
+            strip: None,
         };
 
         let service = EnvConfig {
@@ -1789,6 +1849,8 @@ services:
                 ("SHARED_VAR".into(), "service_value".into()),
                 ("SERVICE_ONLY".into(), "service_only_value".into()),
             ])),
+            clear_session_vars: None,
+            strip: None,
         };
 
         let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();
@@ -1803,15 +1865,56 @@ services:
     }
 
     #[test]
+    fn vars_to_strip_defaults_to_session_vars() {
+        let env = EnvConfig {
+            file: None,
+            vars: None,
+            clear_session_vars: None,
+            strip: None,
+        };
+        let stripped = env.vars_to_strip();
+        for var in crate::constants::SESSION_SCOPED_ENV_VARS {
+            assert!(stripped.contains(&var.to_string()));
+        }
+    }
+
+    #[test]
+    fn vars_to_strip_preserves_explicit_vars() {
+        let env = EnvConfig {
+            file: None,
+            vars: Some(HashMap::from([("SSH_TTY".into(), "/dev/pts/0".into())])),
+            clear_session_vars: None,
+            strip: None,
+        };
+        assert!(!env.vars_to_strip().contains(&"SSH_TTY".to_string()));
+    }
+
+    #[test]
+    fn vars_to_strip_respects_clear_session_vars_false() {
+        let env = EnvConfig {
+            file: None,
+            vars: None,
+            clear_session_vars: Some(false),
+            strip: Some(vec!["FOO".into()]),
+        };
+        let stripped = env.vars_to_strip();
+        assert_eq!(stripped, vec!["FOO".to_string()]);
+    }
+
+    #[test]
     fn test_env_merge_service_file_only_overrides_root() {
         let root = EnvConfig {
             file: Some("root.env".into()),
             vars: Some(HashMap::from([("ROOT_VAR".into(), "root_value".into())])),
+            clear_session_vars: None,
+            strip: None,
         };
 
         let service = EnvConfig {
             file: Some("service.env".into()),
             vars: None,
+            clear_session_vars: None,
+            strip: None,
         };
 
         let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();

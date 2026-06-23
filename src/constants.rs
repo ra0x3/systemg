@@ -128,6 +128,18 @@ pub const DEFAULT_SHELL: &str = "sh";
 /// Shell argument flag for executing command strings.
 pub const SHELL_COMMAND_FLAG: &str = "-c";
 
+/// Caller/session-scoped environment variables that are stripped from
+/// long-lived service environments by default. These describe the SSH session
+/// of whoever ran `sysg` and must not leak into daemonized services, where they
+/// pin a stale `ssh-agent` and orphan it under PID 1.
+pub const SESSION_SCOPED_ENV_VARS: &[&str] = &[
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "SSH_CLIENT",
+    "SSH_CONNECTION",
+    "SSH_TTY",
+];
+
 /// Number of checks to perform when waiting for a process to become ready.
 /// Used in conjunction with PROCESS_CHECK_INTERVAL.
 pub const PROCESS_READY_CHECKS: usize = 10;
