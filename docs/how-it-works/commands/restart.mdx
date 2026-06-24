@@ -56,6 +56,18 @@ Manifest changes are applied: services added since the last load start, services
 removed from the manifest stop, and changed commands take effect. You do not
 need to pass `--config` again if the project already has a known config path.
 
+## Cron units
+
+`restart --service <CRON_UNIT>` is invalid. Cron units are scheduler entries,
+not persistent services, so they cannot be restarted directly:
+
+```
+cron unit '<name>' cannot be restarted directly; reload project '<project>' to reschedule it
+```
+
+To reschedule cron definitions, reload or restart the whole project. A project
+restart re-reads the manifest and reschedules every cron unit it defines.
+
 ## Deployment strategies
 
 Services configured with `deployment.strategy: rolling` get zero-downtime restarts:

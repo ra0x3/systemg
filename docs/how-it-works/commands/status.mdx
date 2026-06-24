@@ -35,6 +35,13 @@ By default, `sysg status` displays an interactive table where you can:
 - **R** - Restart the selected service
 - **q**, **ESC**, or **Ctrl+C** - Exit the status view
 
+:::info Cron units
+The **R** restart control applies to service units only. Cron units are
+scheduler entries, not persistent services, so pressing **R** on a cron row is a
+no-op: systemg shows a notice that cron units cannot be restarted directly and
+that you should reload the project to reschedule them.
+:::
+
 The focused cell in the selected row is drawn in reverse video, so it stands
 out as lighter on a dark terminal and darker on a light terminal. This makes it
 obvious which cell you are on as you tab across the row.
