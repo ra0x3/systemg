@@ -34,6 +34,11 @@ services:
 - Cron jobs are short-lived (run and exit)
 - Cannot mix with `restart_policy`
 - Overlap detection prevents duplicate runs
+- Cron units are scheduled by the supervisor, not run as persistent services.
+  Unlike services, they cannot be started or restarted directly with
+  `sysg start -s <unit>` or `sysg restart -s <unit>` — both are rejected. To
+  (re)schedule a cron unit, reload or restart its project so the supervisor
+  re-reads the manifest.
 
 ## Examples
 

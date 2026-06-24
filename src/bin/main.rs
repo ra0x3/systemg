@@ -66,6 +66,9 @@ const DEFAULT_CONFIG_PATH: &str = "systemg.yaml";
 enum InspectStreamAction {
     Refresh,
     Exit,
+    Start,
+    Stop,
+    Restart,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,13 +77,69 @@ enum LogsStreamAction {
     Exit,
 }
 
+/// Returns true when a control action is invalid for a cron unit. Cron units
+/// are scheduler entries, so start/stop/restart must not dispatch for them.
+fn inspect_stream_action_blocked_for_cron(
+    kind: UnitKind,
+    action: InspectStreamAction,
+) -> bool {
+    kind == UnitKind::Cron
+        && matches!(
+            action,
+            InspectStreamAction::Start
+                | InspectStreamAction::Stop
+                | InspectStreamAction::Restart
+        )
+}
+
 fn inspect_stream_event_action(event: Event) -> Option<InspectStreamAction> {
     match event {
         Event::Key(key_event) if stream_exit_key_event(&key_event) => {
             Some(InspectStreamAction::Exit)
         }
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('s') | KeyCode::Char('S'),
+            ..
+        }) => Some(InspectStreamAction::Start),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('x') | KeyCode::Char('X'),
+            ..
+        }) => Some(InspectStreamAction::Stop),
+        Event::Key(KeyEvent {
+            code: KeyCode::Char('r') | KeyCode::Char('R'),
+            ..
+        }) => Some(InspectStreamAction::Restart),
         _ => None,
     }
+}
+
+fn run_inspect_stream_control_action(
+    action: InspectStreamAction,
+    config: &str,
+    service: &str,
+    project: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let command = match action {
+        InspectStreamAction::Start => "start",
+        InspectStreamAction::Stop => "stop",
+        InspectStreamAction::Restart => "restart",
+        InspectStreamAction::Refresh | InspectStreamAction::Exit => return Ok(()),
+    };
+
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
+    let mut child = process::Command::new(current_exe);
+    child.args([command, "--config", config, "--service", service]);
+    if let Some(project) = project {
+        child.args(["--project", project]);
+    }
+
+    let _status = child
+        .stdin(process::Stdio::inherit())
+        .stdout(process::Stdio::inherit())
+        .stderr(process::Stdio::inherit())
+        .status()?;
+
+    Ok(())
 }
 
 fn logs_stream_event_action(event: Event) -> Option<LogsStreamAction> {
@@ -713,11 +772,43 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                                 previous_line_count,
                             )?;
 
-                            if wait_for_inspect_stream_action(sleep_interval)?
-                                == InspectStreamAction::Exit
-                            {
-                                clear_terminal_output()?;
-                                return Ok(());
+                            match wait_for_inspect_stream_action(sleep_interval)? {
+                                InspectStreamAction::Refresh => {}
+                                InspectStreamAction::Exit => {
+                                    clear_terminal_output()?;
+                                    return Ok(());
+                                }
+                                action @ (InspectStreamAction::Start
+                                | InspectStreamAction::Stop
+                                | InspectStreamAction::Restart) => {
+                                    let unit_kind = payload
+                                        .unit
+                                        .as_ref()
+                                        .map(|unit| unit.kind)
+                                        .unwrap_or(UnitKind::Service);
+                                    if inspect_stream_action_blocked_for_cron(
+                                        unit_kind, action,
+                                    ) {
+                                        terminal::disable_raw_mode()?;
+                                        println!(
+                                            "\nCron units cannot be controlled directly; reload the project to reschedule."
+                                        );
+                                        terminal::enable_raw_mode()?;
+                                        continue;
+                                    }
+                                    terminal::disable_raw_mode()?;
+                                    println!();
+                                    let action_result = run_inspect_stream_control_action(
+                                        action,
+                                        &effective_config,
+                                        &service,
+                                        target_project.as_deref(),
+                                    );
+                                    terminal::enable_raw_mode()?;
+                                    action_result?;
+                                    previous_line_count = 0;
+                                    clear_terminal_output()?;
+                                }
                             }
                         }
                     })();
@@ -1032,6 +1123,38 @@ mod tests {
     use systemg::{spawn::SpawnedChild, status::SpawnedProcessNode};
 
     use super::*;
+
+    #[test]
+    fn inspect_stream_blocks_control_actions_for_cron_units() {
+        for action in [
+            InspectStreamAction::Start,
+            InspectStreamAction::Stop,
+            InspectStreamAction::Restart,
+        ] {
+            assert!(inspect_stream_action_blocked_for_cron(
+                UnitKind::Cron,
+                action
+            ));
+            assert!(!inspect_stream_action_blocked_for_cron(
+                UnitKind::Service,
+                action
+            ));
+        }
+
+        for action in [InspectStreamAction::Refresh, InspectStreamAction::Exit] {
+            assert!(!inspect_stream_action_blocked_for_cron(
+                UnitKind::Cron,
+                action
+            ));
+        }
+    }
+
+    #[test]
+    fn status_restart_control_blocked_for_cron_units() {
+        assert!(status_restart_blocked_for_cron(UnitKind::Cron));
+        assert!(!status_restart_blocked_for_cron(UnitKind::Service));
+        assert!(!status_restart_blocked_for_cron(UnitKind::Orphaned));
+    }
 
     #[test]
     fn visit_spawn_tree_renders_nested_children() {
@@ -2442,6 +2565,36 @@ mod tests {
         )));
 
         assert_eq!(action, Some(InspectStreamAction::Exit));
+    }
+
+    #[test]
+    fn inspect_stream_event_action_starts_on_s() {
+        let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(action, Some(InspectStreamAction::Start));
+    }
+
+    #[test]
+    fn inspect_stream_event_action_stops_on_x() {
+        let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(action, Some(InspectStreamAction::Stop));
+    }
+
+    #[test]
+    fn inspect_stream_event_action_restarts_on_r() {
+        let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+        )));
+
+        assert_eq!(action, Some(InspectStreamAction::Restart));
     }
 
     #[test]

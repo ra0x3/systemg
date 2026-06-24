@@ -143,6 +143,28 @@ fn fallback_cron_user(service_config: &crate::config::ServiceConfig) -> Option<S
         .map(|user| user.name)
 }
 
+/// Rejects direct control of a cron unit. `verb` is the past-tense action
+/// (e.g. "started", "restarted") and `remedy` is the project-level fix
+/// (e.g. "schedule", "reschedule").
+fn reject_direct_cron_control(
+    service_config: &crate::config::ServiceConfig,
+    service_name: &str,
+    target_project: &str,
+    verb: &str,
+    remedy: &str,
+) -> Result<(), SupervisorError> {
+    if service_config.cron.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cron unit '{service_name}' cannot be {verb} directly; reload project '{target_project}' to {remedy} it"
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Splits a qualified selector of the form `project_id/service_name`.
 fn split_project_selector(selector: &str) -> Option<(&str, &str)> {
     let (project, service) = selector.split_once('/')?;
@@ -571,15 +593,13 @@ impl Supervisor {
             (&project_runtime.daemon, service_config)
         };
 
-        if service_config.cron.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "cron unit '{service_name}' cannot be started directly; start or reload project '{target_project}' to schedule it"
-                ),
-            )
-            .into());
-        }
+        reject_direct_cron_control(
+            &service_config,
+            service_name,
+            &target_project,
+            "started",
+            "schedule",
+        )?;
 
         daemon.start_service(service_name, &service_config)?;
 
@@ -2270,6 +2290,13 @@ impl Supervisor {
                     service: service_name.into(),
                     dependency: "service not defined".into(),
                 })?;
+            reject_direct_cron_control(
+                service_config,
+                service_name,
+                &target_project,
+                "restarted",
+                "reschedule",
+            )?;
             self.daemon.restart_service(service_name, service_config)?;
             return Ok(());
         }
@@ -2290,6 +2317,13 @@ impl Supervisor {
                 service: service_name.into(),
                 dependency: "service not defined".into(),
             })?;
+        reject_direct_cron_control(
+            service_config,
+            service_name,
+            &target_project,
+            "restarted",
+            "reschedule",
+        )?;
         project_runtime
             .daemon
             .restart_service(service_name, service_config)?;
@@ -2946,6 +2980,20 @@ services:
             err.to_string()
                 .contains("cron unit 'beta_cron' cannot be started directly"),
             "unexpected cron start error: {err}"
+        );
+
+        let restart_err = supervisor
+            .handle_command(ControlCommand::Restart {
+                config: None,
+                service: Some("beta_cron".into()),
+                project: Some("beta".into()),
+            })
+            .expect_err("direct cron unit restart should be rejected");
+        assert!(
+            restart_err
+                .to_string()
+                .contains("cron unit 'beta_cron' cannot be restarted directly"),
+            "unexpected cron restart error: {restart_err}"
         );
 
         supervisor

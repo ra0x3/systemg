@@ -783,27 +783,39 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
-                            let selected_config_path =
-                                status_unit_config_path(selected_unit, config_path);
-                            let mut args = vec![
-                                "restart",
-                                "--config",
-                                selected_config_path,
-                                "--service",
-                                selected_unit.name.as_str(),
-                            ];
-                            if let Some(project) = selected_unit.project.as_ref() {
-                                args.extend(["--project", project.id.as_str()]);
+                            if status_restart_blocked_for_cron(selected_unit.kind) {
+                                run_status_noop_notice(
+                                    "Cron units cannot be restarted directly; reload the project to reschedule.",
+                                    snapshot,
+                                    &units,
+                                    opts,
+                                    selected_row,
+                                    selected_col,
+                                    health,
+                                )?;
+                            } else {
+                                let selected_config_path =
+                                    status_unit_config_path(selected_unit, config_path);
+                                let mut args = vec![
+                                    "restart",
+                                    "--config",
+                                    selected_config_path,
+                                    "--service",
+                                    selected_unit.name.as_str(),
+                                ];
+                                if let Some(project) = selected_unit.project.as_ref() {
+                                    args.extend(["--project", project.id.as_str()]);
+                                }
+                                run_status_child_view(
+                                    &args,
+                                    snapshot,
+                                    &units,
+                                    opts,
+                                    selected_row,
+                                    selected_col,
+                                    health,
+                                )?;
                             }
-                            run_status_child_view(
-                                &args,
-                                snapshot,
-                                &units,
-                                opts,
-                                selected_row,
-                                selected_col,
-                                health,
-                            )?;
                         }
                     }
                     KeyEvent {
@@ -838,6 +850,42 @@ fn render_status_interactive(
 }
 
 /// Runs a child sysg view while status is in interactive mode, then redraws status.
+/// Returns true when the interactive restart control is invalid for a unit.
+/// Cron units are scheduler entries and cannot be restarted directly.
+fn status_restart_blocked_for_cron(kind: UnitKind) -> bool {
+    kind == UnitKind::Cron
+}
+
+/// Prints a no-op notice for an interactive control that does not apply to the
+/// selected unit, then waits for a key before returning to the status table.
+fn run_status_noop_notice(
+    message: &str,
+    snapshot: &StatusSnapshot,
+    units: &[UnitStatus],
+    opts: &StatusRenderOptions,
+    selected_row: usize,
+    selected_col: usize,
+    health: OverallHealth,
+) -> Result<(), Box<dyn Error>> {
+    terminal::disable_raw_mode()?;
+    println!("\n\n{message}");
+    println!("\nPress any key to return to status view...");
+    terminal::enable_raw_mode()?;
+    let _ = event::read();
+    terminal::disable_raw_mode()?;
+    clear_terminal_output()?;
+    render_status_table_with_focus(
+        snapshot,
+        units,
+        opts,
+        selected_row,
+        selected_col,
+        health,
+    )?;
+    terminal::enable_raw_mode()?;
+    Ok(())
+}
+
 fn run_status_child_view(
     args: &[&str],
     snapshot: &StatusSnapshot,
