@@ -19,6 +19,8 @@ use systemg::daemon::{Daemon, PidFile};
 use systemg::{
     config::load_config,
     daemon::{ServiceLifecycleStatus, ServiceStateFile},
+    ipc::InspectPayload,
+    status::{OverallHealth, StatusSnapshot},
 };
 #[cfg(target_os = "linux")]
 use systemg::{
@@ -36,7 +38,7 @@ fn status_without_config_reports_missing_supervisor_not_missing_manifest() {
     let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
     let output = Command::new(sysg_bin)
         .arg("status")
-        .arg("--json")
+        .args(["--format", "json"])
         .output()
         .expect("run sysg status");
 
@@ -95,7 +97,7 @@ services:
         .arg("status")
         .arg("--config")
         .arg(config_path.as_os_str())
-        .arg("--json")
+        .args(["--format", "json"])
         .output()
         .expect("run sysg status");
 
@@ -111,6 +113,104 @@ services:
         output.stderr.is_empty(),
         "status json output should not emit progress noise on stderr in non-interactive mode"
     );
+
+    drop(home_guard);
+}
+
+#[test]
+fn status_format_defaults_to_json_when_value_is_omitted() {
+    let temp = tempdir().expect("create tempdir");
+    let home_guard = HomeEnvGuard::set(temp.path());
+
+    let config_path = temp.path().join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/true"
+"#,
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))
+        .expect("load config for hash");
+    let service = config.services.get("demo").expect("demo service");
+    let hash = service.compute_hash();
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::ExitedSuccessfully,
+            None,
+            Some(0),
+            None,
+        )
+        .expect("persist state");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("status")
+        .arg("--config")
+        .arg(config_path.as_os_str())
+        .arg("--format")
+        .output()
+        .expect("run sysg status");
+
+    let payload: Value = serde_json::from_slice(&output.stdout)
+        .expect("bare --format should default to json output");
+    assert_eq!(payload["overall_health"], "healthy");
+
+    drop(home_guard);
+}
+
+#[test]
+fn status_xml_falls_back_to_snapshot_without_supervisor() {
+    let temp = tempdir().expect("create tempdir");
+    let home_guard = HomeEnvGuard::set(temp.path());
+
+    let config_path = temp.path().join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/true"
+"#,
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))
+        .expect("load config for hash");
+    let service = config.services.get("demo").expect("demo service");
+    let hash = service.compute_hash();
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::ExitedSuccessfully,
+            None,
+            Some(0),
+            None,
+        )
+        .expect("persist state");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("status")
+        .arg("--config")
+        .arg(config_path.as_os_str())
+        .args(["--format", "xml"])
+        .output()
+        .expect("run sysg status");
+
+    let xml = std::str::from_utf8(&output.stdout).expect("status xml is utf8");
+    let payload: StatusSnapshot = quick_xml::de::from_str(xml).expect("parse status xml");
+    assert_eq!(payload.overall_health, OverallHealth::Healthy);
+    assert_eq!(payload.units.len(), 1);
+    assert_eq!(payload.units[0].hash, hash);
 
     drop(home_guard);
 }
@@ -155,7 +255,7 @@ services:
         .arg("demo")
         .arg("--config")
         .arg(config_path.as_os_str())
-        .arg("--json")
+        .args(["--format", "json"])
         .output()
         .expect("run sysg inspect");
 
@@ -172,6 +272,59 @@ services:
         output.stderr.is_empty(),
         "inspect json output should not emit progress noise on stderr in non-interactive mode"
     );
+
+    drop(home_guard);
+}
+
+#[test]
+fn inspect_xml_falls_back_without_supervisor() {
+    let temp = tempdir().expect("create tempdir");
+    let home_guard = HomeEnvGuard::set(temp.path());
+
+    let config_path = temp.path().join("systemg.yaml");
+    fs::write(
+        &config_path,
+        r#"
+version: "1"
+services:
+  demo:
+    command: "/bin/true"
+"#,
+    )
+    .expect("write config");
+
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))
+        .expect("load config for hash");
+    let service = config.services.get("demo").expect("demo service");
+    let hash = service.compute_hash();
+
+    let mut state = ServiceStateFile::load().expect("load state");
+    state
+        .set(
+            &hash,
+            ServiceLifecycleStatus::Running,
+            Some(4242),
+            None,
+            None,
+        )
+        .expect("persist state");
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .arg("inspect")
+        .arg("--service")
+        .arg("demo")
+        .arg("--config")
+        .arg(config_path.as_os_str())
+        .args(["--format", "xml"])
+        .output()
+        .expect("run sysg inspect");
+
+    let xml = std::str::from_utf8(&output.stdout).expect("inspect xml is utf8");
+    let payload: InspectPayload =
+        quick_xml::de::from_str(xml).expect("parse inspect xml");
+    let unit = payload.unit.expect("inspect xml should include unit");
+    assert_eq!(unit.hash, hash);
+    assert!(payload.samples.is_empty());
 
     drop(home_guard);
 }
@@ -437,7 +590,7 @@ services:
         .arg(config_path.to_str().unwrap())
         .arg("--service")
         .arg("arb_rs")
-        .arg("--json")
+        .args(["--format", "json"])
         .arg("--no-color")
         .output()
         .expect("run sysg status for zombie detection");
@@ -536,7 +689,7 @@ services:
         .arg("status")
         .arg("--config")
         .arg(config_path.to_str().unwrap())
-        .arg("--json")
+        .args(["--format", "json"])
         .arg("--no-color")
         .output()
         .expect("run sysg status for skipped service");
@@ -601,7 +754,7 @@ services:
         .arg("status")
         .arg("--config")
         .arg(config_path.to_str().unwrap())
-        .arg("--json")
+        .args(["--format", "json"])
         .arg("--no-color")
         .output()
         .expect("run sysg status for exited service");

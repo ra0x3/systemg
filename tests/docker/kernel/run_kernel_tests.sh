@@ -269,7 +269,7 @@ fi
 
 # Test metrics collection
 log_info "Collecting system metrics..."
-if sysg --sys inspect --service app_worker --json > /tmp/metrics.json; then
+if sysg --sys inspect --service app_worker --format json > /tmp/metrics.json; then
     if [ -s /tmp/metrics.json ]; then
         log_success "Metrics collection successful"
     else

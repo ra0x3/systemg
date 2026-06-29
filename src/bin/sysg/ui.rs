@@ -1,6 +1,6 @@
 /// Represents status render options.
 struct StatusRenderOptions<'a> {
-    json: bool,
+    format: Option<OutputFormat>,
     no_color: bool,
     #[allow(dead_code)]
     full_cmd: bool,
@@ -11,7 +11,7 @@ struct StatusRenderOptions<'a> {
 
 /// Represents inspect render options.
 struct InspectRenderOptions {
-    json: bool,
+    format: Option<OutputFormat>,
     no_color: bool,
     window_seconds: u64,
     window_desc: String,
@@ -38,6 +38,16 @@ const BRIGHT_WHITE: &str = "\x1b[97m";
 const DIM_WHITE: &str = "\x1b[2;37m";
 const DIM_CYAN: &str = "\x1b[2;36m";
 const RESET: &str = "\x1b[0m";
+
+fn serialize_machine_output<T: serde::Serialize>(
+    payload: &T,
+    format: OutputFormat,
+) -> Result<String, Box<dyn Error>> {
+    match format {
+        OutputFormat::Json => Ok(serde_json::to_string_pretty(payload)?),
+        OutputFormat::Xml => Ok(quick_xml::se::to_string(payload)?),
+    }
+}
 
 #[derive(Clone, Copy)]
 /// Represents the semantic color family inherited by nested status rows.
@@ -1202,7 +1212,7 @@ fn render_status(
     watch_mode: bool,
     config_path: &str,
 ) -> Result<OverallHealth, Box<dyn Error>> {
-    if watch_mode || opts.json {
+    if watch_mode || opts.format.is_some() {
         render_status_non_interactive(snapshot, opts, watch_mode)
     } else {
         render_status_interactive(snapshot, opts, config_path)
@@ -1236,14 +1246,17 @@ fn render_status_non_interactive(
 
     let health = compute_overall_health(&units);
 
-    if opts.json {
+    if let Some(format) = opts.format {
         let filtered_snapshot = StatusSnapshot {
             schema_version: snapshot.schema_version.clone(),
             captured_at: snapshot.captured_at,
             overall_health: health,
             units,
         };
-        println!("{}", serde_json::to_string_pretty(&filtered_snapshot)?);
+        println!(
+            "{}",
+            serialize_machine_output(&filtered_snapshot, format)?
+        );
         return Ok(health);
     }
 
@@ -3175,12 +3188,15 @@ fn collect_inspect_lines(
         )
     };
 
-    if opts.json {
-        let json_payload = InspectPayload {
+    if let Some(format) = opts.format {
+        let inspect_payload = InspectPayload {
             unit: Some(unit.clone()),
             samples: filtered_samples,
         };
-        return Ok((health, vec![serde_json::to_string_pretty(&json_payload)?]));
+        return Ok((
+            health,
+            vec![serialize_machine_output(&inspect_payload, format)?],
+        ));
     }
     let table_width = compute_inspect_process_table_width(unit);
     let outer_inner_width = table_width.saturating_sub(2);

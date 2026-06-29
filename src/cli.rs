@@ -1,7 +1,7 @@
 //! Command-line interface for Systemg.
 use std::{fmt, str::FromStr};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tracing::level_filters::LevelFilter;
 
 /// Wrapper around `LevelFilter` so clap can parse log levels from either
@@ -111,6 +111,15 @@ impl FromStr for LogKind {
             )),
         }
     }
+}
+
+/// Machine-readable output formats supported by status and inspect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Emit JSON output.
+    Json,
+    /// Emit XML output.
+    Xml,
 }
 
 /// Command-line interface for Systemg.
@@ -248,9 +257,15 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// Emit machine-readable JSON output instead of a table.
-        #[arg(long)]
-        json: bool,
+        /// Emit machine-readable output in the requested format.
+        #[arg(
+            long,
+            value_enum,
+            value_name = "FORMAT",
+            num_args = 0..=1,
+            default_missing_value = "json"
+        )]
+        format: Option<OutputFormat>,
 
         /// Disable ANSI colors in output.
         #[arg(long = "no-color")]
@@ -283,9 +298,15 @@ pub enum Commands {
         #[arg(short = 'p', long)]
         project: Option<String>,
 
-        /// Emit machine-readable JSON output instead of a report.
-        #[arg(long)]
-        json: bool,
+        /// Emit machine-readable output in the requested format.
+        #[arg(
+            long,
+            value_enum,
+            value_name = "FORMAT",
+            num_args = 0..=1,
+            default_missing_value = "json"
+        )]
+        format: Option<OutputFormat>,
 
         /// Disable ANSI colors in output.
         #[arg(long = "no-color")]
