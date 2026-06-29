@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use sysinfo::{Pid as SysPid, ProcessRefreshKind, ProcessesToUpdate, System, Users};
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
-    cli::{Cli, Commands, parse_args},
+    cli::{Cli, Commands, OutputFormat, parse_args},
     config::{EffectiveLogsConfig, load_config},
     cron::{CronExecutionStatus, CronStateFile},
     daemon::{Daemon, PidFile, ServiceLifecycleStatus},
@@ -620,7 +620,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             service,
             project,
             all,
-            json,
+            format,
             no_color,
             full_cmd,
             live,
@@ -631,7 +631,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             let render_config = config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH);
 
             let render_opts = StatusRenderOptions {
-                json,
+                format,
                 no_color,
                 full_cmd,
                 include_orphans: all,
@@ -697,7 +697,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config,
             service,
             project,
-            json,
+            format,
             no_color,
             live,
             stream,
@@ -732,7 +732,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             };
 
             let render_opts = InspectRenderOptions {
-                json,
+                format,
                 no_color,
                 window_seconds: stream_seconds,
                 window_desc: format!("last {}s", stream_seconds),
@@ -1496,7 +1496,7 @@ mod tests {
             samples: Vec::new(),
         };
         let opts = InspectRenderOptions {
-            json: false,
+            format: None,
             no_color: true,
             window_seconds: 5,
             window_desc: "last 5s".to_string(),
@@ -2076,7 +2076,7 @@ mod tests {
             service: None,
             project: None,
             all: false,
-            json: false,
+            format: None,
             no_color: false,
             full_cmd: false,
             stream: None,
