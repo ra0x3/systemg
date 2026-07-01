@@ -2060,7 +2060,13 @@ impl StatusManager {
         {
             let target = Pid::from_raw(pid as i32);
             match signal::kill(target, None) {
-                Ok(_) => ProcessState::Running,
+                Ok(_) => {
+                    if matches!(Self::read_proc_state(pid), Some('Z') | Some('X')) {
+                        ProcessState::Zombie
+                    } else {
+                        ProcessState::Running
+                    }
+                }
                 Err(err) => {
                     if err == nix::Error::from(nix::errno::Errno::ESRCH) {
                         ProcessState::Missing
@@ -2147,6 +2153,20 @@ impl StatusManager {
         }
 
         parts.next()?.chars().next()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    /// Reads the process state character via `ps` on non-Linux Unix platforms.
+    fn read_proc_state(pid: u32) -> Option<char> {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "state=", "-p"])
+            .arg(pid.to_string())
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .chars()
+            .next()
     }
 
     /// Parses an uptime string in "HH:MM" format and returns a human-readable string.
