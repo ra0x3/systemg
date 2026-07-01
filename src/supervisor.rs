@@ -2254,7 +2254,7 @@ impl Supervisor {
 
     /// Restarts one service in the selected project without reloading unrelated projects.
     fn restart_single_service_target(
-        &self,
+        &mut self,
         selector: &str,
         project: Option<&str>,
         config_path: Option<&Path>,
@@ -2281,6 +2281,22 @@ impl Supervisor {
         let primary_project = self.daemon.config().project.id.clone();
 
         if target_project == primary_project {
+            if let (Some(config), Some(path)) = (override_config.as_ref(), config_path) {
+                let cached = self.daemon.config();
+                let new_hash = config
+                    .services
+                    .get(service_name)
+                    .map(|svc| svc.compute_hash());
+                let cached_hash = cached
+                    .services
+                    .get(service_name)
+                    .map(|svc| svc.compute_hash());
+                if new_hash != cached_hash {
+                    self.reload_config(path)?;
+                    return Ok(());
+                }
+            }
+
             let config_handle = self.daemon.config();
             let service_config = override_config
                 .as_ref()
@@ -2309,6 +2325,28 @@ impl Supervisor {
             .into());
         };
         let config_handle = project_runtime.daemon.config();
+
+        if let (Some(config), Some(path)) = (override_config.as_ref(), config_path) {
+            let new_hash = config
+                .services
+                .get(service_name)
+                .map(|svc| svc.compute_hash());
+            let cached_hash = config_handle
+                .services
+                .get(service_name)
+                .map(|svc| svc.compute_hash());
+            if new_hash != cached_hash {
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    std::env::current_dir()?.join(path)
+                };
+                let resolved = resolved.canonicalize().unwrap_or(resolved);
+                self.replace_extra_project_runtime(config.clone(), resolved)?;
+                return Ok(());
+            }
+        }
+
         let service_config = override_config
             .as_ref()
             .and_then(|config| config.services.get(service_name))

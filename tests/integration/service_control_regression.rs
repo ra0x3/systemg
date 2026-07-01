@@ -375,3 +375,175 @@ services:
         "Service should show as Stopped after purge"
     );
 }
+
+fn config_with_marker(marker: &std::path::Path, tag: &str) -> String {
+    format!(
+        r#"
+version: '1'
+project:
+  id: repro-proj
+services:
+  worker:
+    command: "sh -c 'echo {tag} > {} && exec sleep 300'"
+    restart_policy: always
+"#,
+        marker.display()
+    )
+}
+
+fn wait_for_marker_value(marker: &std::path::Path, expected: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(value) = fs::read_to_string(marker)
+            && value.trim() == expected
+        {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            let got = fs::read_to_string(marker).unwrap_or_default();
+            panic!("marker never became '{expected}' (last: '{}')", got.trim());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn service_hash(config_path: &std::path::Path, service: &str) -> String {
+    load_config(Some(config_path.to_str().unwrap()))
+        .unwrap()
+        .get_service_hash(service)
+        .expect("service defined in config")
+}
+
+fn wait_for_state_running(hash: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(state) = ServiceStateFile::load()
+            && let Some(entry) = state.get(hash)
+            && matches!(entry.status, ServiceLifecycleStatus::Running)
+        {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("state file never reported hash '{hash}' as Running");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Regression: `restart -s <svc> -c <config>` must reconcile a changed command from
+/// the manifest. The spawned command AND the stored per-hash lifecycle state must
+/// track the new command; the stale hash must not remain the tracked Running entry.
+#[test]
+fn restart_with_config_reconciles_changed_command() {
+    let temp = tempdir().unwrap();
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let _home = HomeEnvGuard::set(&home);
+
+    let marker = dir.join("marker.txt");
+    let config_path = dir.join("systemg.yaml");
+    fs::write(&config_path, config_with_marker(&marker, "V1")).unwrap();
+    let hash_v1 = service_hash(&config_path, "worker");
+
+    let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
+    Command::new(sysg_bin)
+        .args(["start", "--config"])
+        .arg(&config_path)
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    wait_for_marker_value(&marker, "V1");
+    wait_for_state_running(&hash_v1);
+
+    fs::write(&config_path, config_with_marker(&marker, "V2")).unwrap();
+    let hash_v2 = service_hash(&config_path, "worker");
+    assert_ne!(hash_v1, hash_v2, "changed command must change the hash");
+
+    Command::new(sysg_bin)
+        .args(["restart", "--service", "worker", "--config"])
+        .arg(&config_path)
+        .assert()
+        .success();
+
+    wait_for_marker_value(&marker, "V2");
+    wait_for_state_running(&hash_v2);
+
+    let state = ServiceStateFile::load().unwrap();
+    let v1_running = state
+        .get(&hash_v1)
+        .is_some_and(|entry| matches!(entry.status, ServiceLifecycleStatus::Running));
+    assert!(
+        !v1_running,
+        "stale V1 hash must not remain a Running entry after config reconcile"
+    );
+
+    Command::new(sysg_bin)
+        .arg("stop")
+        .arg("--supervisor")
+        .assert()
+        .success();
+}
+
+/// Regression: `stop -p <project>` then `start -c <edited-config>` must launch the new
+/// command from the manifest, not the stale cached command.
+#[test]
+fn stop_project_then_start_reconciles_changed_command() {
+    let temp = tempdir().unwrap();
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let _home = HomeEnvGuard::set(&home);
+
+    let marker = dir.join("marker.txt");
+    let config_path = dir.join("systemg.yaml");
+    fs::write(&config_path, config_with_marker(&marker, "V1")).unwrap();
+    let hash_v1 = service_hash(&config_path, "worker");
+
+    let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
+    Command::new(sysg_bin)
+        .args(["start", "--config"])
+        .arg(&config_path)
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    wait_for_marker_value(&marker, "V1");
+    wait_for_state_running(&hash_v1);
+
+    Command::new(sysg_bin)
+        .args(["stop", "--project", "repro-proj"])
+        .assert()
+        .success();
+
+    thread::sleep(Duration::from_millis(300));
+    let _ = fs::remove_file(&marker);
+
+    fs::write(&config_path, config_with_marker(&marker, "V2")).unwrap();
+    let hash_v2 = service_hash(&config_path, "worker");
+    Command::new(sysg_bin)
+        .args(["start", "--config"])
+        .arg(&config_path)
+        .arg("--daemonize")
+        .assert()
+        .success();
+
+    wait_for_marker_value(&marker, "V2");
+    wait_for_state_running(&hash_v2);
+
+    let state = ServiceStateFile::load().unwrap();
+    let v1_running = state
+        .get(&hash_v1)
+        .is_some_and(|entry| matches!(entry.status, ServiceLifecycleStatus::Running));
+    assert!(
+        !v1_running,
+        "stale V1 hash must not remain a Running entry after stop/start reconcile"
+    );
+
+    Command::new(sysg_bin)
+        .arg("stop")
+        .arg("--supervisor")
+        .assert()
+        .success();
+}
