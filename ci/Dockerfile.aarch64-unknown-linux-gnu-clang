@@ -10,7 +10,7 @@ RUN dpkg --add-architecture arm64 && \
     cmake \
     gcc \
     git \
-    libclang-8-dev \
+    libclang-dev \
     libssl-dev:arm64 \
     lld \
     llvm \
