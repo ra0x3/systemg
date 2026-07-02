@@ -153,6 +153,10 @@ pub enum PidFileError {
     #[error("Failed to parse PID file: {0}")]
     ParseError(#[from] quick_xml::DeError),
 
+    /// Error serializing the PID file to XML.
+    #[error("Failed to serialize PID file: {0}")]
+    SerializeError(#[from] quick_xml::SeError),
+
     /// Error writing to a PID file.
     #[error("Service not found in PID file")]
     ServiceNotFound,
@@ -168,6 +172,10 @@ pub enum ServiceStateError {
     /// Error parsing XML contents of the state file.
     #[error("Failed to parse service state file: {0}")]
     ParseError(#[from] quick_xml::DeError),
+
+    /// Error serializing the state file to XML.
+    #[error("Failed to serialize service state file: {0}")]
+    SerializeError(#[from] quick_xml::SeError),
 
     /// Attempted to update or remove a non-existent service entry.
     #[error("Service not found in state file")]
