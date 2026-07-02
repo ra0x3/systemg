@@ -939,6 +939,32 @@ pub fn collect_disk_snapshot(
     ))
 }
 
+/// Maps each cron service name to the persisted hash whose state is most recent.
+///
+/// A service's config hash changes whenever its config is edited, so history and
+/// metrics persisted under an older hash would otherwise be unreachable. This lets
+/// callers recover that state by service name.
+fn reconcile_cron_hashes_by_name(cron_state: &CronStateFile) -> HashMap<String, String> {
+    let mut best: HashMap<String, (String, Option<SystemTime>)> = HashMap::new();
+    for (hash, job) in cron_state.jobs() {
+        let Some(name) = job.service_name.as_deref() else {
+            continue;
+        };
+        let candidate = job
+            .last_execution
+            .or_else(|| job.execution_history.back().map(|record| record.started_at));
+        match best.get(name) {
+            Some((_, existing)) if *existing >= candidate => {}
+            _ => {
+                best.insert(name.to_string(), (hash.clone(), candidate));
+            }
+        }
+    }
+    best.into_iter()
+        .map(|(name, (hash, _))| (name, hash))
+        .collect()
+}
+
 /// Builds snapshot.
 fn build_snapshot(
     config: Option<&Config>,
@@ -969,6 +995,8 @@ fn build_snapshot(
 
     unit_hashes.extend(service_state.services().keys().cloned());
     unit_hashes.extend(cron_state.jobs().keys().cloned());
+
+    let cron_hash_by_name = reconcile_cron_hashes_by_name(cron_state);
 
     let mut units = Vec::new();
 
@@ -1070,23 +1098,36 @@ fn build_snapshot(
             }
         });
 
-        let cron = cron_state.jobs().get(&hash).map(|job| {
-            let recent_runs: Vec<CronExecutionSummary> = job
-                .execution_history
-                .iter()
-                .rev()
-                .map(cron_record_to_summary)
-                .collect();
+        let cron_hash = if cron_state.jobs().contains_key(&hash) {
+            Some(hash.clone())
+        } else if kind == UnitKind::Cron {
+            actual_name
+                .as_deref()
+                .and_then(|name| cron_hash_by_name.get(name).cloned())
+        } else {
+            None
+        };
 
-            let last_run = recent_runs.first().cloned();
+        let cron = cron_hash
+            .as_ref()
+            .and_then(|cron_hash| cron_state.jobs().get(cron_hash))
+            .map(|job| {
+                let recent_runs: Vec<CronExecutionSummary> = job
+                    .execution_history
+                    .iter()
+                    .rev()
+                    .map(cron_record_to_summary)
+                    .collect();
 
-            CronUnitStatus {
-                timezone_label: job.timezone_label.clone(),
-                timezone: job.timezone.clone(),
-                last_run,
-                recent_runs,
-            }
-        });
+                let last_run = recent_runs.first().cloned();
+
+                CronUnitStatus {
+                    timezone_label: job.timezone_label.clone(),
+                    timezone: job.timezone.clone(),
+                    last_run,
+                    recent_runs,
+                }
+            });
 
         let service_config =
             config.and_then(|cfg| cfg.services.get(actual_name.as_deref().unwrap_or("")));
@@ -1110,7 +1151,14 @@ fn build_snapshot(
             cron.as_ref(),
         );
         let metrics_summary = metrics_store
-            .and_then(|store| store.summarize_unit(&hash))
+            .and_then(|store| {
+                store.summarize_unit(&hash).or_else(|| {
+                    cron_hash
+                        .as_deref()
+                        .filter(|cron_hash| *cron_hash != hash)
+                        .and_then(|cron_hash| store.summarize_unit(cron_hash))
+                })
+            })
             .map(UnitMetricsSummary::from);
 
         let command = service_config.map(|service_config| service_config.command.clone());
@@ -3186,6 +3234,77 @@ services:
         );
         assert_eq!(unit.state, UnitState::Done);
         assert_eq!(unit.health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn build_snapshot_recovers_cron_history_under_stale_hash() {
+        let mut services = std::collections::HashMap::new();
+        let service = crate::config::ServiceConfig {
+            command: "/bin/echo hi".into(),
+            cron: Some(crate::config::CronConfig {
+                expression: "* * * * *".into(),
+                timezone: Some("UTC".into()),
+            }),
+            ..crate::config::ServiceConfig::default()
+        };
+        let live_hash = service.compute_hash();
+        services.insert("nightly".into(), service);
+        let config = Config {
+            version: crate::config::Version::V1,
+            project: crate::config::ProjectConfig::default(),
+            services,
+            project_dir: None,
+            env: None,
+            metrics: crate::config::MetricsConfig::default(),
+            logs: crate::config::LogsConfig::default(),
+            status: crate::config::StatusConfig::default(),
+        };
+
+        let pid_file = PidFile::default();
+        let mut service_state = ServiceStateFile::default();
+        let cron_state_json = json!({
+            "jobs": [{
+                "hash": "deadbeefdeadbeef",
+                "state": {
+                    "service_name": "nightly",
+                    "last_execution": 1,
+                    "execution_history": [{
+                        "started_at": 1,
+                        "completed_at": 2,
+                        "status": "Success",
+                        "exit_code": 0,
+                    }],
+                    "timezone_label": "UTC",
+                    "timezone": "UTC"
+                }
+            }]
+        });
+        let mut cron_state: CronStateFile =
+            serde_json::from_value(cron_state_json).expect("deserialize cron state");
+
+        assert_ne!(live_hash, "deadbeefdeadbeef");
+
+        let snapshot = build_snapshot(
+            Some(&config),
+            &pid_file,
+            &mut service_state,
+            &mut cron_state,
+            None,
+            None,
+            StatusSnapshotMode::Summary,
+        );
+
+        let unit = snapshot
+            .units
+            .iter()
+            .find(|unit| unit.name == "nightly")
+            .expect("nightly unit");
+        let cron = unit
+            .cron
+            .as_ref()
+            .expect("cron history recovered by service name");
+        assert_eq!(cron.recent_runs.len(), 1);
+        assert_eq!(cron.timezone_label, "UTC");
     }
 
     #[test]

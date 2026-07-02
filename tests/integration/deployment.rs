@@ -87,6 +87,69 @@ services:
 }
 
 #[test]
+fn pre_start_failure_captures_stderr_and_tags_phase() {
+    let temp = tempdir().expect("failed to create tempdir");
+    let dir = temp.path();
+    let home = dir.join("home");
+    fs::create_dir_all(&home).expect("failed to create home dir");
+    let _home = HomeEnvGuard::set(&home);
+
+    let config_path = dir.join("config.yaml");
+    fs::write(
+        &config_path,
+        r#"version: "1"
+project_dir: "."
+services:
+  failing_pre_start:
+    command: "sh -c 'echo should_not_run'"
+    restart_policy: "always"
+    deployment:
+      pre_start: "sh -c 'echo migration boom 1>&2; exit 7'"
+"#,
+    )
+    .expect("failed to write config");
+
+    let config = load_config(Some(config_path.to_str().unwrap())).expect("load config");
+    let failing_config = config
+        .services
+        .get("failing_pre_start")
+        .cloned()
+        .expect("service exists");
+
+    let pid_file = Arc::new(Mutex::new(PidFile::load().expect("load pid file")));
+    let state_file = Arc::new(Mutex::new(
+        ServiceStateFile::load().expect("load service state file"),
+    ));
+
+    let daemon = Daemon::new(
+        config,
+        Arc::clone(&pid_file),
+        Arc::clone(&state_file),
+        false,
+    );
+
+    let result = daemon.start_service("failing_pre_start", &failing_config);
+    let err = result.expect_err("pre-start failure should surface as error");
+    assert!(
+        err.to_string().contains("pre_start:"),
+        "error should tag the pre_start phase, got: {err}",
+    );
+
+    let stderr_log = systemg::logs::get_log_path("failing_pre_start", "stderr");
+    let captured = fs::read_to_string(&stderr_log).unwrap_or_default();
+    assert!(
+        captured.contains("[pre_start] migration boom"),
+        "pre_start stderr should be captured in the unit stderr log, got: {captured:?}",
+    );
+    assert!(
+        captured.contains("[pre_start] pre_start: command exited with status"),
+        "pre_start failure summary should be written to stderr log, got: {captured:?}",
+    );
+
+    daemon.shutdown_monitor();
+}
+
+#[test]
 fn pre_start_command_executes_on_service_startup() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();

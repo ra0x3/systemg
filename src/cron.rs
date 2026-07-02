@@ -853,6 +853,7 @@ impl CronManager {
             state.jobs.insert(
                 job.service_hash.clone(),
                 PersistedCronJobState {
+                    service_name: Some(job.service_name.clone()),
                     last_execution: job.last_execution,
                     execution_history: job.execution_history.clone(),
                     timezone_label: job.timezone_label.clone(),
@@ -977,6 +978,9 @@ impl CronStateFile {
 /// Serializable cron job state that persists across restarts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedCronJobState {
+    /// Name of the service this cron job manages.
+    #[serde(default)]
+    pub service_name: Option<String>,
     /// Timestamp of the last execution start.
     #[serde(with = "systemtime_serde_opt", default)]
     pub last_execution: Option<SystemTime>,
@@ -995,6 +999,7 @@ impl Default for PersistedCronJobState {
     /// Returns the default this item.
     fn default() -> Self {
         Self {
+            service_name: None,
             last_execution: None,
             execution_history: VecDeque::with_capacity(MAX_EXECUTION_HISTORY),
             timezone_label: "".to_string(),
@@ -1167,6 +1172,7 @@ mod tests {
             EffectiveTimezone::Utc,
             "UTC".to_string(),
             Some(PersistedCronJobState {
+                service_name: Some("live_service".to_string()),
                 last_execution: Some(SystemTime::now() - Duration::from_secs(30)),
                 execution_history: history,
                 timezone_label: "UTC".to_string(),
@@ -1465,6 +1471,7 @@ mod tests {
         state.jobs.insert(
             "legacy-hash".to_string(),
             PersistedCronJobState {
+                service_name: Some("legacy_service".to_string()),
                 last_execution: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
                 execution_history: history,
                 timezone_label: "UTC".to_string(),
@@ -1501,6 +1508,7 @@ mod tests {
         state.jobs.insert(
             "running-hash".to_string(),
             PersistedCronJobState {
+                service_name: Some("running_service".to_string()),
                 last_execution: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
                 execution_history: history,
                 timezone_label: "UTC".to_string(),
