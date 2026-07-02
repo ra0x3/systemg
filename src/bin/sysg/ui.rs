@@ -3323,6 +3323,22 @@ fn collect_inspect_lines(
     ];
     overview_lines.retain(|line| !line.is_empty());
 
+    if let Some(cron_status) = &unit.cron {
+        let tz_label = if !cron_status.timezone_label.trim().is_empty() {
+            cron_status.timezone_label.trim().to_string()
+        } else if let Some(tz) = cron_status.timezone.as_deref() {
+            tz.to_string()
+        } else {
+            "local".to_string()
+        };
+        let timezone_label = colorize("Timezone", DIM_WHITE, opts.no_color);
+        overview_lines.push(format!(
+            "{} │ {}",
+            empty_label,
+            pad_ansi_str(&format!("{}: {}", timezone_label, tz_label), data_width)
+        ));
+    }
+
     if unit.command.is_some() || unit.runtime_command.is_some() {
         if let Some(command) = &unit.command {
             let cmd_label = colorize("Command", WHITE, opts.no_color);

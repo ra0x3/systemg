@@ -3256,8 +3256,10 @@ impl Daemon {
         command: &str,
     ) -> Result<(), ProcessManagerError> {
         use std::{
-            io::{BufRead, BufReader},
+            fs::OpenOptions,
+            io::{BufRead, BufReader, Write},
             process::Stdio,
+            sync::{Arc, Mutex},
             thread,
         };
 
@@ -3274,23 +3276,46 @@ impl Daemon {
             })?;
 
         let service_name_owned = service_name.to_string();
+        let stderr_log = resolve_log_path(service_name, "stderr");
+        if let Some(parent) = stderr_log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let log_sink = Arc::new(Mutex::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&stderr_log)
+                .ok(),
+        ));
 
         let stdout_handle = child.stdout.take().map(|stdout| {
             let service_name = service_name_owned.clone();
+            let log_sink = Arc::clone(&log_sink);
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     info!("[{service_name} pre-start] {line}");
+                    if let Ok(mut guard) = log_sink.lock()
+                        && let Some(file) = guard.as_mut()
+                    {
+                        let _ = writeln!(file, "[pre_start] {line}");
+                    }
                 }
             })
         });
 
         let stderr_handle = child.stderr.take().map(|stderr| {
             let service_name = service_name_owned.clone();
+            let log_sink = Arc::clone(&log_sink);
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
                     warn!("[{service_name} pre-start] {line}");
+                    if let Ok(mut guard) = log_sink.lock()
+                        && let Some(file) = guard.as_mut()
+                    {
+                        let _ = writeln!(file, "[pre_start] {line}");
+                    }
                 }
             })
         });
@@ -3319,7 +3344,12 @@ impl Daemon {
 
             self.record_start_failure(service_name, exit_code, signal);
 
-            let message = format!("Pre-start command exited with status {}", status);
+            let message = format!("pre_start: command exited with status {}", status);
+            if let Ok(mut guard) = log_sink.lock()
+                && let Some(file) = guard.as_mut()
+            {
+                let _ = writeln!(file, "[pre_start] {message}");
+            }
             return Err(ProcessManagerError::ServiceStartError {
                 service: service_name.to_string(),
                 source: std::io::Error::other(message),
