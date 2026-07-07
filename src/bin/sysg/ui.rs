@@ -1093,7 +1093,9 @@ fn render_status_table_with_focus(
 ) -> Result<(), Box<dyn Error>> {
     let terminal_width = detect_target_table_width(120);
     let mut widths = compute_status_preferred_widths(units, opts.no_color);
-    shrink_status_widths_to_fit(&mut widths, terminal_width);
+    if !agent_mode() {
+        shrink_status_widths_to_fit(&mut widths, terminal_width);
+    }
 
     let columns_array = [
         Column {
@@ -1271,7 +1273,9 @@ fn render_status_non_interactive(
 
     let terminal_width = detect_target_table_width(120);
     let mut widths = compute_status_preferred_widths(&units, opts.no_color);
-    shrink_status_widths_to_fit(&mut widths, terminal_width);
+    if !agent_mode() {
+        shrink_status_widths_to_fit(&mut widths, terminal_width);
+    }
 
     let columns_array = [
         Column {
