@@ -1047,8 +1047,12 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     || !stdout_is_tty()
                     || agent_mode()
             };
+            // Whether output must pass through the reformatting LogWriter at all.
             let machine_output =
                 !matches!(log_format, LogFormat::Text) || strip_ansi_output;
+            // Structured formats (json/raw) intentionally drop banners and read
+            // straight from captured bytes; plain text keeps its service header.
+            let structured_output = !matches!(log_format, LogFormat::Text);
 
             let make_log_writer = || {
                 LogWriter::new(
@@ -1086,7 +1090,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 })?;
 
                 match service.as_ref() {
-                    Some(service_name) if machine_output => {
+                    Some(service_name) if structured_output => {
                         info!("Fetching logs for service: {service_name}");
                         let bytes = manager.collect_service_log(
                             service_name,
