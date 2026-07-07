@@ -249,6 +249,39 @@ fn stderr_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDERR_FILENO) == 1 }
 }
 
+fn stdout_is_tty() -> bool {
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
+/// Returns whether systemg is running in agent mode (non-interactive automation).
+fn agent_mode() -> bool {
+    matches!(std::env::var("SYSTEMG_AGENT"), Ok(value) if !value.is_empty() && value != "0")
+}
+
+/// Decides whether to follow given explicit flags and the environment.
+///
+/// Explicit flags win; otherwise systemg follows only on an interactive stdout
+/// with agent mode disabled, so pipes, SSH, and agents get a one-shot snapshot.
+fn logs_follow_decision(
+    follow_flag: bool,
+    no_follow_flag: bool,
+    stdout_tty: bool,
+    agent_mode: bool,
+) -> bool {
+    if follow_flag {
+        return true;
+    }
+    if no_follow_flag {
+        return false;
+    }
+    stdout_tty && !agent_mode
+}
+
+/// Resolves whether `sysg logs` should follow the stream for this invocation.
+fn resolve_logs_follow(follow_flag: bool, no_follow_flag: bool) -> bool {
+    logs_follow_decision(follow_flag, no_follow_flag, stdout_is_tty(), agent_mode())
+}
+
 fn format_progress_spinner_frame(frame: &str, label: &str) -> String {
     format!("\r{frame} {label}\x1B[K")
 }
@@ -869,6 +902,8 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             project,
             lines,
             kind,
+            follow,
+            no_follow,
             stream,
         } => {
             if prune {
@@ -1068,10 +1103,13 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
                 stream_result?;
             } else {
-                match stream_logs_via_supervisor(true) {
+                let follow_logs = resolve_logs_follow(follow, no_follow);
+                match stream_logs_via_supervisor(follow_logs) {
                     Ok(()) => {}
                     Err(err) => match err.downcast_ref::<ControlError>() {
-                        Some(ControlError::NotAvailable) => render_logs_once(false)?,
+                        Some(ControlError::NotAvailable) => {
+                            render_logs_once(!follow_logs)?
+                        }
                         _ => return Err(err),
                     },
                 }
@@ -1123,6 +1161,24 @@ mod tests {
     use systemg::{spawn::SpawnedChild, status::SpawnedProcessNode};
 
     use super::*;
+
+    #[test]
+    fn logs_follow_flag_forces_follow() {
+        assert!(logs_follow_decision(true, false, false, true));
+    }
+
+    #[test]
+    fn logs_no_follow_flag_forces_oneshot() {
+        assert!(!logs_follow_decision(false, true, true, false));
+    }
+
+    #[test]
+    fn logs_default_follows_only_on_interactive_non_agent() {
+        assert!(logs_follow_decision(false, false, true, false));
+        assert!(!logs_follow_decision(false, false, false, false));
+        assert!(!logs_follow_decision(false, false, true, true));
+        assert!(!logs_follow_decision(false, false, false, true));
+    }
 
     #[test]
     fn inspect_stream_blocks_control_actions_for_cron_units() {

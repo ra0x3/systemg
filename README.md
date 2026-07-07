@@ -71,7 +71,7 @@ System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/
 | `sysg start --config my.yaml` | Start a specific config file. |
 | `sysg start --daemonize` | Launch the supervisor in the background. |
 | `sysg status` | Check the running supervisor's service state. |
-| `sysg logs --service api` | View logs for a specific service. |
+| `sysg logs --service api` | Show a snapshot of a service's logs (add `--follow` to stay attached). |
 | `sysg restart --service api` | Restart one service without restarting everything. |
 
 > **Tip:** `--stderr` redirects stderr from supervised processes to stdout with a `[service_name:stderr]` prefix, which is useful for debugging and CI pipelines.
