@@ -28,6 +28,8 @@ $ sysg logs
 | `-p` | `--project` | Filter logs by stable project id |
 | `-l` | `--lines` | Number of lines to show (default: 50) |
 | `-k` | `--kind` | Kind of logs to show: stdout, stderr, or supervisor. Omit this flag to show stdout+stderr together |
+| `-f` | `--follow` | Follow the log stream until interrupted (like `tail -F`) |
+| `-` | `--no-follow` | Force a one-shot snapshot even on an interactive terminal |
 | `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
@@ -58,6 +60,29 @@ $ sysg logs --project arbitration --service api
 > service output as it is written, then reads the combined service log for the
 > default view. Use `--kind stdout` or `--kind stderr` when you need a single
 > stream only.
+
+### Follow mode and non-interactive callers
+
+Whether `sysg logs` follows the stream (stays attached and prints new lines as
+they arrive) or prints a one-shot snapshot and exits depends on how it is
+invoked:
+
+- `--follow` / `-f` always follows, until you interrupt it.
+- `--no-follow` always prints a one-shot snapshot and exits.
+- With neither flag, systemg follows **only** when stdout is an interactive
+  terminal and `SYSTEMG_AGENT` is unset. When stdout is a pipe, a file, an SSH
+  command, or `SYSTEMG_AGENT` is set, it prints a one-shot snapshot and exits.
+
+This keeps automation from wedging: a plain `sysg logs -s api` over
+`ssh host 'sysg logs -s api'`, `sysg logs -s api | grep error`, or any agent
+returns immediately instead of blocking on a follow that can never be
+interrupted.
+
+```sh
+$ sysg logs --service api --follow      # stay attached (interactive)
+$ sysg logs --service api --no-follow    # one snapshot, then exit
+$ sysg logs --service api | grep ERROR   # auto one-shot: stdout is a pipe
+```
 
 ### Purge logs for a specific service
 
@@ -144,7 +169,7 @@ label:
 
 ## Performance model
 
-For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes both streams through one per-service writer into `{service}.log`. On Linux and macOS, the default `sysg logs` view tails that file directly with `tail -F` in follow mode. `--kind stdout` and `--kind stderr` filter recent captured lines by the stored stream label. The command itself is lightweight; the continuous cost comes from the capture threads, one writer thread, and one append-only file write path per service.
+For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes both streams through one per-service writer into `{service}.log`. On Linux and macOS, the follow view (`--follow`, or the interactive default) tails that file directly with `tail -F`; the one-shot view (`--no-follow`, or the default when stdout is not an interactive terminal) reads the tail once and exits. `--kind stdout` and `--kind stderr` filter recent captured lines by the stored stream label. The command itself is lightweight; the continuous cost comes from the capture threads, one writer thread, and one append-only file write path per service.
 
 For high-output production workloads, configure `logs.sink: none` globally or per service to discard service output and avoid systemg log-writer threads, pipe backpressure from log capture, and file growth.
 

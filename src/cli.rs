@@ -359,6 +359,19 @@ pub enum Commands {
         #[arg(short = 'k', long)]
         kind: Option<LogKind>,
 
+        /// Follow the log stream until interrupted (like `tail -F`).
+        ///
+        /// When neither `--follow` nor `--no-follow` is given, systemg follows only
+        /// when stdout is an interactive terminal and `SYSTEMG_AGENT` is unset;
+        /// otherwise it prints a one-shot snapshot and exits. This keeps
+        /// non-interactive callers (agents, pipes, SSH) from wedging.
+        #[arg(short = 'f', long, conflicts_with = "no_follow")]
+        follow: bool,
+
+        /// Force a one-shot snapshot even on an interactive terminal.
+        #[arg(long = "no-follow")]
+        no_follow: bool,
+
         /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
         #[arg(long, value_name = "DURATION")]
         stream: Option<String>,
@@ -550,6 +563,42 @@ mod tests {
             }
             _ => panic!("expected logs command"),
         }
+    }
+
+    #[test]
+    fn logs_accepts_follow() {
+        let cli =
+            Cli::try_parse_from(["sysg", "logs", "--service", "demo", "-f"]).unwrap();
+        match cli.command {
+            Commands::Logs {
+                follow, no_follow, ..
+            } => {
+                assert!(follow);
+                assert!(!no_follow);
+            }
+            _ => panic!("expected logs command"),
+        }
+    }
+
+    #[test]
+    fn logs_accepts_no_follow() {
+        let cli =
+            Cli::try_parse_from(["sysg", "logs", "--service", "demo", "--no-follow"])
+                .unwrap();
+        match cli.command {
+            Commands::Logs {
+                follow, no_follow, ..
+            } => {
+                assert!(!follow);
+                assert!(no_follow);
+            }
+            _ => panic!("expected logs command"),
+        }
+    }
+
+    #[test]
+    fn logs_rejects_follow_with_no_follow() {
+        assert!(Cli::try_parse_from(["sysg", "logs", "-f", "--no-follow"]).is_err());
     }
 
     #[test]
