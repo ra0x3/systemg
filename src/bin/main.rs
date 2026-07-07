@@ -35,8 +35,8 @@ use systemg::{
     daemon::{Daemon, PidFile, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
     logs::{
-        LogManager, LogSection, RotatingLogWriter, get_service_log_path, prune_logs,
-        resolve_log_path, supervisor_log_path, write_log_section_header,
+        LogFilter, LogManager, LogSection, RotatingLogWriter, get_service_log_path,
+        prune_logs, resolve_log_path, supervisor_log_path, write_log_section_header,
     },
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
@@ -904,6 +904,10 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             kind,
             follow,
             no_follow,
+            since,
+            until,
+            grep,
+            all,
             stream,
         } => {
             if prune {
@@ -978,6 +982,14 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 return Ok(());
             }
 
+            let log_filter = LogFilter::from_parts(
+                since.as_deref(),
+                until.as_deref(),
+                grep.as_deref(),
+                all,
+                chrono::Utc::now(),
+            )?;
+
             let stream_logs_via_supervisor =
                 |follow: bool| -> Result<(), Box<dyn Error>> {
                     let command = ControlCommand::Logs {
@@ -986,6 +998,10 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                         lines,
                         kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
                         follow,
+                        since: since.clone(),
+                        until: until.clone(),
+                        grep: grep.clone(),
+                        all,
                     };
                     ipc::stream_command_output(&command, io::stdout())
                         .map_err(|err| Box::new(err) as Box<dyn Error>)
@@ -1007,6 +1023,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
+                            &log_filter,
                         )?;
                     }
                     None => {
@@ -1055,6 +1072,10 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             lines,
                             kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
                             follow: false,
+                            since: since.clone(),
+                            until: until.clone(),
+                            grep: grep.clone(),
+                            all,
                         };
                         let mut output = Vec::new();
                         match ipc::stream_command_output(&command, &mut output)

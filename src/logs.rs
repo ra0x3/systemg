@@ -227,6 +227,193 @@ pub fn prune_logs(
     Ok(summary)
 }
 
+/// Parses a `--since` / `--until` bound into an absolute UTC instant.
+///
+/// Accepts an RFC3339 timestamp (`2026-07-07T14:00:00Z`), a bare UTC date
+/// (`2026-07-07`, taken as midnight), or a relative duration in the past
+/// (`30m`, `2h`, `7d`) resolved against `now`.
+pub fn parse_time_bound(
+    value: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, LogsManagerError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(LogsManagerError::InvalidTimeBound(value.to_string()));
+    }
+
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(parsed.with_timezone(&chrono::Utc));
+    }
+
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        && let Some(midnight) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(chrono::DateTime::from_naive_utc_and_offset(
+            midnight,
+            chrono::Utc,
+        ));
+    }
+
+    let seconds = parse_age_seconds(trimmed)
+        .map_err(|_| LogsManagerError::InvalidTimeBound(value.to_string()))?;
+    Ok(now - chrono::Duration::seconds(seconds as i64))
+}
+
+/// Post-capture filter applied to persisted log lines before display.
+#[derive(Clone, Default)]
+pub struct LogFilter {
+    /// Lower time bound (inclusive) on the systemg capture timestamp.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Upper time bound (inclusive) on the systemg capture timestamp.
+    pub until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Compiled substring/regex pattern a line must match to be kept.
+    pub grep: Option<regex::Regex>,
+    /// Read the full active-plus-rotated history instead of just the tail.
+    pub all: bool,
+}
+
+impl LogFilter {
+    /// Builds a filter from raw CLI/IPC parts, resolving time bounds against
+    /// `now` and compiling the grep pattern.
+    pub fn from_parts(
+        since: Option<&str>,
+        until: Option<&str>,
+        grep: Option<&str>,
+        all: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Self, LogsManagerError> {
+        let since = since
+            .map(|value| parse_time_bound(value, now))
+            .transpose()?;
+        let until = until
+            .map(|value| parse_time_bound(value, now))
+            .transpose()?;
+        let grep = grep
+            .map(|pattern| {
+                regex::Regex::new(pattern)
+                    .map_err(|err| LogsManagerError::InvalidGrep(err.to_string()))
+            })
+            .transpose()?;
+        Ok(Self {
+            since,
+            until,
+            grep,
+            all,
+        })
+    }
+
+    /// Returns whether any content filter (time bound or pattern) is active.
+    pub fn has_content_filter(&self) -> bool {
+        self.since.is_some() || self.until.is_some() || self.grep.is_some()
+    }
+
+    /// Returns whether the filter would keep any line at all.
+    pub fn is_noop(&self) -> bool {
+        !self.has_content_filter() && !self.all
+    }
+
+    /// Returns whether a single captured log line passes the filter.
+    fn matches(&self, line: &[u8]) -> bool {
+        if let Some(ts) = captured_line_timestamp(line) {
+            if let Some(since) = self.since
+                && ts < since
+            {
+                return false;
+            }
+            if let Some(until) = self.until
+                && ts > until
+            {
+                return false;
+            }
+        } else if self.since.is_some() || self.until.is_some() {
+            return false;
+        }
+
+        if let Some(pattern) = &self.grep {
+            let text = String::from_utf8_lossy(line);
+            if !pattern.is_match(&text) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Retains only the newline-delimited lines that pass the content filter.
+    pub fn apply(&self, bytes: &[u8]) -> Vec<u8> {
+        if !self.has_content_filter() {
+            return bytes.to_vec();
+        }
+        bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| self.matches(line.trim_ascii_end()))
+            .flat_map(|line| line.iter().copied())
+            .collect()
+    }
+}
+
+/// Parses the leading systemg capture timestamp from a persisted log line.
+fn captured_line_timestamp(line: &[u8]) -> Option<chrono::DateTime<chrono::Utc>> {
+    let text = std::str::from_utf8(line).ok()?;
+    let first = text.split(' ').next()?;
+    chrono::DateTime::parse_from_rfc3339(first)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&chrono::Utc))
+}
+
+/// Returns a service's active log path followed by its rotated backups,
+/// ordered oldest to newest, for full-history reads.
+pub fn rotated_history_paths(active: &Path) -> Vec<PathBuf> {
+    let Some(parent) = active.parent() else {
+        return vec![active.to_path_buf()];
+    };
+    let Some(base_name) = active.file_name().and_then(|name| name.to_str()) else {
+        return vec![active.to_path_buf()];
+    };
+    let prefix = format!("{base_name}.");
+
+    let mut backups: Vec<(usize, PathBuf)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if let Some(suffix) = file_name.strip_prefix(&prefix)
+                && let Ok(index) = suffix.parse::<usize>()
+            {
+                backups.push((index, path));
+            }
+        }
+    }
+
+    backups.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
+    let mut paths: Vec<PathBuf> = backups.into_iter().map(|(_, path)| path).collect();
+    if active.exists() {
+        paths.push(active.to_path_buf());
+    }
+    if paths.is_empty() {
+        paths.push(active.to_path_buf());
+    }
+    paths
+}
+
+/// Reads a service's full active-plus-rotated history as one byte buffer.
+fn read_full_history(active: &Path) -> Result<Vec<u8>, LogsManagerError> {
+    let mut bytes = Vec::new();
+    for path in rotated_history_paths(active) {
+        match fs::read(&path) {
+            Ok(mut chunk) => bytes.append(&mut chunk),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(bytes)
+}
+
 /// Returns the legacy path to the log file for a given service and kind.
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     resolve_log_path(service, kind)
@@ -441,6 +628,16 @@ fn resolve_combined_log_path(service: &str) -> PathBuf {
 enum TailMode {
     Follow,
     OneShot,
+}
+
+/// Forces one-shot mode when a content filter or full-history read is active,
+/// since following cannot apply time bounds and full history is bounded.
+fn resolve_tail_mode(mode: TailMode, filter: &LogFilter) -> TailMode {
+    if filter.all || filter.since.is_some() || filter.until.is_some() {
+        TailMode::OneShot
+    } else {
+        mode
+    }
 }
 
 impl TailMode {
@@ -969,14 +1166,28 @@ fn filter_captured_log_bytes(bytes: &[u8], kind: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Follows a canonical service log while emitting only the requested stream.
+/// Returns whether a captured line passes an optional stream kind filter.
+fn line_matches_stream(line: &[u8], stream: Option<LogStream>) -> bool {
+    match stream {
+        Some(stream) => captured_log_line_matches_kind(line, stream.as_str()),
+        None => true,
+    }
+}
+
+/// Follows a canonical service log while emitting only lines that pass the
+/// optional stream kind filter and the content filter (e.g. `--grep`).
 fn follow_filtered_log_file(
     mut writer: impl Write,
     path: &Path,
     lines: usize,
-    stream: LogStream,
+    stream: Option<LogStream>,
+    filter: &LogFilter,
 ) -> Result<(), LogsManagerError> {
-    writer.write_all(&tail_log_file_filtered(path, lines, stream.as_str())?)?;
+    let initial = match stream {
+        Some(stream) => tail_log_file_filtered(path, lines, stream.as_str())?,
+        None => tail_log_file(path, lines)?,
+    };
+    writer.write_all(&filter.apply(&initial))?;
     writer.flush()?;
 
     let mut offset = fs::metadata(path)?.len();
@@ -1013,7 +1224,8 @@ fn follow_filtered_log_file(
 
         while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
             let line = pending.drain(..=newline_pos).collect::<Vec<_>>();
-            if captured_log_line_matches_kind(line.trim_ascii_end(), stream.as_str()) {
+            let trimmed = line.trim_ascii_end();
+            if line_matches_stream(trimmed, stream) && filter.matches(trimmed) {
                 writer.write_all(&line)?;
                 writer.flush()?;
             }
@@ -1029,41 +1241,96 @@ fn write_log_file_tail(
     combined_path: &Path,
     lines: usize,
     kind: Option<&str>,
+    filter: &LogFilter,
 ) -> Result<(), LogsManagerError> {
-    match kind.and_then(LogStream::from_filter) {
-        Some(LogStream::Stdout) => {
-            if combined_path.exists() {
-                writer.write_all(&tail_log_file_filtered(
-                    combined_path,
-                    lines,
-                    LogStream::Stdout.as_str(),
-                )?)?;
-            } else {
-                writer.write_all(&tail_log_file(stdout_path, lines)?)?;
-            }
-        }
-        Some(LogStream::Stderr) => {
-            if combined_path.exists() {
-                writer.write_all(&tail_log_file_filtered(
-                    combined_path,
-                    lines,
-                    LogStream::Stderr.as_str(),
-                )?)?;
-            } else {
-                writer.write_all(&tail_log_file(stderr_path, lines)?)?;
-            }
-        }
-        _ => {
-            if combined_path.exists() {
-                writer.write_all(&tail_log_file(combined_path, lines)?)?;
-            } else {
-                writer.write_all(&tail_log_file(stdout_path, lines)?)?;
-                writer.write_all(&tail_log_file(stderr_path, lines)?)?;
-            }
-        }
+    for bytes in
+        collect_log_tail(stdout_path, stderr_path, combined_path, lines, kind, filter)?
+    {
+        writer.write_all(&bytes)?;
     }
     writer.flush()?;
     Ok(())
+}
+
+/// Collects the selected log bytes for a one-shot view, honoring stream kind,
+/// full-history reads, and post-capture time/pattern filtering.
+fn collect_log_tail(
+    stdout_path: &Path,
+    stderr_path: &Path,
+    combined_path: &Path,
+    lines: usize,
+    kind: Option<&str>,
+    filter: &LogFilter,
+) -> Result<Vec<Vec<u8>>, LogsManagerError> {
+    let stream_kind = kind.and_then(LogStream::from_filter);
+
+    if filter.all {
+        let mut chunks = Vec::new();
+        if combined_path.exists() {
+            let raw = read_full_history(combined_path)?;
+            let selected = match stream_kind {
+                Some(stream) => filter_captured_log_bytes(&raw, stream.as_str()),
+                None => raw,
+            };
+            chunks.push(filter.apply(&selected));
+        } else {
+            match stream_kind {
+                Some(LogStream::Stdout) => {
+                    chunks.push(filter.apply(&read_full_history(stdout_path)?))
+                }
+                Some(LogStream::Stderr) => {
+                    chunks.push(filter.apply(&read_full_history(stderr_path)?))
+                }
+                _ => {
+                    chunks.push(filter.apply(&read_full_history(stdout_path)?));
+                    chunks.push(filter.apply(&read_full_history(stderr_path)?));
+                }
+            }
+        }
+        return Ok(chunks);
+    }
+
+    let read_lines = if filter.has_content_filter() {
+        usize::MAX
+    } else {
+        lines
+    };
+
+    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    match stream_kind {
+        Some(stream) => {
+            if combined_path.exists() {
+                chunks.push(tail_log_file_filtered(
+                    combined_path,
+                    read_lines,
+                    stream.as_str(),
+                )?);
+            } else {
+                let single = match stream {
+                    LogStream::Stdout => stdout_path,
+                    _ => stderr_path,
+                };
+                chunks.push(tail_log_file(single, read_lines)?);
+            }
+        }
+        None => {
+            if combined_path.exists() {
+                chunks.push(tail_log_file(combined_path, read_lines)?);
+            } else {
+                chunks.push(tail_log_file(stdout_path, read_lines)?);
+                chunks.push(tail_log_file(stderr_path, read_lines)?);
+            }
+        }
+    }
+
+    if filter.has_content_filter() {
+        for chunk in &mut chunks {
+            let filtered = filter.apply(chunk);
+            *chunk = tail_log_bytes(&filtered, lines);
+        }
+    }
+
+    Ok(chunks)
 }
 
 /// Writes forwarded console line.
@@ -1407,13 +1674,15 @@ impl LogManager {
         pid: u32,
         lines: usize,
         kind: Option<&str>,
+        filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
             service_name,
             Some(pid),
             lines,
             kind,
-            TailMode::current(),
+            resolve_tail_mode(TailMode::current(), filter),
+            filter,
         )
     }
 
@@ -1424,6 +1693,7 @@ impl LogManager {
         pid: u32,
         lines: usize,
         kind: Option<&str>,
+        filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
             service_name,
@@ -1431,6 +1701,7 @@ impl LogManager {
             lines,
             kind,
             TailMode::OneShot,
+            filter,
         )
     }
 
@@ -1440,13 +1711,15 @@ impl LogManager {
         service_name: &str,
         lines: usize,
         kind: Option<&str>,
+        filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
             service_name,
             None,
             lines,
             kind,
-            TailMode::current(),
+            resolve_tail_mode(TailMode::current(), filter),
+            filter,
         )
     }
 
@@ -1456,6 +1729,7 @@ impl LogManager {
         service_name: &str,
         lines: usize,
         kind: Option<&str>,
+        filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
             service_name,
@@ -1463,11 +1737,13 @@ impl LogManager {
             lines,
             kind,
             TailMode::OneShot,
+            filter,
         )
     }
 
     /// Streams service logs through an existing Unix socket connection.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments)]
     pub fn stream_log_to_socket(
         &self,
         service_name: &str,
@@ -1475,17 +1751,22 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         follow: bool,
+        filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
-        let mode = if follow {
-            TailMode::Follow
-        } else {
-            TailMode::OneShot
-        };
-        if let Some(snapshot) = (kind.is_none()
-            || kind.and_then(LogStream::from_filter).is_some())
-        .then(|| snapshot_live_log(service_name, LogStream::Combined))
-        .flatten()
+        let mode = resolve_tail_mode(
+            if follow {
+                TailMode::Follow
+            } else {
+                TailMode::OneShot
+            },
+            filter,
+        );
+        if !filter.all
+            && let Some(snapshot) = (kind.is_none()
+                || kind.and_then(LogStream::from_filter).is_some())
+            .then(|| snapshot_live_log(service_name, LogStream::Combined))
+            .flatten()
             && !snapshot.is_empty()
         {
             write_log_header(stream.try_clone()?, service_name, pid)?;
@@ -1494,6 +1775,7 @@ impl LogManager {
                 Some(kind_name) => filter_captured_log_bytes(&snapshot, kind_name),
                 None => snapshot,
             };
+            let snapshot = filter.apply(&snapshot);
             let tail = tail_log_bytes(&snapshot, lines);
             if !tail.is_empty() {
                 socket.write_all(&tail)?;
@@ -1510,6 +1792,7 @@ impl LogManager {
                                 }
                                 None => chunk,
                             };
+                            let chunk = filter.apply(&chunk);
                             if chunk.is_empty() {
                                 continue;
                             }
@@ -1540,7 +1823,15 @@ impl LogManager {
             }
             return Ok(());
         }
-        self.stream_logs_platform_with_mode(service_name, pid, lines, kind, mode, stream)
+        self.stream_logs_platform_with_mode(
+            service_name,
+            pid,
+            lines,
+            kind,
+            mode,
+            filter,
+            stream,
+        )
     }
 
     /// Clears stdout and stderr logs for a specific service.
@@ -1604,6 +1895,7 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         println!(
             "\n+{:-^33}+\n\
@@ -1627,17 +1919,19 @@ impl LogManager {
                 &combined_path,
                 lines,
                 kind,
+                filter,
             );
         }
 
         if combined_path.exists()
-            && let Some(stream) = kind.and_then(LogStream::from_filter)
+            && (filter.grep.is_some() || kind.and_then(LogStream::from_filter).is_some())
         {
             return follow_filtered_log_file(
                 std::io::stdout().lock(),
                 &combined_path,
                 lines,
-                stream,
+                kind.and_then(LogStream::from_filter),
+                filter,
             );
         }
 
@@ -1674,6 +1968,7 @@ impl LogManager {
 
     /// Linux implementation for streaming logs through a Unix socket.
     #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
     fn stream_logs_platform_with_mode(
         &self,
         service_name: &str,
@@ -1681,6 +1976,7 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
         write_log_header(stream.try_clone()?, service_name, pid)?;
@@ -1698,17 +1994,19 @@ impl LogManager {
                 &combined_path,
                 lines,
                 kind,
+                filter,
             );
         }
 
         if combined_path.exists()
-            && let Some(stream_filter) = kind.and_then(LogStream::from_filter)
+            && (filter.grep.is_some() || kind.and_then(LogStream::from_filter).is_some())
         {
             return follow_filtered_log_file(
                 stream.try_clone()?,
                 &combined_path,
                 lines,
-                stream_filter,
+                kind.and_then(LogStream::from_filter),
+                filter,
             );
         }
 
@@ -1756,6 +2054,7 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         println!(
             "\n+{:-^33}+\n\
@@ -1779,17 +2078,19 @@ impl LogManager {
                 &combined_path,
                 lines,
                 kind,
+                filter,
             );
         }
 
         if combined_path.exists()
-            && let Some(stream) = kind.and_then(LogStream::from_filter)
+            && (filter.grep.is_some() || kind.and_then(LogStream::from_filter).is_some())
         {
             return follow_filtered_log_file(
                 std::io::stdout().lock(),
                 &combined_path,
                 lines,
-                stream,
+                kind.and_then(LogStream::from_filter),
+                filter,
             );
         }
 
@@ -1815,6 +2116,7 @@ impl LogManager {
 
     /// macOS implementation for streaming logs through a Unix socket.
     #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
     fn stream_logs_platform_with_mode(
         &self,
         service_name: &str,
@@ -1822,6 +2124,7 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
         write_log_header(stream.try_clone()?, service_name, pid)?;
@@ -1839,17 +2142,19 @@ impl LogManager {
                 &combined_path,
                 lines,
                 kind,
+                filter,
             );
         }
 
         if combined_path.exists()
-            && let Some(stream_filter) = kind.and_then(LogStream::from_filter)
+            && (filter.grep.is_some() || kind.and_then(LogStream::from_filter).is_some())
         {
             return follow_filtered_log_file(
                 stream.try_clone()?,
                 &combined_path,
                 lines,
-                stream_filter,
+                kind.and_then(LogStream::from_filter),
+                filter,
             );
         }
 
@@ -1974,9 +2279,15 @@ impl LogManager {
             if let Some(pid) = pid_snapshot.get(&service_name) {
                 debug!("Service: {service_name}, PID: {pid}");
                 let result = if matches!(mode, TailMode::OneShot) {
-                    self.show_log_snapshot(&service_name, *pid, lines, kind)
+                    self.show_log_snapshot(
+                        &service_name,
+                        *pid,
+                        lines,
+                        kind,
+                        &LogFilter::default(),
+                    )
                 } else {
-                    self.show_log(&service_name, *pid, lines, kind)
+                    self.show_log(&service_name, *pid, lines, kind, &LogFilter::default())
                 };
                 if let Err(err) = result {
                     eprintln!("Failed to stream logs for '{}': {}", service_name, err);
@@ -1991,9 +2302,19 @@ impl LogManager {
                 if let Some(_cron_job) = cron_state.jobs().get(&service_hash) {
                     debug!("Showing inactive logs for cron service '{}'", service_name);
                     let result = if matches!(mode, TailMode::OneShot) {
-                        self.show_inactive_log_snapshot(&service_name, lines, kind)
+                        self.show_inactive_log_snapshot(
+                            &service_name,
+                            lines,
+                            kind,
+                            &LogFilter::default(),
+                        )
                     } else {
-                        self.show_inactive_log(&service_name, lines, kind)
+                        self.show_inactive_log(
+                            &service_name,
+                            lines,
+                            kind,
+                            &LogFilter::default(),
+                        )
                     };
                     if let Err(err) = result {
                         eprintln!(
@@ -2432,5 +2753,99 @@ mod tests {
             String::from_utf8(output).expect("valid utf8"),
             format!("[svc] {line}\n")
         );
+    }
+
+    fn utc(text: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(text)
+            .expect("valid rfc3339")
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn parse_time_bound_accepts_rfc3339_and_date() {
+        let now = utc("2026-07-07T12:00:00Z");
+        assert_eq!(
+            parse_time_bound("2026-07-07T09:30:00Z", now).unwrap(),
+            utc("2026-07-07T09:30:00Z")
+        );
+        assert_eq!(
+            parse_time_bound("2026-07-07", now).unwrap(),
+            utc("2026-07-07T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn parse_time_bound_accepts_relative_age() {
+        let now = utc("2026-07-07T12:00:00Z");
+        assert_eq!(
+            parse_time_bound("2h", now).unwrap(),
+            utc("2026-07-07T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn parse_time_bound_rejects_garbage() {
+        let now = utc("2026-07-07T12:00:00Z");
+        assert!(parse_time_bound("not-a-time", now).is_err());
+    }
+
+    #[test]
+    fn log_filter_applies_time_window() {
+        let bytes = b"2026-07-07T09:00:00Z stdout early\n\
+2026-07-07T10:30:00Z stdout middle\n\
+2026-07-07T12:00:00Z stdout late\n";
+        let filter = LogFilter {
+            since: Some(utc("2026-07-07T10:00:00Z")),
+            until: Some(utc("2026-07-07T11:00:00Z")),
+            ..LogFilter::default()
+        };
+        let out = String::from_utf8(filter.apply(bytes)).unwrap();
+        assert_eq!(out, "2026-07-07T10:30:00Z stdout middle\n");
+    }
+
+    #[test]
+    fn log_filter_applies_grep() {
+        let bytes = b"2026-07-07T09:00:00Z stdout hello world\n\
+2026-07-07T09:00:01Z stderr ERROR boom\n\
+2026-07-07T09:00:02Z stdout all good\n";
+        let filter = LogFilter {
+            grep: Some(regex::Regex::new("ERROR|good").unwrap()),
+            ..LogFilter::default()
+        };
+        let out = String::from_utf8(filter.apply(bytes)).unwrap();
+        assert!(out.contains("ERROR boom"));
+        assert!(out.contains("all good"));
+        assert!(!out.contains("hello world"));
+    }
+
+    #[test]
+    fn log_filter_noop_returns_input() {
+        let bytes = b"line without leading timestamp\n";
+        let filter = LogFilter::default();
+        assert_eq!(filter.apply(bytes), bytes);
+        assert!(filter.is_noop());
+    }
+
+    #[test]
+    fn rotated_history_paths_orders_oldest_to_newest() {
+        let dir = std::env::temp_dir().join(format!(
+            "sysg_hist_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let active = dir.join("svc.log");
+        for name in ["svc.log", "svc.log.1", "svc.log.2", "svc.log.10"] {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        let paths = rotated_history_paths(&active);
+        let names: Vec<_> = paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["svc.log.10", "svc.log.2", "svc.log.1", "svc.log"]);
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

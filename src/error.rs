@@ -208,4 +208,14 @@ pub enum LogsManagerError {
     /// Error parsing a `logs prune` size or age argument.
     #[error("Invalid prune argument: {0}")]
     InvalidPruneArg(String),
+
+    /// Error parsing a `logs --since` / `--until` time bound.
+    #[error(
+        "Invalid time bound '{0}' (expected RFC3339, YYYY-MM-DD, or a relative age like 30m/2h/7d)"
+    )]
+    InvalidTimeBound(String),
+
+    /// Error compiling a `logs --grep` pattern.
+    #[error("Invalid --grep pattern: {0}")]
+    InvalidGrep(String),
 }

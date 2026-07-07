@@ -147,6 +147,18 @@ pub enum ControlCommand {
         kind: Option<String>,
         /// Whether to follow the log stream until the client disconnects.
         follow: bool,
+        /// Lower bound (RFC3339) on the systemg capture timestamp.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<String>,
+        /// Upper bound (RFC3339) on the systemg capture timestamp.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<String>,
+        /// Substring/regex pattern a line must match to be shown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grep: Option<String>,
+        /// Read the full active-plus-rotated history instead of the tail.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
     },
     /// Spawn a dynamic child process.
     Spawn {
