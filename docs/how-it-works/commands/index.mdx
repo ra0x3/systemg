@@ -21,7 +21,25 @@ $ sysg purge                     # Clear all state
 `sysg spawn` is deprecated. Use `sysg start --parent-pid ...` for child-process workflows.
 :::
 
-All commands accept `--log-level` (`debug`, `info`, `warn`, `error`).
+## Global flags
+
+Every command accepts:
+
+| Flag | Description |
+|------|-------------|
+| `--log-level` | Set verbosity for this invocation (`debug`, `info`, `warn`, `error`) |
+| `--plain` | Agent-friendly output: disable color, banners, paging, and log following |
+| `--sys` | Opt into privileged system mode (requires root) |
+
+`--plain` is equivalent to setting `SYSTEMG_AGENT=1`, and is also implied when
+`SYSTEMG_AGENT` or `NO_COLOR` is set in the environment. Use it for scripts,
+pipes, SSH commands, and coding agents so `status`, `inspect`, and `logs` emit
+plain, un-truncated, non-blocking output.
+
+```sh
+$ sysg --plain status              # no color, full unit names
+$ SYSTEMG_AGENT=1 sysg logs -s api  # one-shot, stripped, no banners
+```
 
 ## Supervisor status
 

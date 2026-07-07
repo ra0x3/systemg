@@ -255,8 +255,22 @@ fn stdout_is_tty() -> bool {
 }
 
 /// Returns whether systemg is running in agent mode (non-interactive automation).
+///
+/// True when `--plain` was passed (which sets `SYSTEMG_AGENT` for this process),
+/// or when `SYSTEMG_AGENT` / `NO_COLOR` is set in the environment.
 fn agent_mode() -> bool {
-    matches!(std::env::var("SYSTEMG_AGENT"), Ok(value) if !value.is_empty() && value != "0")
+    let set = |name: &str| matches!(std::env::var(name), Ok(value) if !value.is_empty() && value != "0");
+    set("SYSTEMG_AGENT") || set("NO_COLOR")
+}
+
+/// Applies the global `--plain` flag by enabling agent mode for this process,
+/// so every downstream `agent_mode()` check observes it uniformly.
+fn apply_plain_mode(plain: bool) {
+    if plain {
+        unsafe {
+            std::env::set_var("SYSTEMG_AGENT", "1");
+        }
+    }
 }
 
 /// Decides whether to follow given explicit flags and the environment.
@@ -336,6 +350,7 @@ where
 /// Runs the `sysg` command-line entrypoint.
 fn main() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
+    apply_plain_mode(args.plain);
     let euid = Uid::effective();
     let drop_privileges_effective =
         args.drop_privileges && drop_privileges_applies_to_command(&args.command);
@@ -666,7 +681,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 
             let render_opts = StatusRenderOptions {
                 format,
-                no_color,
+                no_color: no_color || agent_mode(),
                 full_cmd,
                 include_orphans: all,
                 service_filter: service.as_deref(),
@@ -767,7 +782,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 
             let render_opts = InspectRenderOptions {
                 format,
-                no_color,
+                no_color: no_color || agent_mode(),
                 window_seconds: stream_seconds,
                 window_desc: format!("last {}s", stream_seconds),
                 samples_limit,
@@ -909,12 +924,32 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             until,
             grep,
             all,
+            path,
             format,
             raw,
             strip_ansi,
             no_strip_ansi,
             stream,
         } => {
+            if path {
+                match service.as_deref() {
+                    Some(service_name) => {
+                        let active = get_service_log_path(service_name);
+                        if all {
+                            for path in systemg::logs::rotated_history_paths(&active)
+                                .into_iter()
+                                .rev()
+                            {
+                                println!("{}", path.display());
+                            }
+                        } else {
+                            println!("{}", active.display());
+                        }
+                    }
+                    None => println!("{}", systemg::runtime::log_dir().display()),
+                }
+                return Ok(());
+            }
             if prune {
                 if max_size.is_none() && max_age.is_none() {
                     eprintln!(

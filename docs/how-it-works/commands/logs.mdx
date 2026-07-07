@@ -34,6 +34,7 @@ $ sysg logs
 | `-` | `--until` | Only show lines captured at or before this time (same formats as `--since`) |
 | `-g` | `--grep` | Only show lines matching this regular expression |
 | `-a` | `--all` | Read the full active-plus-rotated history instead of the last `--lines` |
+| `-` | `--path` | Print the on-disk log path(s) instead of the logs, then exit |
 | `-` | `--format` | Machine-readable output. `json` prints one `{ts, stream, service, line}` object per line |
 | `-` | `--raw` | Print only the application's original line, dropping systemg's timestamp/stream prefix |
 | `-` | `--strip-ansi` | Strip ANSI color/escape sequences (default on for `--format json`, `--raw`, and non-interactive output) |
@@ -219,6 +220,17 @@ Logs are stored in `~/.local/share/systemg/logs/`:
 - `{service}.log` - Canonical stdout+stderr stream in capture order
 - `{service}_stdout.log` / `{service}_stderr.log` - Legacy split-stream files from older systemg versions, still read as a fallback when no canonical log exists
 - `supervisor.log` - systemg's own log output
+
+### Locate log files
+
+Use `--path` to print where logs live instead of reading them — handy when you
+need to point another tool at the files directly:
+
+```sh
+$ sysg logs --path                       # the log directory
+$ sysg logs --service api --path          # that service's active log file
+$ sysg logs --service api --path --all    # active file plus rotated backups
+```
 
 ### Rotation and retention
 

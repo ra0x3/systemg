@@ -139,6 +139,14 @@ pub struct Cli {
     #[arg(long = "drop-privileges", global = true)]
     pub drop_privileges: bool,
 
+    /// Agent-friendly output: disable color, banners, paging, and log following.
+    ///
+    /// Equivalent to setting `SYSTEMG_AGENT=1`. Also implied when `SYSTEMG_AGENT`
+    /// or `NO_COLOR` is set in the environment. Intended for non-interactive
+    /// callers such as scripts, pipes, and coding agents.
+    #[arg(long = "plain", global = true)]
+    pub plain: bool,
+
     /// The command to execute.
     #[command(subcommand)]
     pub command: Commands,
@@ -391,6 +399,14 @@ pub enum Commands {
         #[arg(short = 'a', long)]
         all: bool,
 
+        /// Print the on-disk log path(s) instead of the logs, then exit.
+        ///
+        /// With no service, prints the log directory. With `--service`, prints
+        /// that service's resolved log file (add `--all` to list its rotated
+        /// backups too).
+        #[arg(long)]
+        path: bool,
+
         /// Emit machine-readable output. `json` prints one
         /// `{ts, stream, service, line}` object per line.
         #[arg(long, value_enum, value_name = "FORMAT")]
@@ -637,6 +653,31 @@ mod tests {
     #[test]
     fn logs_rejects_follow_with_no_follow() {
         assert!(Cli::try_parse_from(["sysg", "logs", "-f", "--no-follow"]).is_err());
+    }
+
+    #[test]
+    fn global_plain_flag_parses_before_subcommand() {
+        let cli = Cli::try_parse_from(["sysg", "--plain", "status"]).unwrap();
+        assert!(cli.plain);
+    }
+
+    #[test]
+    fn global_plain_flag_parses_after_subcommand() {
+        let cli = Cli::try_parse_from(["sysg", "logs", "--plain"]).unwrap();
+        assert!(cli.plain);
+    }
+
+    #[test]
+    fn logs_accepts_path_flag() {
+        let cli = Cli::try_parse_from(["sysg", "logs", "-s", "api", "--path", "--all"])
+            .unwrap();
+        match cli.command {
+            Commands::Logs { path, all, .. } => {
+                assert!(path);
+                assert!(all);
+            }
+            _ => panic!("expected logs command"),
+        }
     }
 
     #[test]
