@@ -414,6 +414,196 @@ fn read_full_history(active: &Path) -> Result<Vec<u8>, LogsManagerError> {
     Ok(bytes)
 }
 
+/// Output rendering mode for displayed log lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LogFormat {
+    /// Human-readable text with systemg's `ts stream` prefix.
+    #[default]
+    Text,
+    /// The application's original line only (systemg prefix stripped).
+    Raw,
+    /// One JSON object per line: `{ts, stream, service, line}`.
+    Json,
+}
+
+/// Removes ANSI escape sequences (CSI and simple two-byte escapes) from bytes.
+pub fn strip_ansi(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut iter = bytes.iter().copied().peekable();
+    while let Some(byte) = iter.next() {
+        if byte != 0x1b {
+            out.push(byte);
+            continue;
+        }
+        match iter.peek().copied() {
+            Some(b'[') => {
+                iter.next();
+                for follow in iter.by_ref() {
+                    if (0x40..=0x7e).contains(&follow) {
+                        break;
+                    }
+                }
+            }
+            Some(b']') => {
+                iter.next();
+                while let Some(follow) = iter.next() {
+                    if follow == 0x07 {
+                        break;
+                    }
+                    if follow == 0x1b && iter.peek() == Some(&b'\\') {
+                        iter.next();
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                iter.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// A captured log line split into its systemg metadata and payload.
+struct CapturedLine<'a> {
+    timestamp: &'a str,
+    stream: &'a str,
+    message: &'a str,
+}
+
+/// Parses a persisted `<rfc3339> <stream> <message>` captured log line.
+///
+/// Returns `None` for chrome such as banners and section headers, which do not
+/// carry a leading capture timestamp.
+fn parse_captured_line(line: &str) -> Option<CapturedLine<'_>> {
+    let mut parts = line.splitn(3, ' ');
+    let timestamp = parts.next()?;
+    chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
+    let stream = parts.next()?;
+    if !matches!(stream, "stdout" | "stderr" | "combined") {
+        return None;
+    }
+    let message = parts.next().unwrap_or("");
+    Some(CapturedLine {
+        timestamp,
+        stream,
+        message,
+    })
+}
+
+/// Escapes a string as a JSON string value (without surrounding quotes).
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                escaped.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+/// A `Write` adapter that reformats systemg log bytes into the selected output
+/// mode line by line, optionally stripping ANSI escapes and dropping chrome.
+pub struct LogWriter<W: Write> {
+    inner: W,
+    format: LogFormat,
+    strip_ansi: bool,
+    service: Option<String>,
+    pending: Vec<u8>,
+}
+
+impl<W: Write> LogWriter<W> {
+    /// Creates a new adapter around `inner`.
+    pub fn new(
+        inner: W,
+        format: LogFormat,
+        strip_ansi: bool,
+        service: Option<String>,
+    ) -> Self {
+        Self {
+            inner,
+            format,
+            strip_ansi,
+            service,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Renders and writes a single complete line (newline already stripped).
+    fn render_line(&mut self, raw: &[u8]) -> std::io::Result<()> {
+        let bytes = if self.strip_ansi {
+            strip_ansi(raw)
+        } else {
+            raw.to_vec()
+        };
+
+        if matches!(self.format, LogFormat::Text) {
+            self.inner.write_all(&bytes)?;
+            self.inner.write_all(b"\n")?;
+            return Ok(());
+        }
+
+        let text = String::from_utf8_lossy(&bytes);
+        let parsed = parse_captured_line(&text);
+
+        match self.format {
+            LogFormat::Text => unreachable!(),
+            LogFormat::Raw => {
+                if let Some(parsed) = parsed {
+                    self.inner.write_all(parsed.message.as_bytes())?;
+                    self.inner.write_all(b"\n")?;
+                }
+            }
+            LogFormat::Json => {
+                if let Some(parsed) = parsed {
+                    let service = self.service.as_deref().unwrap_or("");
+                    let json = format!(
+                        "{{\"ts\":\"{}\",\"stream\":\"{}\",\"service\":\"{}\",\"line\":\"{}\"}}\n",
+                        json_escape(parsed.timestamp),
+                        json_escape(parsed.stream),
+                        json_escape(service),
+                        json_escape(parsed.message),
+                    );
+                    self.inner.write_all(json.as_bytes())?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for LogWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if matches!(self.format, LogFormat::Text) && !self.strip_ansi {
+            return self.inner.write(buf);
+        }
+        self.pending.extend_from_slice(buf);
+        while let Some(pos) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=pos).collect();
+            let line = &line[..line.len() - 1];
+            self.render_line(line)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.pending.is_empty() {
+            let line = std::mem::take(&mut self.pending);
+            self.render_line(&line)?;
+        }
+        self.inner.flush()
+    }
+}
+
 /// Returns the legacy path to the log file for a given service and kind.
 pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     resolve_log_path(service, kind)
@@ -1667,6 +1857,32 @@ impl LogManager {
         Self { pid_file }
     }
 
+    /// Collects the filtered one-shot log bytes for a single service without
+    /// printing, for callers that reformat the output themselves.
+    pub fn collect_service_log(
+        &self,
+        service_name: &str,
+        lines: usize,
+        kind: Option<&str>,
+        filter: &LogFilter,
+    ) -> Result<Vec<u8>, LogsManagerError> {
+        let stdout_path = resolve_log_path(service_name, "stdout");
+        let stderr_path = resolve_log_path(service_name, "stderr");
+        let combined_path = resolve_combined_log_path(service_name);
+        let mut bytes = Vec::new();
+        for chunk in collect_log_tail(
+            &stdout_path,
+            &stderr_path,
+            &combined_path,
+            lines,
+            kind,
+            filter,
+        )? {
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    }
+
     /// Shows the logs for a specific service's stdout/stderr in real-time.
     pub fn show_log(
         &self,
@@ -2824,6 +3040,82 @@ mod tests {
         let filter = LogFilter::default();
         assert_eq!(filter.apply(bytes), bytes);
         assert!(filter.is_noop());
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        let input = b"\x1b[1;31mERROR\x1b[0m boom \x1b[34mblue\x1b[0m";
+        assert_eq!(strip_ansi(input), b"ERROR boom blue");
+    }
+
+    #[test]
+    fn strip_ansi_leaves_plain_text() {
+        let input = b"plain line 42";
+        assert_eq!(strip_ansi(input), input);
+    }
+
+    #[test]
+    fn parse_captured_line_extracts_fields() {
+        let parsed =
+            parse_captured_line("2026-07-07T09:00:00Z stdout hello world").unwrap();
+        assert_eq!(parsed.timestamp, "2026-07-07T09:00:00Z");
+        assert_eq!(parsed.stream, "stdout");
+        assert_eq!(parsed.message, "hello world");
+    }
+
+    #[test]
+    fn parse_captured_line_rejects_banner() {
+        assert!(parse_captured_line("┌─────────┐").is_none());
+        assert!(parse_captured_line("Project: arbitration").is_none());
+    }
+
+    #[test]
+    fn log_writer_json_emits_one_object_per_line() {
+        let mut out = Vec::new();
+        {
+            let mut writer =
+                LogWriter::new(&mut out, LogFormat::Json, true, Some("api".into()));
+            writer
+                .write_all(b"2026-07-07T09:00:00Z stdout \x1b[31mhello\x1b[0m\n")
+                .unwrap();
+            writer.write_all(b"\xe2\x94\x8c banner line\n").unwrap();
+            writer.flush().unwrap();
+        }
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text,
+            "{\"ts\":\"2026-07-07T09:00:00Z\",\"stream\":\"stdout\",\"service\":\"api\",\"line\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn log_writer_raw_strips_prefix_and_banner() {
+        let mut out = Vec::new();
+        {
+            let mut writer = LogWriter::new(&mut out, LogFormat::Raw, true, None);
+            writer
+                .write_all(b"2026-07-07T09:00:00Z stderr actual message\n")
+                .unwrap();
+            writer.write_all(b"Running Services\n").unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(String::from_utf8(out).unwrap(), "actual message\n");
+    }
+
+    #[test]
+    fn log_writer_text_strip_ansi_keeps_prefix() {
+        let mut out = Vec::new();
+        {
+            let mut writer = LogWriter::new(&mut out, LogFormat::Text, true, None);
+            writer
+                .write_all(b"2026-07-07T09:00:00Z stdout \x1b[32mok\x1b[0m\n")
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "2026-07-07T09:00:00Z stdout ok\n"
+        );
     }
 
     #[test]

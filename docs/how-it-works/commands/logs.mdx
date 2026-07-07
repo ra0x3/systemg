@@ -34,6 +34,10 @@ $ sysg logs
 | `-` | `--until` | Only show lines captured at or before this time (same formats as `--since`) |
 | `-g` | `--grep` | Only show lines matching this regular expression |
 | `-a` | `--all` | Read the full active-plus-rotated history instead of the last `--lines` |
+| `-` | `--format` | Machine-readable output. `json` prints one `{ts, stream, service, line}` object per line |
+| `-` | `--raw` | Print only the application's original line, dropping systemg's timestamp/stream prefix |
+| `-` | `--strip-ansi` | Strip ANSI color/escape sequences (default on for `--format json`, `--raw`, and non-interactive output) |
+| `-` | `--no-strip-ansi` | Keep ANSI escape sequences even when they would be stripped by default |
 | `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
@@ -156,6 +160,40 @@ by the active file, oldest to newest, so you can grep or time-window across the
 entire retained history in one command instead of `cat`-ing each rotation by
 hand. `--all` ignores `--lines`.
 
+### Machine-readable output
+
+```sh
+$ sysg logs --service api --format json
+```
+
+`--format json` emits one JSON object per captured line —
+`{"ts","stream","service","line"}` — dropping banners and section headers so the
+stream is a clean JSON-lines document. ANSI escapes are stripped automatically.
+
+```sh
+$ sysg logs --service api --format json --grep ERROR | jq -r .line
+```
+
+### Raw application output
+
+```sh
+$ sysg logs --service api --raw
+```
+
+`--raw` prints only the application's original log line, without systemg's
+capture timestamp and stream label — the closest equivalent to reading the
+service's own stdout. Banners are dropped and ANSI is stripped by default.
+
+### ANSI handling
+
+systemg records service output verbatim, so lines a service colored for its own
+terminal are stored with their ANSI escapes.
+
+> **Info:** When output is a pipe, a file, or `--format json` / `--raw`,
+> `sysg logs` strips those escapes so downstream tools (`grep`, `jq`, `awk`) see
+> clean text. Pass `--no-strip-ansi` to keep the color, or `--strip-ansi` to
+> force stripping even on an interactive terminal.
+
 ### Stream snapshots
 
 ```sh
@@ -204,6 +242,11 @@ label:
 2026-05-14T02:05:13.470911Z stderr Compiling tungstenite v0.28.0
 2026-05-14T02:05:13.471020Z stdout request completed status=200
 ```
+
+> **Info:** The leading timestamp is systemg's own capture time; a service that
+> prints its own timestamp will show both. Use `--raw` to drop systemg's prefix
+> and keep only the application's line, or `--format json` to get the timestamp,
+> stream, and message as separate fields.
 
 ## Performance model
 

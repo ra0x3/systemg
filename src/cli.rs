@@ -391,6 +391,25 @@ pub enum Commands {
         #[arg(short = 'a', long)]
         all: bool,
 
+        /// Emit machine-readable output. `json` prints one
+        /// `{ts, stream, service, line}` object per line.
+        #[arg(long, value_enum, value_name = "FORMAT")]
+        format: Option<OutputFormat>,
+
+        /// Print only the application's original line, dropping systemg's
+        /// capture timestamp and stream prefix.
+        #[arg(long)]
+        raw: bool,
+
+        /// Strip ANSI color/escape sequences from log lines. Defaults on for
+        /// `--format json`, `--raw`, and non-interactive output.
+        #[arg(long = "strip-ansi")]
+        strip_ansi: bool,
+
+        /// Keep ANSI escape sequences even when they would be stripped by default.
+        #[arg(long = "no-strip-ansi", conflicts_with = "strip_ansi")]
+        no_strip_ansi: bool,
+
         /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
         #[arg(long, value_name = "DURATION")]
         stream: Option<String>,
@@ -618,6 +637,41 @@ mod tests {
     #[test]
     fn logs_rejects_follow_with_no_follow() {
         assert!(Cli::try_parse_from(["sysg", "logs", "-f", "--no-follow"]).is_err());
+    }
+
+    #[test]
+    fn logs_accepts_format_and_render_flags() {
+        let cli = Cli::try_parse_from([
+            "sysg",
+            "logs",
+            "-s",
+            "api",
+            "--format",
+            "json",
+            "--strip-ansi",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Logs {
+                format,
+                strip_ansi,
+                raw,
+                ..
+            } => {
+                assert_eq!(format, Some(OutputFormat::Json));
+                assert!(strip_ansi);
+                assert!(!raw);
+            }
+            _ => panic!("expected logs command"),
+        }
+    }
+
+    #[test]
+    fn logs_rejects_strip_and_no_strip_together() {
+        assert!(
+            Cli::try_parse_from(["sysg", "logs", "--strip-ansi", "--no-strip-ansi"])
+                .is_err()
+        );
     }
 
     #[test]
