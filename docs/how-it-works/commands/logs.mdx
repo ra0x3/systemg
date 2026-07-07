@@ -30,6 +30,10 @@ $ sysg logs
 | `-k` | `--kind` | Kind of logs to show: stdout, stderr, or supervisor. Omit this flag to show stdout+stderr together |
 | `-f` | `--follow` | Follow the log stream until interrupted (like `tail -F`) |
 | `-` | `--no-follow` | Force a one-shot snapshot even on an interactive terminal |
+| `-` | `--since` | Only show lines captured at or after this time (RFC3339, `YYYY-MM-DD`, or a relative age like `30m`/`2h`/`7d`) |
+| `-` | `--until` | Only show lines captured at or before this time (same formats as `--since`) |
+| `-g` | `--grep` | Only show lines matching this regular expression |
+| `-a` | `--all` | Read the full active-plus-rotated history instead of the last `--lines` |
 | `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
@@ -117,6 +121,40 @@ $ sysg logs --kind supervisor
 ```sh
 $ sysg logs --service api --lines 200
 ```
+
+### Filter by pattern
+
+```sh
+$ sysg logs --service api --grep ERROR
+```
+
+`--grep` takes a regular expression and keeps only matching lines. It composes
+with `--kind`, the time bounds, and `--all`.
+
+### Filter by time window
+
+```sh
+$ sysg logs --service api --since 2h
+$ sysg logs --service api --since 2026-07-07 --until 2026-07-07T12:00:00Z
+```
+
+Time bounds are matched against systemg's capture timestamp (the UTC prefix on
+each stored line). `--since` / `--until` accept an RFC3339 timestamp, a bare UTC
+date (taken as midnight), or a relative age in the past (`30m`, `2h`, `7d`).
+Because following cannot honor an upper bound, any `--since` / `--until` /
+`--all` read is a one-shot snapshot.
+
+### Read the full rotated history
+
+```sh
+$ sysg logs --service api --all --grep ERROR
+```
+
+By default `sysg logs` reads only the tail of the active `{service}.log`. `--all`
+concatenates the rotated backups (`{service}.log.2`, `{service}.log.1`) followed
+by the active file, oldest to newest, so you can grep or time-window across the
+entire retained history in one command instead of `cat`-ing each rotation by
+hand. `--all` ignores `--lines`.
 
 ### Stream snapshots
 

@@ -120,6 +120,8 @@ struct SupervisorLogRequest<'a> {
     kind: Option<&'a str>,
     /// Whether to follow the log stream until the client disconnects.
     follow: bool,
+    /// Post-capture time/pattern/history filter applied before display.
+    filter: crate::logs::LogFilter,
     /// Supervisor-owned Unix stream connected to the CLI client.
     stream: &'a std::os::unix::net::UnixStream,
 }
@@ -1433,8 +1435,25 @@ impl Supervisor {
                                 lines,
                                 kind,
                                 follow,
+                                since,
+                                until,
+                                grep,
+                                all,
                             } = command
                             {
+                                let filter = match crate::logs::LogFilter::from_parts(
+                                    since.as_deref(),
+                                    until.as_deref(),
+                                    grep.as_deref(),
+                                    all,
+                                    chrono::Utc::now(),
+                                ) {
+                                    Ok(filter) => filter,
+                                    Err(err) => {
+                                        let _ = writeln!(stream, "{err}");
+                                        continue;
+                                    }
+                                };
                                 let snapshot = match self.collect_configured_snapshot() {
                                     Ok(snapshot) => {
                                         self.status_cache.replace(snapshot.clone());
@@ -1465,6 +1484,7 @@ impl Supervisor {
                                         lines,
                                         kind: kind.as_deref(),
                                         follow,
+                                        filter,
                                         stream: &log_stream,
                                     };
                                     if let Err(err) =
@@ -1570,6 +1590,7 @@ impl Supervisor {
                         request.lines,
                         requested_kind,
                         request.follow,
+                        &request.filter,
                         request.stream,
                     )
                     .map_err(SupervisorError::from);
@@ -1594,6 +1615,7 @@ impl Supervisor {
                         request.lines,
                         requested_kind,
                         request.follow,
+                        &request.filter,
                         request.stream,
                     )
                     .map_err(SupervisorError::from);
@@ -1667,6 +1689,7 @@ impl Supervisor {
                         request.lines,
                         requested_kind,
                         false,
+                        &crate::logs::LogFilter::default(),
                         request.stream,
                     )?;
                 }

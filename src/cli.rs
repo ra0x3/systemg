@@ -372,6 +372,25 @@ pub enum Commands {
         #[arg(long = "no-follow")]
         no_follow: bool,
 
+        /// Only show lines captured at or after this time.
+        ///
+        /// Accepts an RFC3339 timestamp (`2026-07-07T14:00:00Z`), a UTC date
+        /// (`2026-07-07`), or a relative age in the past (`30m`, `2h`, `7d`).
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
+
+        /// Only show lines captured at or before this time (same formats as --since).
+        #[arg(long, value_name = "TIME")]
+        until: Option<String>,
+
+        /// Only show lines matching this regular expression.
+        #[arg(short = 'g', long, value_name = "PATTERN")]
+        grep: Option<String>,
+
+        /// Read the full active-plus-rotated history instead of the last --lines.
+        #[arg(short = 'a', long)]
+        all: bool,
+
         /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
         #[arg(long, value_name = "DURATION")]
         stream: Option<String>,
@@ -599,6 +618,39 @@ mod tests {
     #[test]
     fn logs_rejects_follow_with_no_follow() {
         assert!(Cli::try_parse_from(["sysg", "logs", "-f", "--no-follow"]).is_err());
+    }
+
+    #[test]
+    fn logs_accepts_filter_flags() {
+        let cli = Cli::try_parse_from([
+            "sysg",
+            "logs",
+            "-s",
+            "api",
+            "--since",
+            "2h",
+            "--until",
+            "2026-07-07",
+            "--grep",
+            "ERROR",
+            "--all",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Logs {
+                since,
+                until,
+                grep,
+                all,
+                ..
+            } => {
+                assert_eq!(since.as_deref(), Some("2h"));
+                assert_eq!(until.as_deref(), Some("2026-07-07"));
+                assert_eq!(grep.as_deref(), Some("ERROR"));
+                assert!(all);
+            }
+            _ => panic!("expected logs command"),
+        }
     }
 
     #[test]

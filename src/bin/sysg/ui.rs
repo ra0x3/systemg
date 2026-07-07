@@ -183,6 +183,7 @@ fn grouped_log_units(snapshot: &StatusSnapshot) -> Vec<(LogSection, Vec<&str>)> 
 
 /// Renders logs for a single unit using the same status snapshot data that
 /// powers `sysg status` and `sysg inspect`.
+#[allow(clippy::too_many_arguments)]
 fn render_service_logs_from_snapshot(
     manager: &LogManager,
     snapshot: &StatusSnapshot,
@@ -191,6 +192,7 @@ fn render_service_logs_from_snapshot(
     lines: usize,
     kind: Option<&str>,
     snapshot_mode: bool,
+    filter: &LogFilter,
 ) -> Result<(), Box<dyn Error>> {
     let unit = snapshot
         .units
@@ -205,17 +207,18 @@ fn render_service_logs_from_snapshot(
                     process_pid,
                     lines,
                     kind,
+                    filter,
                 )?;
             } else {
-                manager.show_log(service_name, process_pid, lines, kind)?;
+                manager.show_log(service_name, process_pid, lines, kind, filter)?;
             }
             return Ok(());
         }
 
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, kind)?;
+            manager.show_inactive_log_snapshot(service_name, lines, kind, filter)?;
         } else {
-            manager.show_inactive_log(service_name, lines, kind)?;
+            manager.show_inactive_log(service_name, lines, kind, filter)?;
         }
         return Ok(());
     }
@@ -236,9 +239,9 @@ fn render_service_logs_from_snapshot(
         || stderr_exists
     {
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, kind)?;
+            manager.show_inactive_log_snapshot(service_name, lines, kind, filter)?;
         } else {
-            manager.show_inactive_log(service_name, lines, kind)?;
+            manager.show_inactive_log(service_name, lines, kind, filter)?;
         }
     } else {
         warn!("Service '{service_name}' is not currently running");
@@ -297,6 +300,7 @@ fn render_all_logs_from_snapshot(
                     lines,
                     kind,
                     snapshot_mode,
+                    &LogFilter::default(),
                 )?;
             }
         }
