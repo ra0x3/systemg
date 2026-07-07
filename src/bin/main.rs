@@ -35,8 +35,9 @@ use systemg::{
     daemon::{Daemon, PidFile, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
     logs::{
-        LogFilter, LogManager, LogSection, RotatingLogWriter, get_service_log_path,
-        prune_logs, resolve_log_path, supervisor_log_path, write_log_section_header,
+        LogFilter, LogFormat, LogManager, LogSection, LogWriter, RotatingLogWriter,
+        get_service_log_path, prune_logs, resolve_log_path, supervisor_log_path,
+        write_log_section_header,
     },
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
@@ -908,6 +909,10 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             until,
             grep,
             all,
+            format,
+            raw,
+            strip_ansi,
+            no_strip_ansi,
             stream,
         } => {
             if prune {
@@ -990,6 +995,35 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 chrono::Utc::now(),
             )?;
 
+            let log_format = match format {
+                Some(OutputFormat::Json) => LogFormat::Json,
+                Some(OutputFormat::Xml) => {
+                    eprintln!("`sysg logs` does not support --format xml; use json.");
+                    process::exit(2);
+                }
+                None if raw => LogFormat::Raw,
+                None => LogFormat::Text,
+            };
+            let strip_ansi_output = if no_strip_ansi {
+                false
+            } else {
+                strip_ansi
+                    || !matches!(log_format, LogFormat::Text)
+                    || !stdout_is_tty()
+                    || agent_mode()
+            };
+            let machine_output =
+                !matches!(log_format, LogFormat::Text) || strip_ansi_output;
+
+            let make_log_writer = || {
+                LogWriter::new(
+                    io::stdout(),
+                    log_format,
+                    strip_ansi_output,
+                    service.clone(),
+                )
+            };
+
             let stream_logs_via_supervisor =
                 |follow: bool| -> Result<(), Box<dyn Error>> {
                     let command = ControlCommand::Logs {
@@ -1003,7 +1037,11 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                         grep: grep.clone(),
                         all,
                     };
-                    ipc::stream_command_output(&command, io::stdout())
+                    let mut writer = make_log_writer();
+                    ipc::stream_command_output(&command, &mut writer)
+                        .map_err(|err| Box::new(err) as Box<dyn Error>)?;
+                    writer
+                        .flush()
                         .map_err(|err| Box::new(err) as Box<dyn Error>)
                 };
 
@@ -1013,6 +1051,18 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 })?;
 
                 match service.as_ref() {
+                    Some(service_name) if machine_output => {
+                        info!("Fetching logs for service: {service_name}");
+                        let bytes = manager.collect_service_log(
+                            service_name,
+                            lines,
+                            kind.as_ref().map(|kind| kind.as_str()),
+                            &log_filter,
+                        )?;
+                        let mut writer = make_log_writer();
+                        writer.write_all(&bytes)?;
+                        writer.flush()?;
+                    }
                     Some(service_name) => {
                         info!("Fetching logs for service: {service_name}");
                         render_service_logs_from_snapshot(
@@ -1087,6 +1137,10 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                                         &output,
                                         previous_line_count,
                                     )?;
+                                } else if machine_output {
+                                    let mut writer = make_log_writer();
+                                    writer.write_all(&output)?;
+                                    writer.flush()?;
                                 } else {
                                     io::stdout().write_all(&output)?;
                                     io::stdout().flush()?;
