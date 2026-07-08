@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     io,
@@ -16,7 +16,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{
-        Config, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy, load_config,
+        Config, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
+        load_config, load_config_from_file,
     },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
@@ -655,8 +656,8 @@ impl Supervisor {
                 std::env::current_dir()?.join(config_path)
             };
             let resolved = resolved.canonicalize().unwrap_or(resolved);
-            runtime::ensure_trusted_config(&resolved)?;
-            let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
+            let trusted = runtime::open_trusted_config(&resolved)?;
+            let config = load_config_from_file(trusted, &resolved)?;
             if config.project.id != project_id {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -694,8 +695,8 @@ impl Supervisor {
         };
 
         let stored = project_runtime.config_path.clone();
-        runtime::ensure_trusted_config(&stored)?;
-        let config = load_config(Some(stored.to_string_lossy().as_ref()))?;
+        let trusted = runtime::open_trusted_config(&stored)?;
+        let config = load_config_from_file(trusted, &stored)?;
         if config.project.id != project_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1547,6 +1548,8 @@ impl Supervisor {
         let requested_kind = request.kind;
 
         if let Some(service_name) = request.service {
+            crate::logs::validate_service_name(&service_name)
+                .map_err(SupervisorError::from)?;
             let matching_units: Vec<_> = request
                 .snapshot
                 .units
@@ -1798,8 +1801,9 @@ impl Supervisor {
                     )))
                 } else if let Some(project_id) = project.as_deref() {
                     if let Some(config_path) = config.as_deref() {
-                        runtime::ensure_trusted_config(Path::new(config_path))?;
-                        let config = load_config(Some(config_path))?;
+                        let path = Path::new(config_path);
+                        let trusted = runtime::open_trusted_config(path)?;
+                        let config = load_config_from_file(trusted, path)?;
                         if config.project.id != project_id {
                             return Err(io::Error::new(
                                 io::ErrorKind::InvalidInput,
@@ -1928,6 +1932,20 @@ impl Supervisor {
         }
     }
 
+    /// Resolves a service configuration by name across the primary daemon and
+    /// any additional managed projects.
+    fn resolve_service_config(
+        &self,
+        service_name: &str,
+    ) -> Option<crate::config::ServiceConfig> {
+        if let Some(config) = self.daemon.config().services.get(service_name) {
+            return Some(config.clone());
+        }
+        self.extra_projects.values().find_map(|project| {
+            project.daemon.config().services.get(service_name).cloned()
+        })
+    }
+
     /// Handles handle spawn.
     fn handle_spawn(&mut self, params: SpawnParams) -> Result<u32, SupervisorError> {
         let Some(program) = params.command.first() else {
@@ -1942,9 +1960,40 @@ impl Supervisor {
             .authorize_spawn(params.parent_pid, &params.name)?;
         let depth = spawn_auth.depth;
 
+        let privilege = spawn_auth
+            .root_service
+            .as_deref()
+            .and_then(|name| self.resolve_service_config(name))
+            .map(|service_config| {
+                crate::privilege::PrivilegeContext::from_service(
+                    &spawn_auth.root_service.clone().unwrap_or_default(),
+                    &service_config,
+                )
+            })
+            .transpose()
+            .map_err(|source| SupervisorError::from(io::Error::other(source)))?;
+
         let mut cmd = std::process::Command::new(program);
         if params.command.len() > 1 {
             cmd.args(&params.command[1..]);
+        }
+
+        let drops_privileges = privilege
+            .as_ref()
+            .is_some_and(|p| p.user.drops_privileges());
+        if drops_privileges {
+            cmd.env_clear();
+            cmd.env(
+                "PATH",
+                std::env::var("PATH").unwrap_or_else(|_| {
+                    crate::constants::DEFAULT_SERVICE_PATH.to_string()
+                }),
+            );
+            if let Some(privilege) = &privilege {
+                for (key, value) in privilege.user.env_overrides() {
+                    cmd.env(key, value);
+                }
+            }
         }
 
         cmd.env("SPAWN_DEPTH", depth.to_string());
@@ -1957,8 +2006,33 @@ impl Supervisor {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
+        if let Some(privilege) = privilege.clone() {
+            let privilege_pre_exec = privilege.clone();
+            unsafe {
+                cmd.pre_exec(move || {
+                    privilege_pre_exec.apply_pre_exec().map_err(|err| {
+                        eprintln!(
+                            "systemg spawn pre_exec: privilege setup failed: {err}"
+                        );
+                        err
+                    })
+                });
+            }
+        }
+
         let mut child = cmd.spawn()?;
         let child_pid = child.id();
+
+        #[cfg(target_os = "linux")]
+        if let Some(privilege) = &privilege
+            && let Err(err) = privilege.apply_post_spawn(child_pid as libc::pid_t)
+        {
+            warn!(
+                "Failed post-spawn privilege setup for '{}': {err}",
+                params.name
+            );
+        }
+
         let command_string = params.command.join(" ");
         let child_name = params.name.clone();
         let started_at = SystemTime::now();
@@ -2108,8 +2182,8 @@ impl Supervisor {
         };
 
         info!("Reloading configuration from {:?}", resolved);
-        runtime::ensure_trusted_config(&resolved)?;
-        let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
+        let trusted = runtime::open_trusted_config(&resolved)?;
+        let config = load_config_from_file(trusted, &resolved)?;
 
         if let Some(collector) = self.metrics_collector.take() {
             collector.stop();
@@ -2210,8 +2284,8 @@ impl Supervisor {
             std::env::current_dir()?.join(path)
         };
         let resolved = resolved.canonicalize().unwrap_or(resolved);
-        runtime::ensure_trusted_config(&resolved)?;
-        let config = load_config(Some(resolved.to_string_lossy().as_ref()))?;
+        let trusted = runtime::open_trusted_config(&resolved)?;
+        let config = load_config_from_file(trusted, &resolved)?;
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
 
@@ -2763,6 +2837,53 @@ mod tests {
             }
             Err(err) => panic!("failed to inspect timed-out cron process: {err}"),
         }
+    }
+
+    #[test]
+    fn resolve_service_config_finds_primary_service_only() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("systemg.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "1"
+services:
+  api:
+    command: "/bin/true"
+"#,
+        )
+        .expect("write config");
+
+        let supervisor =
+            Supervisor::new(config_path, false, None).expect("create supervisor");
+
+        assert_eq!(
+            supervisor.resolve_service_config("api").map(|c| c.command),
+            Some("/bin/true".to_string())
+        );
+        assert!(supervisor.resolve_service_config("missing").is_none());
+
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
     }
 
     #[test]

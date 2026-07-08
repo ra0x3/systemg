@@ -32,11 +32,11 @@ use crate::{
         SkipConfig,
     },
     constants::{
-        DEFAULT_SHELL, DaemonLock, DeploymentStrategy, MAX_STATUS_LOG_LINES,
-        PID_FILE_NAME, PID_LOCK_SUFFIX, POST_RESTART_VERIFY_ATTEMPTS,
-        POST_RESTART_VERIFY_DELAY, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
-        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
-        SHELL_COMMAND_FLAG, STATE_FILE_NAME,
+        DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
+        MAX_STATUS_LOG_LINES, PID_FILE_NAME, PID_LOCK_SUFFIX,
+        POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY, PROCESS_CHECK_INTERVAL,
+        PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT,
+        SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG, STATE_FILE_NAME,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_service_log_writers},
@@ -2224,6 +2224,19 @@ impl Daemon {
             merged_env.insert(key, value);
         }
 
+        let inherit_env = service_config
+            .env
+            .as_ref()
+            .and_then(|env| env.inherit_env)
+            .unwrap_or(false);
+        if privilege.user.drops_privileges() && !inherit_env {
+            debug!("Starting '{service_name}' from a clean environment (privilege drop)");
+            cmd.env_clear();
+            merged_env
+                .entry("PATH".to_string())
+                .or_insert_with(|| DEFAULT_SERVICE_PATH.to_string());
+        }
+
         if !merged_env.is_empty() {
             let keys: Vec<_> = merged_env.keys().cloned().collect();
             debug!("Setting environment variables: {:?}", keys);
@@ -3532,12 +3545,7 @@ impl Daemon {
         value: &str,
     ) -> ServiceConfig {
         let mut cloned = service.clone();
-        let mut env_cfg = cloned.env.take().unwrap_or(EnvConfig {
-            file: None,
-            vars: None,
-            clear_session_vars: None,
-            strip: None,
-        });
+        let mut env_cfg = cloned.env.take().unwrap_or_default();
         let mut vars = env_cfg.vars.take().unwrap_or_default();
         vars.insert(key.to_string(), value.to_string());
         env_cfg.vars = Some(vars);

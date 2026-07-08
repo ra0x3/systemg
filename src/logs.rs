@@ -609,6 +609,50 @@ pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
     resolve_log_path(service, kind)
 }
 
+/// Rejects a service name that could escape the log directory.
+///
+/// Log file paths are built by interpolating the service name into a filename
+/// under `runtime::log_dir()`. The name arrives from the control socket, so a
+/// value containing a path separator, NUL, or a `.`/`..` component could
+/// traverse out of the log directory and cause the supervisor to read or create
+/// files elsewhere ([CWE-22]/[CWE-73]). Only names that resolve to a single
+/// in-directory filename are accepted.
+///
+/// [CWE-22]: https://cwe.mitre.org/data/definitions/22.html
+/// [CWE-73]: https://cwe.mitre.org/data/definitions/73.html
+pub fn validate_service_name(service: &str) -> Result<(), LogsManagerError> {
+    let invalid = service.is_empty()
+        || service.len() > 255
+        || service == "."
+        || service == ".."
+        || service
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == '\0' || std::path::is_separator(c));
+    if invalid {
+        return Err(LogsManagerError::InvalidServiceName(service.to_string()));
+    }
+    Ok(())
+}
+
+/// Confirms a resolved log path stays within the log directory before it is
+/// opened or created, guarding against traversal even if an unvalidated name
+/// reaches a path builder.
+fn assert_within_log_dir(path: &Path) -> Result<(), LogsManagerError> {
+    let log_dir = runtime::log_dir();
+    let parent = path.parent().unwrap_or(&log_dir);
+    let base = log_dir.canonicalize().unwrap_or(log_dir.clone());
+    let resolved = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
+    if resolved == base {
+        Ok(())
+    } else {
+        Err(LogsManagerError::InvalidServiceName(
+            path.display().to_string(),
+        ))
+    }
+}
+
 /// Returns the canonical path for a service log without performing any existence checks.
 fn canonical_log_path(service: &str, kind: &str) -> PathBuf {
     let mut path = runtime::log_dir();
@@ -1121,6 +1165,7 @@ fn resolve_tail_targets(
     service_name: &str,
     pid: Option<u32>,
 ) -> Result<(PathBuf, PathBuf, PathBuf), LogsManagerError> {
+    validate_service_name(service_name)?;
     let stdout_path = resolve_log_path(service_name, "stdout");
     let stderr_path = resolve_log_path(service_name, "stderr");
     let combined_path = resolve_combined_log_path(service_name);
@@ -1129,9 +1174,11 @@ fn resolve_tail_targets(
     let stderr_exists = stderr_path.exists();
 
     if !combined_path.exists() && !stdout_exists {
+        assert_within_log_dir(&stdout_path)?;
         touch_log_file(&stdout_path);
     }
     if !combined_path.exists() && !stderr_exists {
+        assert_within_log_dir(&stderr_path)?;
         touch_log_file(&stderr_path);
     }
 
@@ -2052,6 +2099,7 @@ impl LogManager {
 
     /// Clears stdout and stderr logs for a specific service.
     pub fn clear_service_logs(&self, service_name: &str) -> Result<(), LogsManagerError> {
+        validate_service_name(service_name)?;
         let stdout_path = resolve_log_path(service_name, "stdout");
         let stderr_path = resolve_log_path(service_name, "stderr");
         let combined_path = resolve_combined_log_path(service_name);
@@ -2589,6 +2637,32 @@ mod tests {
     use tempfile::tempdir_in;
 
     use super::*;
+
+    #[test]
+    fn validate_service_name_accepts_plain_names() {
+        for name in ["api", "web-1", "worker_2", "svc.v1", "A.B_c-3"] {
+            assert!(validate_service_name(name).is_ok(), "rejected {name}");
+        }
+    }
+
+    #[test]
+    fn validate_service_name_rejects_traversal() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../etc/passwd",
+            "../../../../etc/cron.d/x",
+            "a/b",
+            "a\\b",
+            "nul\0byte",
+        ] {
+            assert!(
+                validate_service_name(name).is_err(),
+                "accepted traversal name {name:?}"
+            );
+        }
+    }
 
     #[test]
     fn tail_log_bytes_returns_last_lines_with_trailing_newline() {

@@ -125,6 +125,11 @@ pub const STATE_FILE_NAME: &str = "state.xml";
 /// Default shell used for executing service commands and hooks.
 pub const DEFAULT_SHELL: &str = "sh";
 
+/// `PATH` installed for a privilege-dropped service started from a clean
+/// environment, so it can still resolve system binaries without inheriting the
+/// supervisor's (root's) `PATH`.
+pub const DEFAULT_SERVICE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
 /// Shell argument flag for executing command strings.
 pub const SHELL_COMMAND_FLAG: &str = "-c";
 
@@ -166,6 +171,12 @@ pub const MAX_STATUS_LOG_LINES: usize = 50;
 
 /// Buffer size for log output streams (stdout/stderr).
 pub const LOG_BUFFER_SIZE: usize = 8192;
+
+/// Maximum size of a single newline-framed control-socket command.
+///
+/// Caps the buffer `read_command` allocates so one connection cannot exhaust
+/// supervisor memory by streaming bytes without a newline.
+pub const MAX_CONTROL_LINE: u64 = 1024 * 1024;
 
 /// Format string for hook labels combining stage and outcome.
 /// Example: "pre_start.pending", "post_start.success"

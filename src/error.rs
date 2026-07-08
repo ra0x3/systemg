@@ -218,4 +218,8 @@ pub enum LogsManagerError {
     /// Error compiling a `logs --grep` pattern.
     #[error("Invalid --grep pattern: {0}")]
     InvalidGrep(String),
+
+    /// Service name would escape the log directory.
+    #[error("Invalid service name: {0}")]
+    InvalidServiceName(String),
 }

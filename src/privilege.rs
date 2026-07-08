@@ -58,6 +58,11 @@ impl UserContext {
         }
     }
 
+    /// Whether this context switches the process to a different user or group.
+    pub fn drops_privileges(&self) -> bool {
+        self.uid.is_some() || self.gid.is_some()
+    }
+
     /// Builds the environment-variable overrides that align with the target
     /// account (e.g. `HOME`, `USER`, `LOGNAME`, `SHELL`).
     pub fn env_overrides(&self) -> HashMap<String, String> {
@@ -746,6 +751,25 @@ mod tests {
         assert_eq!(vars.get("SHELL"), Some(&"/bin/bash".to_string()));
         assert_eq!(vars.get("USER"), Some(&"example".to_string()));
         assert_eq!(vars.get("LOGNAME"), Some(&"example".to_string()));
+    }
+
+    #[test]
+    fn drops_privileges_tracks_uid_and_gid() {
+        assert!(!UserContext::default().drops_privileges());
+        assert!(
+            UserContext {
+                uid: Some(1000),
+                ..UserContext::default()
+            }
+            .drops_privileges()
+        );
+        assert!(
+            UserContext {
+                gid: Some(1000),
+                ..UserContext::default()
+            }
+            .drops_privileges()
+        );
     }
 }
 

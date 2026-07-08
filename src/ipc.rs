@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     time::Duration,
@@ -408,9 +408,20 @@ pub fn stream_command_output(
 
 /// Utility to read a command from a `UnixStream`. Used by the supervisor event loop.
 pub fn read_command(stream: &mut UnixStream) -> Result<ControlCommand, ControlError> {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
+    let cap = crate::constants::MAX_CONTROL_LINE;
+    let mut reader = BufReader::new(stream).take(cap + 1);
+    let mut buf = Vec::new();
+    reader.read_until(b'\n', &mut buf)?;
+
+    if buf.len() as u64 > cap {
+        return Err(ControlError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "control command exceeds maximum length",
+        )));
+    }
+
+    let line = String::from_utf8(buf)
+        .map_err(|e| ControlError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
 
     if line.trim().is_empty() {
         return Err(ControlError::Io(io::Error::new(
@@ -783,6 +794,34 @@ mod tests {
         let response: ControlResponse = serde_json::from_str(line.trim()).unwrap();
 
         assert!(matches!(response, ControlResponse::Message(msg) if msg == "Started"));
+    }
+
+    #[test]
+    fn read_command_rejects_oversized_line() {
+        let temp = tempdir().unwrap();
+        let socket_path = temp.path().join("oversize.sock");
+
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to bind test socket: {err}"),
+        };
+
+        std::thread::spawn(move || {
+            if let Ok(mut stream) = UnixStream::connect(&socket_path) {
+                let payload =
+                    vec![b'a'; (crate::constants::MAX_CONTROL_LINE as usize) + 16];
+                let _ = stream.write_all(&payload);
+                let _ = stream.flush();
+            }
+        });
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let result = read_command(&mut stream);
+        assert!(matches!(
+            result,
+            Err(ControlError::Io(err)) if err.kind() == io::ErrorKind::InvalidData
+        ));
     }
 
     #[test]

@@ -848,7 +848,7 @@ impl<'de> Deserialize<'de> for HealthCheckConfig {
 }
 
 /// Represents environment variables for a service.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EnvConfig {
     /// Optional path to an environment file.
     pub file: Option<String>,
@@ -859,6 +859,11 @@ pub struct EnvConfig {
     pub clear_session_vars: Option<bool>,
     /// Additional inherited variables to remove from the service environment.
     pub strip: Option<Vec<String>>,
+    /// Whether a privilege-dropped service inherits the supervisor's environment.
+    /// Defaults to `false`: services that switch user/group start from a clean
+    /// environment so root's variables (secrets, `LD_*`) do not leak across the
+    /// privilege boundary. Set `true` to opt back into full inheritance.
+    pub inherit_env: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -872,6 +877,8 @@ struct RawEnvConfig {
     clear_session_vars: Option<bool>,
     /// Additional inherited variables to remove from the service env.
     strip: Option<Vec<String>>,
+    /// Whether a privilege-dropped service inherits the supervisor environment.
+    inherit_env: Option<bool>,
     /// Direct key/value pairs provided alongside `file` or instead of `vars`.
     #[serde(flatten)]
     entries: HashMap<String, String>,
@@ -896,6 +903,7 @@ impl<'de> Deserialize<'de> for EnvConfig {
             vars: if vars.is_empty() { None } else { Some(vars) },
             clear_session_vars: raw.clear_session_vars,
             strip: raw.strip,
+            inherit_env: raw.inherit_env,
         })
     }
 }
@@ -978,6 +986,7 @@ impl EnvConfig {
                     } else {
                         Some(merged_strip)
                     },
+                    inherit_env: service_cfg.inherit_env.or(root_cfg.inherit_env),
                 })
             }
         }
@@ -1225,7 +1234,29 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
         }
     });
 
-    let content = fs::read_to_string(config_path).map_err(|e| {
+    let file = fs::File::open(config_path).map_err(|e| {
+        ProcessManagerError::ConfigReadError(std::io::Error::new(
+            e.kind(),
+            format!("{} ({})", e, config_path.display()),
+        ))
+    })?;
+
+    load_config_from_file(file, config_path)
+}
+
+/// Parses configuration from an already-open, trust-validated descriptor.
+///
+/// Reading from the same `File` that [`crate::runtime::open_trusted_config`]
+/// validated closes the check-to-use race a stat-then-reopen sequence would
+/// leave: the bytes parsed here are exactly the bytes that passed validation.
+pub fn load_config_from_file(
+    mut file: fs::File,
+    config_path: &Path,
+) -> Result<Config, ProcessManagerError> {
+    use std::io::Read;
+
+    let mut content = String::new();
+    file.read_to_string(&mut content).map_err(|e| {
         ProcessManagerError::ConfigReadError(std::io::Error::new(
             e.kind(),
             format!("{} ({})", e, config_path.display()),
@@ -1466,6 +1497,7 @@ services:
                 vars: Some(HashMap::from([("RUST_LOG".into(), "debug".into())])),
                 clear_session_vars: None,
                 strip: None,
+                inherit_env: None,
             }),
             metrics: MetricsConfig {
                 retention_minutes: 30,
@@ -1801,6 +1833,7 @@ services:
             vars: Some(HashMap::from([("ROOT_VAR".into(), "root_value".into())])),
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
 
         let result = EnvConfig::merge(Some(&root), None).unwrap();
@@ -1821,6 +1854,7 @@ services:
             )])),
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
 
         let result = EnvConfig::merge(None, Some(&service)).unwrap();
@@ -1841,6 +1875,7 @@ services:
             ])),
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
 
         let service = EnvConfig {
@@ -1851,6 +1886,7 @@ services:
             ])),
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
 
         let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();
@@ -1871,6 +1907,7 @@ services:
             vars: None,
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
         let stripped = env.vars_to_strip();
         for var in crate::constants::SESSION_SCOPED_ENV_VARS {
@@ -1885,6 +1922,7 @@ services:
             vars: Some(HashMap::from([("SSH_TTY".into(), "/dev/pts/0".into())])),
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
         assert!(!env.vars_to_strip().contains(&"SSH_TTY".to_string()));
     }
@@ -1896,9 +1934,37 @@ services:
             vars: None,
             clear_session_vars: Some(false),
             strip: Some(vec!["FOO".into()]),
+            inherit_env: None,
         };
         let stripped = env.vars_to_strip();
         assert_eq!(stripped, vec!["FOO".to_string()]);
+    }
+
+    #[test]
+    fn inherit_env_parses_and_defaults_to_none() {
+        let env: EnvConfig = serde_yaml::from_str("inherit_env: true\n").unwrap();
+        assert_eq!(env.inherit_env, Some(true));
+
+        let default: EnvConfig = serde_yaml::from_str("FOO: bar\n").unwrap();
+        assert_eq!(default.inherit_env, None);
+    }
+
+    #[test]
+    fn merge_prefers_service_inherit_env_then_root() {
+        let root = EnvConfig {
+            inherit_env: Some(true),
+            ..Default::default()
+        };
+        let service = EnvConfig {
+            inherit_env: Some(false),
+            ..Default::default()
+        };
+        let merged = EnvConfig::merge(Some(&root), Some(&service)).unwrap();
+        assert_eq!(merged.inherit_env, Some(false));
+
+        let service_unset = EnvConfig::default();
+        let merged = EnvConfig::merge(Some(&root), Some(&service_unset)).unwrap();
+        assert_eq!(merged.inherit_env, Some(true));
     }
 
     #[test]
@@ -1908,6 +1974,7 @@ services:
             vars: Some(HashMap::from([("ROOT_VAR".into(), "root_value".into())])),
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
 
         let service = EnvConfig {
@@ -1915,6 +1982,7 @@ services:
             vars: None,
             clear_session_vars: None,
             strip: None,
+            inherit_env: None,
         };
 
         let result = EnvConfig::merge(Some(&root), Some(&service)).unwrap();

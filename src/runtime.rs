@@ -171,21 +171,26 @@ pub fn write_private_file(
     Ok(())
 }
 
-/// Rejects a config path that an untrusted user could control.
+/// Validates that an open config file is not attacker-controlled.
 ///
-/// Loading a config executes the commands it declares with the supervisor's
-/// privileges, so a path supplied over the control socket must not be writable
-/// by anyone other than the supervisor's owner (or root). On Unix this rejects
-/// files that are group/other-writable or owned by a different non-root user.
-/// Non-Unix targets accept the path as-is.
+/// Operates on the metadata of an already-open descriptor (`fstat`) so the check
+/// and the subsequent read cannot straddle a path swap. Rejects files that are
+/// group/other-writable or owned by a different non-root user.
 #[cfg(unix)]
-pub fn ensure_trusted_config(path: &std::path::Path) -> std::io::Result<()> {
+fn validate_trusted_metadata(
+    metadata: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let owner = unsafe { libc::getuid() };
-    let metadata = std::fs::metadata(path)?;
-    let mode = metadata.mode();
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to load config {path:?}: not a regular file"),
+        ));
+    }
 
+    let mode = metadata.mode();
     if mode & 0o022 != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -196,6 +201,7 @@ pub fn ensure_trusted_config(path: &std::path::Path) -> std::io::Result<()> {
         ));
     }
 
+    let owner = unsafe { libc::getuid() };
     let file_owner = metadata.uid();
     if file_owner != owner && file_owner != 0 && owner != 0 {
         return Err(std::io::Error::new(
@@ -207,6 +213,45 @@ pub fn ensure_trusted_config(path: &std::path::Path) -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+/// Opens a config file only if it is not attacker-controlled.
+///
+/// Loading a config executes the commands it declares with the supervisor's
+/// privileges, so a path supplied over the control socket must not be writable
+/// by anyone other than the supervisor's owner (or root). Opening with
+/// `O_NOFOLLOW` (so the final component cannot be a symlink) and validating the
+/// resulting descriptor with `fstat` closes the check-to-use race that a
+/// stat-then-reopen sequence would leave open ([CWE-367]/[CWE-59]): the file
+/// that is validated is exactly the file that is read.
+///
+/// [CWE-367]: https://cwe.mitre.org/data/definitions/367.html
+/// [CWE-59]: https://cwe.mitre.org/data/definitions/59.html
+#[cfg(unix)]
+pub fn open_trusted_config(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    validate_trusted_metadata(&file.metadata()?, path)?;
+    Ok(file)
+}
+
+/// Opens a config file, accepting it as-is on non-Unix targets.
+#[cfg(not(unix))]
+pub fn open_trusted_config(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// Rejects a config path that an untrusted user could control.
+///
+/// Thin wrapper over [`open_trusted_config`] for callers that only need the
+/// yes/no decision; the descriptor is dropped immediately.
+#[cfg(unix)]
+pub fn ensure_trusted_config(path: &std::path::Path) -> std::io::Result<()> {
+    open_trusted_config(path).map(|_| ())
 }
 
 /// Rejects a config path that an untrusted user could control.
@@ -412,6 +457,22 @@ mod tests {
             .expect("chmod world-writable");
         let err = ensure_trusted_config(&path).expect_err("world-writable rejected");
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_trusted_config_rejects_symlinked_final_component() {
+        let temp = tempdir().expect("tempdir");
+        let target = temp.path().join("real.yaml");
+        std::fs::write(&target, b"version: 1\n").expect("write target");
+        let link = temp.path().join("link.yaml");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let err = open_trusted_config(&link).expect_err("symlink rejected");
+        assert!(matches!(
+            err.raw_os_error(),
+            Some(code) if code == libc::ELOOP || code == libc::EMLINK
+        ));
     }
 
     #[test]
