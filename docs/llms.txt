@@ -1,0 +1,73 @@
+# systemg
+
+> systemg is a general-purpose program composer: a single `sysg` binary that
+> starts, supervises, restarts, inspects, and logs local service graphs defined
+> in YAML. It is useful for development environments, local stacks, CI jobs,
+> cron-style units, and agent-managed workflows.
+
+Current release: `0.50.0`
+
+Primary links:
+
+- Documentation: https://sysg.dev
+- Quickstart: https://sysg.dev/quickstart
+- Installation: https://sysg.dev/installation
+- Commands: https://sysg.dev/how-it-works/commands
+- Logs command: https://sysg.dev/how-it-works/commands/logs
+- Status command: https://sysg.dev/how-it-works/commands/status
+- Configuration: https://sysg.dev/how-it-works/configuration
+- Repository: https://github.com/ra0x3/systemg
+
+## Agent-Friendly Usage
+
+Use `--plain` for scripts, pipes, SSH sessions, and coding agents:
+
+```sh
+sysg --plain status
+sysg --plain status --format json
+sysg --plain inspect -s api --format json
+sysg --plain logs -s api --format json
+```
+
+`--plain` sets `SYSTEMG_AGENT=1` for the current process. Agent mode is also
+enabled when `SYSTEMG_AGENT` or `NO_COLOR` is set. In agent mode, systemg avoids
+color, banners, paging, truncation, and accidental log-following where possible.
+
+## Commands LLMs Should Prefer
+
+- `sysg --plain status`: human-readable, non-interactive status with full unit
+  names.
+- `sysg status --format json`: structured supervisor status for parsing.
+- `sysg inspect -s <unit> --format json`: structured details for one service or
+  cron unit.
+- `sysg logs -s <unit> --format json`: JSON-lines logs with `{ts, stream,
+  service, line}` fields.
+- `sysg logs -s <unit> --raw`: application log lines without systemg timestamp
+  or stream prefixes.
+- `sysg logs -s <unit> --grep ERROR --since 2h`: filtered one-shot log query.
+- `sysg logs --path` or `sysg logs -s <unit> --path --all`: locate active and
+  rotated log files for external tooling.
+
+## Log Behavior
+
+As of `0.50.0`, `sysg logs` is safe for non-interactive callers by default. It
+follows logs only when stdout is an interactive terminal and agent mode is not
+enabled. In pipes, files, SSH commands, and agent sessions, it prints a one-shot
+snapshot and exits. Use `--follow` only when a long-running tail is intended;
+use `--no-follow` to force a one-shot snapshot on a terminal.
+
+Useful log options:
+
+- `--format json`: clean JSON-lines output for parsing.
+- `--raw`: only the application's original line.
+- `--strip-ansi`: remove terminal color and escape sequences.
+- `--no-strip-ansi`: preserve recorded ANSI escapes.
+- `--since`, `--until`: time-window logs by systemg capture timestamp.
+- `--grep`: regex filter.
+- `--all`: read active plus rotated history, oldest to newest.
+
+## Install
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+```

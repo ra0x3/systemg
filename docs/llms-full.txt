@@ -1,0 +1,425 @@
+# systemg Full LLM Guide
+
+systemg is a general-purpose program composer. It manages a graph of local
+programs from a YAML manifest, starts dependencies in order, supervises long
+running services, runs cron-style units, captures logs, reports status, and
+supports targeted service control through a single CLI named `sysg`.
+
+Current release: `0.50.0`
+Release context: the changes since commit `b1a640d` make systemg much friendlier
+for LLMs, scripts, SSH commands, and other non-interactive automation.
+
+Primary links:
+
+- Documentation: https://sysg.dev
+- Quickstart: https://sysg.dev/quickstart
+- Installation: https://sysg.dev/installation
+- Commands: https://sysg.dev/how-it-works/commands
+- Logs command: https://sysg.dev/how-it-works/commands/logs
+- Status command: https://sysg.dev/how-it-works/commands/status
+- Inspect command: https://sysg.dev/how-it-works/commands/inspect
+- Configuration: https://sysg.dev/how-it-works/configuration
+- Runtime state: https://sysg.dev/how-it-works/state
+- Logging model: https://sysg.dev/how-it-works/logs
+- Repository: https://github.com/ra0x3/systemg
+
+## What Changed For Agents In 0.50.0
+
+The release after `b1a640d` added an agent-friendly command surface:
+
+- Global `--plain` mode for non-interactive callers.
+- `SYSTEMG_AGENT=1` support for environment-based agent mode.
+- `NO_COLOR` also implies agent-friendly output.
+- `sysg logs` no longer blocks by default when called from pipes, files, SSH, or
+  agent sessions.
+- Explicit `sysg logs --follow` and `sysg logs --no-follow` controls.
+- Structured `sysg logs --format json` output.
+- `sysg logs --raw` for application lines without systemg prefixes.
+- Default ANSI stripping for JSON, raw, non-interactive, and agent log output.
+- `sysg logs --since`, `--until`, `--grep`, and `--all` for bounded log
+  searches across active and rotated history.
+- `sysg logs --path` for locating log files without scraping internal paths.
+- Status and inspect output avoid color and truncation under `--plain`.
+
+There was also dependency maintenance in this range, including a
+`crossbeam-epoch` CVE bump, and the package version was released as `0.50.0`.
+
+## Agent Mode
+
+Prefer `--plain` whenever an LLM, script, CI job, remote shell, or parser is
+driving `sysg`.
+
+```sh
+sysg --plain status
+sysg --plain logs -s api
+sysg --plain inspect -s api --format json
+```
+
+`--plain` is global, so it can be placed before or after the subcommand. It is
+equivalent to setting `SYSTEMG_AGENT=1` for the current process. Agent mode is
+also enabled if either `SYSTEMG_AGENT` or `NO_COLOR` is set in the environment.
+
+Agent mode is intended to:
+
+- Disable color and decorative terminal output.
+- Avoid banners and paging where applicable.
+- Preserve full unit names instead of truncating for a terminal table.
+- Make `sysg logs` one-shot by default instead of following forever.
+- Strip ANSI escape sequences from log output by default.
+
+Recommended environment for tools that run many `sysg` commands:
+
+```sh
+export SYSTEMG_AGENT=1
+```
+
+## Install
+
+Install latest:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+```
+
+Install or activate a specific version:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.50.0
+```
+
+System deployments use `scripts/install-systemg.sh` to set up `/usr/bin/sysg`,
+`/etc/systemg`, and `/var/lib/systemg`.
+
+## Core Mental Model
+
+systemg runs a supervisor. Projects are usually loaded from a `systemg.yaml`
+configuration file. Units can be services or cron jobs. Services are long
+running processes that may be restarted. Cron units are scheduled jobs and are
+not persistent services.
+
+Common operations:
+
+```sh
+sysg start
+sysg start --config systemg.yaml
+sysg start --daemonize
+sysg stop
+sysg restart
+sysg status
+sysg inspect -s api
+sysg logs -s api
+```
+
+Most service-specific commands accept:
+
+```sh
+--service <name>
+-s <name>
+--project <project-id>
+-p <project-id>
+--config <path>
+-c <path>
+```
+
+When multiple registered projects contain the same service name, include
+`--project` to disambiguate.
+
+## Status
+
+Use `status` to inspect supervisor health.
+
+Best commands for LLMs:
+
+```sh
+sysg --plain status
+sysg status --format json
+sysg status --project <project-id> --format json
+sysg status --service api --format json
+```
+
+`sysg status` can run without a config file when a supervisor is already
+running. If no supervisor is running and no config is provided, it reports that
+there is no running supervisor.
+
+Useful status options:
+
+- `--format json`: structured machine-readable output. If `--format` is passed
+  without a value, JSON is the default.
+- `--format xml`: XML status output.
+- `--plain`: disable color and print full, un-truncated unit names.
+- `--project <id>`: filter by stable project id.
+- `--service <name>`: filter to one unit.
+- `--all`: include orphaned state outside the selected project/config set.
+- `--live`: force immediate runtime collection instead of using the configured
+  snapshot mode.
+- `--stream <duration>`: continuously refresh status. Avoid this for one-shot
+  LLM calls unless streaming is explicitly requested.
+
+Exit-code convention for rendered status and inspect views:
+
+- `0`: healthy
+- `1`: warning
+- `2`: failing
+
+## Inspect
+
+Use `inspect` for one service or cron unit.
+
+Best commands for LLMs:
+
+```sh
+sysg --plain inspect -s api
+sysg inspect -s api --format json
+sysg inspect -s api --project <project-id> --format json
+```
+
+Useful inspect options:
+
+- `--format json`: structured detail for parsers.
+- `--format xml`: XML detail.
+- `--plain`: inherited global flag for agent-friendly output.
+- `--project <id>`: disambiguate duplicate service names.
+- `--live`: force immediate runtime collection.
+- `--stream <duration>`: continuously refresh. Avoid for one-shot agent calls.
+
+## Logs
+
+Use `logs` to read service output captured by systemg.
+
+Best commands for LLMs:
+
+```sh
+sysg --plain logs -s api
+sysg logs -s api --format json
+sysg logs -s api --raw
+sysg logs -s api --grep ERROR --since 2h
+sysg logs -s api --all --grep "panic|ERROR|failed"
+sysg logs --kind supervisor --format json
+sysg logs --path
+sysg logs -s api --path --all
+```
+
+Important log-following behavior:
+
+- `--follow` or `-f` always follows until interrupted.
+- `--no-follow` always prints one snapshot and exits.
+- With neither flag, systemg follows only when stdout is an interactive terminal
+  and agent mode is unset.
+- In pipes, files, SSH commands, and `SYSTEMG_AGENT=1` sessions, logs are
+  one-shot by default.
+
+This means these commands are safe for LLMs and automation:
+
+```sh
+sysg logs -s api
+sysg --plain logs -s api
+sysg logs -s api | grep ERROR
+ssh host 'SYSTEMG_AGENT=1 sysg logs -s api'
+```
+
+Use `--follow` only when a long-running tail is intentional:
+
+```sh
+sysg logs -s api --follow
+```
+
+### Structured Logs
+
+Use JSON-lines output for reliable parsing:
+
+```sh
+sysg logs -s api --format json
+```
+
+Each emitted line is a JSON object with:
+
+```json
+{"ts":"2026-07-07T12:00:00Z","stream":"stdout","service":"api","line":"request completed"}
+```
+
+Properties:
+
+- `ts`: systemg capture timestamp.
+- `stream`: `stdout`, `stderr`, or supervisor stream label.
+- `service`: service name when available.
+- `line`: original application line after requested stripping/prefix handling.
+
+`--format json` drops banners and section headers, and strips ANSI escapes by
+default.
+
+### Raw Logs
+
+Use raw output when the application line itself is the only useful payload:
+
+```sh
+sysg logs -s api --raw
+```
+
+`--raw` removes systemg's capture timestamp and stream label. ANSI escapes are
+stripped by default.
+
+### Time And Pattern Filtering
+
+Use bounded log reads instead of asking for unbounded output:
+
+```sh
+sysg logs -s api --since 30m
+sysg logs -s api --since 2h --grep ERROR
+sysg logs -s api --since 2026-07-07 --until 2026-07-07T12:00:00Z
+```
+
+Accepted time forms:
+
+- RFC3339 timestamp, such as `2026-07-07T14:00:00Z`.
+- Bare UTC date, such as `2026-07-07`.
+- Relative age in the past, such as `30m`, `2h`, or `7d`.
+
+`--grep` is a regular expression. It composes with `--kind`, `--since`,
+`--until`, and `--all`.
+
+Any `--since`, `--until`, or `--all` read is a one-shot snapshot because an
+upper-bounded or historical read cannot be followed continuously.
+
+### Active And Rotated History
+
+By default, `sysg logs` reads recent lines from the active log. Use `--all` to
+read active plus rotated history:
+
+```sh
+sysg logs -s api --all --grep ERROR
+```
+
+The output is ordered oldest to newest, with rotated backups before the active
+file. `--all` ignores `--lines`.
+
+### Log Paths
+
+Use `--path` to locate logs without relying on internal path conventions:
+
+```sh
+sysg logs --path
+sysg logs -s api --path
+sysg logs -s api --path --all
+```
+
+With no service, `--path` prints the log directory. With a service, it prints
+that service's active log path. With `--all`, it prints active plus rotated
+backup paths.
+
+### ANSI Handling
+
+systemg records service output verbatim, including ANSI escapes. For downstream
+tools:
+
+- ANSI stripping is on by default for `--format json`.
+- ANSI stripping is on by default for `--raw`.
+- ANSI stripping is on by default for non-interactive output.
+- ANSI stripping is on by default in agent mode.
+- Use `--strip-ansi` to force stripping.
+- Use `--no-strip-ansi` to preserve escapes.
+
+## Command Recipes For LLMs
+
+Get a parseable view of the system:
+
+```sh
+sysg status --format json
+```
+
+Get a readable view without terminal decoration:
+
+```sh
+sysg --plain status
+```
+
+Inspect one service:
+
+```sh
+sysg inspect -s api --format json
+```
+
+Check recent errors:
+
+```sh
+sysg logs -s api --format json --grep "ERROR|WARN|panic|failed" --since 2h
+```
+
+Get only application log text:
+
+```sh
+sysg logs -s api --raw --since 30m
+```
+
+Search all retained history:
+
+```sh
+sysg logs -s api --all --grep "database|timeout|connection"
+```
+
+Disambiguate a service name across projects:
+
+```sh
+sysg status --project <project-id> --service api --format json
+sysg inspect --project <project-id> -s api --format json
+sysg logs --project <project-id> -s api --format json
+```
+
+Restart one service:
+
+```sh
+sysg restart -s api
+```
+
+Stop one service:
+
+```sh
+sysg stop -s api
+```
+
+Restart a service in a specific project:
+
+```sh
+sysg restart --project <project-id> -s api
+```
+
+## Avoid These In One-Shot Agent Calls
+
+Avoid long-running or interactive commands unless the user explicitly asked for
+streaming:
+
+```sh
+sysg logs -s api --follow
+sysg status --stream 5
+sysg inspect -s api --stream 5
+sysg logs -s api --stream 2
+```
+
+Prefer one-shot alternatives:
+
+```sh
+sysg --plain logs -s api --lines 200
+sysg status --format json
+sysg inspect -s api --format json
+```
+
+## Output Selection
+
+For LLM and automation workflows:
+
+- Prefer JSON for parsing and decision making.
+- Prefer `--plain` for human-readable summaries.
+- Prefer `--raw` when only application log text matters.
+- Prefer `--grep`, `--since`, and `--lines` to bound log volume.
+- Prefer `--project` when service names may be duplicated across projects.
+- Prefer `--path` when another tool should read the logs directly.
+
+## Relevant Local Docs
+
+These docs contain the canonical user-facing descriptions:
+
+- `docs/how-it-works/commands/index.mdx`: global flags, including `--plain`.
+- `docs/how-it-works/commands/status.mdx`: status behavior and options.
+- `docs/how-it-works/commands/logs.mdx`: logs behavior, filters, JSON/raw
+  output, ANSI handling, path lookup, and rotation.
+- `docs/how-it-works/logs.mdx`: logging architecture and retention model.
+- `docs/how-it-works/configuration.mdx`: service and project configuration.
