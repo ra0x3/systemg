@@ -4,121 +4,93 @@ title: Security
 
 # Security
 
-Defense-in-depth security features for production deployments.
+systemg spawns and supervises arbitrary processes, often as root in system mode. That makes it a high-value target for local privilege escalation, so we treat it like one. This page states the trust model explicitly, documents the guarantees at each privilege boundary, and lists the knobs you use to confine services.
 
-## Principle of least privilege
+## Trust model
 
-Services drop to minimum required permissions:
+Two things are trusted by design:
+
+- **The config file.** Commands, users, and health-check URLs in it are intended execution. If you can write the config, you can already run code as whoever runs the supervisor — that's the point of a supervisor, not a vulnerability.
+- **A same-UID caller of the control socket.** The socket is owner-only (`0600`) inside an owner-only (`0700`) directory, and every connection is authenticated with `SO_PEERCRED` / `getpeereid`. Only the supervisor's own user (and root, which can bypass any check anyway) may issue commands.
+
+Everything else is untrusted and is where we spend our effort: the control socket and its IPC protocol, filesystem permissions, and every cross-privilege boundary — privilege dropping, capabilities, namespaces, cgroups, inherited file descriptors, signal delivery, and environment handling.
+
+## Guarantees at the boundary
+
+These hold with no configuration on your part.
+
+**Authenticated control channel.** The `control.sock` peer UID is checked on every accept; connections from other local users are rejected before any command is read. A single framed command is capped (1 MiB) so one connection can't exhaust supervisor memory.
+
+**Owner-only runtime state.** State and log directories are created `0700`; the socket, PID file, and config hint are `0600`. Service topology, PIDs, and config paths are not readable by other local users.
+
+**Race-free config loads.** Configs supplied over the socket (`restart --config`, project add) are opened once with `O_NOFOLLOW` and validated on the open descriptor (`fstat`) — the file that passes the ownership/permission check is the exact file that's parsed and executed. No stat-then-reopen window, no symlink swap. Group/other-writable or foreign-owned configs are refused.
+
+**Correct privilege drop.** Before `exec`, a dropped service goes through: namespace unshare → rlimits → nice/affinity → capability trim → `setgroups`/`setgid`/`setuid` → ambient caps. Supplementary groups are always reset on a UID switch, so a service dropped to `nobody` does not retain root's `docker`/`wheel`/`sudo` membership.
+
+**Clean environment across the boundary.** A service that switches user or group starts from a cleared environment by default — the supervisor's variables (secrets, `LD_*`, `PATH`) do not leak into a lower-privileged child. Opt back into inheritance per service with `inherit_env: true`.
+
+**Confined dynamic spawns.** Children created through the socket's spawn path inherit their parent service's privilege context — same user, caps, limits, and cgroup — so a spawn can never be more privileged than the service that authorized it.
+
+**No descriptor leaks.** Socket-activation FDs inherited via `LISTEN_FDS` are marked `FD_CLOEXEC`, so listening sockets don't survive `exec` into services.
+
+**No traversal from socket input.** Service names arriving over the socket are validated and every resolved log path is confined to the log directory, so a crafted name can't make the supervisor read or create files outside it.
+
+## Confining a service
+
+Least privilege is a configuration you write, not a mode you toggle.
 
 ```yaml
 services:
   web:
     command: "./server"
-    user: "www-data"
+    user: "www-data"            # drop root after the supervisor binds
     capabilities:
-      - CAP_NET_BIND_SERVICE  # Only what's needed
+      - CAP_NET_BIND_SERVICE    # keep only what's needed; drop the rest
+    limits:
+      nofile: 65536
+      nproc: 1024
+      cgroup:
+        memory_max: "2G"
+        cpu_max: "100000 50000" # 1 CPU
+    isolation:
+      network: true             # private netns
+      pid: true                 # private process tree
+      mount: true
+      user: true
 ```
 
-## Current features
+**Capabilities (Linux)** — the service retains only the listed capabilities; everything else, including the bounding set, is cleared. Grant `CAP_NET_BIND_SERVICE` for low ports, not root.
 
-### Capabilities (Linux)
+**Resource limits** — `nofile`, `nproc`, `memlock`, and cgroup `memory_max` / `cpu_max` cap what a service (or a runaway fork bomb) can consume.
 
-Services retain only specified capabilities:
+**Namespace isolation** — `network`, `pid`, `mount`, and `user` namespaces separate a service from the host. Namespace creation may need `CAP_SYS_ADMIN`; cgroup writes inside containers may need `limits.cgroup.root` pointed at a writable path.
 
-```yaml
-capabilities:
-  - CAP_NET_BIND_SERVICE  # Bind ports < 1024
-  - CAP_SYS_NICE          # Adjust priority
-  - CAP_DAC_READ_SEARCH   # Read any file
-```
+**Environment** — session-scoped variables (`SSH_*`) are stripped from long-lived services by default; add more with `strip`, and use `inherit_env: false` (the default under a privilege drop) to start from a clean slate.
 
-### Resource limits
+## Deployment guidance
 
-Prevent resource exhaustion:
+- **Run in user mode unless you need root.** `sysg start` runs unprivileged; reserve `sudo sysg --sys start` for services that genuinely require system-level features.
+- **Drop privileges at the service, not the supervisor.** `user:` drops the child after the supervisor has done any privileged setup (e.g. binding port 80). `--drop-privileges` governs child spawning; it does not change privileges for read-only control commands.
+- **Isolate untrusted workloads** with a non-root `user:`, network and PID namespaces, and a cgroup memory cap.
 
-```yaml
-limits:
-  nofile: 65536      # Max file descriptors
-  nproc: 1024        # Max processes
-  memlock: "100M"    # Locked memory
-  cgroup:
-    memory_max: "2G"
-    cpu_max: "100000 50000"  # 1 CPU
-```
-
-### Namespace isolation
-
-Isolate from host system:
-
-```yaml
-isolation:
-  network: true  # Private network
-  pid: true      # Private process tree
-  mount: true    # Private mounts
-  user: true     # User namespace
-```
-
-## Upcoming features
+## On the roadmap
 
 | Feature | Status | Purpose |
-|---------|--------|---------|
-| `seccomp` | Planned | System call filtering |
+|---|---|---|
+| `private_devices` | In progress | Device isolation |
+| `private_tmp` | In progress | Per-service `/tmp` |
+| `seccomp` | Planned | Syscall filtering |
 | `apparmor_profile` | Planned | Mandatory access control |
 | `selinux_context` | Planned | SELinux labels |
-| `private_devices` | In progress | Device isolation |
-| `private_tmp` | In progress | Temp directory isolation |
 
-## Best practices
+These are declared in config today and currently warn rather than enforce; systemg does not silently pretend a profile is applied.
 
-### Run unprivileged when possible
+## Reporting and audits
 
-```bash
-# User mode (default)
-$ sysg start
-
-# System mode (only when needed)
-$ sudo sysg --sys start
-```
-
-### Drop privileges immediately
-
-```yaml
-services:
-  nginx:
-    command: "nginx"
-    user: "www-data"  # Drops root after binding port 80
-```
-
-`--drop-privileges` affects child service spawning (`start`/`restart`) and does
-not change privileges for read-only control commands.
-
-### Isolate untrusted workloads
-
-```yaml
-services:
-  untrusted:
-    command: "./third-party-app"
-    user: "nobody"
-    isolation:
-      network: true
-      pid: true
-    limits:
-      cgroup:
-        memory_max: "100M"
-```
-
-## Troubleshooting
-
-**Permission denied on namespace creation**
-- Add `CAP_SYS_ADMIN` capability
-
-**Cgroup write failures in containers**
-- Set `limits.cgroup.root` to writable path
-
-**Socket activation with systemd**
-- systemg preserves `LISTEN_FDS` automatically
+systemg is audited adversarially against the trust model above, and each review verifies the disposition of every prior finding. If you find a security issue, please report it privately via the repository's security contact rather than a public issue.
 
 ## See also
 
-- [Privileged Mode](how-it-works/privileged-mode) - System-level features
-- [Configuration](how-it-works/configuration) - Security options
+- [Privileged Mode](how-it-works/privileged-mode) — system-level features and the drop sequence
+- [Configuration](how-it-works/configuration) — every security option
+- [State](how-it-works/state) — runtime files and their permissions

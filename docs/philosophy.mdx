@@ -4,17 +4,26 @@ title: Philosophy
 
 # Philosophy
 
-systemg makes multi-service applications easy to run.
+systemg exists to run a handful of related processes as one unit — with dependency ordering, restarts, and privilege dropping — without asking you to become a systemd expert or hand your app to a container runtime.
 
-## Design principles
+## What we optimize for
 
-**Simple configuration** - YAML, not complex unit files
-**Dependency aware** - Services start in the right order
-**Single binary** - No runtime dependencies
-**Dev to prod** - Same config works everywhere
-**Least privilege** - Drop permissions by default
+**Legible configuration.** One YAML file describes your services, their order, and how they're confined. It reads like what it does. No unit-file dialect, no generated indirection, no "where is this actually configured."
+
+**One binary, no runtime.** systemg is a single static binary. There's nothing to install alongside it, nothing to keep in sync, and the same binary and config run on a laptop and in production. Dev/prod parity is the default, not a project.
+
+**Correct process lifecycle.** Services start in dependency order and are supervised for real: restarts with backoff, process-group teardown that doesn't orphan children, and state that survives a supervisor crash so your services don't die with it.
+
+**Secure because it's the default, not because you configured it.** A service that drops to another user starts from a clean environment with reset supplementary groups and trimmed capabilities — you don't have to remember to ask. The [control socket](security) is authenticated and owner-only. Least privilege is the path of least resistance.
+
+**Honest about its boundaries.** When a feature isn't implemented, systemg says so and warns — it never silently pretends a seccomp profile or namespace is in effect. The [trust model](security) is written down, and the code is audited against it.
+
+## What we're not
+
+systemg is not a container runtime, an orchestrator, or a replacement for PID 1 on a full OS. It's the layer between "a shell script with `&`" and "stand up Kubernetes" — the right tool when you have a few services that belong together and you want them supervised, ordered, and confined, on one machine.
 
 ## See also
 
-- [Introduction](intro) - What systemg does
-- [Configuration](how-it-works/configuration) - Define your system
+- [Introduction](intro) — what systemg does
+- [Security](security) — trust model and hardening
+- [Configuration](how-it-works/configuration) — define your system
