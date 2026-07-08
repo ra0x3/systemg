@@ -642,10 +642,23 @@ jobs:
           RELEASE_TAG: ${{ needs.extract-version.outputs.tag }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-2   # change if needed
+          AWS_DEFAULT_REGION: us-east-2
+          CLOUDFRONT_DISTRIBUTION_ID: ${{ secrets.SH_SYSG_DEV_CLOUDFRONT_DISTRIBUTION_ID }}
           S3_BUCKET: sh.sysg.dev
         run: |
           set -euo pipefail
+
+          VERSION="${RELEASE_TAG#v}"
+          PUBLIC_BASE_URL="https://${S3_BUCKET}"
+
+          aws s3 cp scripts/index.sh "s3://${S3_BUCKET}/index.sh" \
+            --content-type "text/x-shellscript"
+          aws s3 cp scripts/index.sh "s3://${S3_BUCKET}/index.html" \
+            --content-type "text/x-shellscript"
+
+          printf '%s\n' "$VERSION" > VERSION
+          aws s3 cp VERSION "s3://${S3_BUCKET}/latest/VERSION" \
+            --content-type "text/plain"
 
           # Get release ID from tag (works for both auto-release and manual releases)
           if [ -n "${{ github.event.release.id }}" ]; then
@@ -667,6 +680,9 @@ jobs:
             echo "Uploading $name to s3://${S3_BUCKET}/${name} ..."
             aws s3 cp "$name" "s3://${S3_BUCKET}/${name}" --content-type "application/gzip"
 
+            echo "Uploading $name to s3://${S3_BUCKET}/latest/${name} ..."
+            aws s3 cp "$name" "s3://${S3_BUCKET}/latest/${name}" --content-type "application/gzip"
+
             echo "Uploaded $name successfully"
           done < <(
             curl -s -H "Authorization: token $GITHUB_TOKEN" \
@@ -674,6 +690,23 @@ jobs:
                 "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
             | jq -r '.[] | select(.name | endswith(".tar.gz")) | "\(.browser_download_url) \(.name)"'
           )
+
+          if [ -n "${CLOUDFRONT_DISTRIBUTION_ID:-}" ]; then
+            invalidation_id="$(aws cloudfront create-invalidation \
+              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+              --paths "/" "/index.sh" "/index.html" "/latest/*" "/sysg-${VERSION}-*.tar.gz" \
+              --query 'Invalidation.Id' \
+              --output text)"
+            aws cloudfront wait invalidation-completed \
+              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+              --id "$invalidation_id"
+          fi
+
+          public_version="$(curl -fsSL "${PUBLIC_BASE_URL}/latest/VERSION" | sed 's/^v//' | awk 'NR==1 {print $1; exit}')"
+          if [ "$public_version" != "$VERSION" ]; then
+            echo "Public latest version mismatch: got '$public_version', expected '$VERSION'" >&2
+            exit 1
+          fi
 
   cargo-publish:
     name: Publish to crates.io

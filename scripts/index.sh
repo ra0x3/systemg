@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+INSTALL_SCRIPT_URL="${SYSG_INSTALL_SCRIPT_URL:-https://sh.sysg.dev}"
+DOWNLOAD_BASE_URL="${SYSG_DOWNLOAD_BASE_URL:-https://sh.sysg.dev}"
+
 REQUESTED_VERSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -19,8 +22,8 @@ while [ $# -gt 0 ]; do
       echo "systemg installer"
       echo ""
       echo "Usage:"
-      echo "  Install latest:     curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh"
-      echo "  Install specific:   curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version VERSION"
+      echo "  Install latest:     curl --proto '=https' --tlsv1.2 -fsSL ${INSTALL_SCRIPT_URL} | sh"
+      echo "  Install specific:   curl --proto '=https' --tlsv1.2 -fsSL ${INSTALL_SCRIPT_URL} | sh -s -- --version VERSION"
       echo ""
       echo "Options:"
       echo "  --version, -v VERSION    Install or activate a specific version"
@@ -97,20 +100,21 @@ echo ""
 
 LATEST_VERSION=""
 fetch_latest() {
-  curl -s https://api.github.com/repos/ra0x3/systemg/releases/latest \
-    | awk -F'"' '/tag_name/ {gsub(/^v/, "", $4); print $4}'
+  curl -fsSL "${DOWNLOAD_BASE_URL}/latest/VERSION" \
+    | sed 's/^v//' \
+    | awk 'NR==1 {print $1; exit}'
 }
 
 if [ -n "$REQUESTED_VERSION" ]; then
   VERSION="${REQUESTED_VERSION#v}"
-  LATEST_VERSION="$(fetch_latest)"
+  LATEST_VERSION="$(fetch_latest || true)"
   if [ -z "$LATEST_VERSION" ]; then
     LATEST_VERSION="$VERSION"
   fi
 else
   VERSION="$(fetch_latest)"
   if [ -z "$VERSION" ]; then
-    echo "X Failed to determine latest version from GitHub"
+    echo "X Failed to determine latest version from ${DOWNLOAD_BASE_URL}/latest/VERSION"
     exit 1
   fi
   LATEST_VERSION="$VERSION"
@@ -155,11 +159,12 @@ if [ -x "$VERSION_BINARY" ]; then
 fi
 
 FILE="sysg-$VERSION-$TARGET.tar.gz"
-URL="https://sh.sysg.dev/$FILE"
+URL="${DOWNLOAD_BASE_URL}/$FILE"
 
 if ! curl -sSfL "$URL" -o "$FILE" 2>/dev/null; then
   echo "X Binary '$FILE' not available for your platform"
   echo ""
+  echo "  Download host: ${DOWNLOAD_BASE_URL}"
   echo "  Available releases: https://github.com/ra0x3/systemg/releases"
   exit 1
 fi
@@ -366,7 +371,7 @@ p "${C_BORDER_SUB}╰───────────────────�
 if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$VERSION" ]; then
   p ""
   UPDATE_LABEL="Update available: ${LATEST_VERSION}"
-  UPDATE_CMD="Run: curl -fsSL https://sh.sysg.dev | sh"
+  UPDATE_CMD="Run: curl -fsSL ${INSTALL_SCRIPT_URL} | sh"
   p "${C_BORDER_SUB}╭──────────────────────────────────────────────────────────────────────────────╮${RESET}"
   p "${C_BORDER_SUB}│${C_TEXT}${BOLD}$(center_text "$UPDATE_LABEL")${RESET}${C_BORDER_SUB}│${RESET}"
   p "${C_BORDER_SUB}│${C_MUTED2}${DIM}$(center_text "$UPDATE_CMD")${RESET}${C_BORDER_SUB}│${RESET}"
