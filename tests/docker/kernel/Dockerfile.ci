@@ -14,6 +14,7 @@ FROM ${RUNTIME_IMAGE}
 RUN apt-get update && apt-get install -y \
     curl \
     sudo \
+    util-linux \
     python3 \
     procps \
     lsof \

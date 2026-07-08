@@ -25,10 +25,11 @@ fi
 # Try to run help command
 echo ""
 echo "Testing help command..."
-if /usr/local/bin/sysg --help 2>&1 | grep -q "sysg" || true; then
-    echo "✓ Help command attempted"
+if /usr/local/bin/sysg --help 2>&1 | grep -q "sysg"; then
+    echo "✓ Help command works"
 else
-    echo "✗ Help command failed completely"
+    echo "✗ Help command failed"
+    exit 1
 fi
 
 # Create a simple test configuration
@@ -54,7 +55,11 @@ timeout 20 /usr/local/bin/sysg start --daemonize --config systemg.yaml
 
 echo ""
 echo "Checking systemg status..."
-timeout 20 /usr/local/bin/sysg status --config systemg.yaml
+if ! timeout 20 /usr/local/bin/sysg status --config systemg.yaml | grep -q "test_service"; then
+    echo "✗ status did not report test_service"
+    exit 1
+fi
+echo "✓ status reports the configured service"
 
 echo ""
 echo "==================================="

@@ -12,6 +12,7 @@ FROM ${RUNTIME_IMAGE}
 # Install minimal dependencies for testing
 RUN apt-get update && apt-get install -y \
     sudo \
+    util-linux \
     python3 \
     procps \
     lsof \

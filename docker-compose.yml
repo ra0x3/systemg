@@ -30,7 +30,9 @@ services:
     privileged: true
     environment:
       - KERNEL_MODE=true
-      - KERNEL_STRICT=false
+      # Strict by default so the privilege-drop and hardening assertions are
+      # fatal locally, matching CI (which leaves KERNEL_STRICT unset -> true).
+      - KERNEL_STRICT=${KERNEL_STRICT:-true}
       - TEST_ENV=docker
     volumes:
       # System directories for kernel mode

@@ -383,10 +383,10 @@ fi
 log_info "Checking PID file security..."
 if [ -f /var/lib/systemg/sysg.pid ]; then
     PERMS=$(stat -c %a /var/lib/systemg/sysg.pid)
-    if [ "$PERMS" = "644" ] || [ "$PERMS" = "600" ]; then
-        log_success "PID file has secure permissions"
+    if [ "$PERMS" = "600" ]; then
+        log_success "PID file is owner-only (0600)"
     else
-        log_fail "PID file permissions too open: $PERMS"
+        log_fail "PID file permissions not 0600: $PERMS"
     fi
 else
     log_fail "Supervisor PID file not found"
@@ -491,6 +491,93 @@ fi
 
 # Clean up load test
 timeout 20 sysg --sys purge || true
+
+# ==============================================================================
+# SCENARIO 10: Hardening guarantees (cross-privilege boundaries)
+# ==============================================================================
+log_test "Scenario 10: Hardening guarantees at the privilege boundary"
+
+sysg --sys purge 2>/dev/null || true
+
+cat > /tmp/hardening.yaml <<EOF
+version: "1"
+services:
+  dropped:
+    command: "sh -lc 'id -un > /tmp/hardening_user; env > /tmp/hardening_env; sleep 60'"
+    user: "${POSTGRES_SERVICE_USER}"
+    restart_policy: "never"
+EOF
+
+# A secret in the supervisor environment must NOT reach a privilege-dropped
+# service started from a clean environment.
+export SYSG_LEAK_CANARY="do-not-leak-$$"
+sysg start --sys --drop-privileges --daemonize --config /tmp/hardening.yaml
+sleep 2
+
+# --- Guarantee: clean environment across the privilege boundary ---
+if [ -f /tmp/hardening_env ]; then
+    if grep -q "SYSG_LEAK_CANARY" /tmp/hardening_env; then
+        log_optional_fail "Supervisor secret leaked into privilege-dropped service env"
+    else
+        log_success "Privilege-dropped service started from a clean environment"
+    fi
+else
+    log_optional_fail "Dropped service did not write its environment marker"
+fi
+unset SYSG_LEAK_CANARY
+
+# --- Guarantee: control socket and state dir are owner-only ---
+SOCK=/var/lib/systemg/control.sock
+if [ -S "$SOCK" ]; then
+    SOCK_PERMS=$(stat -c %a "$SOCK")
+    if [ "$SOCK_PERMS" = "600" ]; then
+        log_success "Control socket is owner-only (0600)"
+    else
+        log_fail "Control socket permissions too open: $SOCK_PERMS"
+    fi
+else
+    log_optional_fail "Control socket not found at $SOCK"
+fi
+
+STATE_DIR_PERMS=$(stat -c %a /var/lib/systemg 2>/dev/null || echo "missing")
+if [ "$STATE_DIR_PERMS" = "700" ]; then
+    log_success "State directory is owner-only (0700)"
+else
+    log_optional_fail "State directory permissions not 0700: $STATE_DIR_PERMS"
+fi
+
+# --- Guarantee: control socket rejects a foreign-UID peer ---
+# A non-root, non-owner user connecting to the socket must be rejected.
+if command -v runuser >/dev/null 2>&1 && id nobody >/dev/null 2>&1; then
+    PEER_OUT=$(runuser -u nobody -- sysg --sys status --config /tmp/hardening.yaml 2>&1 || true)
+    if echo "$PEER_OUT" | grep -qiE "unauthorized|permission denied|not available"; then
+        log_success "Control socket rejects a foreign-UID peer"
+    else
+        log_optional_fail "Foreign-UID peer was not rejected by the control socket"
+    fi
+else
+    log_info "Skipping peer-auth test (runuser or nobody unavailable)"
+fi
+
+# --- Guarantee: log service name cannot traverse the log directory ---
+TRAVERSAL_CANARY=/tmp/sysg-traversal-canary
+rm -f "${TRAVERSAL_CANARY}"*.log 2>/dev/null || true
+TRAVERSAL_OUT=$(sysg --sys logs --service "../../../../tmp/sysg-traversal-canary" \
+    --config /tmp/hardening.yaml 2>&1 || true)
+if echo "$TRAVERSAL_OUT" | grep -qi "invalid service name"; then
+    log_success "Log request rejects traversal in the service name"
+else
+    log_optional_fail "Traversal service name was not explicitly rejected: $TRAVERSAL_OUT"
+fi
+# Belt-and-suspenders: the supervisor must not have created a file outside the log dir.
+if ls "${TRAVERSAL_CANARY}"*.log >/dev/null 2>&1; then
+    log_fail "Log request created a file outside the log directory"
+else
+    log_success "Log request did not create files outside the log directory"
+fi
+
+sysg --sys purge 2>/dev/null || true
+rm -f /tmp/hardening_user /tmp/hardening_env
 
 # ==============================================================================
 # FINAL: Clean shutdown test

@@ -28,5 +28,5 @@ WORKDIR /home/testuser
 # Copy test projects and scripts
 COPY --chown=testuser:testuser tests/docker/user/ /home/testuser/
 
-# Run the simplified test for now
-CMD ["/bin/bash", "simple_test.sh"]
+# Run the full user-mode UAT suite (matches the CI Dockerfile).
+CMD ["/bin/bash", "run_user_tests.sh"]
