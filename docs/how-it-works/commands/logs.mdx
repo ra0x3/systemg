@@ -171,6 +171,18 @@ $ sysg logs --service api --format json
 `{"ts","stream","service","line"}` — dropping banners and section headers so the
 stream is a clean JSON-lines document. ANSI escapes are stripped automatically.
 
+### Project-wide filtering and aggregation
+
+```sh
+$ sysg logs --project arbitration --all --since 2026-07-08 --grep openai_ --format json --no-follow
+```
+
+Every content flag — `--grep`, `--since` / `--until`, and `--all` — applies to
+project-wide reads (`--project`, or the no-service default) exactly as it does to
+a single `--service`. Each JSON record carries the resolved `service` name of the
+unit that produced the line, so you can aggregate by service without querying each
+one separately.
+
 ```sh
 $ sysg logs --service api --format json --grep ERROR | jq -r .line
 ```

@@ -159,6 +159,10 @@ pub enum ControlCommand {
         /// Read the full active-plus-rotated history instead of the tail.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
+        /// Whether the client renders structured output (json/raw) and can
+        /// consume per-service marker lines for attribution.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        structured: bool,
     },
     /// Spawn a dynamic child process.
     Spawn {

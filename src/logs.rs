@@ -426,6 +426,22 @@ pub enum LogFormat {
     Json,
 }
 
+/// Prefix of the control line the supervisor emits before a service's bytes so
+/// downstream readers can attribute lines to the right unit. Begins with an
+/// ASCII record separator (`0x1e`) so it never collides with captured output.
+pub const SERVICE_MARKER_PREFIX: &str = "\u{1e}sysg-service ";
+
+/// Builds the per-service marker line the supervisor writes before streaming a
+/// unit's captured bytes.
+pub fn service_marker_line(service: &str) -> Vec<u8> {
+    format!("{SERVICE_MARKER_PREFIX}{service}\n").into_bytes()
+}
+
+/// Returns the service name carried by a marker line, if `line` is one.
+fn parse_service_marker(line: &str) -> Option<&str> {
+    line.strip_prefix(SERVICE_MARKER_PREFIX)
+}
+
 /// Removes ANSI escape sequences (CSI and simple two-byte escapes) from bytes.
 pub fn strip_ansi(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
@@ -545,6 +561,13 @@ impl<W: Write> LogWriter<W> {
         } else {
             raw.to_vec()
         };
+
+        if let Ok(text) = std::str::from_utf8(&bytes)
+            && let Some(service) = parse_service_marker(text)
+        {
+            self.service = Some(service.to_string());
+            return Ok(());
+        }
 
         if matches!(self.format, LogFormat::Text) {
             self.inner.write_all(&bytes)?;
@@ -3109,6 +3132,76 @@ mod tests {
     }
 
     #[test]
+    fn collect_all_ignores_default_lines_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "sysg_all_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let combined = dir.join("svc.log");
+        let mut body = String::new();
+        for index in 0..200 {
+            body.push_str(&format!(
+                "2026-07-08T09:00:{index:02}Z stdout line {index}\n"
+            ));
+        }
+        fs::write(&combined, body).unwrap();
+        let missing = dir.join("svc_stdout.log");
+
+        let filter = LogFilter {
+            all: true,
+            ..LogFilter::default()
+        };
+        let chunks =
+            collect_log_tail(&missing, &missing, &combined, 50, None, &filter).unwrap();
+        let text = String::from_utf8(chunks.concat()).unwrap();
+        assert_eq!(text.lines().count(), 200);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn collect_all_time_window_spans_rotated_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "sysg_rot_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let combined = dir.join("svc.log");
+        fs::write(
+            dir.join("svc.log.1"),
+            "2026-07-04T09:00:00Z stdout old rotated\n\
+2026-07-08T09:00:00Z stdout kept rotated\n",
+        )
+        .unwrap();
+        fs::write(
+            &combined,
+            "2026-07-08T10:00:00Z stdout kept active\n\
+2026-07-09T09:00:00Z stdout too new\n",
+        )
+        .unwrap();
+        let missing = dir.join("svc_stdout.log");
+
+        let filter = LogFilter {
+            since: Some(utc("2026-07-08T00:00:00Z")),
+            until: Some(utc("2026-07-09T00:00:00Z")),
+            all: true,
+            ..LogFilter::default()
+        };
+        let chunks =
+            collect_log_tail(&missing, &missing, &combined, 50, None, &filter).unwrap();
+        let text = String::from_utf8(chunks.concat()).unwrap();
+        assert!(text.contains("kept rotated"), "{text}");
+        assert!(text.contains("kept active"), "{text}");
+        assert!(!text.contains("old rotated"), "{text}");
+        assert!(!text.contains("too new"), "{text}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn log_filter_noop_returns_input() {
         let bytes = b"line without leading timestamp\n";
         let filter = LogFilter::default();
@@ -3159,6 +3252,50 @@ mod tests {
         assert_eq!(
             text,
             "{\"ts\":\"2026-07-07T09:00:00Z\",\"stream\":\"stdout\",\"service\":\"api\",\"line\":\"hello\"}\n"
+        );
+    }
+
+    #[test]
+    fn log_writer_json_service_follows_marker_lines() {
+        let mut out = Vec::new();
+        {
+            let mut writer = LogWriter::new(&mut out, LogFormat::Json, true, None);
+            writer
+                .write_all(&service_marker_line("arb_rs__server"))
+                .unwrap();
+            writer
+                .write_all(b"2026-07-08T09:00:00Z stdout openai_call\n")
+                .unwrap();
+            writer
+                .write_all(&service_marker_line("arb_py__curator"))
+                .unwrap();
+            writer
+                .write_all(b"2026-07-08T09:00:01Z stderr ingest done\n")
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text,
+            "{\"ts\":\"2026-07-08T09:00:00Z\",\"stream\":\"stdout\",\"service\":\"arb_rs__server\",\"line\":\"openai_call\"}\n\
+{\"ts\":\"2026-07-08T09:00:01Z\",\"stream\":\"stderr\",\"service\":\"arb_py__curator\",\"line\":\"ingest done\"}\n"
+        );
+    }
+
+    #[test]
+    fn log_writer_drops_marker_lines_in_text_mode() {
+        let mut out = Vec::new();
+        {
+            let mut writer = LogWriter::new(&mut out, LogFormat::Text, true, None);
+            writer.write_all(&service_marker_line("svc")).unwrap();
+            writer
+                .write_all(b"2026-07-08T09:00:00Z stdout hello\n")
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "2026-07-08T09:00:00Z stdout hello\n"
         );
     }
 

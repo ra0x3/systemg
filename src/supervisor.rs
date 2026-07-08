@@ -123,6 +123,9 @@ struct SupervisorLogRequest<'a> {
     follow: bool,
     /// Post-capture time/pattern/history filter applied before display.
     filter: crate::logs::LogFilter,
+    /// Whether the client renders structured output and consumes per-service
+    /// marker lines, so multi-service views can be attributed to their unit.
+    structured: bool,
     /// Supervisor-owned Unix stream connected to the CLI client.
     stream: &'a std::os::unix::net::UnixStream,
 }
@@ -1440,6 +1443,7 @@ impl Supervisor {
                                 until,
                                 grep,
                                 all,
+                                structured,
                             } = command
                             {
                                 let filter = match crate::logs::LogFilter::from_parts(
@@ -1486,6 +1490,7 @@ impl Supervisor {
                                         kind: kind.as_deref(),
                                         follow,
                                         filter,
+                                        structured,
                                         stream: &log_stream,
                                     };
                                     if let Err(err) =
@@ -1686,13 +1691,18 @@ impl Supervisor {
                 write_log_section_header(request.stream.try_clone()?, section)?;
 
                 for (service_name, pid) in units {
+                    if request.structured {
+                        request.stream.try_clone()?.write_all(
+                            &crate::logs::service_marker_line(&service_name),
+                        )?;
+                    }
                     manager.stream_log_to_socket(
                         &service_name,
                         pid,
                         request.lines,
                         requested_kind,
                         false,
-                        &crate::logs::LogFilter::default(),
+                        &request.filter,
                         request.stream,
                     )?;
                 }
@@ -4186,6 +4196,188 @@ services:
         supervisor
             .shutdown_runtime()
             .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn offline_unit(name: &str, project: &str) -> UnitStatus {
+        UnitStatus {
+            name: name.into(),
+            hash: format!("{name}-hash"),
+            project: Some(crate::status::ProjectStatus {
+                id: project.into(),
+                name: project.into(),
+                mode: Default::default(),
+                config_path: None,
+            }),
+            kind: UnitKind::Service,
+            lifecycle: None,
+            state: UnitState::Unknown,
+            intent: UnitIntent::Manual,
+            health: UnitHealth::Healthy,
+            process: None,
+            uptime: None,
+            last_exit: None,
+            cron: None,
+            metrics: None,
+            command: Some("/bin/true".into()),
+            runtime_command: None,
+            spawned_children: Vec::new(),
+        }
+    }
+
+    /// Drives `handle_logs_command` for a project-wide request over a socket pair
+    /// and returns the raw bytes streamed to the client.
+    fn run_project_logs(
+        snapshot: StatusSnapshot,
+        structured: bool,
+        filter: crate::logs::LogFilter,
+    ) -> String {
+        use std::io::Read as _;
+
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let pid_file = Arc::new(std::sync::Mutex::new(crate::daemon::PidFile::default()));
+        let request = SupervisorLogRequest {
+            snapshot,
+            pid_file,
+            service: None,
+            project: Some("arb".into()),
+            lines: 50,
+            kind: None,
+            follow: false,
+            filter,
+            structured,
+            stream: &server,
+        };
+        Supervisor::handle_logs_command(request).expect("logs command");
+        drop(server);
+
+        let mut client = client;
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn project_logs_apply_grep_and_emit_service_markers() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let log_dir = runtime::log_dir();
+        fs::create_dir_all(&log_dir).expect("make log dir");
+        fs::write(
+            log_dir.join("arb_rs__server.log"),
+            "2026-07-08T09:00:00Z stdout openai_call ok\n\
+2026-07-08T09:00:01Z stdout gemini_call ignored\n",
+        )
+        .unwrap();
+        fs::write(
+            log_dir.join("arb_py__curator.log"),
+            "2026-07-08T09:00:02Z stdout rolling insights ignored\n\
+2026-07-08T09:00:03Z stdout openai_embeddings ok\n",
+        )
+        .unwrap();
+
+        let snapshot = StatusSnapshot {
+            schema_version: crate::status::STATUS_SCHEMA_VERSION.into(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: vec![
+                offline_unit("arb_rs__server", "arb"),
+                offline_unit("arb_py__curator", "arb"),
+            ],
+        };
+
+        let filter = crate::logs::LogFilter::from_parts(
+            None,
+            None,
+            Some("openai_"),
+            false,
+            Utc::now(),
+        )
+        .unwrap();
+
+        let out = run_project_logs(snapshot, true, filter);
+
+        assert!(out.contains("openai_call ok"), "{out}");
+        assert!(out.contains("openai_embeddings ok"), "{out}");
+        assert!(!out.contains("gemini_call"), "{out}");
+        assert!(!out.contains("rolling insights"), "{out}");
+
+        let server_marker =
+            String::from_utf8(crate::logs::service_marker_line("arb_rs__server"))
+                .unwrap();
+        let curator_marker =
+            String::from_utf8(crate::logs::service_marker_line("arb_py__curator"))
+                .unwrap();
+        assert!(out.contains(server_marker.trim_end()), "{out}");
+        assert!(out.contains(curator_marker.trim_end()), "{out}");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn project_logs_omit_service_markers_when_not_structured() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let log_dir = runtime::log_dir();
+        fs::create_dir_all(&log_dir).expect("make log dir");
+        fs::write(
+            log_dir.join("arb_rs__server.log"),
+            "2026-07-08T09:00:00Z stdout plain line\n",
+        )
+        .unwrap();
+
+        let snapshot = StatusSnapshot {
+            schema_version: crate::status::STATUS_SCHEMA_VERSION.into(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: vec![offline_unit("arb_rs__server", "arb")],
+        };
+
+        let out = run_project_logs(snapshot, false, crate::logs::LogFilter::default());
+
+        assert!(out.contains("plain line"), "{out}");
+        assert!(!out.contains(crate::logs::SERVICE_MARKER_PREFIX), "{out}");
 
         unsafe {
             if let Some(home) = original_home {

@@ -259,6 +259,7 @@ fn render_all_logs_from_snapshot(
     lines: usize,
     kind: Option<&str>,
     snapshot_mode: bool,
+    filter: &LogFilter,
 ) -> Result<(), Box<dyn Error>> {
     let mut filtered_snapshot = snapshot.clone();
     if project.is_some() {
@@ -300,7 +301,7 @@ fn render_all_logs_from_snapshot(
                     lines,
                     kind,
                     snapshot_mode,
-                    &LogFilter::default(),
+                    filter,
                 )?;
             }
         }

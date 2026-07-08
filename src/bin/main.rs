@@ -1075,6 +1075,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                         until: until.clone(),
                         grep: grep.clone(),
                         all,
+                        structured: structured_output,
                     };
                     let mut writer = make_log_writer();
                     ipc::stream_command_output(&command, &mut writer)
@@ -1124,6 +1125,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
+                            &log_filter,
                         )?;
                     }
                 }
@@ -1165,6 +1167,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                             until: until.clone(),
                             grep: grep.clone(),
                             all,
+                            structured: structured_output,
                         };
                         let mut output = Vec::new();
                         match ipc::stream_command_output(&command, &mut output)
