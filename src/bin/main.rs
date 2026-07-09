@@ -49,6 +49,7 @@ use systemg::{
         compute_overall_health, explain_unit_health, format_elapsed,
     },
     supervisor::Supervisor,
+    validate::{self, ValidationReport},
 };
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -1232,6 +1233,23 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 }
             }
         }
+        Commands::Validate {
+            config,
+            format,
+            no_color,
+        } => {
+            let (report, content) = validate::validate(&config);
+            let use_color = !(no_color || agent_mode());
+            match format {
+                Some(fmt) => {
+                    println!("{}", serialize_machine_output(&report, fmt)?);
+                }
+                None => {
+                    render_validation_report(&report, content.as_deref(), use_color);
+                }
+            }
+            process::exit(if report.valid { 0 } else { 1 });
+        }
         Commands::Purge => {
             purge_all_state()?;
             println!("All systemg state has been purged");
@@ -1263,6 +1281,85 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 /// Handles drop privileges applies to command.
 fn drop_privileges_applies_to_command(command: &Commands) -> bool {
     matches!(command, Commands::Start { .. } | Commands::Restart { .. })
+}
+
+/// Renders a validation report as a human-readable diagnostic, optionally with
+/// a caret-annotated source snippet and ANSI color.
+fn render_validation_report(
+    report: &ValidationReport,
+    content: Option<&str>,
+    use_color: bool,
+) {
+    let paint = |code: &str, text: &str| {
+        if use_color {
+            format!("{code}{text}{RESET}")
+        } else {
+            text.to_string()
+        }
+    };
+
+    println!();
+    if report.valid {
+        println!(
+            "  {}  {}",
+            paint(GREEN_BOLD, "✓ valid"),
+            paint(BRIGHT_WHITE, &report.config)
+        );
+        println!(
+            "  {}",
+            paint(GRAY, "This manifest parses and resolves cleanly.")
+        );
+        println!();
+        return;
+    }
+
+    let count = report.diagnostics.len();
+    let noun = if count == 1 { "problem" } else { "problems" };
+    println!(
+        "  {}  {} {}",
+        paint(RED_BOLD, "✗ invalid"),
+        paint(BRIGHT_WHITE, &report.config),
+        paint(GRAY, &format!("· {count} {noun}"))
+    );
+
+    for (index, diagnostic) in report.diagnostics.iter().enumerate() {
+        println!();
+        let where_at = match (diagnostic.line, diagnostic.column) {
+            (Some(line), Some(col)) => format!("line {line}:{col}"),
+            (Some(line), None) => format!("line {line}"),
+            _ => "config".to_string(),
+        };
+        println!(
+            "  {} {}  {}",
+            paint(RED_BOLD, &format!("{}.", index + 1)),
+            paint(RED, &diagnostic.kind),
+            paint(GRAY, &where_at)
+        );
+        println!("     {}", paint(WHITE, &diagnostic.message));
+
+        if let Some(line) = diagnostic.line
+            && let Some(text) =
+                content.and_then(|c| c.lines().nth(line.saturating_sub(1)))
+        {
+            println!();
+            let gutter = format!("{:>4} │ ", line);
+            println!("  {}{}", paint(GRAY, &gutter), paint(BRIGHT_WHITE, text));
+            if let Some(col) = diagnostic.column {
+                let pad = " ".repeat(2 + gutter.len() + col.saturating_sub(1));
+                println!("{}{}", pad, paint(RED_BOLD, "^"));
+            }
+            println!();
+        }
+
+        println!("     {} {}", paint(YELLOW, "why "), diagnostic.why);
+        println!("     {} {}", paint(GREEN, "fix "), diagnostic.suggestion);
+        println!(
+            "     {} {}",
+            paint(CYAN, "docs"),
+            paint(CYAN, &diagnostic.doc)
+        );
+    }
+    println!();
 }
 
 /// Handles system mode state detected.

@@ -16,6 +16,8 @@ Primary links:
 - Logs command: https://sysg.dev/how-it-works/commands/logs
 - Status command: https://sysg.dev/how-it-works/commands/status
 - Configuration: https://sysg.dev/how-it-works/configuration
+- Validate command: https://sysg.dev/how-it-works/commands/validate
+- Claude Code integration: https://sysg.dev/integrations/claude-code
 - Repository: https://github.com/ra0x3/systemg
 
 ## Agent-Friendly Usage
@@ -35,6 +37,10 @@ color, banners, paging, truncation, and accidental log-following where possible.
 
 ## Commands LLMs Should Prefer
 
+- `sysg validate -c <file>`: check a manifest before running it. Exits `0` when
+  valid, `1` otherwise. Add `--format json` for structured diagnostics with the
+  line, column, category, message, and suggested fix. Run this after writing or
+  editing any config.
 - `sysg --plain status`: human-readable, non-interactive status with full unit
   names.
 - `sysg status --format json`: structured supervisor status for parsing.

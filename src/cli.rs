@@ -440,6 +440,27 @@ pub enum Commands {
         stream: Option<String>,
     },
 
+    /// Validate a configuration file and report errors with fixes.
+    Validate {
+        /// Path to the configuration file (defaults to `systemg.yaml`).
+        #[arg(short, long, default_value = "systemg.yaml")]
+        config: String,
+
+        /// Emit machine-readable output in the requested format.
+        #[arg(
+            long,
+            value_enum,
+            value_name = "FORMAT",
+            num_args = 0..=1,
+            default_missing_value = "json"
+        )]
+        format: Option<OutputFormat>,
+
+        /// Disable ANSI colors in output.
+        #[arg(long = "no-color")]
+        no_color: bool,
+    },
+
     /// Purge all systemg state and runtime files.
     Purge,
 
@@ -766,6 +787,33 @@ mod tests {
                 assert_eq!(service, None);
             }
             _ => panic!("expected logs command"),
+        }
+    }
+
+    #[test]
+    fn validate_accepts_config_and_format() {
+        let cli = Cli::try_parse_from([
+            "sysg", "validate", "-c", "app.yaml", "--format", "json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Validate { config, format, .. } => {
+                assert_eq!(config, "app.yaml");
+                assert_eq!(format, Some(OutputFormat::Json));
+            }
+            _ => panic!("expected validate command"),
+        }
+    }
+
+    #[test]
+    fn validate_defaults_config() {
+        let cli = Cli::try_parse_from(["sysg", "validate"]).unwrap();
+        match cli.command {
+            Commands::Validate { config, format, .. } => {
+                assert_eq!(config, "systemg.yaml");
+                assert_eq!(format, None);
+            }
+            _ => panic!("expected validate command"),
         }
     }
 

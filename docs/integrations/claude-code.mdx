@@ -1,0 +1,70 @@
+---
+title: Claude Code
+---
+
+# Claude Code
+
+systemg ships an official [Claude Code](https://claude.com/claude-code) plugin
+and skill so coding agents can drive `sysg` correctly — writing valid manifests,
+starting and inspecting stacks, and reading logs — without you pasting docs into
+every session.
+
+The plugin is distributed from a **self-hosted marketplace** in the systemg
+repository, so you install it straight from GitHub.
+
+## What you get
+
+- **A plugin** (`systemg`) that registers the systemg skill with Claude Code.
+- **A skill** that teaches Claude the `sysg` CLI, the YAML config schema,
+  deployments, cron units, and log inspection — including the agent-friendly
+  `--plain` conventions.
+
+## Install
+
+Add the marketplace, then install the plugin:
+
+```text
+/plugin marketplace add ra0x3/systemg
+/plugin install systemg
+```
+
+`/plugin marketplace add ra0x3/systemg` points Claude Code at the
+`.claude-plugin/marketplace.json` at the repository root; `/plugin install
+systemg` installs the plugin from it. You can also browse and install
+interactively from the `/plugin` menu once the marketplace is added.
+
+## Updating
+
+The plugin version is kept in lockstep with the systemg release. CI stamps
+`.claude-plugin/plugin.json` with the crate version from `Cargo.toml` on every
+release, so the marketplace always advertises the current version.
+
+Refresh the marketplace to pick up new releases:
+
+```text
+/plugin marketplace update systemg
+```
+
+Claude Code surfaces available updates for installed plugins, so in practice you
+are prompted to update rather than having to check by hand.
+
+## Using the skill
+
+Once installed, the skill activates automatically whenever you ask Claude to
+work with systemg — for example:
+
+- "Write a `sysg.yaml` for a Postgres + API stack with a health check."
+- "Start this stack and show me the status as JSON."
+- "Tail the api service logs and grep for errors in the last hour."
+
+Under the hood the skill instructs Claude to use `--plain` in non-interactive
+contexts, to prefer `--format json` for parsing, and to run
+[`sysg validate`](/how-it-works/commands/validate) before starting a stack so
+config mistakes are caught early with precise, fixable diagnostics.
+
+## See also
+
+- [Commands](/how-it-works/commands) - Full CLI reference
+- [`validate`](/how-it-works/commands/validate) - Check a manifest before running it
+- [Configuration](/how-it-works/configuration) - Manifest schema
+- [Plugin source](https://github.com/ra0x3/systemg/tree/main/.claude-plugin) on GitHub

@@ -94,6 +94,7 @@
               "how-it-works/commands/logs",
               "how-it-works/commands/status",
               "how-it-works/commands/inspect",
+              "how-it-works/commands/validate",
               "how-it-works/commands/purge",
               "how-it-works/commands/spawn",
               "how-it-works/commands/start-vs-spawn"
@@ -111,6 +112,12 @@
           "examples/crud",
           "examples/units",
           "examples/orchestrator"
+        ]
+      },
+      {
+        "group": "Integrations",
+        "pages": [
+          "integrations/claude-code"
         ]
       }
     ]

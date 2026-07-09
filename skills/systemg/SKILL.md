@@ -15,6 +15,8 @@ LLM-oriented reference when anything here is insufficient.
 Always pass `--plain` in non-interactive contexts (scripts, agents, pipes):
 
 ```sh
+sysg validate -c sysg.yaml       # check a config; exits non-zero on errors
+sysg validate -c sysg.yaml --format json   # structured diagnostics for CI
 sysg start -c sysg.yaml          # start the manager with a config
 sysg restart                     # restart (optionally -c new-config.yaml)
 sysg stop                        # stop the manager
@@ -99,6 +101,8 @@ services:
 
 ## Conventions
 
+- Run `sysg validate -c <file>` after writing or editing a manifest; it reports
+  the exact line, why it's wrong, and a fix. Prefer `--format json` when parsing.
 - Health checks live under `deployment.health_check`, never top-level.
 - `depends_on` gates start order; a dependent starts only after its
   dependencies (including their `pre_start`) have started.

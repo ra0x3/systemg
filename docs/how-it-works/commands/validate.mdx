@@ -1,0 +1,101 @@
+---
+title: validate
+---
+
+# validate
+
+Check a configuration file before you run it. `validate` parses the manifest,
+resolves the dependency graph, and — when something is wrong — tells you the
+exact line, why it's an error, and how to fix it.
+
+```sh
+$ sysg validate -c sysg.yaml
+```
+
+```text
+  ✗ invalid  sysg.yaml · 1 problem
+
+  1. missing-version  line 1:1
+     missing field `version`
+
+     1 │ services:
+         ^
+
+     why  Every manifest must declare its schema version at the top level.
+     fix  Add `version: "1"` as the first key in the file.
+     docs https://sysg.dev/how-it-works/configuration
+```
+
+A clean file reports success and exits `0`:
+
+```text
+  ✓ valid  sysg.yaml
+  This manifest parses and resolves cleanly.
+```
+
+## Options
+
+| Short | Long | Description |
+|-------|------|-------------|
+| `-c` | `--config` | Path to the configuration file (defaults to `systemg.yaml`) |
+| `-` | `--format` | Emit machine-readable output (`json`) |
+| `-` | `--no-color` | Disable ANSI colors |
+| `-` | `--plain` | Agent-friendly output (also disables color) |
+
+## What it checks
+
+- **Schema** — a supported `version`, a `services` map, and a `command` per service.
+- **Syntax** — YAML that parses, with a caret pointing at the offending token.
+- **Health checks** — every `deployment.health_check` has a `url` or a `command`.
+- **Dependencies** — `depends_on` references exist and form no cycle.
+- **Project id** — a valid, non-empty `project.id`.
+- **Environment** — `${VAR}` interpolations resolve from the environment or env file.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Configuration is valid |
+| `1` | Configuration has one or more problems |
+
+## JSON output
+
+Use `--format json` for CI gates and tooling. Each diagnostic carries its
+location, category, message, and remediation:
+
+```sh
+$ sysg validate -c sysg.yaml --format json
+```
+
+```json
+{
+  "config": "sysg.yaml",
+  "valid": false,
+  "diagnostics": [
+    {
+      "line": 1,
+      "column": 1,
+      "kind": "missing-version",
+      "message": "missing field `version`",
+      "why": "Every manifest must declare its schema version at the top level.",
+      "suggestion": "Add `version: \"1\"` as the first key in the file.",
+      "doc": "https://sysg.dev/how-it-works/configuration"
+    }
+  ]
+}
+```
+
+## Example
+
+Gate a deploy on a valid manifest:
+
+```sh
+$ sysg validate -c production.yaml --plain || exit 1
+$ sysg start -c production.yaml --daemonize
+```
+
+## See also
+
+- [Configuration](/how-it-works/configuration) - Full manifest reference
+- [`start`](/how-it-works/commands/start) - Launch a validated manifest
+- [`status`](/how-it-works/commands/status) - Check services once they're running

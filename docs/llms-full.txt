@@ -18,6 +18,8 @@ Primary links:
 - Logs command: https://sysg.dev/how-it-works/commands/logs
 - Status command: https://sysg.dev/how-it-works/commands/status
 - Inspect command: https://sysg.dev/how-it-works/commands/inspect
+- Validate command: https://sysg.dev/how-it-works/commands/validate
+- Claude Code integration: https://sysg.dev/integrations/claude-code
 - Configuration: https://sysg.dev/how-it-works/configuration
 - Runtime state: https://sysg.dev/how-it-works/state
 - Logging model: https://sysg.dev/how-it-works/logs
@@ -182,6 +184,39 @@ Useful inspect options:
 - `--project <id>`: disambiguate duplicate service names.
 - `--live`: force immediate runtime collection.
 - `--stream <duration>`: continuously refresh. Avoid for one-shot agent calls.
+
+## Validate
+
+Use `validate` to check a manifest before running it. It parses the file,
+resolves the dependency graph, and reports precise, fixable diagnostics.
+
+Best commands for LLMs:
+
+```sh
+sysg validate -c sysg.yaml
+sysg validate -c sysg.yaml --format json
+sysg --plain validate -c sysg.yaml
+```
+
+Behavior:
+
+- Exit code `0` when the manifest is valid, `1` when it has problems.
+- Human output shows the offending line with a caret, plus a plain-language
+  `why`, a suggested `fix`, and a docs link. It is colored for terminals and
+  falls back to plain text under `--plain` / `--no-color` / agent mode.
+- `--format json` emits `{config, valid, diagnostics[]}` where each diagnostic
+  has `line`, `column`, `kind`, `message`, `why`, `suggestion`, and `doc`.
+
+Checks performed: supported `version`, a `services` map with a `command` per
+service, valid YAML syntax, `deployment.health_check` with a `url` or `command`,
+`depends_on` references that exist and contain no cycle, a valid `project.id`,
+and `${VAR}` interpolations that resolve. Run `sysg validate` after writing or
+editing any config, and gate deploys on it:
+
+```sh
+sysg validate -c production.yaml --plain || exit 1
+sysg start -c production.yaml --daemonize
+```
 
 ## Logs
 
@@ -450,13 +485,35 @@ For LLM and automation workflows:
 - Prefer `--project` when service names may be duplicated across projects.
 - Prefer `--path` when another tool should read the logs directly.
 
+## Claude Code Integration
+
+systemg ships an official Claude Code plugin and skill from a self-hosted
+marketplace in the repository. The skill teaches the `sysg` CLI, the config
+schema, deployments, cron units, and log inspection, and instructs the agent to
+use `--plain` in non-interactive contexts, prefer `--format json`, and run
+`sysg validate` before starting a stack.
+
+Install:
+
+```text
+/plugin marketplace add ra0x3/systemg
+/plugin install systemg
+```
+
+The plugin version tracks the crate version (CI stamps
+`.claude-plugin/plugin.json` from `Cargo.toml` on release). Refresh with
+`/plugin marketplace update systemg`; Claude Code prompts for updates
+automatically. Full details: https://sysg.dev/integrations/claude-code
+
 ## Relevant Local Docs
 
 These docs contain the canonical user-facing descriptions:
 
 - `docs/how-it-works/commands/index.mdx`: global flags, including `--plain`.
 - `docs/how-it-works/commands/status.mdx`: status behavior and options.
+- `docs/how-it-works/commands/validate.mdx`: config validation and diagnostics.
 - `docs/how-it-works/commands/logs.mdx`: logs behavior, filters, JSON/raw
   output, ANSI handling, path lookup, and rotation.
 - `docs/how-it-works/logs.mdx`: logging architecture and retention model.
 - `docs/how-it-works/configuration.mdx`: service and project configuration.
+- `docs/integrations/claude-code.mdx`: the Claude Code plugin and skill.

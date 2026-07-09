@@ -23,6 +23,9 @@ pub mod cli;
 /// Config loading.
 pub mod config;
 
+/// Configuration validation and diagnostics.
+pub mod validate;
+
 /// Constants.
 pub mod constants;
 
