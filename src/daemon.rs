@@ -2780,19 +2780,16 @@ impl Daemon {
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let state = Self::wait_for_ready(service_name, &self.processes, &self.pid_file)?;
 
-        if let ServiceReadyState::Running = state {
-            if let Some(health_check) = self
+        if let ServiceReadyState::Running = state
+            && let Some(health_check) = self
                 .config
                 .services
                 .get(service_name)
                 .and_then(|service| service.deployment.as_ref())
                 .and_then(|deployment| deployment.health_check.as_ref())
-            {
-                info!(
-                    "Waiting for health check of '{service_name}' before marking it ready"
-                );
-                self.wait_for_health_check(service_name, health_check)?;
-            }
+        {
+            info!("Waiting for health check of '{service_name}' before marking it ready");
+            self.wait_for_health_check(service_name, health_check)?;
         }
 
         Ok(state)
@@ -3314,7 +3311,11 @@ impl Daemon {
                 let _ = std::fs::create_dir_all(parent);
             }
             Arc::new(Mutex::new(
-                OpenOptions::new().create(true).append(true).open(&path).ok(),
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .ok(),
             ))
         };
         let stdout_sink = open_sink("stdout");
