@@ -1,0 +1,15 @@
+{
+  "name": "systemg",
+  "description": "Official plugin marketplace for systemg (sysg), an agent-friendly general process composer.",
+  "owner": {
+    "name": "ra0x3",
+    "url": "https://github.com/ra0x3"
+  },
+  "plugins": [
+    {
+      "name": "systemg",
+      "description": "Teaches Claude the sysg process manager: CLI commands, YAML config schema, deployments, cron units, and log inspection.",
+      "source": "./"
+    }
+  ]
+}

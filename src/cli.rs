@@ -8,6 +8,7 @@ use tracing::level_filters::LevelFilter;
 const DOCS_HELP: &str = "\
 Documentation:
   Docs:      https://sysg.dev
+  Config:    https://sysg.dev/how-it-works/configuration
   LLM docs:  https://sysg.dev/llms.txt (index)
              https://sysg.dev/llms-full.txt (full reference)";
 

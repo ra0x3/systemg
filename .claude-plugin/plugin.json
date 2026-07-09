@@ -1,0 +1,11 @@
+{
+  "name": "systemg",
+  "description": "Teaches Claude the sysg process manager: CLI commands, YAML config schema, deployments, cron units, and log inspection.",
+  "version": "0.51.0",
+  "author": {
+    "name": "ra0x3"
+  },
+  "homepage": "https://sysg.dev",
+  "repository": "https://github.com/ra0x3/systemg",
+  "license": "MIT"
+}
