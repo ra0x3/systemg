@@ -2778,7 +2778,24 @@ impl Daemon {
         &self,
         service_name: &str,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        Self::wait_for_ready(service_name, &self.processes, &self.pid_file)
+        let state = Self::wait_for_ready(service_name, &self.processes, &self.pid_file)?;
+
+        if let ServiceReadyState::Running = state {
+            if let Some(health_check) = self
+                .config
+                .services
+                .get(service_name)
+                .and_then(|service| service.deployment.as_ref())
+                .and_then(|deployment| deployment.health_check.as_ref())
+            {
+                info!(
+                    "Waiting for health check of '{service_name}' before marking it ready"
+                );
+                self.wait_for_health_check(service_name, health_check)?;
+            }
+        }
+
+        Ok(state)
     }
 
     /// Internal implementation of wait_for_service_ready that accepts explicit handles for processes
@@ -3276,6 +3293,8 @@ impl Daemon {
             thread,
         };
 
+        let started = Instant::now();
+
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(command)
@@ -3289,29 +3308,43 @@ impl Daemon {
             })?;
 
         let service_name_owned = service_name.to_string();
-        let stderr_log = resolve_log_path(service_name, "stderr");
-        if let Some(parent) = stderr_log.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let log_sink = Arc::new(Mutex::new(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&stderr_log)
-                .ok(),
-        ));
+        let open_sink = |kind: &str| {
+            let path = resolve_log_path(service_name, kind);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            Arc::new(Mutex::new(
+                OpenOptions::new().create(true).append(true).open(&path).ok(),
+            ))
+        };
+        let stdout_sink = open_sink("stdout");
+        let stderr_sink = open_sink("stderr");
+
+        let write_marker = |line: &str| {
+            for sink in [&stdout_sink, &stderr_sink] {
+                if let Ok(mut guard) = sink.lock()
+                    && let Some(file) = guard.as_mut()
+                {
+                    let _ = writeln!(file, "[pre_start] {line}");
+                }
+            }
+        };
+        write_marker(&format!("\u{25b6} running: {command}"));
 
         let stdout_handle = child.stdout.take().map(|stdout| {
             let service_name = service_name_owned.clone();
-            let log_sink = Arc::clone(&log_sink);
+            let stdout_sink = Arc::clone(&stdout_sink);
+            let stderr_sink = Arc::clone(&stderr_sink);
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     info!("[{service_name} pre-start] {line}");
-                    if let Ok(mut guard) = log_sink.lock()
-                        && let Some(file) = guard.as_mut()
-                    {
-                        let _ = writeln!(file, "[pre_start] {line}");
+                    for sink in [&stdout_sink, &stderr_sink] {
+                        if let Ok(mut guard) = sink.lock()
+                            && let Some(file) = guard.as_mut()
+                        {
+                            let _ = writeln!(file, "[pre_start] {line}");
+                        }
                     }
                 }
             })
@@ -3319,15 +3352,18 @@ impl Daemon {
 
         let stderr_handle = child.stderr.take().map(|stderr| {
             let service_name = service_name_owned.clone();
-            let log_sink = Arc::clone(&log_sink);
+            let stdout_sink = Arc::clone(&stdout_sink);
+            let stderr_sink = Arc::clone(&stderr_sink);
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
                     warn!("[{service_name} pre-start] {line}");
-                    if let Ok(mut guard) = log_sink.lock()
-                        && let Some(file) = guard.as_mut()
-                    {
-                        let _ = writeln!(file, "[pre_start] {line}");
+                    for sink in [&stdout_sink, &stderr_sink] {
+                        if let Ok(mut guard) = sink.lock()
+                            && let Some(file) = guard.as_mut()
+                        {
+                            let _ = writeln!(file, "[pre_start] {line}");
+                        }
                     }
                 }
             })
@@ -3348,6 +3384,8 @@ impl Daemon {
             let _ = handle.join();
         }
 
+        let elapsed = started.elapsed().as_secs();
+
         if !status.success() {
             let exit_code = status.code();
             #[cfg(unix)]
@@ -3357,17 +3395,16 @@ impl Daemon {
 
             self.record_start_failure(service_name, exit_code, signal);
 
+            write_marker(&format!("\u{2716} failed after {elapsed}s ({status})"));
+
             let message = format!("pre_start: command exited with status {}", status);
-            if let Ok(mut guard) = log_sink.lock()
-                && let Some(file) = guard.as_mut()
-            {
-                let _ = writeln!(file, "[pre_start] {message}");
-            }
             return Err(ProcessManagerError::ServiceStartError {
                 service: service_name.to_string(),
                 source: std::io::Error::other(message),
             });
         }
+
+        write_marker(&format!("\u{2714} completed in {elapsed}s (exit 0)"));
 
         Ok(())
     }
