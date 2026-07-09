@@ -1,6 +1,6 @@
 # systemg Full LLM Guide
 
-systemg is a general-purpose program composer. It manages a graph of local
+systemg is an agent-friendly general process composer. It manages a graph of local
 programs from a YAML manifest, starts dependencies in order, supervises long
 running services, runs cron-style units, captures logs, reports status, and
 supports targeted service control through a single CLI named `sysg`.

@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
   "name": "systemg",
-  "description": "A general-purpose program composer.",
+  "description": "An agent-friendly general process composer.",
   "favicon": "/static/img/favicon/favicon.ico",
   "logo": {
     "light": "/static/img/full-logo-colored-cropped.webp",
