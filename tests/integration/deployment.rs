@@ -142,7 +142,7 @@ services:
         "pre_start stderr should be captured in the unit stderr log, got: {captured:?}",
     );
     assert!(
-        captured.contains("[pre_start] pre_start: command exited with status"),
+        captured.contains("[pre_start] \u{2716} failed after"),
         "pre_start failure summary should be written to stderr log, got: {captured:?}",
     );
 
