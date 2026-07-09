@@ -59,7 +59,7 @@ services:
     command: "redis-server"
   orchestrator:
     command: >
-      porki
+      porki run
       --role orchestrator
       --instructions instructions/INSTRUCTIONS.md
       --redis-url redis://127.0.0.1:6379
@@ -70,7 +70,8 @@ services:
     depends_on: ["redis"]
     spawn:
       mode: dynamic
-      limit: 10
+      limits:
+        children: 10
 ```
 
 The orchestrator example disables systemg-managed service output capture because
@@ -110,8 +111,7 @@ wait for a lease before timing out.
 $ cd examples/orchestrator
 $ pip install porki
 
-# Run
-$ redis-server
+# Run (redis starts as a dependency)
 $ sysg start
 
 # Monitor

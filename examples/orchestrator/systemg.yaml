@@ -18,7 +18,6 @@ services:
       --llm-provider claude
     restart_policy: always
     backoff: "5s"
-    work_dir: "."
     env:
       vars:
         PORKI_LLM_MAX_CONCURRENCY: "6"

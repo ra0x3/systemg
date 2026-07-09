@@ -20,6 +20,7 @@ Runtime files systemg uses to track services.
 ├── config_hint        # Last config path
 ├── pid.xml           # Service → PID mapping
 ├── state.xml         # Service metadata
+├── cron_state.xml    # Cron run history
 └── logs/             # Service output
 ```
 
@@ -52,7 +53,7 @@ Tracks service status, restart counts, and exit codes.
 
 State survives supervisor restarts. Services keep running even if the supervisor crashes.
 
-Clean shutdown removes `sysg.pid` and `control.sock`. Stale files after crash? Run `sysg purge`.
+Clean shutdown removes `sysg.pid`, `control.sock`, and `config_hint`. Stale files after crash? Run `sysg purge`.
 
 ## See also
 

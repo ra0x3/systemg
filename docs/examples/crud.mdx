@@ -29,9 +29,10 @@ status:
 services:
   fastapi_server:
     command: "uv run uvicorn main:app --host 0.0.0.0 --port 8888"
-    deployment_strategy: "rolling_start"
-    restart_policy: "on_failure"
-    retries: "10"
+    deployment:
+      strategy: "rolling"
+    restart_policy: "on-failure"
+    max_restarts: 10
     backoff: "5s"
 ```
 
@@ -237,7 +238,7 @@ curl http://localhost:8888/chaos
 1. **Service starts** with `sysg start` and serves the API on port 8888
 2. **In-memory storage** using Python dict for simplicity
 3. **Chaos endpoint** randomly fails to demonstrate recovery capabilities
-4. **Automatic restarts** when service crashes (up to 10 retries with 5s backoff)
+4. **Automatic restarts** when service crashes (up to 10 restarts with 5s backoff)
 5. **Rolling deployments** ensure zero downtime during updates
 
 ## Interactive API docs

@@ -4,6 +4,13 @@ use std::{fmt, str::FromStr};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing::level_filters::LevelFilter;
 
+/// Documentation links appended to `--help` output.
+const DOCS_HELP: &str = "\
+Documentation:
+  Docs:      https://sysg.dev
+  LLM docs:  https://sysg.dev/llms.txt (index)
+             https://sysg.dev/llms-full.txt (full reference)";
+
 /// Wrapper around `LevelFilter` so clap can parse log levels from either
 /// string names ("info", "debug", etc.) or numeric shorthands (0-5).
 #[derive(Clone, Copy, Debug)]
@@ -126,6 +133,7 @@ pub enum OutputFormat {
 #[derive(Parser)]
 #[command(name = "systemg", version, author)]
 #[command(about = "A lightweight process manager for system services", long_about = None)]
+#[command(after_help = DOCS_HELP)]
 pub struct Cli {
     /// Override the logging verbosity for this invocation only.
     #[arg(long, value_name = "LEVEL", global = true)]

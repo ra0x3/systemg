@@ -32,7 +32,7 @@ services:
 ## Notes
 
 - Cron jobs are short-lived (run and exit)
-- Cannot mix with `restart_policy`
+- `restart_policy` is ignored for cron units; each run is scheduled, not supervised
 - Overlap detection prevents duplicate runs
 - Cron units are scheduled by the supervisor, not run as persistent services.
   Unlike services, they cannot be started or restarted directly with

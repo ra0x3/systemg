@@ -26,12 +26,12 @@ services:
 
 ```bash
 #!/bin/sh
-$ i=1
-$ while true; do
-$     echo "Count: $i"
-$     i=$((i + 1))
-$     sleep 1
-$ done
+i=1
+while true; do
+    echo "Count: $i"
+    i=$((i + 1))
+    sleep 1
+done
 ```
 
 ## Run it
@@ -43,6 +43,11 @@ $ sysg stop
 ```
 
 You'll see:
+
+```
+Count: 1
+Count: 2
+Count: 3
 ```
 
 The example keeps `logs.sink: file` explicit so `sysg logs` works immediately.
@@ -51,10 +56,6 @@ pipeline.
 
 `status.snapshot_mode: summary` keeps status and inspect reads inexpensive by
 reading current persisted state without detailed runtime process collection.
-Count: 1
-Count: 2
-Count: 3
-```
 
 ## Next steps
 
@@ -72,5 +73,7 @@ status:
 services:
   counter:
     command: "sh counter.sh"
-    restart_policy: "always"
+    restart_policy: "on-failure"
+    max_restarts: 5
+    backoff: "5s"
 ```

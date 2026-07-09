@@ -5,7 +5,7 @@ programs from a YAML manifest, starts dependencies in order, supervises long
 running services, runs cron-style units, captures logs, reports status, and
 supports targeted service control through a single CLI named `sysg`.
 
-Current release: `0.50.0`
+Current release: `0.51.0`
 Release context: the changes since commit `b1a640d` make systemg much friendlier
 for LLMs, scripts, SSH commands, and other non-interactive automation.
 
@@ -84,11 +84,12 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 Install or activate a specific version:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.50.0
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.51.0
 ```
 
 System deployments use `scripts/install-systemg.sh` to set up `/usr/bin/sysg`,
-`/etc/systemg`, and `/var/lib/systemg`.
+`/etc/systemg`, and `/var/lib/systemg`. In system mode (`--sys`), state lives in
+`/var/lib/systemg` and logs live in `/var/log/systemg`.
 
 ## Core Mental Model
 
@@ -317,6 +318,42 @@ tools:
 - ANSI stripping is on by default in agent mode.
 - Use `--strip-ansi` to force stripping.
 - Use `--no-strip-ansi` to preserve escapes.
+
+### Log Maintenance
+
+Truncate retained logs or prune rotated backups when disk usage matters:
+
+```sh
+sysg logs --purge
+sysg logs -s api --purge
+sysg logs --prune --max-size 100MB
+sysg logs --prune --max-age 7d
+```
+
+`--purge` truncates log files (all services plus `supervisor.log`, or one
+service with `-s`). `--prune` deletes rotated backups by total size or age and
+requires at least one of `--max-size` or `--max-age`.
+
+## Configuration Keys
+
+Manifest reference (see `docs/how-it-works/configuration.mdx` for details):
+
+- Top level: `version` (required), `project` (`id`, `name`, or shorthand
+  string), `env`, `logs` (`sink: file|none`, `max_bytes`, `max_files`),
+  `status` (`snapshot_mode: off|summary|detailed`, `snapshot_interval_secs`),
+  `metrics` (`retention_minutes`, `sample_interval_secs`, `max_memory_bytes`,
+  `spillover_path`), and `services` (required).
+- Per service: `command` (required), `depends_on`, `env` (`vars`, `file`,
+  `inherit_env`, `clear_session_vars`, `strip`), `restart_policy`
+  (`always|on-failure|never`; clean exits never restart), `backoff`,
+  `max_restarts`, `hooks` (`on_start`/`on_stop`/`on_restart` with
+  `success`/`error` handlers), `cron` (`expression`, `timezone`),
+  `deployment` (`strategy: rolling|immediate`, `pre_start`, `health_check`,
+  `grace_period`, `blue_green`), `logs`, `skip`, `spawn` (`mode`, `limits`).
+- Privileged mode only: `user`, `group`, `supplementary_groups`,
+  `capabilities`, `limits`, `isolation`.
+
+Health checks live under `deployment.health_check`, not at the service level.
 
 ## Command Recipes For LLMs
 

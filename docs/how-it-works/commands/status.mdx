@@ -120,11 +120,11 @@ $ sysg status
 ║  Intent       │ Serve 4                                                     ║
 ╚═══════════════╧══════════════════════════════════════════════════════════════╝
 
-UNIT       KIND  STATE    INTENT  USER  PID    CPU   RSS    UPTIME  CMD            LAST_EXIT  HEALTH
-postgres   srvc  Running  Serve   app   14823  0.1%  92 MB  2h      postgres       -          Healthy
-redis      srvc  Running  Serve   app   14824  0.0%  18 MB  2h      redis-server   -          Healthy
-api        srvc  Running  Serve   app   14826  1.2%  64 MB  2h      python app.py  -          Healthy
-worker     srvc  Running  Serve   app   14827  0.3%  41 MB  2h      python worker  -          Healthy
+UNIT       KIND  STATE    USER  PID    CPU   RSS    UPTIME  CMD            LAST_EXIT  HEALTH
+postgres   srvc  Running  app   14823  0.1%  92 MB  2h      postgres       -          Healthy
+redis      srvc  Running  app   14824  0.0%  18 MB  2h      redis-server   -          Healthy
+api        srvc  Running  app   14826  1.2%  64 MB  2h      python app.py  -          Healthy
+worker     srvc  Running  app   14827  0.3%  41 MB  2h      python worker  -          Healthy
 ```
 
 ### View specific service
@@ -143,7 +143,7 @@ Health: Healthy
 PID: 14826
 Uptime: 2h3m
 CPU: 1.2%
-Memory: 4.5%
+RSS: 64 MB
 Command: python app.py
 ```
 
@@ -201,10 +201,6 @@ process and spawn-tree detail in status/inspect views.
   outcome. `STATE` answers "what is this unit doing, or what happened most
   recently?" Values are `Running`, `Done`, `Failed`, `Stopped`, `Skipped`,
   `Lost`, `Zombie`, `Queued`, `Overlap`, and `Unknown`.
-- **INTENT** - What systemg expects from the unit. Values are `Serve` for
-  long-running services, `Once` for one-shot services, `Cron` for scheduled
-  jobs, `Manual` for manually controlled units, `Skip` for skipped units, and
-  `Orphan` for persisted state without a matching config entry.
 - **USER** - Runtime process user when detailed runtime data is available.
 - **PID** - Runtime process ID when the unit has a tracked process.
 - **CPU** - Current CPU usage when runtime metrics are available.
@@ -234,6 +230,9 @@ process and spawn-tree detail in status/inspect views.
 | `Unknown` | No reliable runtime or lifecycle fact is available. |
 
 ### Intent values
+
+Intent describes what systemg expects from each unit. It appears in the
+overview summary box (the `Intent` row), not as a per-unit table column.
 
 | Intent | Meaning |
 | --- | --- |

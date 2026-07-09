@@ -10,7 +10,7 @@ systemg exists to run a handful of related processes as one unit — with depend
 
 **Legible configuration.** One YAML file describes your services, their order, and how they're confined. It reads like what it does. No unit-file dialect, no generated indirection, no "where is this actually configured."
 
-**One binary, no runtime.** systemg is a single static binary. There's nothing to install alongside it, nothing to keep in sync, and the same binary and config run on a laptop and in production. Dev/prod parity is the default, not a project.
+**One binary, no runtime.** systemg is a single self-contained binary. There's nothing to install alongside it, nothing to keep in sync, and the same binary and config run on a laptop and in production. Dev/prod parity is the default, not a project.
 
 **Correct process lifecycle.** Services start in dependency order and are supervised for real: restarts with backoff, process-group teardown that doesn't orphan children, and state that survives a supervisor crash so your services don't die with it.
 

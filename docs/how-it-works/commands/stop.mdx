@@ -71,7 +71,7 @@ this, plain `sysg status` reports `No running supervisor`.
 
 1. Services stop in reverse dependency order
 2. Each service receives `SIGTERM`
-3. After 10 seconds, `SIGKILL` is sent if needed
+3. After a short grace period (about 1 second), `SIGKILL` is sent if needed
 4. The supervisor remains available unless you used `--supervisor`
 
 When stopping a single service, its dependents keep running. Only crashes trigger cascading stops.

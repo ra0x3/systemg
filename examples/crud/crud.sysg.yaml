@@ -10,7 +10,8 @@ status:
 services:
   fastapi_server:
     command: "uv run uvicorn main:app --host 0.0.0.0 --port 8888"
-    deployment_strategy: "rolling_start"
-    restart_policy: "on_failure"
-    retries: "10"
+    deployment:
+      strategy: "rolling"
+    restart_policy: "on-failure"
+    max_restarts: 10
     backoff: "5s"

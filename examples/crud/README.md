@@ -89,7 +89,7 @@ sysg logs --service fastapi_server
 curl http://localhost:8888/chaos
 ```
 
-With `restart_policy: "on_failure"` and `backoff: "5s"`, systemg will automatically restart the service if it crashes, with a 5-second delay between attempts.
+With `restart_policy: "on-failure"` and `backoff: "5s"`, systemg will automatically restart the service if it crashes, with a 5-second delay between attempts.
 
 ## Configuration
 
@@ -108,9 +108,10 @@ status:
 services:
   fastapi_server:
     command: "uv run uvicorn main:app --host 0.0.0.0 --port 8888"
-    deployment_strategy: "rolling_start"  # Zero-downtime deployments
-    restart_policy: "on_failure"          # Auto-restart on crashes
-    retries: "10"                          # Max restart attempts
+    deployment:
+      strategy: "rolling"                 # Zero-downtime deployments
+    restart_policy: "on-failure"          # Auto-restart on crashes
+    max_restarts: 10                      # Max restart attempts
     backoff: "5s"                          # Delay between restarts
 ```
 

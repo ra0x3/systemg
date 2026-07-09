@@ -77,6 +77,7 @@
       {
         "group": "How It Works",
         "pages": [
+          "how-it-works/index",
           "how-it-works/configuration",
           "how-it-works/cron",
           "how-it-works/webhooks",
@@ -86,6 +87,7 @@
           {
             "group": "Commands",
             "pages": [
+              "how-it-works/commands/index",
               "how-it-works/commands/start",
               "how-it-works/commands/stop",
               "how-it-works/commands/restart",
@@ -104,6 +106,7 @@
       {
         "group": "Examples",
         "pages": [
+          "examples/index",
           "examples/hello-world",
           "examples/crud",
           "examples/units",

@@ -22,8 +22,8 @@ services:
       file: ".env"
       vars:
         FOO: "foo"
-    restart_policy: "on_failure"
-    retries: "5"
+    restart_policy: "on-failure"
+    max_restarts: 5
     backoff: "5s"
 ```
 

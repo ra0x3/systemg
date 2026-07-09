@@ -165,6 +165,26 @@ Modes:
 
 For large deployments, keep `summary` globally and use focused `inspect --service` workflows when deeper investigation is needed.
 
+### `metrics`
+
+Optional tuning for the CPU/memory sampling that powers `status` and `inspect`.
+
+```yaml
+metrics:
+  retention_minutes: 720
+  sample_interval_secs: 1
+  max_memory_bytes: 10485760
+  spillover_path: ".state/metrics"
+```
+
+Fields:
+
+- `retention_minutes`: minutes of in-memory samples to keep (default 720).
+- `sample_interval_secs`: seconds between samples, clamped 1-60 (default 1).
+- `max_memory_bytes`: memory cap across all sample buffers (default 10 MiB).
+- `spillover_path`: optional directory for spilling older samples to disk, with
+  `spillover_max_bytes` and `spillover_segment_bytes` controlling disk usage.
+
 ### `services`
 
 **Required**. Defines the services to manage.
@@ -247,9 +267,13 @@ services:
 ```
 
 **Policies:**
-- `always` - Restart on any exit
-- `on-failure` - Restart only on non-zero exit codes
+- `always` - Restart on non-zero exit codes
+- `on-failure` - Restart on non-zero exit codes
 - `never` - Don't restart
+
+A clean (zero) exit is treated as intentional and never triggers a restart,
+regardless of policy. Restarts respect `backoff` between attempts and stop
+after `max_restarts` (unlimited when unset).
 
 ### `hooks`
 
@@ -268,21 +292,6 @@ services:
       on_stop:
         error:
           command: "curl --request POST https://alerts.example.com/crash"
-```
-
-### `health_check`
-
-Verify services are ready before marking them healthy.
-
-```yaml
-services:
-  api:
-    command: "python app.py"
-    health_check:
-      command: "curl --fail http://localhost:8000/health"
-      interval: "10s"
-      timeout: "5s"
-      retries: 3
 ```
 
 ### `cron`
@@ -344,10 +353,23 @@ Primary keys available on each service definition.
 | `backoff` | string | Time between restart attempts |
 | `max_restarts` | number | Maximum restart attempts |
 | `hooks` | object | Lifecycle event handlers |
-| `health_check` | object | Service readiness probe |
-| `cron` | string | Cron schedule expression |
+| `cron` | object | Cron schedule (`expression`, optional `timezone`) |
 | `deployment` | object | Update strategy configuration |
 | `logs` | object | Service stdout/stderr capture and rotation settings |
+| `skip` | bool or string | Skip this service, or a command whose success skips it |
+| `spawn` | object | Dynamic child-process policy (`mode`, `limits`) |
+| `user` / `group` | string | Run the service as this user/group (privileged mode) |
+| `supplementary_groups` | array | Extra groups applied before dropping privileges |
+| `capabilities` | array | Linux capabilities retained after the privilege drop |
+| `limits` | object | Resource limits (`nofile`, `nproc`, `memlock`, `nice`, `cpu_affinity`, `cgroup`) |
+| `isolation` | object | Namespace isolation (`network`, `mount`, `pid`, `user`) |
+
+`user`, `group`, `supplementary_groups`, `capabilities`, `limits`, and
+`isolation` only take effect in privileged mode - see
+[Privileged mode](/how-it-works/privileged-mode) for details and examples.
+
+Health checks are configured under `deployment.health_check`, not as a
+top-level service key.
 
 ### Environment object
 
@@ -357,6 +379,9 @@ Environment sources and inline overrides merged into the service process environ
 |-------|------|-------------|
 | `vars` | object | Key-value environment variables |
 | `file` | string | Path to env file |
+| `inherit_env` | bool | Let a privilege-dropped service inherit the supervisor's environment instead of starting clean (default `false`) |
+| `clear_session_vars` | bool | Strip session-scoped variables like `SSH_*` and `DISPLAY` (default `true`) |
+| `strip` | array | Additional variable names to remove from the service environment |
 
 ### Hooks object
 

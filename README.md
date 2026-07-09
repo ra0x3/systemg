@@ -61,71 +61,75 @@ An agent-friendly general process composer.
 $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
-System deployments: `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/systemg`, `/var/lib/systemg`. See [security guide](docs/docs/security.md).
+For system-wide deployments, `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/systemg`, and `/var/lib/systemg` — see the [security guide](docs/security.mdx).
 
 ### Usage
 
-| Command | Description |
-|---------|-------------|
-| `sysg start` | Start the default `systemg.yaml` in the foreground. |
-| `sysg start --config my.yaml` | Start a specific config file. |
-| `sysg start --daemonize` | Launch the supervisor in the background. |
-| `sysg status` | Check the running supervisor's service state. |
-| `sysg logs --service api` | Show a snapshot of a service's logs (add `--follow` to stay attached). |
-| `sysg restart --service api` | Restart one service without restarting everything. |
-
-> **Tip:** `--stderr` redirects stderr from supervised processes to stdout with a `[service_name:stderr]` prefix, which is useful for debugging and CI pipelines.
-
-By default, systemg captures service stdout/stderr through pipes and persists a local copy under its log directory. For high-output services, configure logging explicitly:
+Describe your system in a `systemg.yaml`:
 
 ```yaml
-logs:
-  sink: file
-  max_bytes: 10485760
-  max_files: 5
-status:
-  snapshot_mode: summary
-  snapshot_interval_secs: 5
+version: "1"
 services:
-  noisy_worker:
-    command: "worker --verbose"
-    logs:
-      sink: none
+  postgres:
+    command: "postgres -D ./data"
+    restart_policy: "always"
+
+  api:
+    command: "gunicorn app:application --bind 0.0.0.0:8000"
+    depends_on:
+      - postgres
+    restart_policy: "on-failure"
+    max_restarts: 5
+    backoff: "5s"
+    deployment:
+      strategy: "rolling"
+      health_check:
+        command: "curl --fail http://localhost:8000/health"
+
+  backup:
+    command: "sh backup.sh"
+    cron:
+      expression: "0 0 2 * * *"
 ```
 
-`sink: none` discards service output without creating systemg log-writer threads or files, which is useful when another production logging pipeline already collects process output.
+Then run it:
 
-`status.snapshot_mode: summary` keeps `sysg status` and `sysg inspect`
-inexpensive while still reading current persisted state such as cron history.
-Use `detailed` only when you need process tree and runtime command details for
-diagnostics. Add `--live` to `sysg status` or `sysg inspect` when a single
-request should force immediate runtime collection instead of the configured
-snapshot mode.
+```sh
+sysg start --daemonize      # start everything, in dependency order
+sysg status                 # see what's running
+sysg logs --service api -f  # follow one service's logs
+sysg restart --service api  # bounce one service, not the world
+```
 
----
+That's the whole workflow. Log rotation, output sinks, and status-snapshot tuning are covered in the [configuration docs](docs/how-it-works/configuration.mdx).
 
 ## Why systemg
 
-Compose programs into systems with explicit dependencies and health checks.
+You declare your processes, their dependencies, and their health checks in one file. systemg starts them in topological order, restarts them according to policy, and won't call a rolling deploy done until the new process passes its health check.
+
+It sits in the gap between systemd and Docker Compose. systemd wants to own the whole machine. Compose has the right composition model but makes you adopt containers to get it. Supervisor is close, but has no dependency graph and needs a Python runtime. systemg is one static binary that runs the same in a VM, a container, or on a Raspberry Pi — and everything it knows is readable back out through `sysg status` and `sysg inspect`, so scripts and coding agents can drive it as easily as you can.
 
 ### Features
 
-- **Dependencies** - Topological startup order with health-aware cascading
-- **Rolling Deployments** - Blue-green swaps with health validation
-- **Environment** - `.env` file propagation
-- **Webhooks** - Event notifications ([docs](docs/docs/webhooks.md))
-- **Cron** - Scheduled tasks with overlap detection
-- **Spawning** - Dynamic child process tracking
-- **OS Integration** - systemd/cgroups when available
-- **Single Binary** - No runtime dependencies
+- Dependency-ordered startup, gated on health checks
+- Rolling deployments: blue-green process swap, health-validated
+- Restart policies with backoff
+- Cron jobs with overlap detection
+- Lifecycle [hooks](docs/how-it-works/webhooks.mdx) on start/stop
+- `.env` file propagation
+- Tracks child processes your services spawn
+- CPU/RSS metrics built into `status` and `inspect`
+- [Privileged mode](docs/how-it-works/privileged-mode.mdx): per-service user/group, capabilities, rlimits, namespaces
+- Uses systemd/cgroups when present; needs neither
 
 ## How systemg Compares
 
-| Feature | systemg | systemd | Supervisor | Docker Compose |
+| | systemg | systemd | Supervisor | Docker Compose |
 |---------|---------|---------|------------|----------------|
 | **Focus** | Program composition | System management | Process supervision | Container orchestration |
-| **Configuration** | Declarative YAML | Unit files | INI files | YAML |
-| **Dependencies** | Topological with health checks | Complex unit chains | Manual ordering | Service links |
-| **Deployments** | Built-in rolling workflows | External tooling | Manual restarts | Recreate/rolling |
+| **Config** | YAML | Unit files | INI | YAML |
+| **Dependencies** | Topological, health-aware | Unit chains | Manual ordering | Service links |
+| **Deployments** | Built-in rolling | External tooling | Manual restarts | Recreate/rolling |
 | **Runtime deps** | None | DBus, journal | Python | Docker daemon |
-| **OS integration** | Optional | Required | None | Container runtime |
+
+Full documentation lives at [sysg.dev](https://sysg.dev).

@@ -19,10 +19,10 @@ After installation, systemg uses the following directory structure:
 ├── bin/
 │   └── sysg           # Symlink to active version
 ├── versions/
-│   ├── 0.15.5/
-│   │   └── sysg       # Version 0.15.5 binary
-│   ├── 0.15.6/
-│   │   └── sysg       # Version 0.15.6 binary
+│   ├── 0.50.0/
+│   │   └── sysg       # Version 0.50.0 binary
+│   ├── 0.51.0/
+│   │   └── sysg       # Version 0.51.0 binary
 │   └── ...
 └── active-version     # File containing active version number
 ```
@@ -39,10 +39,10 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 
 ```bash
 # Long form
-curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.15.6
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.51.0
 
 # Short form
-curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.15.6
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.51.0
 ```
 
 ### Switch to Already Installed Version
@@ -50,8 +50,8 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.15.6
 If a version is already installed, running the install command for that version will simply switch to it:
 
 ```bash
-# This will switch to 0.15.5 if already installed, or install it if not
-curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.15.5
+# This will switch to 0.50.0 if already installed, or install it if not
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.50.0
 ```
 
 ### Show Help
@@ -117,8 +117,8 @@ To test the installer locally:
 
 ```bash
 # Using a local script
-cat scripts/index.sh | sh -s -- --version 0.15.6
+cat scripts/index.sh | sh -s -- --version 0.51.0
 
 # Or directly
-sh scripts/index.sh --version 0.15.6
+sh scripts/index.sh --version 0.51.0
 ```
