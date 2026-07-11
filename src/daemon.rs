@@ -27,9 +27,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     config::{
-        BlueGreenDeploymentConfig, Config, EffectiveLogsConfig, EnvConfig,
-        HealthCheckConfig, HookAction, HookOutcome, HookStage, LogSink, ServiceConfig,
-        SkipConfig,
+        BlueGreenDeploymentConfig, Config, DependsOnCondition, EffectiveLogsConfig,
+        EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage, LogSink,
+        ServiceConfig, SkipConfig,
     },
     constants::{
         DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
@@ -2614,6 +2614,7 @@ impl Daemon {
 
         let order = self.config.service_start_order()?;
         let mut healthy_services = HashSet::new();
+        let mut completed_services = HashSet::new();
         let mut failed_services = HashSet::new();
         let mut first_error: Option<ProcessManagerError> = None;
 
@@ -2629,6 +2630,7 @@ impl Daemon {
                     service_name
                 );
                 healthy_services.insert(service_name.clone());
+                completed_services.insert(service_name.clone());
                 continue 'service_loop;
             }
 
@@ -2637,6 +2639,7 @@ impl Daemon {
                     SkipConfig::Flag(true) => {
                         info!("Skipping service '{service_name}' due to skip flag");
                         healthy_services.insert(service_name.clone());
+                        completed_services.insert(service_name.clone());
                         continue 'service_loop;
                     }
                     SkipConfig::Flag(false) => {
@@ -2651,6 +2654,7 @@ impl Daemon {
                                     "Skipping service '{service_name}' due to skip condition"
                                 );
                                 healthy_services.insert(service_name.clone());
+                                completed_services.insert(service_name.clone());
                                 continue 'service_loop;
                             }
                             Ok(false) => {
@@ -2675,32 +2679,51 @@ impl Daemon {
 
             if let Some(deps) = &service.depends_on {
                 for dep in deps {
-                    if failed_services.contains(dep) {
+                    let dep_name = dep.service();
+                    if failed_services.contains(dep_name) {
                         error!(
-                            "Skipping start of '{service_name}' because dependency '{dep}' failed."
+                            "Skipping start of '{service_name}' because dependency '{dep_name}' failed."
                         );
                         if first_error.is_none() {
                             first_error = Some(ProcessManagerError::DependencyFailed {
                                 service: service_name.clone(),
-                                dependency: dep.clone(),
+                                dependency: dep_name.to_string(),
                             });
                         }
                         failed_services.insert(service_name.clone());
                         continue 'service_loop;
                     }
 
-                    if !healthy_services.contains(dep) {
+                    if !healthy_services.contains(dep_name) {
                         error!(
-                            "Skipping start of '{service_name}' because dependency '{dep}' is not running."
+                            "Skipping start of '{service_name}' because dependency '{dep_name}' is not running."
                         );
                         if first_error.is_none() {
                             first_error = Some(ProcessManagerError::DependencyError {
                                 service: service_name.clone(),
-                                dependency: dep.clone(),
+                                dependency: dep_name.to_string(),
                             });
                         }
                         failed_services.insert(service_name.clone());
                         continue 'service_loop;
+                    }
+
+                    if dep.condition() == DependsOnCondition::Completed
+                        && !completed_services.contains(dep_name)
+                    {
+                        if let Err(err) =
+                            self.wait_for_dependency_completion(&service_name, dep_name)
+                        {
+                            error!(
+                                "Skipping start of '{service_name}' because dependency '{dep_name}' did not complete: {err}"
+                            );
+                            if first_error.is_none() {
+                                first_error = Some(err);
+                            }
+                            failed_services.insert(service_name.clone());
+                            continue 'service_loop;
+                        }
+                        completed_services.insert(dep_name.to_string());
                     }
                 }
             }
@@ -2712,6 +2735,7 @@ impl Daemon {
                 Ok(ServiceReadyState::CompletedSuccess) => {
                     info!("Service '{service_name}' completed successfully.");
                     healthy_services.insert(service_name.clone());
+                    completed_services.insert(service_name.clone());
                 }
                 Err(err) => {
                     error!("Failed to start service '{service_name}': {err}");
@@ -2858,6 +2882,80 @@ impl Daemon {
         })
     }
 
+    /// Blocks until a `condition: completed` dependency exits cleanly.
+    ///
+    /// Polls the dependency's process without a timeout — builds and migrations can
+    /// legitimately run for minutes. Returns [`ProcessManagerError::DependencyFailed`]
+    /// if the dependency exits with a non-zero status or was stopped.
+    fn wait_for_dependency_completion(
+        &self,
+        service_name: &str,
+        dep: &str,
+    ) -> Result<(), ProcessManagerError> {
+        info!("Waiting for dependency '{dep}' of '{service_name}' to complete");
+
+        loop {
+            match Self::probe_service_state(dep, &self.processes, &self.pid_file)? {
+                ServiceProbe::Running => thread::sleep(SERVICE_POLL_INTERVAL),
+                ServiceProbe::Exited(status) => {
+                    if status.success() {
+                        info!("Dependency '{dep}' completed successfully");
+                        self.update_state(
+                            dep,
+                            ServiceLifecycleStatus::ExitedSuccessfully,
+                            None,
+                            Some(0),
+                            None,
+                        )?;
+                        return Ok(());
+                    }
+
+                    #[cfg(unix)]
+                    let signal = status.signal();
+                    #[cfg(not(unix))]
+                    let signal: Option<i32> = None;
+                    self.update_state(
+                        dep,
+                        ServiceLifecycleStatus::ExitedWithError,
+                        None,
+                        status.code(),
+                        signal,
+                    )?;
+
+                    return Err(ProcessManagerError::DependencyFailed {
+                        service: service_name.to_string(),
+                        dependency: dep.to_string(),
+                    });
+                }
+                ServiceProbe::NotStarted => {
+                    let status = self.get_service_hash(dep).and_then(|hash| {
+                        self.state_file
+                            .lock()
+                            .ok()
+                            .and_then(|state| state.get(&hash).map(|entry| entry.status))
+                    });
+
+                    match status {
+                        Some(
+                            ServiceLifecycleStatus::ExitedSuccessfully
+                            | ServiceLifecycleStatus::Skipped,
+                        ) => return Ok(()),
+                        Some(
+                            ServiceLifecycleStatus::ExitedWithError
+                            | ServiceLifecycleStatus::Stopped,
+                        ) => {
+                            return Err(ProcessManagerError::DependencyFailed {
+                                service: service_name.to_string(),
+                                dependency: dep.to_string(),
+                            });
+                        }
+                        _ => thread::sleep(SERVICE_POLL_INTERVAL),
+                    }
+                }
+            }
+        }
+    }
+
     /// Attempts to determine the current state of a tracked service without blocking.
     ///
     /// Uses `try_wait` to check the underlying child process and updates the PID file if the
@@ -2921,7 +3019,20 @@ impl Daemon {
                     "Skipping cron-managed service '{}' during restart; scheduled execution will launch it",
                     service_name
                 );
+                completed_services.insert(service_name.clone());
                 continue;
+            }
+
+            if let Some(deps) = &service.depends_on {
+                for dep in deps {
+                    let dep_name = dep.service();
+                    if dep.condition() == DependsOnCondition::Completed
+                        && !completed_services.contains(dep_name)
+                    {
+                        self.wait_for_dependency_completion(&service_name, dep_name)?;
+                        completed_services.insert(dep_name.to_string());
+                    }
+                }
             }
 
             restarted_services.push(service_name.clone());
@@ -4966,7 +5077,11 @@ mod tests {
             depends_on: if deps.is_empty() {
                 None
             } else {
-                Some(deps.iter().map(|d| d.to_string()).collect())
+                Some(
+                    deps.iter()
+                        .map(|d| crate::config::DependsOn::from(*d))
+                        .collect(),
+                )
             },
             deployment: None,
             hooks: None,

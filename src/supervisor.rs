@@ -2765,7 +2765,12 @@ mod tests {
             depends_on: if depends_on.is_empty() {
                 None
             } else {
-                Some(depends_on.iter().map(|dep| dep.to_string()).collect())
+                Some(
+                    depends_on
+                        .iter()
+                        .map(|dep| crate::config::DependsOn::from(*dep))
+                        .collect(),
+                )
             },
             ..ServiceConfig::default()
         }

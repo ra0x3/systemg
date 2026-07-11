@@ -82,6 +82,19 @@ pub enum ProcessManagerError {
         cycle: String,
     },
 
+    /// Error when a `condition: completed` dependency can never complete.
+    #[error(
+        "Service '{service}' waits for '{dependency}' to complete, but '{dependency}' has restart_policy '{policy}' and never exits for good"
+    )]
+    DependencyNeverCompletes {
+        /// The service declaring the dependency.
+        service: String,
+        /// The dependency that cannot complete.
+        dependency: String,
+        /// The dependency's restart policy.
+        policy: String,
+    },
+
     /// Error for poisoned mutex.
     #[error("Mutex is poisoned: {0}")]
     MutexPoisonError(String),

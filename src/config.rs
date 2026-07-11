@@ -518,6 +518,64 @@ pub enum TerminationPolicy {
     Reparent,
 }
 
+/// Readiness condition a dependency must reach before dependents start.
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DependsOnCondition {
+    /// Dependency is running (and passed its health check, if any).
+    #[default]
+    Started,
+    /// Dependency exited successfully before dependents start.
+    Completed,
+}
+
+/// A single `depends_on` entry: a bare service name or a detailed form
+/// with an explicit readiness condition.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(untagged)]
+pub enum DependsOn {
+    /// Bare service name; waits for the dependency to start.
+    Name(String),
+    /// Detailed form selecting how long to wait for the dependency.
+    Detailed {
+        /// Name of the dependency service.
+        service: String,
+        /// Condition the dependency must reach.
+        #[serde(default)]
+        condition: DependsOnCondition,
+    },
+}
+
+impl DependsOn {
+    /// Name of the dependency service.
+    pub fn service(&self) -> &str {
+        match self {
+            DependsOn::Name(name) => name,
+            DependsOn::Detailed { service, .. } => service,
+        }
+    }
+
+    /// Condition the dependency must reach before dependents start.
+    pub fn condition(&self) -> DependsOnCondition {
+        match self {
+            DependsOn::Name(_) => DependsOnCondition::Started,
+            DependsOn::Detailed { condition, .. } => *condition,
+        }
+    }
+}
+
+impl From<&str> for DependsOn {
+    fn from(name: &str) -> Self {
+        DependsOn::Name(name.to_string())
+    }
+}
+
+impl From<String> for DependsOn {
+    fn from(name: String) -> Self {
+        DependsOn::Name(name)
+    }
+}
+
 /// Configuration for an individual service.
 #[derive(Debug, Default, Deserialize, Clone, serde::Serialize)]
 pub struct ServiceConfig {
@@ -545,7 +603,7 @@ pub struct ServiceConfig {
     /// Maximum number of restart attempts before giving up (None = unlimited).
     pub max_restarts: Option<u32>,
     /// List of services that must start before this service.
-    pub depends_on: Option<Vec<String>>,
+    pub depends_on: Option<Vec<DependsOn>>,
     /// Deployment strategy configuration.
     pub deployment: Option<DeploymentConfig>,
     /// Hooks for lifecycle events (e.g., on_start, on_error).
@@ -1097,14 +1155,29 @@ impl Config {
         for (service, cfg) in &self.services {
             if let Some(deps) = &cfg.depends_on {
                 for dep in deps {
-                    if !self.services.contains_key(dep) {
+                    let dep_name = dep.service();
+                    let Some(dep_cfg) = self.services.get(dep_name) else {
                         return Err(ProcessManagerError::UnknownDependency {
                             service: service.clone(),
-                            dependency: dep.clone(),
+                            dependency: dep_name.to_string(),
+                        });
+                    };
+
+                    if dep.condition() == DependsOnCondition::Completed
+                        && let Some(policy @ "always") = dep_cfg.restart_policy.as_deref()
+                    {
+                        return Err(ProcessManagerError::DependencyNeverCompletes {
+                            service: service.clone(),
+                            dependency: dep_name.to_string(),
+                            policy: policy.to_string(),
                         });
                     }
+
                     *indegree.get_mut(service).expect("service must exist") += 1;
-                    graph.entry(dep.clone()).or_default().push(service.clone());
+                    graph
+                        .entry(dep_name.to_string())
+                        .or_default()
+                        .push(service.clone());
                 }
             }
         }
@@ -1154,7 +1227,9 @@ impl Config {
         for (service, cfg) in &self.services {
             if let Some(deps) = &cfg.depends_on {
                 for dep in deps {
-                    map.entry(dep.clone()).or_default().push(service.clone());
+                    map.entry(dep.service().to_string())
+                        .or_default()
+                        .push(service.clone());
                 }
             }
         }
@@ -1619,7 +1694,7 @@ services:
             backoff: None,
             max_restarts: None,
             depends_on: depends_on
-                .map(|deps| deps.into_iter().map(String::from).collect()),
+                .map(|deps| deps.into_iter().map(DependsOn::from).collect()),
             deployment: None,
             hooks: None,
             cron: None,
