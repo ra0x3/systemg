@@ -1,0 +1,150 @@
+---
+title: Projects
+---
+
+# Projects
+
+A **project** is a durable namespace that groups the services declared in one
+config. Its identity is the `project.id` field in your manifest. Because a
+single resident supervisor can host many projects at once, projects are how
+systemg keeps unrelated (or related) workloads cleanly separated inside one
+running daemon.
+
+<Info>
+  One supervisor, many projects. You can run a database stack, a web API, and a
+  batch of cron units as three independent projects under the **same** systemg
+  process. They share the runtime but keep separate state, logs, and status —
+  and you target each one by id with `-p/--project`.
+</Info>
+
+## Declaring a project
+
+Set a stable id in your config:
+
+```yaml
+project:
+  id: arbitration
+  name: Arbitration
+```
+
+Or the shorthand, which sets both `id` and `name`:
+
+```yaml
+project: arbitration
+```
+
+See [Configuration](/how-it-works/configuration) for the full `project` block.
+
+<Warning>
+  Treat `project.id` as durable runtime identity. Changing it does not rename a
+  project — it creates a **new** namespace, and the old one's running services
+  become orphaned state (visible under `sysg status --all`). Rename freely with
+  `name`; never rename by editing `id`.
+</Warning>
+
+<Note>
+  Configs without a `project` block still load. systemg derives a legacy id from
+  the config directory so existing deployments keep working, but explicit
+  `project.id` values are strongly recommended once more than one project shares
+  a supervisor.
+</Note>
+
+## `-p/--project` vs `-c/--config`
+
+These two flags answer different questions, and knowing which to reach for is
+the single most useful thing about projects.
+
+| Flag | What it does |
+|------|--------------|
+| `-c` / `--config` | **Loads and registers** a project from a config file on disk. Use it the first time you start a project, or when you want to reload the manifest from a specific path. |
+| `-p` / `--project` | **Targets a project already registered** with the running supervisor, by its `project.id`. No file path required. |
+
+The mental model: `-c` is *bring this project into the supervisor from disk*;
+`-p` is *act on a project the supervisor already knows about*.
+
+```sh
+# First start: register the project from its config
+$ sysg start -c services/arbitration.yaml
+
+# From now on, target it by id — no config path needed
+$ sysg status -p arbitration
+$ sysg logs -p arbitration -s worker
+$ sysg restart -p arbitration
+$ sysg stop -p arbitration
+```
+
+<Info>
+  Every registered project stores the config path it was started from. That's
+  why `-p` alone is enough for later commands — systemg looks up the project's
+  recorded manifest for you. This is what makes multi-project workflows
+  ergonomic: you register once with `-c`, then drive everything by `-p`.
+</Info>
+
+## How `-p` relates to `sysg restart`
+
+`restart -p <id>` is where the stored config path pays off:
+
+```sh
+$ sysg restart -p arbitration
+```
+
+When `--config` is omitted, `restart --project` reuses the config path the
+supervisor already recorded for that project and reloads it from disk. Manifest
+changes are applied on reload:
+
+- services added since the last load **start**
+- services removed from the manifest **stop**
+- changed commands **take effect**
+
+You do not need to pass `-c` again once the project has a known config path.
+Pass `-c` explicitly only when you want to reload from a *different* file.
+
+<Warning>
+  If the config you point at declares a different `project.id` than the one you
+  target, systemg refuses the operation rather than silently switching
+  namespaces. The flag, the config, and any service selector prefix must all
+  agree on the project.
+</Warning>
+
+## Qualified service selectors
+
+Anywhere you name a service, you can qualify it with its project using
+`project_id/service_name`:
+
+```sh
+$ sysg restart arbitration/worker
+$ sysg logs gamecast-dev/api
+```
+
+This is equivalent to passing `-p` plus the bare service name. If you supply
+both a selector prefix and `-p`, they must match.
+
+<Warning>
+  A mismatch is an error, not a best-effort guess:
+
+  ```
+  project flag 'arbitration' does not match service selector project 'gamecast-dev'
+  ```
+
+  systemg would rather stop than act on the wrong project.
+</Warning>
+
+<Info>
+  When a service name is unambiguous — it exists in exactly one registered
+  project — you can drop the project qualifier entirely and systemg resolves it
+  for you. If the same service name lives in **multiple** projects, systemg
+  refuses and asks you to disambiguate with `-p`.
+</Info>
+
+## `-p` per command
+
+`-p/--project` is accepted across the commands that act on running projects:
+
+| Command | Effect of `-p <id>` |
+|---------|---------------------|
+| `start` | Start (or start a single service within) the named project. |
+| `stop` | Stop the named project's services. Use `--supervisor` to shut everything down. |
+| `restart` | Reload the project's stored manifest and restart its services. |
+| `status` | Scope the status table to one project. |
+| `logs` | Filter tailed logs to one project. |
+| `inspect` | Inspect a service within a specific project. |

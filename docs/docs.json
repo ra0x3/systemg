@@ -79,6 +79,7 @@
         "pages": [
           "how-it-works/index",
           "how-it-works/configuration",
+          "how-it-works/projects",
           "how-it-works/cron",
           "how-it-works/webhooks",
           "how-it-works/state",
