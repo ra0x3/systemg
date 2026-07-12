@@ -1330,6 +1330,9 @@ struct DaemonContext {
     manual_stop_flags: Arc<Mutex<HashSet<String>>>,
     /// Services whose automatic restarts are temporarily suppressed.
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
+    /// Services with a reconcile-triggered restart currently in flight, so the
+    /// monitor does not spawn overlapping restart threads for the same unit.
+    restart_in_flight: Arc<Mutex<HashSet<String>>>,
     /// Flag indicating whether the monitoring loop should remain active.
     running: Arc<AtomicBool>,
     /// Pipe stderr to stdout.
@@ -1381,6 +1384,13 @@ impl DaemonContext {
         &self,
     ) -> Result<OrderedLockGuard<'_, HashSet<String>>, ProcessManagerError> {
         acquire_lock(&self.restart_suppressed, DaemonLock::RestartSuppressed)
+    }
+
+    /// Acquires the restart_in_flight lock with ordering enforcement.
+    fn lock_restart_in_flight(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashSet<String>>, ProcessManagerError> {
+        acquire_lock(&self.restart_in_flight, DaemonLock::RestartInFlight)
     }
 
     /// Creates a cancellation token for a Linux service thread.
@@ -1436,6 +1446,8 @@ pub struct Daemon {
     manual_stop_flags: Arc<Mutex<HashSet<String>>>,
     /// Suppressed auto-restarts.
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
+    /// Reconcile-triggered restarts currently in flight.
+    restart_in_flight: Arc<Mutex<HashSet<String>>>,
     /// Linux thread cancellation.
     #[cfg(target_os = "linux")]
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -1456,6 +1468,7 @@ impl Daemon {
             restart_counts: Arc::clone(&self.restart_counts),
             manual_stop_flags: Arc::clone(&self.manual_stop_flags),
             restart_suppressed: Arc::clone(&self.restart_suppressed),
+            restart_in_flight: Arc::clone(&self.restart_in_flight),
             running: Arc::clone(&self.running),
             pipe_stderr: Arc::clone(&self.pipe_stderr),
             #[cfg(target_os = "linux")]
@@ -2022,6 +2035,7 @@ impl Daemon {
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
             manual_stop_flags: Arc::new(Mutex::new(HashSet::new())),
             restart_suppressed: Arc::new(Mutex::new(HashSet::new())),
+            restart_in_flight: Arc::new(Mutex::new(HashSet::new())),
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             pipe_stderr: Arc::new(AtomicBool::new(false)),
@@ -4776,6 +4790,9 @@ impl Daemon {
                 debug!("No active services detected in monitor loop.");
             }
 
+            let mut reconciled = Self::reconcile_lost_services(&ctx);
+            restarted_services.append(&mut reconciled);
+
             for (name, recorded_pgid) in restarted_services {
                 Self::reap_orphaned_group_before_restart(&name, recorded_pgid);
                 if let Some(service) = ctx.config.services.get(&name) {
@@ -4787,6 +4804,75 @@ impl Daemon {
         }
 
         debug!("Monitor loop terminating.");
+    }
+
+    /// Restarts services that died during startup and were reaped out of the
+    /// process map before the monitor could observe the exit.
+    ///
+    /// A service that fails to become ready (e.g. a port conflict at boot) is
+    /// removed from `processes` by the readiness probe, so `monitor_loop`'s
+    /// `try_wait` sweep never sees it crash. This reconciler re-detects such
+    /// units — configured, long-running, absent from the process map, not
+    /// manually stopped or suppressed — and feeds them back into the restart
+    /// path when their policy allows. A non-empty `restart_counts` entry acts as
+    /// the in-flight guard so a restart is only triggered once per failure.
+    fn reconcile_lost_services(
+        ctx: &DaemonContext,
+    ) -> Vec<(String, Option<libc::pid_t>)> {
+        let mut to_restart = Vec::new();
+
+        let tracked: HashSet<String> = match ctx.lock_processes() {
+            Ok(guard) => guard.keys().cloned().collect(),
+            Err(_) => return to_restart,
+        };
+
+        for (name, service) in &ctx.config.services {
+            if tracked.contains(name) {
+                continue;
+            }
+            if !Self::should_verify_service(service) {
+                continue;
+            }
+
+            let policy = service.restart_policy.as_deref();
+            if policy != Some("always") && policy != Some("on-failure") {
+                continue;
+            }
+
+            let manually_stopped = ctx
+                .lock_manual_stop_flags()
+                .map(|guard| guard.contains(name))
+                .unwrap_or(false);
+            if manually_stopped {
+                continue;
+            }
+
+            let suppressed = ctx
+                .lock_restart_suppressed()
+                .map(|guard| guard.contains(name))
+                .unwrap_or(false);
+            if suppressed {
+                continue;
+            }
+
+            let in_flight = ctx
+                .lock_restart_in_flight()
+                .map(|guard| guard.contains(name))
+                .unwrap_or(true);
+            if in_flight {
+                continue;
+            }
+
+            if let Ok(mut guard) = ctx.lock_restart_in_flight() {
+                guard.insert(name.clone());
+            }
+            warn!(
+                "Service '{name}' is not running and was not manually stopped; restarting per its restart policy."
+            );
+            to_restart.push((name.clone(), None));
+        }
+
+        to_restart
     }
 
     /// Handles restarting a service if its restart policy allows.
@@ -4806,6 +4892,9 @@ impl Daemon {
                 error!(
                     "Service '{name}' has reached maximum restart attempts ({max}). Giving up."
                 );
+                if let Ok(mut guard) = ctx.lock_restart_in_flight() {
+                    guard.remove(&name);
+                }
                 return;
             }
         }
@@ -4819,6 +4908,7 @@ impl Daemon {
             .unwrap_or(5);
 
         let _ = thread::spawn(move || {
+            let _in_flight = InFlightGuard::new(&ctx.restart_in_flight, name.clone());
             warn!("Restarting '{name}' after {backoff} seconds...");
             thread::sleep(Duration::from_secs(backoff));
 
@@ -5036,6 +5126,30 @@ impl Daemon {
                 }
             }
         });
+    }
+}
+
+/// Clears a service's `restart_in_flight` entry when the restart thread ends,
+/// on every exit path including early returns.
+struct InFlightGuard {
+    set: Arc<Mutex<HashSet<String>>>,
+    name: String,
+}
+
+impl InFlightGuard {
+    fn new(set: &Arc<Mutex<HashSet<String>>>, name: String) -> Self {
+        Self {
+            set: Arc::clone(set),
+            name,
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.set.lock() {
+            guard.remove(&self.name);
+        }
     }
 }
 

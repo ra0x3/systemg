@@ -962,7 +962,13 @@ impl Supervisor {
                         }
                     }
                 }
-                self.daemon.start_service(&service_name, service_config)?;
+                if let Err(err) = self.daemon.start_service(&service_name, service_config)
+                {
+                    error!(
+                        "Service '{service_name}' failed to start during boot: {err}. Continuing; monitor will retry per its restart policy."
+                    );
+                    continue;
+                }
 
                 if let Some(ref spawn) = service_config.spawn
                     && let Some(SpawnMode::Dynamic) = spawn.mode

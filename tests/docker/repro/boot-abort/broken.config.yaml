@@ -1,0 +1,8 @@
+version: "1"
+project:
+  id: boot-abort-broken
+services:
+  needs_ghost:
+    command: "sleep 3000"
+    depends_on:
+      - "does_not_exist"

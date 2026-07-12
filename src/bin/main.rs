@@ -3422,15 +3422,38 @@ fn start_supervisor_daemon(
     service: Option<String>,
     pipe_stderr: bool,
 ) -> Result<(), Box<dyn Error>> {
-    daemonize_systemg()?;
-
-    let mut supervisor = Supervisor::new(config_path, false, service)?;
-    supervisor.set_pipe_stderr(pipe_stderr);
-    if let Err(err) = supervisor.run() {
-        error!("Supervisor exited with error: {err}");
+    let child_pid = unsafe { libc::fork() };
+    if child_pid < 0 {
+        return Err(io::Error::last_os_error().into());
     }
 
-    Ok(())
+    if child_pid == 0 {
+        detach_daemon()?;
+
+        let mut supervisor = match Supervisor::new(config_path, false, service) {
+            Ok(supervisor) => supervisor,
+            Err(err) => {
+                error!("Supervisor failed to initialize: {err}");
+                process::exit(1);
+            }
+        };
+        supervisor.set_pipe_stderr(pipe_stderr);
+        if let Err(err) = supervisor.run() {
+            error!("Supervisor exited with error: {err}");
+            process::exit(1);
+        }
+        process::exit(0);
+    }
+
+    with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid)).map_err(
+        |err| {
+            io::Error::other(format!(
+                "supervisor failed to start; see {}: {err}",
+                supervisor_log_path().display()
+            ))
+            .into()
+        },
+    )
 }
 
 /// Builds daemon.
@@ -3982,21 +4005,12 @@ fn supervisor_error_is_protocol_mismatch(message: &str) -> bool {
     .any(|needle| message.contains(needle))
 }
 
-/// Handles daemonize systemg.
-fn daemonize_systemg() -> std::io::Result<()> {
-    if unsafe { libc::fork() } > 0 {
-        std::process::exit(0);
-    }
-
+/// Detaches the current (already-forked) process into a daemon: new session,
+/// root cwd, and stdio pointed at /dev/null. Does not fork again, so the caller's
+/// child PID stays the supervisor's PID and boot-failure detection stays correct.
+fn detach_daemon() -> std::io::Result<()> {
     unsafe {
         libc::setsid();
-    }
-
-    if unsafe { libc::fork() } > 0 {
-        std::process::exit(0);
-    }
-
-    unsafe {
         libc::setpgid(0, 0);
     }
 

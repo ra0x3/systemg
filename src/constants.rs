@@ -67,8 +67,12 @@ pub enum DaemonLock {
     ManualStopFlags = 5,
 
     /// Lock for tracking services with suppressed restarts.
-    /// Priority: 6 (must be acquired last)
+    /// Priority: 6
     RestartSuppressed = 6,
+
+    /// Lock for tracking services with an in-flight reconcile-triggered restart.
+    /// Priority: 7 (must be acquired last)
+    RestartInFlight = 7,
 }
 
 impl DaemonLock {
@@ -87,6 +91,7 @@ impl DaemonLock {
             Self::RestartCounts => "restart_counts",
             Self::ManualStopFlags => "manual_stop_flags",
             Self::RestartSuppressed => "restart_suppressed",
+            Self::RestartInFlight => "restart_in_flight",
         }
     }
 

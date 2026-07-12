@@ -1,0 +1,11 @@
+version: "1"
+project:
+  id: boot-abort-repro
+services:
+  good_service:
+    command: "sleep 3000"
+    restart_policy: "always"
+  port_hog:
+    command: "python3 -c 'import socket,time; s=socket.socket(); s.bind((\"127.0.0.1\",8099)); s.listen(); time.sleep(3000)'"
+    restart_policy: "always"
+    backoff: "2s"
