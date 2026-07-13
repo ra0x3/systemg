@@ -687,14 +687,39 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           PUBLIC_BASE_URL="https://${S3_BUCKET}"
 
+          # Objects fall into two classes with opposite caching needs, and uploading
+          # them without any Cache-Control leaves CloudFront to apply its 24h default
+          # TTL to everything -- which is how a stale `latest/VERSION` gets served for
+          # a full day after a release.
+          #
+          #   MUTABLE   pointers that change every release (latest/*, the install
+          #             script). Must revalidate against the origin before serving, or
+          #             `curl | sh` hands users the previous release's binary.
+          #   IMMUTABLE version-pinned artifacts that never change once published.
+          #             Cache them at the edge forever; they never need invalidating.
+          CACHE_MUTABLE="no-cache, max-age=0, must-revalidate"
+          CACHE_IMMUTABLE="public, max-age=31536000, immutable"
+
+          # An empty distribution ID silently skipped invalidation, which is what kept
+          # the stale-TTL bug hidden. Correctness no longer depends on invalidation
+          # running, but a release that cannot invalidate is still a release that
+          # serves stale bytes at the edge for longer than it should. Fail loudly.
+          if [ -z "${CLOUDFRONT_DISTRIBUTION_ID:-}" ]; then
+            echo "CLOUDFRONT_DISTRIBUTION_ID is empty; refusing to publish a release that cannot invalidate the CDN." >&2
+            exit 1
+          fi
+
           aws s3 cp scripts/index.sh "s3://${S3_BUCKET}/index.sh" \
-            --content-type "text/x-shellscript"
+            --content-type "text/x-shellscript" \
+            --cache-control "$CACHE_MUTABLE"
           aws s3 cp scripts/index.sh "s3://${S3_BUCKET}/index.html" \
-            --content-type "text/x-shellscript"
+            --content-type "text/x-shellscript" \
+            --cache-control "$CACHE_MUTABLE"
 
           printf '%s\n' "$VERSION" > VERSION
           aws s3 cp VERSION "s3://${S3_BUCKET}/latest/VERSION" \
-            --content-type "text/plain"
+            --content-type "text/plain" \
+            --cache-control "$CACHE_MUTABLE"
 
           # Get release ID from tag (works for both auto-release and manual releases)
           if [ -n "${{ github.event.release.id }}" ]; then
@@ -713,11 +738,18 @@ jobs:
             echo "Downloading $name from $url ..."
             curl -sSL -H "Authorization: token $GITHUB_TOKEN" -o "$name" "$url"
 
+            # The version-pinned key never changes once published, so it can be cached
+            # forever. The same bytes under latest/ are a moving pointer and must be
+            # revalidated, otherwise the edge keeps serving the previous release.
             echo "Uploading $name to s3://${S3_BUCKET}/${name} ..."
-            aws s3 cp "$name" "s3://${S3_BUCKET}/${name}" --content-type "application/gzip"
+            aws s3 cp "$name" "s3://${S3_BUCKET}/${name}" \
+              --content-type "application/gzip" \
+              --cache-control "$CACHE_IMMUTABLE"
 
             echo "Uploading $name to s3://${S3_BUCKET}/latest/${name} ..."
-            aws s3 cp "$name" "s3://${S3_BUCKET}/latest/${name}" --content-type "application/gzip"
+            aws s3 cp "$name" "s3://${S3_BUCKET}/latest/${name}" \
+              --content-type "application/gzip" \
+              --cache-control "$CACHE_MUTABLE"
 
             echo "Uploaded $name successfully"
           done < <(
@@ -727,20 +759,38 @@ jobs:
             | jq -r '.[] | select(.name | endswith(".tar.gz")) | "\(.browser_download_url) \(.name)"'
           )
 
-          if [ -n "${CLOUDFRONT_DISTRIBUTION_ID:-}" ]; then
-            invalidation_id="$(aws cloudfront create-invalidation \
-              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-              --paths "/" "/index.sh" "/index.html" "/latest/*" "/sysg-${VERSION}-*.tar.gz" \
-              --query 'Invalidation.Id' \
-              --output text)"
-            aws cloudfront wait invalidation-completed \
-              --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-              --id "$invalidation_id"
+          invalidation_id="$(aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths "/" "/index.sh" "/index.html" "/latest/*" "/sysg-${VERSION}-*.tar.gz" \
+            --query 'Invalidation.Id' \
+            --output text)"
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --id "$invalidation_id"
+
+          # Check the origin first. This asserts what we actually published, and
+          # cannot be fooled by whatever an edge happens to be holding.
+          origin_version="$(aws s3 cp "s3://${S3_BUCKET}/latest/VERSION" - | sed 's/^v//' | awk 'NR==1 {print $1; exit}')"
+          if [ "$origin_version" != "$VERSION" ]; then
+            echo "S3 origin version mismatch: got '$origin_version', expected '$VERSION'" >&2
+            exit 1
           fi
 
-          public_version="$(curl -fsSL "${PUBLIC_BASE_URL}/latest/VERSION" | sed 's/^v//' | awk 'NR==1 {print $1; exit}')"
+          # Then confirm the edge caught up. Invalidation completing does not guarantee
+          # every PoP has converged, so retry rather than failing the release on a
+          # single unlucky read.
+          public_version=""
+          for attempt in $(seq 1 10); do
+            public_version="$(curl -fsSL -H 'Cache-Control: no-cache' "${PUBLIC_BASE_URL}/latest/VERSION" | sed 's/^v//' | awk 'NR==1 {print $1; exit}')"
+            if [ "$public_version" = "$VERSION" ]; then
+              break
+            fi
+            echo "Attempt ${attempt}: CDN still serving '${public_version}', want '${VERSION}'; retrying ..."
+            sleep 15
+          done
+
           if [ "$public_version" != "$VERSION" ]; then
-            echo "Public latest version mismatch: got '$public_version', expected '$VERSION'" >&2
+            echo "Public latest version mismatch after invalidation: got '$public_version', expected '$VERSION'" >&2
             exit 1
           fi
 
