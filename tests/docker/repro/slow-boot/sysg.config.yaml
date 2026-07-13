@@ -1,0 +1,34 @@
+version: "1"
+project:
+  id: slow-boot-repro
+services:
+  # Mirrors gamecast's `gamecast_build`: a oneshot barrier every later service
+  # waits on. 6s stands in for a real `build.sh`.
+  slow_build:
+    command: "sh /repro/build.sh"
+    restart_policy: "never"
+
+  # Mirrors gamecast's `gamecast_api`:
+  #   * depends_on the build barrier (condition: completed)
+  #   * ALSO re-runs the same build via pre_start -> the build runs TWICE
+  #   * health_check against a port the service never opens, so the check
+  #     exhausts its full retry budget before boot can finish
+  #   * grace_period tacked on after that
+  #
+  # The service itself is a plain `sleep`: it never binds 8099, so the health
+  # check can only fail. This isolates BOOT LATENCY from the double-fork
+  # supervision bug -- nothing here double-forks.
+  api:
+    command: "sleep 3000"
+    restart_policy: "always"
+    depends_on:
+      - service: "slow_build"
+        condition: "completed"
+    deployment:
+      strategy: "immediate"
+      pre_start: "sh /repro/build.sh"
+      health_check:
+        url: "http://127.0.0.1:8099/health"
+        timeout: "20s"
+        retries: 3
+      grace_period: "3s"

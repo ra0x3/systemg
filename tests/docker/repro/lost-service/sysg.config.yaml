@@ -1,0 +1,18 @@
+version: "1"
+project:
+  id: lost-service-repro
+services:
+  # Double-forks: the command sysg spawns exits immediately, but a grandchild
+  # keeps running and holds the port. sysg records the grandchild's PID in the
+  # pid file (via the wrapper), so the Child handle in `processes` refers to a
+  # process that is already reaped, while the unit is nominally "up".
+  #
+  # Killing the grandchild leaves the daemon with a stale handle it never
+  # re-probes -> the unit sits in `Lost` forever with no restart.
+  daemonizer:
+    command: "python3 /repro/daemonize.py 8099"
+    restart_policy: "always"
+    backoff: "1s"
+  anchor:
+    command: "sleep 3000"
+    restart_policy: "always"
