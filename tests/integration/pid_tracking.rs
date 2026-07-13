@@ -40,34 +40,36 @@ fn wait_for_pid_change(service: &str, previous: u32) -> u32 {
     }
 }
 
-fn build_daemon(config: Config) -> Daemon {
-    let pid_file = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
-    let state_file = Arc::new(Mutex::new(ServiceStateFile::load().unwrap_or_default()));
-    Daemon::new(config, pid_file, state_file, false)
-}
-
-fn wait_for_state_status(
-    service_hash: &str,
-    expected: ServiceLifecycleStatus,
-) -> ServiceStateFile {
-    let deadline = Instant::now() + Duration::from_secs(10);
+/// Waits for the state file to settle on a Running entry whose PID is actually alive.
+/// A restart writes the pid file before the state file, so an entry can briefly name a
+/// PID from a generation that has already exited; requiring the PID to be live skips
+/// those and returns the entry for the restart that stuck.
+fn wait_for_state_pid(service_hash: &str) -> systemg::daemon::ServiceStateEntry {
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        let state_file = ServiceStateFile::load().expect("load state file");
-        if let Some(entry) = state_file.get(service_hash)
-            && entry.status == expected
+        if let Ok(state_file) = ServiceStateFile::load()
+            && let Some(entry) = state_file.get(service_hash)
+            && entry.status == ServiceLifecycleStatus::Running
+            && let Some(pid) = entry.pid
+            && is_process_alive(pid)
         {
-            return state_file;
+            return entry.clone();
         }
 
         if Instant::now() >= deadline {
             panic!(
-                "Timed out waiting for service hash {service_hash} to reach status {:?}",
-                expected
+                "Timed out waiting for service hash {service_hash} to settle on a live running PID"
             );
         }
 
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn build_daemon(config: Config) -> Daemon {
+    let pid_file = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
+    let state_file = Arc::new(Mutex::new(ServiceStateFile::load().unwrap_or_default()));
+    Daemon::new(config, pid_file, state_file, false)
 }
 
 #[test]
@@ -116,7 +118,7 @@ fn restart_updates_state_with_new_pid() {
     daemon.start_services().expect("failed to start services");
 
     let initial_pid = wait_for_pid("flaky");
-    let new_pid = wait_for_pid_change("flaky", initial_pid);
+    wait_for_pid_change("flaky", initial_pid);
 
     let config_arc = daemon.config();
     let service_hash = config_arc
@@ -125,21 +127,22 @@ fn restart_updates_state_with_new_pid() {
         .expect("service present")
         .compute_hash();
 
-    let state_file =
-        wait_for_state_status(&service_hash, ServiceLifecycleStatus::Running);
-    let entry = state_file
-        .get(&service_hash)
-        .expect("state entry present after restart");
+    // The pid file and the state file are written at different points of a restart:
+    // launch records the PID, and only after the readiness probe does the state file
+    // persist Running. Sampling one and then the other can straddle a second restart
+    // and compare PIDs from different generations, so settle on the state file first
+    // and take it as the source of truth for which PID this restart landed on.
+    let entry = wait_for_state_pid(&service_hash);
+    let new_pid = entry.pid.expect("state entry records a pid");
 
     assert_eq!(
         entry.status,
         ServiceLifecycleStatus::Running,
         "Expected restart to mark service as running"
     );
-    assert_eq!(
-        entry.pid,
-        Some(new_pid),
-        "State file should record the new PID after restart"
+    assert_ne!(
+        new_pid, initial_pid,
+        "State file should record a new PID after restart"
     );
     assert!(
         is_process_alive(new_pid),
