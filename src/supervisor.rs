@@ -63,6 +63,17 @@ pub enum SupervisorError {
     Logs(#[from] LogsManagerError),
 }
 
+/// Converts a supervisor error into the response the client renders: structured
+/// diagnostics pass through intact, everything else degrades to a string.
+fn error_response(err: &SupervisorError) -> ControlResponse {
+    match err {
+        SupervisorError::Process(ProcessManagerError::Diag(diag)) => {
+            ControlResponse::Diag(diag.clone())
+        }
+        other => ControlResponse::Error(other.to_string()),
+    }
+}
+
 /// Daemon supervisor that handles CLI commands.
 pub struct Supervisor {
     config_path: PathBuf,
@@ -1525,7 +1536,7 @@ impl Supervisor {
                                     error!("Supervisor command failed: {err}");
                                     let _ = ipc::write_response(
                                         &mut stream,
-                                        &ControlResponse::Error(err.to_string()),
+                                        &error_response(&err),
                                     );
                                 }
                             }

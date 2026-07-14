@@ -348,8 +348,44 @@ where
     result
 }
 
+use std::fmt;
+
+/// Carries a structured diagnostic up to `main` so it renders after any
+/// progress spinner has released the stderr lock — rendering inside a spinner
+/// closure deadlocks against the lock the spinner thread holds.
+struct DiagError(Box<systemg::diag::Diagnostic>);
+
+impl fmt::Display for DiagError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.render(false))
+    }
+}
+
+impl fmt::Debug for DiagError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl Error for DiagError {}
+
 /// Runs the `sysg` command-line entrypoint.
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> process::ExitCode {
+    match run() {
+        Ok(()) => process::ExitCode::SUCCESS,
+        Err(err) => {
+            if let Some(diag) = err.downcast_ref::<DiagError>() {
+                eprintln!("{}", diag.0.render_for_terminal());
+            } else {
+                eprintln!("Error: {err}");
+            }
+            process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// Dispatches the parsed CLI command.
+fn run() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
     apply_plain_mode(args.plain);
     let euid = Uid::effective();
@@ -3770,6 +3806,56 @@ fn resolve_project_context_from_config(
     Ok(config.project.id)
 }
 
+/// Renders the project-mismatch diagnostic and exits: the requested project is
+/// not the one the resolved config defines, which usually means the CLI picked
+/// up a different config than the user expects. Lists what the running
+/// supervisor actually has loaded so the user can retarget without guessing.
+fn fail_project_mismatch(requested: &str, config_project: &str) -> ! {
+    use systemg::diag::Diagnostic;
+
+    let loaded: Vec<String> =
+        match ipc::send_command(&ControlCommand::Status { live: false }) {
+            Ok(ControlResponse::Status(snapshot)) => {
+                let mut ids: Vec<String> = snapshot
+                    .units
+                    .iter()
+                    .filter_map(|unit| unit.project.as_ref().map(|p| p.id.clone()))
+                    .collect();
+                ids.sort();
+                ids.dedup();
+                ids
+            }
+            _ => Vec::new(),
+        };
+
+    let mut diag = Diagnostic::error(
+        "SG0201",
+        format!("project `{requested}` does not match the resolved config"),
+    )
+    .note(format!(
+        "the config sysg resolved for this command defines project `{config_project}`"
+    ))
+    .note(
+        "sysg resolved a config that may not be the one you meant — pass -c to point \
+         at the right file, or -p with a loaded project id",
+    );
+
+    if !loaded.is_empty() {
+        diag = diag.evidence("projects loaded in the running supervisor", loaded);
+    }
+
+    let diag = diag
+        .help_cmd("list projects", "sysg status")
+        .help_cmd(
+            "target explicitly",
+            "sysg logs -s <service> -p <project-id>",
+        )
+        .help_docs();
+
+    eprintln!("{}", diag.render_for_terminal());
+    process::exit(1);
+}
+
 /// Resolves the project filter for status without treating the default config as mandatory.
 fn resolve_status_project_filter(
     config_arg: Option<&str>,
@@ -3780,14 +3866,7 @@ fn resolve_status_project_filter(
             let config_path = resolve_config_path(config_arg)?;
             let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
             if config.project.id != project {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "project '{}' does not match config project '{}'",
-                        project, config.project.id
-                    ),
-                )
-                .into());
+                fail_project_mismatch(&project, &config.project.id);
             }
             Ok(Some(project))
         }
@@ -3814,14 +3893,7 @@ fn resolve_command_project(
             && let Some(config) = config_value.as_ref()
             && config.project.id != project
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project '{}' does not match config project '{}'",
-                    project, config.project.id
-                ),
-            )
-            .into());
+            fail_project_mismatch(&project, &config.project.id);
         }
         return Ok(Some(project));
     }
@@ -3923,6 +3995,7 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
             Ok(())
         }
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
+        Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
         Err(ControlError::NotAvailable) => {
             warn!("No running systemg supervisor found; skipping command");
             let _ = ipc::cleanup_runtime();

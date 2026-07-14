@@ -29,6 +29,9 @@ pub mod validate;
 /// Constants.
 pub mod constants;
 
+/// rustc-style diagnostics: structured, colored, actionable failure reports.
+pub mod diag;
+
 /// Metrics.
 pub mod metrics;
 

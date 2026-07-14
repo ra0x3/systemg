@@ -4,6 +4,10 @@ use thiserror::Error;
 /// Defines all possible errors that can occur in the process manager.
 #[derive(Debug, Error)]
 pub enum ProcessManagerError {
+    /// A structured diagnostic carrying evidence and next steps for the user.
+    #[error("{0}")]
+    Diag(Box<crate::diag::Diagnostic>),
+
     /// Error reading or accessing a configuration file.
     #[error("Failed to read config file: {0}")]
     ConfigReadError(#[from] std::io::Error),

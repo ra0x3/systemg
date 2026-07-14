@@ -3601,13 +3601,77 @@ impl Daemon {
             }
         }
 
-        Err(ProcessManagerError::ServiceStartError {
-            service: service_name.to_string(),
-            source: std::io::Error::other(format!(
-                "Health check did not succeed within {:?} after {} attempts",
-                timeout, retries
-            )),
-        })
+        Err(ProcessManagerError::Diag(Box::new(
+            self.health_check_failure_diag(service_name, health_check, timeout, retries),
+        )))
+    }
+
+    /// Builds the diagnostic for a service that never became healthy: what was
+    /// checked, whether the process is even alive, its last output, and the
+    /// exact commands to dig further.
+    fn health_check_failure_diag(
+        &self,
+        service_name: &str,
+        health_check: &HealthCheckConfig,
+        timeout: Duration,
+        retries: u32,
+    ) -> crate::diag::Diagnostic {
+        use crate::diag::Diagnostic;
+
+        let project = self.config.project.id.clone();
+        let target = health_check
+            .url
+            .as_deref()
+            .or(health_check.command.as_deref())
+            .unwrap_or("<unconfigured>");
+
+        let alive = self
+            .pid_file
+            .lock()
+            .ok()
+            .and_then(|guard| guard.pid_for(service_name))
+            .is_some_and(|pid| {
+                #[cfg(target_os = "linux")]
+                {
+                    !matches!(Self::read_proc_state(pid), None | Some('Z') | Some('X'))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None)
+                        .is_ok()
+                }
+            });
+
+        let mut diag = Diagnostic::error(
+            "SG0104",
+            format!("service `{service_name}` failed to become healthy"),
+        )
+        .note(format!(
+            "{retries} health checks against {target} failed over {}s",
+            timeout.as_secs()
+        ));
+
+        diag = if alive {
+            diag.note(
+                "the process is running but never answered the health check \
+                 — it may be listening on a different address or still starting",
+            )
+        } else {
+            diag.note(
+                "the process is not running — it exited before it could become healthy",
+            )
+        };
+
+        diag.evidence(
+            format!("last output from `{service_name}`"),
+            crate::logs::tail_service_log(service_name, 8),
+        )
+        .help_cmd(
+            "view logs",
+            format!("sysg logs -s {service_name} -p {project}"),
+        )
+        .help_cmd("check status", format!("sysg status -p {project}"))
+        .help_docs()
     }
 
     /// Performs a single configured health check, using command or HTTP mode.

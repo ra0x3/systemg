@@ -95,6 +95,59 @@ pub fn supervisor_log_path() -> PathBuf {
     runtime::log_dir().join("supervisor.log")
 }
 
+/// Returns the last `n` content lines of a service's log, ANSI-stripped and
+/// with the `<timestamp> <stream>` prefix removed, for use as diagnostic
+/// evidence. Returns an empty vec when the log is missing or unreadable.
+pub fn tail_service_log(service: &str, n: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let path = get_service_log_path(service);
+    let Ok(mut file) = fs::File::open(&path) else {
+        return Vec::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let window = 16 * 1024;
+    let start = len.saturating_sub(window);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = Vec::with_capacity(window as usize);
+    if file.read_to_end(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&strip_ansi(&buf)).into_owned();
+
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(strip_log_line_prefix)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .take(n)
+        .rev()
+        .collect()
+}
+
+/// Drops the leading `<rfc3339-timestamp> <stream>` tokens a service log line
+/// carries, leaving the process's own output.
+fn strip_log_line_prefix(line: &str) -> String {
+    let mut parts = line.splitn(3, ' ');
+    let (Some(first), Some(second), Some(rest)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return line.to_string();
+    };
+    let looks_like_timestamp = first.len() >= 20
+        && first.ends_with('Z')
+        && first.contains('T')
+        && first.starts_with(|c: char| c.is_ascii_digit());
+    if looks_like_timestamp && matches!(second, "stdout" | "stderr") {
+        rest.to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 /// Summary of the files removed by a prune run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PruneSummary {

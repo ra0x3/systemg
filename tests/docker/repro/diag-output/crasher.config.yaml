@@ -1,0 +1,14 @@
+version: "1"
+project:
+  id: diag-repro
+services:
+  crasher:
+    command: "sh -c 'echo \"FATAL: flux capacitor misaligned\" >&2; sleep 0.3; exit 1'"
+    restart_policy: "never"
+    deployment:
+      strategy: "immediate"
+      health_check:
+        url: "http://127.0.0.1:8123/health"
+        timeout: "4s"
+        retries: 2
+        interval: "1s"

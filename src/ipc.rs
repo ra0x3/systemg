@@ -190,6 +190,8 @@ pub enum ControlResponse {
     Message(String),
     /// Command failed with an error message.
     Error(String),
+    /// Command failed with a structured diagnostic the client renders.
+    Diag(Box<crate::diag::Diagnostic>),
     /// Current status snapshot payload.
     Status(StatusSnapshot),
     /// Inspect payload including recent samples.
