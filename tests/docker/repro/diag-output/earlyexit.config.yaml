@@ -1,0 +1,7 @@
+version: "1"
+project:
+  id: diag-early
+services:
+  earlyexit:
+    command: "sh -c 'echo \"PANIC: no such table: users\" >&2; exit 3'"
+    restart_policy: "never"

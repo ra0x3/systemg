@@ -1,0 +1,10 @@
+version: "1"
+project:
+  id: diag-prefail
+services:
+  needs_build:
+    command: "sleep 3000"
+    restart_policy: "always"
+    deployment:
+      strategy: "immediate"
+      pre_start: "sh -c 'echo \"npm ERR! missing script: build\" >&2; exit 2'"

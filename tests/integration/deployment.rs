@@ -130,9 +130,18 @@ services:
 
     let result = daemon.start_service("failing_pre_start", &failing_config);
     let err = result.expect_err("pre-start failure should surface as error");
+    let rendered = err.to_string();
     assert!(
-        err.to_string().contains("pre_start:"),
-        "error should tag the pre_start phase, got: {err}",
+        rendered.contains("error[SG0103]"),
+        "error should carry the pre_start diagnostic code, got: {rendered}",
+    );
+    assert!(
+        rendered.contains("pre_start for `failing_pre_start` failed"),
+        "error should name the failing phase and service, got: {rendered}",
+    );
+    assert!(
+        rendered.contains("migration boom"),
+        "error should quote the captured pre_start output, got: {rendered}",
     );
 
     let stderr_log = systemg::logs::get_log_path("failing_pre_start", "stderr");

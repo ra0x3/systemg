@@ -2816,7 +2816,12 @@ impl Daemon {
         &self,
         service_name: &str,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        let state = Self::wait_for_ready(service_name, &self.processes, &self.pid_file)?;
+        let state = Self::wait_for_ready(
+            service_name,
+            &self.config.project.id,
+            &self.processes,
+            &self.pid_file,
+        )?;
 
         if let ServiceReadyState::Running = state
             && let Some(health_check) = self
@@ -2837,6 +2842,7 @@ impl Daemon {
     /// and PID file. This allows the function to be called from both instance methods and static contexts.
     fn wait_for_ready(
         service_name: &str,
+        project: &str,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
@@ -2866,18 +2872,32 @@ impl Daemon {
                     let signal: Option<i32> = None;
                     let exit_code = status.code();
                     warn!(
-                        "Service '{service_name}' exited during startup (exit_code={exit_code:?}, signal={signal:?}). For details run: sysg logs {service_name}"
+                        "Service '{service_name}' exited during startup (exit_code={exit_code:?}, signal={signal:?})."
                     );
 
-                    let message = match exit_code {
-                        Some(code) => format!("process exited with status {code}"),
-                        None => format!("process terminated unexpectedly: {status:?}"),
+                    let how = match (exit_code, signal) {
+                        (Some(code), _) => format!("exited with status {code}"),
+                        (None, Some(sig)) => format!("was killed by signal {sig}"),
+                        (None, None) => "terminated unexpectedly".to_string(),
                     };
 
-                    return Err(ProcessManagerError::ServiceStartError {
-                        service: service_name.to_string(),
-                        source: std::io::Error::other(message),
-                    });
+                    let diag = crate::diag::Diagnostic::error(
+                        "SG0102",
+                        format!("service `{service_name}` exited immediately at start"),
+                    )
+                    .note(format!("the process {how} before it finished starting"))
+                    .evidence(
+                        format!("last output from `{service_name}`"),
+                        crate::logs::tail_service_log(service_name, 8),
+                    )
+                    .help_cmd(
+                        "view logs",
+                        format!("sysg logs -s {service_name} -p {project}"),
+                    )
+                    .help_cmd("check status", format!("sysg status -p {project}"))
+                    .help_docs();
+
+                    return Err(ProcessManagerError::Diag(Box::new(diag)));
                 }
                 ServiceProbe::NotStarted => {
                     thread::sleep(SERVICE_POLL_INTERVAL);
@@ -3457,14 +3477,28 @@ impl Daemon {
         };
         write_marker(&format!("\u{25b6} running: {command}"));
 
+        let tail: Arc<Mutex<std::collections::VecDeque<String>>> =
+            Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let push_tail = |tail: &Arc<Mutex<std::collections::VecDeque<String>>>,
+                         line: &str| {
+            if let Ok(mut guard) = tail.lock() {
+                if guard.len() >= 12 {
+                    guard.pop_front();
+                }
+                guard.push_back(line.to_string());
+            }
+        };
+
         let stdout_handle = child.stdout.take().map(|stdout| {
             let service_name = service_name_owned.clone();
             let stdout_sink = Arc::clone(&stdout_sink);
             let stderr_sink = Arc::clone(&stderr_sink);
+            let tail = Arc::clone(&tail);
             thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().map_while(Result::ok) {
                     info!("[{service_name} pre-start] {line}");
+                    push_tail(&tail, &line);
                     for sink in [&stdout_sink, &stderr_sink] {
                         if let Ok(mut guard) = sink.lock()
                             && let Some(file) = guard.as_mut()
@@ -3480,10 +3514,12 @@ impl Daemon {
             let service_name = service_name_owned.clone();
             let stdout_sink = Arc::clone(&stdout_sink);
             let stderr_sink = Arc::clone(&stderr_sink);
+            let tail = Arc::clone(&tail);
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().map_while(Result::ok) {
                     warn!("[{service_name} pre-start] {line}");
+                    push_tail(&tail, &line);
                     for sink in [&stdout_sink, &stderr_sink] {
                         if let Ok(mut guard) = sink.lock()
                             && let Some(file) = guard.as_mut()
@@ -3523,11 +3559,29 @@ impl Daemon {
 
             write_marker(&format!("\u{2716} failed after {elapsed}s ({status})"));
 
-            let message = format!("pre_start: command exited with status {}", status);
-            return Err(ProcessManagerError::ServiceStartError {
-                service: service_name.to_string(),
-                source: std::io::Error::other(message),
-            });
+            let captured: Vec<String> = tail
+                .lock()
+                .map(|guard| guard.iter().cloned().collect())
+                .unwrap_or_default();
+            let project = self.config.project.id.clone();
+            let diag = crate::diag::Diagnostic::error(
+                "SG0103",
+                format!("pre_start for `{service_name}` failed"),
+            )
+            .origin(
+                format!("services.{service_name}.deployment.pre_start"),
+                None,
+                None,
+            )
+            .note(format!("`{command}` exited with {status} after {elapsed}s"))
+            .note("the service was not started because its pre_start command failed")
+            .evidence("pre_start output", captured)
+            .help_cmd(
+                "view logs",
+                format!("sysg logs -s {service_name} -p {project}"),
+            )
+            .help_docs();
+            return Err(ProcessManagerError::Diag(Box::new(diag)));
         }
 
         write_marker(&format!("\u{2714} completed in {elapsed}s (exit 0)"));
@@ -5015,7 +5069,12 @@ impl Daemon {
 
             match restart_result {
                 Ok(pid) => {
-                    match Self::wait_for_ready(&name, &ctx.processes, &ctx.pid_file) {
+                    match Self::wait_for_ready(
+                        &name,
+                        &ctx.config.project.id,
+                        &ctx.processes,
+                        &ctx.pid_file,
+                    ) {
                         Ok(ServiceReadyState::Running) => {
                             if let Ok(mut counts) = ctx.lock_restart_counts() {
                                 counts.insert(name.clone(), 0);

@@ -1,0 +1,65 @@
+---
+title: Dialog
+---
+
+# Dialog
+
+When something fails, sysg answers like a compiler: what happened, the evidence
+it captured while it happened, and the exact next commands to run. Every
+user-facing failure is a structured diagnostic with a stable error code.
+
+```text
+error[SG0104]: service `gamecast_api` failed to become healthy
+
+  5 health checks against http://127.0.0.1:8080/api/v1/health failed over 45s
+  the process is not running — it exited before it could become healthy
+
+  last output from `gamecast_api`:
+  │ Error: error returned from database: password authentication failed for user "postgres"
+
+  help:
+    view logs     sysg logs -s gamecast_api -p gamecast-api-dev
+    check status  sysg status -p gamecast-api-dev
+    docs          https://docs.sysg.dev/errors/SG0104
+```
+
+## Anatomy
+
+Every diagnostic has the same shape:
+
+| Part | What it tells you |
+| --- | --- |
+| `error[SG0104]` | Severity and a stable code you can search or look up |
+| Title | One sentence stating what happened |
+| `-->` location | The config file and key the problem originates from, when known |
+| Notes | Plain-sentence facts sysg observed (exit codes, timing, liveness) |
+| Evidence | Output sysg captured — usually your service's own last log lines |
+| `help:` | Runnable commands and a docs link for this exact code |
+
+## Colors
+
+On a terminal, diagnostics are colored: red for errors, yellow for warnings,
+cyan for notes and locations, green for the help section, bold for runnable
+commands, and underlined blue for docs links. Piped or redirected output is
+plain text with no escape codes, and `NO_COLOR` is respected.
+
+## Error codes
+
+| Code | Meaning |
+| --- | --- |
+| `SG0001` | Catchall — a failure that has no more specific diagnosis yet |
+| `SG0102` | A service exited immediately at start, before it finished starting |
+| `SG0103` | A service's `pre_start` command failed, so the service was not started |
+| `SG0104` | A service never passed its configured health check |
+| `SG0201` | The `-p` project does not match the config sysg resolved |
+
+Codes are stable: a script can match on them, and each has a page at
+`https://docs.sysg.dev/errors/<code>`.
+
+## Where evidence comes from
+
+sysg already captures every service's stdout and stderr (see
+[Logs](/how-it-works/logs)). Diagnostics quote the last lines of that capture
+at the moment of failure, so the reason a service died — a bad database
+password, a port conflict, a missing binary — arrives inside the error itself
+instead of behind a `sysg logs` round-trip.

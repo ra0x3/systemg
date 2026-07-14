@@ -100,7 +100,8 @@
               "how-it-works/commands/spawn",
               "how-it-works/commands/start-vs-spawn"
             ]
-          }
+          },
+          "how-it-works/dialog"
         ]
       },
       "security",

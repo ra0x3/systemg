@@ -369,6 +369,19 @@ impl fmt::Debug for DiagError {
 
 impl Error for DiagError {}
 
+/// Wraps errors that never became a structured diagnostic, so every failure
+/// leaves the user with next steps instead of a bare message.
+fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
+    systemg::diag::Diagnostic::error("SG0001", "command failed")
+        .note(message)
+        .help_cmd(
+            "supervisor log",
+            format!("tail -n 50 {}", supervisor_log_path().display()),
+        )
+        .help_cmd("check status", "sysg status")
+        .help_docs()
+}
+
 /// Runs the `sysg` command-line entrypoint.
 fn main() -> process::ExitCode {
     match run() {
@@ -377,7 +390,7 @@ fn main() -> process::ExitCode {
             if let Some(diag) = err.downcast_ref::<DiagError>() {
                 eprintln!("{}", diag.0.render_for_terminal());
             } else {
-                eprintln!("Error: {err}");
+                eprintln!("{}", catchall_diag(&err.to_string()).render_for_terminal());
             }
             process::ExitCode::FAILURE
         }

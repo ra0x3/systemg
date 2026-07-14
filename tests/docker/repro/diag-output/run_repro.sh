@@ -50,6 +50,32 @@ TTY_OUT="$(script -qec 'sysg start --config /repro/crasher.config.yaml --daemoni
 printf '%s' "$TTY_OUT" | grep -q $'\x1b\[1;31m'
 check "$?" "tty output paints the error header red"
 
+section "service exits immediately -> SG0102 diagnostic"
+EOUT="$(sysg start --config /repro/earlyexit.config.yaml --daemonize 2>&1)"
+printf '%s\n' "$EOUT"
+has "$EOUT" 'error\[SG0102\]'                    "carries the error code"
+has "$EOUT" 'exited immediately at start'        "states what happened"
+has "$EOUT" 'no such table: users'               "quotes the service's own crash output"
+has "$EOUT" 'sysg logs -s earlyexit -p diag-early' "gives the exact logs command"
+has "$EOUT" 'docs.sysg.dev/errors/SG0102'        "links the docs page for the code"
+
+section "pre_start fails -> SG0103 diagnostic"
+POUT="$(sysg start --config /repro/prefail.config.yaml --daemonize 2>&1)"
+printf '%s\n' "$POUT"
+has "$POUT" 'error\[SG0103\]'                    "carries the error code"
+has "$POUT" 'pre_start for `needs_build` failed' "states what happened"
+has "$POUT" 'npm ERR! missing script: build'     "quotes the pre_start output"
+has "$POUT" 'services.needs_build.deployment.pre_start' "points at the config key"
+has "$POUT" 'docs.sysg.dev/errors/SG0103'        "links the docs page for the code"
+
+section "unstructured failure -> SG0001 catchall"
+COUT="$(sysg start --config /repro/does-not-exist.yaml --daemonize 2>&1)"
+printf '%s\n' "$COUT"
+has "$COUT" 'error\[SG0001\]'                    "carries the catchall code"
+has "$COUT" 'supervisor log'                     "points at the supervisor log"
+has "$COUT" 'sysg status'                        "suggests checking status"
+has "$COUT" 'docs.sysg.dev/errors/SG0001'        "links the docs page for the code"
+
 section "project mismatch -> SG0201 diagnostic"
 MOUT="$(sysg logs -s crasher -p wrong-project -c /repro/crasher.config.yaml 2>&1)"
 printf '%s\n' "$MOUT"

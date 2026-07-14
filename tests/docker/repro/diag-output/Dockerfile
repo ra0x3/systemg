@@ -19,6 +19,8 @@ RUN chmod +x /usr/local/bin/sysg
 
 COPY tests/docker/repro/diag-output/anchor.config.yaml /repro/anchor.config.yaml
 COPY tests/docker/repro/diag-output/crasher.config.yaml /repro/crasher.config.yaml
+COPY tests/docker/repro/diag-output/earlyexit.config.yaml /repro/earlyexit.config.yaml
+COPY tests/docker/repro/diag-output/prefail.config.yaml /repro/prefail.config.yaml
 COPY tests/docker/repro/diag-output/run_repro.sh /repro/run_repro.sh
 RUN chmod +x /repro/run_repro.sh
 
