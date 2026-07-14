@@ -1,0 +1,7 @@
+version: "1"
+project:
+  id: stale-daemon-repro
+services:
+  steady:
+    command: "sleep 3000"
+    restart_policy: "always"

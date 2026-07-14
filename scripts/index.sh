@@ -346,8 +346,8 @@ echo ""
 p "${C_BORDER_MAIN}╭──────────────────────────────────────────────────────────────────────────────╮${RESET}"
 p "${C_BORDER_MAIN}│                                                                              │${RESET}"
 p "${C_BORDER_MAIN}│                                                                              │${RESET}"
-# Center the logo - logo is 30 chars wide
-LOGO_WIDTH=30
+# Center the logo - logo is 29 chars wide
+LOGO_WIDTH=29
 LOGO_PADDING=$(( (BOX_INNER - LOGO_WIDTH) / 2 ))
 LOGO_PADDING_RIGHT=$(( BOX_INNER - LOGO_WIDTH - LOGO_PADDING ))
 

@@ -164,6 +164,8 @@ pub enum ControlCommand {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         structured: bool,
     },
+    /// Report the version of the resident supervisor binary.
+    Version,
     /// Spawn a dynamic child process.
     Spawn {
         /// Parent process PID (from Unix socket peer credentials).
@@ -201,6 +203,8 @@ pub enum ControlResponse {
         /// PID of the spawned child process.
         pid: u32,
     },
+    /// Version of the resident supervisor binary.
+    DaemonVersion(String),
 }
 
 /// Result of sending a command with a short acknowledgement window.

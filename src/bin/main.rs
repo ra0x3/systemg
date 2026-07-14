@@ -4007,6 +4007,10 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
             println!("Spawned process with PID: {}", pid);
             Ok(())
         }
+        Ok(ControlResponse::DaemonVersion(version)) => {
+            println!("{version}");
+            Ok(())
+        }
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
         Err(ControlError::NotAvailable) => {
@@ -4024,6 +4028,24 @@ fn restart_daemonized(
     config_path: PathBuf,
     allow_recycle: bool,
 ) -> Result<(), Box<dyn Error>> {
+    match daemon_version_drift() {
+        VersionDrift::Drifted(daemon_version) => {
+            if allow_recycle {
+                return recycle_supervisor_for_restart(config_path);
+            }
+            eprintln!(
+                "{YELLOW}Warn: resident supervisor is v{daemon_version} but this CLI is v{}; run a full `sysg restart` to recycle it{RESET}",
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        VersionDrift::PreVersionDaemon => {
+            if allow_recycle {
+                return recycle_supervisor_for_restart(config_path);
+            }
+        }
+        VersionDrift::Matched | VersionDrift::Unknown => {}
+    }
+
     match ipc::send_command_with_timeout(&command, RESTART_DAEMON_ACK_TIMEOUT) {
         Ok(ipc::CommandAck::Pending) => Ok(()),
         Ok(ipc::CommandAck::Response(ControlResponse::Message(_))) => Ok(()),
@@ -4050,10 +4072,46 @@ fn restart_daemonized(
     }
 }
 
+/// Outcome of comparing the resident supervisor's version against this CLI.
+enum VersionDrift {
+    /// Daemon and CLI run the same version.
+    Matched,
+    /// Daemon runs a different version (older or newer) than this CLI.
+    Drifted(String),
+    /// Daemon predates the Version command entirely.
+    PreVersionDaemon,
+    /// No daemon reachable or it was too busy to answer in time.
+    Unknown,
+}
+
+/// Asks the resident supervisor for its version and compares it to this CLI's.
+fn daemon_version_drift() -> VersionDrift {
+    match ipc::send_command_with_timeout(
+        &ControlCommand::Version,
+        RESTART_DAEMON_ACK_TIMEOUT,
+    ) {
+        Ok(ipc::CommandAck::Response(ControlResponse::DaemonVersion(version))) => {
+            if version == env!("CARGO_PKG_VERSION") {
+                VersionDrift::Matched
+            } else {
+                VersionDrift::Drifted(version)
+            }
+        }
+        Ok(ipc::CommandAck::Response(ControlResponse::Error(message)))
+            if supervisor_error_is_protocol_mismatch(&message) =>
+        {
+            VersionDrift::PreVersionDaemon
+        }
+        Ok(_) => VersionDrift::Unknown,
+        Err(ControlError::Serde(_)) => VersionDrift::PreVersionDaemon,
+        Err(_) => VersionDrift::Unknown,
+    }
+}
+
 /// Stops the resident supervisor and starts a fresh daemon with the requested config.
 fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Error>> {
     warn!(
-        "Restart IPC was rejected by the resident supervisor; recycling supervisor with config {:?}",
+        "Resident supervisor does not match this CLI (version drift or rejected IPC); recycling supervisor with config {:?}",
         config_path
     );
     stop_supervisors();

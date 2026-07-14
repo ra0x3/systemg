@@ -1969,6 +1969,9 @@ impl Supervisor {
                 self.status_cache.replace(snapshot.clone());
                 Ok(ControlResponse::Status(snapshot))
             }
+            ControlCommand::Version => Ok(ControlResponse::DaemonVersion(
+                env!("CARGO_PKG_VERSION").to_string(),
+            )),
         }
     }
 
