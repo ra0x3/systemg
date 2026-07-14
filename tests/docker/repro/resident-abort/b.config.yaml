@@ -1,0 +1,14 @@
+version: "1"
+project:
+  id: resident-b
+services:
+  aaa_boom:
+    command: "sh -c 'echo boom >&2; exit 1'"
+    restart_policy: "on-failure"
+    backoff: "2s"
+  good_one:
+    command: "sleep 3001"
+    restart_policy: "always"
+  zz_tail:
+    command: "sleep 3002"
+    restart_policy: "always"

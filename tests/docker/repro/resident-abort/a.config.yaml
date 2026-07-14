@@ -1,0 +1,7 @@
+version: "1"
+project:
+  id: resident-anchor
+services:
+  anchor:
+    command: "sleep 3000"
+    restart_policy: "always"

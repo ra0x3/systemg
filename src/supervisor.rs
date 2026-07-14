@@ -353,7 +353,12 @@ impl Supervisor {
                 }
             }
 
-            daemon.start_service(&service_name, service_config)?;
+            if let Err(err) = daemon.start_service(&service_name, service_config) {
+                error!(
+                    "Service '{service_name}' failed to start: {err}. Continuing; monitor will retry per its restart policy."
+                );
+                continue;
+            }
 
             if let Some(ref spawn) = service_config.spawn
                 && let Some(SpawnMode::Dynamic) = spawn.mode
@@ -732,7 +737,7 @@ impl Supervisor {
         config_path: PathBuf,
     ) -> Result<(), SupervisorError> {
         let project_id = config.project.id.clone();
-        let Some(existing) = self.extra_projects.remove(&project_id) else {
+        let Some(existing) = self.extra_projects.get(&project_id) else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("project '{project_id}' is not managed by this supervisor"),
@@ -740,7 +745,15 @@ impl Supervisor {
             .into());
         };
         let mode = existing.mode;
-        existing.daemon.stop_services()?;
+        let own_services: Vec<String> =
+            existing.daemon.config().services.keys().cloned().collect();
+        for service in &own_services {
+            if let Err(err) = existing.daemon.stop_service(service) {
+                warn!(
+                    "Failed to stop '{service}' while restarting project '{project_id}': {err}"
+                );
+            }
+        }
         existing.daemon.shutdown_monitor();
 
         Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
