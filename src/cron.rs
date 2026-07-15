@@ -1090,6 +1090,7 @@ mod tests {
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         };
         service_config.compute_hash()
     }
@@ -1362,6 +1363,7 @@ mod tests {
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         }
     }
 

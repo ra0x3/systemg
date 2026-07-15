@@ -461,6 +461,17 @@ pub enum Commands {
         no_color: bool,
     },
 
+    /// Convert a legacy `project:` manifest to the canonical `projects:` form.
+    Migrate {
+        /// Path to the manifest to convert.
+        config: String,
+
+        /// Overwrite the file in place (a `.bak` copy is kept) instead of
+        /// printing the converted manifest to stdout.
+        #[arg(long)]
+        in_place: bool,
+    },
+
     /// Purge all systemg state and runtime files.
     Purge,
 

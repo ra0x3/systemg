@@ -10,6 +10,7 @@ use regex::Regex;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use sha2::{Digest, Sha256};
 use strum_macros::AsRefStr;
+use tracing::warn;
 
 use crate::{
     error::ProcessManagerError,
@@ -135,10 +136,17 @@ struct ManifestHeader {
 pub struct ConfigV1 {
     /// Configuration version.
     pub version: Version,
-    /// Optional stable project namespace and display metadata.
+    /// Deprecated single-project declaration. Superseded by `projects`, but still
+    /// accepted (with a warning) so existing manifests keep working.
     #[serde(default)]
     pub project: Option<ProjectConfigInput>,
-    /// Map of service names to their respective configurations.
+    /// Canonical multi-project map keyed by project id. Each entry groups its own
+    /// services; a file may declare one or many.
+    #[serde(default)]
+    pub projects: Option<HashMap<String, ProjectEntry>>,
+    /// Services with no project (a loose bundle). With `projects`, these are the
+    /// project-less units; with the legacy `project`, these are its services.
+    #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
     /// Root directory from which relative paths are resolved.
     pub project_dir: Option<String>,
@@ -155,6 +163,23 @@ pub struct ConfigV1 {
     pub status: StatusConfig,
 }
 
+/// One project inside a `projects:` map. The map key supplies the id; the entry
+/// carries its display name and services, plus optional per-project overrides.
+#[derive(Debug, Deserialize)]
+pub struct ProjectEntry {
+    /// Human-friendly display name. Defaults to the project id (the map key).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Services belonging to this project.
+    pub services: HashMap<String, ServiceConfig>,
+    /// Optional per-project environment overrides.
+    #[serde(default)]
+    pub env: Option<EnvConfig>,
+    /// Optional per-project logging defaults.
+    #[serde(default)]
+    pub logs: Option<LogsConfig>,
+}
+
 impl TryFrom<ConfigV1> for Config {
     type Error = String;
 
@@ -166,16 +191,105 @@ impl TryFrom<ConfigV1> for Config {
             ));
         }
 
-        Ok(Self {
+        if value.project.is_some() && value.projects.is_some() {
+            return Err(
+                "a manifest may use 'project' or 'projects', not both; \
+                 run 'sysg migrate' to convert 'project' to 'projects'"
+                    .to_string(),
+            );
+        }
+
+        // Single-value callers (the CLI, validation, status fallbacks) get the
+        // FIRST project of a multi-project file. The supervisor uses the
+        // fan-out path (`into_configs`) to load every project; this keeps the
+        // 40+ `load_config` call sites working without each needing to know
+        // about multi-project files.
+        let mut projects = value.into_configs()?;
+        if projects.is_empty() {
+            return Ok(Config::default());
+        }
+        Ok(projects.remove(0))
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
             version: CURRENT_MANIFEST_VERSION,
-            project: value.project.map(Into::into).unwrap_or_default(),
-            services: value.services,
-            project_dir: value.project_dir,
-            env: value.env,
-            metrics: value.metrics,
-            logs: value.logs,
-            status: value.status,
-        })
+            project: ProjectConfig::default(),
+            services: HashMap::new(),
+            project_dir: None,
+            env: None,
+            metrics: MetricsConfig::default(),
+            logs: LogsConfig::default(),
+            status: StatusConfig::default(),
+        }
+    }
+}
+
+impl ConfigV1 {
+    /// Fans a v1 manifest into one `Config` per declared project, plus one for
+    /// any project-less (loose) top-level services. Each returned `Config` is a
+    /// normal single-project config the supervisor already knows how to load.
+    fn into_configs(self) -> Result<Vec<Config>, String> {
+        if self.project.is_some() && self.projects.is_some() {
+            return Err(
+                "a manifest may use 'project' or 'projects', not both".to_string(),
+            );
+        }
+
+        let mut configs = Vec::new();
+
+        if let Some(projects) = self.projects {
+            let mut entries: Vec<(String, ProjectEntry)> = projects.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (id, entry) in entries {
+                let mut project_services = entry.services;
+                tag_project_scope(&mut project_services, &id);
+                configs.push(Config {
+                    version: CURRENT_MANIFEST_VERSION,
+                    project: ProjectConfig {
+                        name: entry.name.unwrap_or_else(|| id.clone()),
+                        id,
+                    },
+                    services: project_services,
+                    project_dir: self.project_dir.clone(),
+                    env: entry.env.or_else(|| self.env.clone()),
+                    metrics: self.metrics.clone(),
+                    logs: entry.logs.unwrap_or_else(|| self.logs.clone()),
+                    status: self.status.clone(),
+                });
+            }
+
+            if !self.services.is_empty() {
+                let mut loose = self.services;
+                tag_project_scope(&mut loose, LOOSE_PROJECT_SCOPE);
+                configs.push(Config {
+                    version: CURRENT_MANIFEST_VERSION,
+                    project: ProjectConfig::default(),
+                    services: loose,
+                    project_dir: self.project_dir,
+                    env: self.env,
+                    metrics: self.metrics,
+                    logs: self.logs,
+                    status: self.status,
+                });
+            }
+
+            return Ok(configs);
+        }
+
+        configs.push(Config {
+            version: CURRENT_MANIFEST_VERSION,
+            project: self.project.map(Into::into).unwrap_or_default(),
+            services: self.services,
+            project_dir: self.project_dir,
+            env: self.env,
+            metrics: self.metrics,
+            logs: self.logs,
+            status: self.status,
+        });
+        Ok(configs)
     }
 }
 const METRICS_DEFAULT_RETENTION_MINUTES: u64 = 720; // 12 hours
@@ -617,6 +731,12 @@ pub struct ServiceConfig {
     /// Service output logging overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logs: Option<LogsConfig>,
+    /// Project this service belongs to, injected during multi-project fan-out so
+    /// identical service configs in different projects hash distinctly and never
+    /// collide in the shared pid/state files. `None` for single-project files, so
+    /// their existing state-file keys stay byte-for-byte unchanged (no migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_scope: Option<String>,
 }
 
 /// Resource limit overrides configured per service.
@@ -1299,6 +1419,110 @@ pub fn parse_config_manifest(content: &str) -> Result<Config, serde_yaml::Error>
     }
 }
 
+/// Parses a manifest into one `Config` per declared project (plus one for any
+/// loose top-level services). Single-project and legacy `project:` files yield a
+/// one-element vec; a `projects:` map yields one per entry. This is the ingest
+/// path the supervisor uses so one file can fan out into many project runtimes.
+pub fn parse_config_projects(content: &str) -> Result<Vec<Config>, serde_yaml::Error> {
+    let header: ManifestHeader = serde_yaml::from_str(content)?;
+    match header.version {
+        Version::V1 => {
+            let config: ConfigV1 = serde_yaml::from_str(content)?;
+            if config.projects.is_none() && uses_legacy_project_shape(&config) {
+                warn!(
+                    "'project:' is deprecated; run 'sysg migrate <file>' to convert to the 'projects:' format"
+                );
+            }
+            config.into_configs().map_err(serde_yaml::Error::custom)
+        }
+    }
+}
+
+/// Whether a manifest uses the deprecated single-project shape (an explicit
+/// `project:` block, or top-level services with no `projects:` map).
+fn uses_legacy_project_shape(config: &ConfigV1) -> bool {
+    config.project.is_some() || !config.services.is_empty()
+}
+
+/// Scope marker for the project-less (loose) service bundle in a multi-project
+/// manifest, so loose services hash distinctly from any real project's.
+const LOOSE_PROJECT_SCOPE: &str = "__loose__";
+
+/// Stamps each service with its owning project so identical service configs in
+/// different projects hash distinctly and never collide in shared state.
+fn tag_project_scope(services: &mut HashMap<String, ServiceConfig>, scope: &str) {
+    for service in services.values_mut() {
+        service.project_scope = Some(scope.to_string());
+    }
+}
+
+/// Rewrites a legacy `project:` + `services:` manifest into the canonical
+/// `projects:` form, returning the converted YAML. A manifest that already uses
+/// `projects:` (and has no legacy `project:`) is returned unchanged.
+pub fn migrate_manifest(content: &str) -> Result<String, ProcessManagerError> {
+    use serde_yaml::{Mapping, Value};
+
+    let mut root: Value =
+        serde_yaml::from_str(content).map_err(ProcessManagerError::ConfigParseError)?;
+    let Value::Mapping(map) = &mut root else {
+        return Err(ProcessManagerError::ConfigParseError(
+            serde_yaml::Error::custom("manifest root must be a mapping"),
+        ));
+    };
+
+    let project_key = Value::String("project".into());
+    let projects_key = Value::String("projects".into());
+    let services_key = Value::String("services".into());
+    let name_key = Value::String("name".into());
+    let id_key = Value::String("id".into());
+
+    if map.contains_key(&projects_key) {
+        return Ok(content.to_string());
+    }
+
+    let Some(project_val) = map.remove(&project_key) else {
+        // No project block and no projects: nothing to migrate.
+        return Ok(content.to_string());
+    };
+
+    // Derive id and optional name from the legacy `project:` block.
+    let (id, name) = match project_val {
+        Value::String(id) => (id, None),
+        Value::Mapping(pm) => {
+            let id = pm
+                .get(&id_key)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(
+                        "legacy project block is missing an id",
+                    ))
+                })?;
+            let name = pm.get(&name_key).and_then(Value::as_str).map(str::to_string);
+            (id, name)
+        }
+        _ => {
+            return Err(ProcessManagerError::ConfigParseError(
+                serde_yaml::Error::custom("unrecognized project block shape"),
+            ));
+        }
+    };
+
+    let services = map.remove(&services_key).unwrap_or(Value::Mapping(Mapping::new()));
+
+    let mut entry = Mapping::new();
+    if let Some(name) = name {
+        entry.insert(name_key, Value::String(name));
+    }
+    entry.insert(services_key, services);
+
+    let mut projects = Mapping::new();
+    projects.insert(Value::String(id), Value::Mapping(entry));
+    map.insert(projects_key, Value::Mapping(projects));
+
+    serde_yaml::to_string(&root).map_err(ProcessManagerError::ConfigParseError)
+}
+
 /// Loads and parses the configuration file, expanding environment variables.
 pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerError> {
     let config_path = config_path.map(Path::new).unwrap_or_else(|| {
@@ -1398,6 +1622,90 @@ pub fn load_config_from_file(
     Ok(config)
 }
 
+/// Loads a manifest into one `Config` per project it declares, applying the same
+/// env resolution and validation as [`load_config_from_file`] to each. This is
+/// how one file fans out into the multiple project runtimes the supervisor holds.
+pub fn load_projects_from_file(
+    mut file: fs::File,
+    config_path: &Path,
+) -> Result<Vec<Config>, ProcessManagerError> {
+    use std::io::Read;
+
+    let mut content = String::new();
+    file.read_to_string(&mut content).map_err(|e| {
+        ProcessManagerError::ConfigReadError(std::io::Error::new(
+            e.kind(),
+            format!("{} ({})", e, config_path.display()),
+        ))
+    })?;
+
+    let base_path = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
+    // First pass over the raw text applies env-file side effects so ${VAR}
+    // expansion below can see them, mirroring load_config_from_file.
+    for config in parse_config_projects(&content)
+        .map_err(ProcessManagerError::ConfigParseError)?
+    {
+        apply_env_side_effects(&config, &base_path)?;
+    }
+
+    let expanded_content = expand_env_vars(&content)?;
+    let configs = parse_config_projects(&expanded_content)
+        .map_err(ProcessManagerError::ConfigParseError)?;
+
+    let mut finalized = Vec::with_capacity(configs.len());
+    for mut config in configs {
+        config.project_dir = Some(base_path.to_string_lossy().to_string());
+        config.project = resolve_project_config(config.project, &base_path)?;
+        for service in config.services.values_mut() {
+            service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
+        }
+        config.service_start_order()?;
+        finalized.push(config);
+    }
+    Ok(finalized)
+}
+
+/// Applies a config's env-file loads and inline var sets to the process
+/// environment, so subsequent `${VAR}` expansion resolves against them.
+fn apply_env_side_effects(
+    config: &Config,
+    base_path: &Path,
+) -> Result<(), ProcessManagerError> {
+    if let Some(env_config) = &config.env {
+        if let Some(resolved_path) = env_config.path(base_path) {
+            load_env_file(&resolved_path.to_string_lossy())?;
+        }
+        if let Some(vars) = &env_config.vars {
+            for (key, value) in vars {
+                unsafe {
+                    env::set_var(key, value);
+                }
+            }
+        }
+    }
+
+    for service in config.services.values() {
+        let merged_env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
+        if let Some(env_config) = &merged_env {
+            if let Some(resolved_path) = env_config.path(base_path) {
+                load_env_file(&resolved_path.to_string_lossy())?;
+            }
+            if let Some(vars) = &env_config.vars {
+                for (key, value) in vars {
+                    unsafe {
+                        env::set_var(key, value);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs::File, io::Write};
@@ -1405,6 +1713,99 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn projects_map_fans_out_into_one_config_per_entry() {
+        let configs = parse_config_projects(
+            r#"
+version: "1"
+projects:
+  foo:
+    name: "Foo"
+    services:
+      bar: { command: "sleep 1" }
+  boo:
+    services:
+      shine: { command: "sleep 1" }
+services:
+  loose: { command: "sleep 1" }
+"#,
+        )
+        .expect("multi-project manifest parses");
+
+        assert_eq!(configs.len(), 3);
+        let foo = configs.iter().find(|c| c.project.id == "foo").unwrap();
+        assert_eq!(foo.project.name, "Foo");
+        assert!(foo.services.contains_key("bar"));
+        let boo = configs.iter().find(|c| c.project.id == "boo").unwrap();
+        assert_eq!(boo.project.name, "boo");
+        assert!(boo.services.contains_key("shine"));
+        // The loose bundle has an empty (default) project id and holds `loose`.
+        let loose = configs.iter().find(|c| c.project.id.is_empty()).unwrap();
+        assert!(loose.services.contains_key("loose"));
+    }
+
+    #[test]
+    fn legacy_single_project_still_parses_as_one_config() {
+        let configs = parse_config_projects(
+            r#"
+version: "1"
+project: { id: legacy }
+services:
+  worker: { command: "sleep 1" }
+"#,
+        )
+        .expect("legacy manifest parses");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].project.id, "legacy");
+        assert!(configs[0].services.contains_key("worker"));
+    }
+
+    #[test]
+    fn migrate_converts_legacy_project_to_projects() {
+        let converted = migrate_manifest(
+            r#"
+version: "1"
+project:
+  id: shop
+  name: "Shop"
+services:
+  api: { command: "sleep 1" }
+"#,
+        )
+        .expect("migration succeeds");
+
+        // The converted text parses into exactly the shop project with api.
+        let configs = parse_config_projects(&converted).expect("converted parses");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].project.id, "shop");
+        assert_eq!(configs[0].project.name, "Shop");
+        assert!(configs[0].services.contains_key("api"));
+        assert!(converted.contains("projects:"));
+        assert!(!converted.contains("\nproject:"));
+    }
+
+    #[test]
+    fn migrate_leaves_projects_manifest_unchanged() {
+        let src = "version: \"1\"\nprojects:\n  foo:\n    services:\n      s: { command: \"x\" }\n";
+        assert_eq!(migrate_manifest(src).unwrap(), src);
+    }
+
+    #[test]
+    fn project_and_projects_together_is_rejected() {
+        let err = parse_config_projects(
+            r#"
+version: "1"
+project: { id: a }
+projects:
+  b:
+    services:
+      s: { command: "sleep 1" }
+"#,
+        )
+        .expect_err("both keys must be rejected");
+        assert!(err.to_string().contains("project"));
+    }
 
     #[test]
     fn expand_env_vars_errors_on_missing_variable() {
@@ -1565,6 +1966,7 @@ services:
                 id: "systemg".into(),
                 name: Some("Systemg".into()),
             }),
+            projects: None,
             services,
             project_dir: Some("/tmp/systemg".into()),
             env: Some(EnvConfig {
@@ -1701,6 +2103,7 @@ services:
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         }
     }
 
@@ -2375,6 +2778,7 @@ services:
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         };
 
         let config2 = ServiceConfig {
@@ -2399,6 +2803,7 @@ services:
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         };
 
         let hash1 = config1.compute_hash();
@@ -2432,6 +2837,7 @@ services:
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         };
 
         let modified_command = ServiceConfig {
@@ -2498,6 +2904,7 @@ services:
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         };
         let hash = config.compute_hash();
         assert_eq!(hash.len(), 16);

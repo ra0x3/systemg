@@ -1352,6 +1352,23 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             }
             process::exit(if report.valid { 0 } else { 1 });
         }
+        Commands::Migrate { config, in_place } => {
+            let content = fs::read_to_string(&config)
+                .map_err(|e| io::Error::other(format!("failed to read {config}: {e}")))?;
+            let converted = systemg::config::migrate_manifest(&content)?;
+            if in_place {
+                let backup = format!("{config}.bak");
+                fs::write(&backup, &content).map_err(|e| {
+                    io::Error::other(format!("failed to write backup {backup}: {e}"))
+                })?;
+                fs::write(&config, &converted).map_err(|e| {
+                    io::Error::other(format!("failed to write {config}: {e}"))
+                })?;
+                println!("Migrated {config} (backup at {backup})");
+            } else {
+                print!("{converted}");
+            }
+        }
         Commands::Purge => {
             purge_all_state()?;
             println!("All systemg state has been purged");
@@ -4185,9 +4202,29 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
         "Resident supervisor does not match this CLI (version drift or rejected IPC); recycling supervisor with config {:?}",
         config_path
     );
+
+    // Validate the replacement config BEFORE tearing down the working supervisor.
+    // Recycling that stops the old daemon and then fails to load the new config
+    // leaves the box with no supervisor at all — never trade a running stack for
+    // an unvalidated one.
+    if let Err(err) = load_config(Some(config_path.to_string_lossy().as_ref())) {
+        return Err(io::Error::other(format!(
+            "refusing to recycle supervisor: replacement config {} failed to load ({err}); the existing supervisor was left running",
+            config_path.display()
+        ))
+        .into());
+    }
+
     stop_supervisors();
     let _ = ipc::cleanup_runtime();
-    start_supervisor_daemon(config_path, None, false)
+    let recovery_path = config_path.clone();
+    start_supervisor_daemon(config_path, None, false).map_err(|err| {
+        io::Error::other(format!(
+            "supervisor recycle FAILED: the old supervisor was stopped but the new one did not start ({err}). Run `sysg start --daemonize --config {}` to recover.",
+            recovery_path.display()
+        ))
+        .into()
+    })
 }
 
 fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {

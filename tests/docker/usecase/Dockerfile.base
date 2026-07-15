@@ -1,0 +1,26 @@
+# Shared base for every use-case test: builds sysg from source once, so each
+# case's own Dockerfile is a thin FROM this image plus its fixtures. Build it
+# with `run_all.sh`, which tags it `sysg-usecase-base` before building cases.
+ARG RUST_IMAGE=rust:1.96.0-bullseye
+ARG RUNTIME_IMAGE=ubuntu:22.04
+FROM ${RUST_IMAGE} AS builder
+
+WORKDIR /app
+COPY . .
+RUN cargo build --release --bin sysg
+
+FROM ${RUNTIME_IMAGE}
+
+RUN apt-get update && apt-get install -y \
+    procps \
+    python3 \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/sysg /usr/local/bin/sysg
+RUN chmod +x /usr/local/bin/sysg
+
+# Shared shell helpers every case sources for PASS/FAIL bookkeeping.
+COPY tests/docker/usecase/lib.sh /usecase/lib.sh
+
+WORKDIR /usecase

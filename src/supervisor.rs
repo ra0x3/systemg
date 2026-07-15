@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{
         Config, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
-        load_config, load_config_from_file,
+        load_config, load_config_from_file, load_projects_from_file,
     },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
@@ -96,6 +96,9 @@ pub struct Supervisor {
     cron_projects: Arc<RwLock<Vec<CronProjectRuntime>>>,
     op_slot: OpSlot,
     reconciler: Option<reconcile::Reconciler>,
+    /// Additional projects declared in the primary config file (a multi-project
+    /// manifest), registered as extra projects once the primary has booted.
+    pending_projects: Vec<Config>,
 }
 
 /// Runtime state for an additional project managed by the resident supervisor.
@@ -463,6 +466,54 @@ impl Supervisor {
         .map_err(SupervisorError::Status)?;
         Self::apply_project_metadata(&mut snapshot, run_mode, config_path);
         Ok(snapshot)
+    }
+
+    /// Builds an aggregate status snapshot across every managed project from the
+    /// shared project list, so the background refresher reflects extra projects
+    /// (including those a multi-project file fanned out) without holding `&self`.
+    fn collect_projects_snapshot(
+        projects: &Arc<RwLock<Vec<CronProjectRuntime>>>,
+        metrics_store: &MetricsHandle,
+        spawn_manager: &DynamicSpawnManager,
+        mode: StatusSnapshotMode,
+    ) -> Result<StatusSnapshot, StatusError> {
+        let runtimes = match projects.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return Ok(StatusSnapshot::empty()),
+        };
+
+        let mut valid_cron_hashes = HashSet::new();
+        for runtime in &runtimes {
+            valid_cron_hashes.extend(cron_hashes_for_config(runtime.config.as_ref()));
+        }
+
+        let mut snapshots = Vec::with_capacity(runtimes.len());
+        for runtime in &runtimes {
+            let config_path = runtime
+                .config
+                .project_dir
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let snapshot = Self::collect_daemon_snapshot(
+                &runtime.daemon,
+                metrics_store,
+                spawn_manager,
+                mode,
+                ProjectRunMode::Daemon,
+                &config_path,
+                Some(&valid_cron_hashes),
+            )
+            .map_err(|err| match err {
+                SupervisorError::Status(status_err) => status_err,
+                other => StatusError::Config(
+                    ProcessManagerError::MutexPoisonError(other.to_string()),
+                ),
+            })?;
+            snapshots.push(snapshot);
+        }
+
+        Ok(Self::aggregate_snapshots(snapshots))
     }
 
     /// Returns cron hashes for all projects currently managed by the supervisor.
@@ -839,7 +890,21 @@ impl Supervisor {
             std::env::current_dir()?.join(config_path)
         };
         let config_path = config_path.canonicalize().unwrap_or(config_path);
-        let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+        let mut projects = {
+            let trusted = runtime::open_trusted_config(&config_path)?;
+            load_projects_from_file(trusted, &config_path)?
+        };
+        if projects.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("config at {} declared no projects", config_path.display()),
+            )
+            .into());
+        }
+        // The first project becomes the primary daemon; the rest are registered
+        // as extra projects after the primary boots.
+        let config = projects.remove(0);
+        let pending_projects = projects;
         let cron_manager = CronManager::new();
         cron_manager.sync_from_config(&config)?;
 
@@ -885,6 +950,7 @@ impl Supervisor {
             cron_projects,
             op_slot,
             reconciler: None,
+            pending_projects,
         })
     }
 
@@ -956,7 +1022,7 @@ impl Supervisor {
             self.daemon.config().project.id
         ));
         self.sweep_port_ghosts();
-        let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
+        let config = self.daemon.config();
         let service_order =
             Self::startup_service_order(&config, self.service_filter.as_deref())?;
         for service_name in service_order {
@@ -1033,7 +1099,82 @@ impl Supervisor {
                 }
             }
         }
+
+        let pending = std::mem::take(&mut self.pending_projects);
+        let config_path = self.config_path.clone();
+        if !pending.is_empty() {
+            info!(
+                "Booting {} additional project(s) from multi-project config",
+                pending.len()
+            );
+        }
+        for extra in pending {
+            let project_id = extra.project.id.clone();
+            if let Err(err) = self.boot_extra_project(extra, &config_path) {
+                error!(
+                    "Failed to boot project '{project_id}' from multi-project config: {err}. Continuing with remaining projects."
+                );
+            }
+        }
+
         self.op_slot.clear();
+        Ok(())
+    }
+
+    /// Registers and synchronously starts one additional project from a
+    /// multi-project manifest during boot. Unlike the live AddProject path this
+    /// does not spawn a background boot thread — boot must be deterministic, and
+    /// a failure here is isolated to this project by the caller.
+    fn boot_extra_project(
+        &mut self,
+        config: Config,
+        config_path: &Path,
+    ) -> Result<(), SupervisorError> {
+        let project_id = config.project.id.clone();
+        if project_id == self.daemon.config().project.id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate project id '{project_id}' in multi-project config"),
+            )
+            .into());
+        }
+        if self.extra_projects.contains_key(&project_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate project id '{project_id}' in multi-project config"),
+            )
+            .into());
+        }
+
+        self.op_slot
+            .begin(format!("starting project '{project_id}'"));
+        Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
+        let mut daemon = Daemon::new(
+            config,
+            self.daemon.pid_file_handle(),
+            self.daemon.service_state_handle(),
+            self.detach_children,
+        );
+        daemon.set_pipe_stderr(self.pipe_stderr);
+        daemon.set_op_slot(self.op_slot.clone());
+
+        Self::start_project_services(
+            &daemon,
+            daemon.config().as_ref(),
+            self.service_filter.as_deref(),
+            &self.spawn_manager,
+        )?;
+
+        self.extra_projects.insert(
+            project_id.clone(),
+            ProjectRuntime {
+                daemon,
+                mode: ProjectRunMode::Daemon,
+                config_path: config_path.to_path_buf(),
+            },
+        );
+        self.sync_cron_projects()?;
+        info!("Project '{project_id}' booted from multi-project config");
         Ok(())
     }
 
@@ -1310,54 +1451,31 @@ impl Supervisor {
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
-        match collect_runtime_snapshot(
-            Arc::clone(&config_handle),
-            &pid_handle,
-            &state_handle,
-            Some(&self.metrics_store),
-            Some(&self.spawn_manager),
-            Self::status_snapshot_mode(config_handle.as_ref()),
-        ) {
-            Ok(mut snapshot) => {
-                Self::apply_project_metadata(
-                    &mut snapshot,
-                    self.primary_project_mode,
-                    &self.config_path,
-                );
-                self.status_cache.replace(snapshot);
-            }
+        // Seed the cache from ALL managed projects, not just the primary, so a
+        // multi-project boot (which registers extra projects before this point)
+        // is reflected in status from the first read.
+        match self.collect_aggregate_snapshot(false) {
+            Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to build initial status snapshot: {err}"),
         }
 
         let cache_clone = self.status_cache.clone();
-        let config_for_refresh = Arc::clone(&config_handle);
-        let pid_for_refresh = Arc::clone(&pid_handle);
-        let state_for_refresh = Arc::clone(&state_handle);
-        let metrics_for_refresh = self.metrics_store.clone();
-        let spawn_manager_for_refresh = self.spawn_manager.clone();
         let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
         let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
-        let refresh_project_mode = self.primary_project_mode;
-        let refresh_config_path = self.config_path.clone();
+        let refresh_projects = Arc::clone(&self.cron_projects);
+        let refresh_metrics = self.metrics_store.clone();
+        let refresh_spawn = self.spawn_manager.clone();
         if !matches!(refresh_mode, StatusSnapshotMode::Off) {
             self.status_refresher = Some(StatusRefresher::spawn(
                 cache_clone,
                 refresh_interval,
                 move || {
-                    let mut snapshot = collect_runtime_snapshot(
-                        Arc::clone(&config_for_refresh),
-                        &pid_for_refresh,
-                        &state_for_refresh,
-                        Some(&metrics_for_refresh),
-                        Some(&spawn_manager_for_refresh),
+                    Supervisor::collect_projects_snapshot(
+                        &refresh_projects,
+                        &refresh_metrics,
+                        &refresh_spawn,
                         refresh_mode,
-                    )?;
-                    Supervisor::apply_project_metadata(
-                        &mut snapshot,
-                        refresh_project_mode,
-                        &refresh_config_path,
-                    );
-                    Ok(snapshot)
+                    )
                 },
             ));
         }
@@ -2601,7 +2719,33 @@ impl Supervisor {
         };
         let resolved = resolved.canonicalize().unwrap_or(resolved);
         let trusted = runtime::open_trusted_config(&resolved)?;
-        let config = load_config_from_file(trusted, &resolved)?;
+        let configs = load_projects_from_file(trusted, &resolved)?;
+
+        let mut last_id = None;
+        for config in configs {
+            last_id =
+                Some(self.register_one_project(config, &resolved, &service_filter, mode)?);
+        }
+        last_id.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("config at {} declared no projects", resolved.display()),
+            )
+            .into()
+        })
+    }
+
+    /// Registers and starts a single already-parsed project config, the unit of
+    /// work `add_project_config` loops over once per project a file declares.
+    fn register_one_project(
+        &mut self,
+        config: Config,
+        resolved: &Path,
+        service_filter: &Option<String>,
+        mode: ProjectRunMode,
+    ) -> Result<String, SupervisorError> {
+        let service_filter = service_filter.clone();
+        let resolved = resolved.to_path_buf();
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
 

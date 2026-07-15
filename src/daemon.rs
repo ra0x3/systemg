@@ -1459,6 +1459,10 @@ pub struct Daemon {
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Pipe stderr to stdout.
     pipe_stderr: Arc<AtomicBool>,
+    /// Ownership sentinel: `Drop` only tears down the shared monitor/threads when
+    /// the LAST clone is dropped. `Daemon` is `Clone` over shared `Arc`s, so a
+    /// transient clone dropped mid-operation must never shut down the live daemon.
+    liveness: Arc<()>,
     /// Reports what a blocking boot step is currently waiting on.
     op_slot: OpSlot,
 }
@@ -2048,6 +2052,7 @@ impl Daemon {
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             pipe_stderr: Arc::new(AtomicBool::new(false)),
             op_slot: OpSlot::new(),
+            liveness: Arc::new(()),
         }
     }
 
@@ -5323,8 +5328,13 @@ impl Drop for InFlightGuard {
 }
 
 impl Drop for Daemon {
-    /// Handles drop.
+    /// Tears down the monitor and cancels service threads only when this is the
+    /// final clone. `Daemon` shares its runtime through `Arc`s, so dropping a
+    /// transient clone must not shut down a daemon other clones still use.
     fn drop(&mut self) {
+        if Arc::strong_count(&self.liveness) > 1 {
+            return;
+        }
         self.shutdown_monitor();
         #[cfg(target_os = "linux")]
         self.context().cancel_all_service_threads();
@@ -5372,6 +5382,7 @@ mod tests {
             skip: None,
             spawn: None,
             logs: None,
+            project_scope: None,
         }
     }
 

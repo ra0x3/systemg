@@ -1,0 +1,17 @@
+version: "1"
+projects:
+  foo:
+    name: "Foo Project"
+    services:
+      bar:
+        command: "sleep 3000"
+        restart_policy: "always"
+  boo:
+    services:
+      shine:
+        command: "sleep 3000"
+        restart_policy: "always"
+services:
+  loose:
+    command: "sleep 3000"
+    restart_policy: "always"
