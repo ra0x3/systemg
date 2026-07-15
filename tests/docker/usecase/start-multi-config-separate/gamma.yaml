@@ -1,0 +1,8 @@
+version: "1"
+projects:
+  gamma:
+    name: Gamma
+    services:
+      gamma_svc:
+        command: "sleep 3000"
+        restart_policy: "always"

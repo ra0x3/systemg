@@ -1,0 +1,9 @@
+version: "1"
+projects:
+  demo:
+    name: Demo
+    services:
+      needs_setup:
+        command: "sleep 3000"
+        deployment:
+          pre_start: "sh -c 'exit 3'"
