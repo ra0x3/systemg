@@ -72,5 +72,8 @@ pub mod test_utils;
 /// Runtime paths and modes.
 pub mod runtime;
 
+/// Per-project on-disk state layout.
+pub mod state_store;
+
 /// Privilege dropping.
 pub mod privilege;

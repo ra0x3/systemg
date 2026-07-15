@@ -8,8 +8,37 @@ use common::{HomeEnvGuard, is_process_alive, wait_for_pid, wait_for_pid_removed}
 use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    state_store::StateStore,
 };
 use tempfile::tempdir;
+
+/// Every project's state store (single-project test configs have exactly one).
+fn all_project_stores() -> Vec<StateStore> {
+    let projects_dir = systemg::runtime::state_dir().join("projects");
+    match std::fs::read_dir(&projects_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| StateStore::for_project(&e.file_name().to_string_lossy()))
+            .collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// First project PID file that records `service`.
+fn any_pid_file_with(service: &str) -> Option<PidFile> {
+    all_project_stores()
+        .into_iter()
+        .filter_map(|s| PidFile::load(s).ok())
+        .find(|p| p.pid_for(service).is_some())
+}
+
+/// First project service-state file that records `hash`.
+fn any_state_file_with(hash: &str) -> Option<ServiceStateFile> {
+    all_project_stores()
+        .into_iter()
+        .filter_map(|s| ServiceStateFile::load(s).ok())
+        .find(|s| s.get(hash).is_some())
+}
 
 /// Regression test for critical bug #1: Individual service stop via CLI must actually kill the process
 /// This tests the exact scenario reported: sysg stop -s <service> reports stopped but process still runs
@@ -75,7 +104,7 @@ services:
     );
 
     // Verify other_service is still running (single service stop shouldn't affect others)
-    let other_pid = PidFile::load().unwrap().pid_for("other_service");
+    let other_pid = any_pid_file_with("other_service").and_then(|p| p.pid_for("other_service"));
     assert!(
         other_pid.is_some(),
         "other_service should still have PID entry"
@@ -228,7 +257,7 @@ services:
 
     // Status should reflect that the process is dead, not "running"
     // The PidFile might still have the entry, but the process is dead
-    let pid_file = PidFile::load().unwrap();
+    let pid_file = PidFile::load(daemon.store()).unwrap();
     if let Some(recorded_pid) = pid_file.pid_for("test_service") {
         assert_eq!(recorded_pid, pid, "PID should match");
         // The critical check: even if PID is in file, process is actually dead
@@ -312,7 +341,8 @@ services:
         .compute_hash();
 
     // Seed some runtime state so status shows the service prior to purge.
-    let mut state_file = ServiceStateFile::load().unwrap_or_default();
+    let store = StateStore::for_project(&config.project.id);
+    let mut state_file = ServiceStateFile::load(store.clone()).unwrap_or_default();
     state_file
         .set(
             &service_hash,
@@ -324,7 +354,7 @@ services:
         .unwrap();
     drop(state_file);
 
-    let mut pid_file = PidFile::load().unwrap_or_default();
+    let mut pid_file = PidFile::load(store).unwrap_or_default();
     pid_file.insert("sample", 4242).unwrap();
     drop(pid_file);
 
@@ -417,7 +447,7 @@ fn service_hash(config_path: &std::path::Path, service: &str) -> String {
 fn wait_for_state_running(hash: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(state) = ServiceStateFile::load()
+        if let Some(state) = any_state_file_with(hash)
             && let Some(entry) = state.get(hash)
             && matches!(entry.status, ServiceLifecycleStatus::Running)
         {
@@ -470,7 +500,7 @@ fn restart_with_config_reconciles_changed_command() {
     wait_for_marker_value(&marker, "V2");
     wait_for_state_running(&hash_v2);
 
-    let state = ServiceStateFile::load().unwrap();
+    let state = any_state_file_with(&hash_v2).expect("state file with v2 hash");
     let v1_running = state
         .get(&hash_v1)
         .is_some_and(|entry| matches!(entry.status, ServiceLifecycleStatus::Running));
@@ -532,7 +562,7 @@ fn stop_project_then_start_reconciles_changed_command() {
     wait_for_marker_value(&marker, "V2");
     wait_for_state_running(&hash_v2);
 
-    let state = ServiceStateFile::load().unwrap();
+    let state = any_state_file_with(&hash_v2).expect("state file with v2 hash");
     let v1_running = state
         .get(&hash_v1)
         .is_some_and(|entry| matches!(entry.status, ServiceLifecycleStatus::Running));

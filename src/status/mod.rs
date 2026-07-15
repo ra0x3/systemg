@@ -34,6 +34,7 @@ use crate::{
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind},
+    state_store::StateStore,
 };
 
 const GREEN_BOLD: &str = "\x1b[1;32m";
@@ -888,7 +889,8 @@ pub(crate) fn collect_runtime_snapshot_with_cron_hashes(
     mode: StatusSnapshotMode,
     _valid_cron_hashes: Option<&HashSet<String>>,
 ) -> Result<StatusSnapshot, StatusError> {
-    let mut cron_state = CronStateFile::load()?;
+    let store = StateStore::for_project(&config.project.id);
+    let mut cron_state = CronStateFile::load(store)?;
     let pid_guard = pid_file.lock().map_err(|_| StatusError::PidFilePoisoned)?;
     let mut state_guard = service_state
         .lock()
@@ -923,9 +925,13 @@ pub(crate) fn cron_hashes_for_config(config: &Config) -> HashSet<String> {
 pub fn collect_disk_snapshot(
     config: Option<Config>,
 ) -> Result<StatusSnapshot, StatusError> {
-    let pid_file = PidFile::load()?;
-    let mut service_state = ServiceStateFile::load()?;
-    let mut cron_state = CronStateFile::load()?;
+    let store = match config.as_ref() {
+        Some(c) => StateStore::for_project(&c.project.id),
+        None => StateStore::loose(),
+    };
+    let pid_file = PidFile::load(store.clone())?;
+    let mut service_state = ServiceStateFile::load(store.clone())?;
+    let mut cron_state = CronStateFile::load(store)?;
     let config_ref = config.as_ref();
 
     Ok(build_snapshot(
@@ -2317,8 +2323,12 @@ impl StatusManager {
         }
 
         if is_cron {
-            let cron_state =
-                CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+            let store = self
+                .state_file
+                .lock()
+                .map(|g| g.store())
+                .unwrap_or_else(|_| StateStore::loose());
+            let cron_state = CronStateFile::load(store).unwrap_or_default();
             if let Some(job_state) = cron_state.jobs().get(service_hash)
                 && let Some(last_execution) = job_state.execution_history.back()
             {
@@ -2499,8 +2509,12 @@ impl StatusManager {
             service_hashes.extend(state_guard.services().keys().cloned());
         }
 
-        let cron_state =
-            CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+        let store = self
+            .state_file
+            .lock()
+            .map(|g| g.store())
+            .unwrap_or_else(|_| StateStore::loose());
+        let cron_state = CronStateFile::load(store).unwrap_or_default();
         service_hashes.extend(cron_state.jobs().keys().cloned());
 
         if service_hashes.is_empty() {
@@ -2527,8 +2541,8 @@ impl StatusManager {
 
     /// Shows the status of services **only in the current config** (filtered).
     pub fn show_statuses_filtered(&self, config: &crate::config::Config) {
-        let cron_state =
-            CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+        let store = StateStore::for_project(&config.project.id);
+        let cron_state = CronStateFile::load(store).unwrap_or_default();
 
         if config.services.is_empty() {
             println!("No managed services.");
@@ -2974,7 +2988,10 @@ mod tests {
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
 
-        let pid_file = Arc::new(Mutex::new(PidFile::load().expect("load pid file")));
+        let store = StateStore::for_project("test");
+        let pid_file = Arc::new(Mutex::new(
+            PidFile::load(store.clone()).expect("load pid file"),
+        ));
         {
             let mut guard = pid_file.lock().expect("lock pid file");
             guard.insert("demo_service", 42).expect("insert pid entry");
@@ -2982,7 +2999,7 @@ mod tests {
 
         let service_hash = "deadbeefdeadbeef";
         let state_file = Arc::new(Mutex::new(
-            ServiceStateFile::load().expect("load state file"),
+            ServiceStateFile::load(store).expect("load state file"),
         ));
         {
             let mut guard = state_file.lock().expect("lock state file");
@@ -3059,7 +3076,8 @@ services:
         let service = config.services.get("demo").expect("demo service");
         let hash = service.compute_hash();
 
-        let mut pid_file = PidFile::load().expect("load pid file");
+        let store = StateStore::for_project(&config.project.id);
+        let mut pid_file = PidFile::load(store.clone()).expect("load pid file");
         pid_file.insert("demo", 42).expect("insert service pid");
         let persisted = PersistedSpawnChild {
             pid: 4242,
@@ -3078,7 +3096,7 @@ services:
             .record_spawn(persisted)
             .expect("record spawn metadata");
 
-        let mut state = ServiceStateFile::load().expect("load state");
+        let mut state = ServiceStateFile::load(store).expect("load state");
         state
             .set(&hash, ServiceLifecycleStatus::Running, Some(42), None, None)
             .expect("persist running state");
@@ -3187,9 +3205,7 @@ services:
         };
 
         let mut pid_file = PidFile::default();
-        pid_file
-            .insert("nightly", 2_000_000_000)
-            .expect("insert pid");
+        pid_file.insert_in_memory("nightly", 2_000_000_000);
 
         let mut service_state = ServiceStateFile::default();
         let cron_state_json = json!({
@@ -3329,20 +3345,16 @@ services:
         };
 
         let mut pid_file = PidFile::default();
-        pid_file
-            .insert("migrate", 2_000_000_000)
-            .expect("insert pid");
+        pid_file.insert_in_memory("migrate", 2_000_000_000);
 
         let mut service_state = ServiceStateFile::default();
-        service_state
-            .set(
-                &hash,
-                ServiceLifecycleStatus::ExitedSuccessfully,
-                Some(2_000_000_000),
-                Some(0),
-                None,
-            )
-            .expect("set state");
+        service_state.set_in_memory(
+            &hash,
+            ServiceLifecycleStatus::ExitedSuccessfully,
+            Some(2_000_000_000),
+            Some(0),
+            None,
+        );
         let mut cron_state = CronStateFile::default();
 
         let snapshot = build_snapshot(
@@ -3391,18 +3403,16 @@ services:
         };
 
         let mut pid_file = PidFile::default();
-        pid_file.insert("api", 2_000_000_000).expect("insert pid");
+        pid_file.insert_in_memory("api", 2_000_000_000);
 
         let mut service_state = ServiceStateFile::default();
-        service_state
-            .set(
-                &hash,
-                ServiceLifecycleStatus::Running,
-                Some(2_000_000_000),
-                None,
-                None,
-            )
-            .expect("set state");
+        service_state.set_in_memory(
+            &hash,
+            ServiceLifecycleStatus::Running,
+            Some(2_000_000_000),
+            None,
+            None,
+        );
         let mut cron_state = CronStateFile::default();
 
         let snapshot = build_snapshot(
@@ -3524,27 +3534,23 @@ services:
         };
 
         let mut pid_file = PidFile::default();
-        pid_file.insert("demo", 42).expect("insert pid");
-        pid_file
-            .record_spawn(PersistedSpawnChild {
-                pid: 43,
-                name: "child".into(),
-                command: "sleep 30".into(),
-                started_at: SystemTime::now(),
-                ttl_secs: None,
-                depth: 1,
-                parent_pid: 42,
-                service_hash: Some(hash.clone()),
-                cpu_percent: None,
-                rss_bytes: None,
-                last_exit: None,
-            })
-            .expect("record child");
+        pid_file.insert_in_memory("demo", 42);
+        pid_file.record_spawn_in_memory(PersistedSpawnChild {
+            pid: 43,
+            name: "child".into(),
+            command: "sleep 30".into(),
+            started_at: SystemTime::now(),
+            ttl_secs: None,
+            depth: 1,
+            parent_pid: 42,
+            service_hash: Some(hash.clone()),
+            cpu_percent: None,
+            rss_bytes: None,
+            last_exit: None,
+        });
 
         let mut service_state = ServiceStateFile::default();
-        service_state
-            .set(&hash, ServiceLifecycleStatus::Running, Some(42), None, None)
-            .expect("set state");
+        service_state.set_in_memory(&hash, ServiceLifecycleStatus::Running, Some(42), None, None);
         let mut cron_state = CronStateFile::default();
 
         let snapshot = build_snapshot(

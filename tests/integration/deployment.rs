@@ -10,6 +10,7 @@ use common::{HomeEnvGuard, wait_for_path};
 use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    state_store::StateStore,
 };
 use tempfile::tempdir;
 
@@ -43,9 +44,12 @@ services:
         .cloned()
         .expect("service exists");
 
-    let pid_file = Arc::new(Mutex::new(PidFile::load().expect("load pid file")));
+    let store = StateStore::for_project(&config.project.id);
+    let pid_file = Arc::new(Mutex::new(
+        PidFile::load(store.clone()).expect("load pid file"),
+    ));
     let state_file = Arc::new(Mutex::new(
-        ServiceStateFile::load().expect("load service state file"),
+        ServiceStateFile::load(store).expect("load service state file"),
     ));
 
     let daemon = Daemon::new(
@@ -116,9 +120,12 @@ services:
         .cloned()
         .expect("service exists");
 
-    let pid_file = Arc::new(Mutex::new(PidFile::load().expect("load pid file")));
+    let store = StateStore::for_project(&config.project.id);
+    let pid_file = Arc::new(Mutex::new(
+        PidFile::load(store.clone()).expect("load pid file"),
+    ));
     let state_file = Arc::new(Mutex::new(
-        ServiceStateFile::load().expect("load service state file"),
+        ServiceStateFile::load(store).expect("load service state file"),
     ));
 
     let daemon = Daemon::new(

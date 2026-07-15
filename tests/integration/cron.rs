@@ -12,7 +12,26 @@ use systemg::{
     cron::{CronExecutionStatus, CronStateFile},
     daemon::Daemon,
     ipc::{self, ControlCommand, ControlError},
+    state_store::StateStore,
 };
+
+/// Loads the cron state file from whichever project directory holds `hash`.
+fn cron_state_with_hash(hash: &str) -> Option<CronStateFile> {
+    let projects_dir = systemg::runtime::state_dir().join("projects");
+    let entries = std::fs::read_dir(&projects_dir).ok()?;
+    let mut fallback = None;
+    for entry in entries.flatten() {
+        let id = entry.file_name();
+        let store = StateStore::for_project(&id.to_string_lossy());
+        if let Ok(state) = CronStateFile::load(store) {
+            if state.jobs().contains_key(hash) {
+                return Some(state);
+            }
+            fallback = Some(state);
+        }
+    }
+    fallback
+}
 use tempfile::tempdir;
 
 #[test]
@@ -201,7 +220,7 @@ fn wait_for_supervisor_socket() {
 fn wait_for_cron_history_record(service_hash: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(state) = CronStateFile::load()
+        if let Some(state) = cron_state_with_hash(service_hash)
             && let Some(job) = state.jobs().get(service_hash)
             && let Some(record) = job.execution_history.back()
             && record.completed_at.is_some()
@@ -212,7 +231,7 @@ fn wait_for_cron_history_record(service_hash: &str) {
         }
 
         if Instant::now() >= deadline {
-            let state = CronStateFile::load().ok();
+            let state = cron_state_with_hash(service_hash);
             panic!(
                 "timed out waiting for persisted cron execution history for {service_hash}; state={state:#?}"
             );

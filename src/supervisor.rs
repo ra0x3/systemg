@@ -1627,7 +1627,7 @@ impl Supervisor {
                                             metrics,
                                         );
                                         if let Ok(mut state_file) =
-                                                        ServiceStateFile::load()
+                                                        ServiceStateFile::load(daemon.store())
                                                         && let Err(err) = state_file.set(
                                                             &service_hash,
                                                             ServiceLifecycleStatus::ExitedSuccessfully,
@@ -1641,7 +1641,7 @@ impl Supervisor {
                                     }
                                     Ok(ServiceReadyState::Running) => {
                                         thread::sleep(Duration::from_millis(50));
-                                        match PidFile::reload() {
+                                        match PidFile::reload(daemon.store()) {
                                             Ok(pid_file) => {
                                                 if let Some(pid) =
                                                     pid_file.get(&job_name_clone)
@@ -1702,7 +1702,7 @@ impl Supervisor {
                                                                             metrics,
                                                                         );
                                                             if let Ok(mut state_file) =
-                                                                ServiceStateFile::load()
+                                                                ServiceStateFile::load(daemon.store())
                                                             {
                                                                 let lifecycle_status = match status {
                                                                                 CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
@@ -1752,7 +1752,7 @@ impl Supervisor {
                                                                             None,
                                                                             metrics,
                                                                         );
-                                                            if let Ok(mut state_file) = ServiceStateFile::load()
+                                                            if let Ok(mut state_file) = ServiceStateFile::load(daemon.store())
                                                                             && let Err(err) = state_file.set(
                                                                                 &service_hash,
                                                                                 ServiceLifecycleStatus::ExitedWithError,
@@ -1766,7 +1766,7 @@ impl Supervisor {
                                                         }
                                                     }
                                                     if let Ok(mut pid_file) =
-                                                        PidFile::load()
+                                                        PidFile::load(daemon.store())
                                                         && let Err(err) = pid_file
                                                             .remove(&job_name_clone)
                                                     {
@@ -1779,7 +1779,7 @@ impl Supervisor {
                                                     let already_completed = if let Ok(
                                                         state_file,
                                                     ) =
-                                                        ServiceStateFile::load()
+                                                        ServiceStateFile::load(daemon.store())
                                                         && let Some(entry) =
                                                             state_file.get(&service_hash)
                                                     {
@@ -1836,7 +1836,7 @@ impl Supervisor {
                                                                         vec![],
                                                                     );
                                                         if let Ok(mut state_file) =
-                                                                        ServiceStateFile::load()
+                                                                        ServiceStateFile::load(daemon.store())
                                                                         && let Err(err) = state_file.set(
                                                                             &service_hash,
                                                                             ServiceLifecycleStatus::ExitedWithError,
@@ -4275,13 +4275,23 @@ services:
             .and_then(|project| project.daemon.get_service_hash("beta_cron"))
             .expect("beta cron hash");
 
-        let cron_state = crate::cron::CronStateFile::load().expect("load cron state");
+        let alpha_store = supervisor.daemon.store();
+        let beta_store = supervisor
+            .extra_projects
+            .get("beta")
+            .expect("beta project")
+            .daemon
+            .store();
+        let alpha_cron =
+            crate::cron::CronStateFile::load(alpha_store.clone()).expect("load alpha cron");
+        let beta_cron =
+            crate::cron::CronStateFile::load(beta_store.clone()).expect("load beta cron");
         assert!(
-            cron_state.jobs().contains_key(&alpha_hash),
+            alpha_cron.jobs().contains_key(&alpha_hash),
             "alpha cron should be persisted before aggregate status"
         );
         assert!(
-            cron_state.jobs().contains_key(&beta_hash),
+            beta_cron.jobs().contains_key(&beta_hash),
             "beta cron should be persisted before aggregate status"
         );
 
@@ -4312,14 +4322,16 @@ services:
             other => panic!("expected status response, got {other:?}"),
         }
 
-        let cron_state = crate::cron::CronStateFile::load()
-            .expect("load cron state after aggregate status");
+        let alpha_cron = crate::cron::CronStateFile::load(alpha_store)
+            .expect("load alpha cron after aggregate status");
+        let beta_cron = crate::cron::CronStateFile::load(beta_store)
+            .expect("load beta cron after aggregate status");
         assert!(
-            cron_state.jobs().contains_key(&alpha_hash),
+            alpha_cron.jobs().contains_key(&alpha_hash),
             "aggregate status should not prune primary project cron state"
         );
         assert!(
-            cron_state.jobs().contains_key(&beta_hash),
+            beta_cron.jobs().contains_key(&beta_hash),
             "aggregate status should not prune extra project cron state"
         );
 
@@ -4620,8 +4632,14 @@ services:
             other => panic!("expected inspect response, got {other:?}"),
         }
 
-        let cron_state =
-            crate::cron::CronStateFile::load().expect("load cron state before stop");
+        let beta_store = supervisor
+            .extra_projects
+            .get("beta")
+            .expect("beta project")
+            .daemon
+            .store();
+        let cron_state = crate::cron::CronStateFile::load(beta_store.clone())
+            .expect("load cron state before stop");
         assert_eq!(
             cron_state
                 .jobs()
@@ -4647,8 +4665,8 @@ services:
                 .any(|job| job.service_name == "beta_cron"),
             "stopped beta cron should leave active scheduler routing"
         );
-        let cron_state =
-            crate::cron::CronStateFile::load().expect("load cron state after stop");
+        let cron_state = crate::cron::CronStateFile::load(beta_store)
+            .expect("load cron state after stop");
         assert_eq!(
             cron_state
                 .jobs()

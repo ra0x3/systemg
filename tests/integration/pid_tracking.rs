@@ -19,14 +19,29 @@ use systemg::{
         load_config,
     },
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    state_store::StateStore,
 };
 use tempfile::tempdir;
+
+/// Iterates every project's state store (single-project test configs have one).
+fn project_stores() -> Vec<StateStore> {
+    let projects_dir = systemg::runtime::state_dir().join("projects");
+    match std::fs::read_dir(&projects_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| StateStore::for_project(&e.file_name().to_string_lossy()))
+            .collect(),
+        Err(_) => vec![],
+    }
+}
 
 fn wait_for_pid_change(service: &str, previous: u32) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(pid_file) = PidFile::load()
-            && let Some(pid) = pid_file.pid_for(service)
+        if let Some(pid) = project_stores()
+            .into_iter()
+            .filter_map(|s| PidFile::load(s).ok())
+            .find_map(|p| p.pid_for(service))
             && pid != previous
         {
             return pid;
@@ -47,13 +62,15 @@ fn wait_for_pid_change(service: &str, previous: u32) -> u32 {
 fn wait_for_state_pid(service_hash: &str) -> systemg::daemon::ServiceStateEntry {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if let Ok(state_file) = ServiceStateFile::load()
-            && let Some(entry) = state_file.get(service_hash)
+        if let Some(entry) = project_stores()
+            .into_iter()
+            .filter_map(|s| ServiceStateFile::load(s).ok())
+            .find_map(|sf| sf.get(service_hash).cloned())
             && entry.status == ServiceLifecycleStatus::Running
             && let Some(pid) = entry.pid
             && is_process_alive(pid)
         {
-            return entry.clone();
+            return entry;
         }
 
         if Instant::now() >= deadline {
@@ -67,8 +84,9 @@ fn wait_for_state_pid(service_hash: &str) -> systemg::daemon::ServiceStateEntry 
 }
 
 fn build_daemon(config: Config) -> Daemon {
-    let pid_file = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
-    let state_file = Arc::new(Mutex::new(ServiceStateFile::load().unwrap_or_default()));
+    let store = StateStore::for_project(&config.project.id);
+    let pid_file = Arc::new(Mutex::new(PidFile::load(store.clone()).unwrap_or_default()));
+    let state_file = Arc::new(Mutex::new(ServiceStateFile::load(store).unwrap_or_default()));
     Daemon::new(config, pid_file, state_file, false)
 }
 
@@ -206,7 +224,7 @@ services:
     daemon.stop_service("resilient").expect("stop resilient");
     wait_for_pid_removed("resilient");
 
-    let state = ServiceStateFile::load().expect("load state");
+    let state = ServiceStateFile::load(daemon.store()).expect("load state");
     let entry = state.get(&service_hash).expect("state entry for hash");
     assert_eq!(
         entry.status,
@@ -261,7 +279,7 @@ services:
         .get("steady")
         .expect("service present")
         .compute_hash();
-    let mut state_file = ServiceStateFile::load().expect("load state file");
+    let mut state_file = ServiceStateFile::load(daemon.store()).expect("load state file");
     state_file
         .set(
             &service_hash,
@@ -293,7 +311,7 @@ services:
         "Expected status output to treat the alive process as running, got: {stdout}"
     );
 
-    let refreshed_state = ServiceStateFile::load().expect("reload state file");
+    let refreshed_state = ServiceStateFile::load(daemon.store()).expect("reload state file");
     let entry = refreshed_state
         .get(&service_hash)
         .expect("state entry present after status call");

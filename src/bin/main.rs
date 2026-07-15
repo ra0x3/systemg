@@ -42,6 +42,7 @@ use systemg::{
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
     spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
+    state_store::StateStore,
     status::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, ProjectRunMode,
         SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitIntent, UnitKind,
@@ -1083,7 +1084,18 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 service.as_deref(),
             )?;
 
-            let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
+            let log_project = target_project.clone().or_else(|| {
+                load_config(Some(&effective_config))
+                    .ok()
+                    .map(|c| c.project.id)
+            });
+            let log_store = match log_project {
+                Some(id) => StateStore::for_project(&id),
+                None => StateStore::loose(),
+            };
+            let pid = Arc::new(Mutex::new(
+                PidFile::load(log_store).unwrap_or_default(),
+            ));
             let manager = LogManager::new(pid.clone());
 
             if purge {

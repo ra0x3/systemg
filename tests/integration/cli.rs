@@ -15,6 +15,7 @@ use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
 use common::{is_process_alive, wait_for_path};
 use systemg::daemon::PidFile;
+use systemg::state_store::StateStore;
 use tempfile::tempdir;
 
 #[test]
@@ -573,7 +574,16 @@ fn start_daemonize_accepts_unit_command_without_config() {
         generated_yaml
     );
 
-    let pid_file = PidFile::load().expect("pid file should load");
+    let projects_dir = systemg::runtime::state_dir().join("projects");
+    let pid_file = fs::read_dir(&projects_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            PidFile::load(StateStore::for_project(&e.file_name().to_string_lossy())).ok()
+        })
+        .find(|p| !p.services().is_empty())
+        .expect("pid file should load with services");
     assert!(
         !pid_file.services().is_empty(),
         "expected at least one supervised service in pid file"

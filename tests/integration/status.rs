@@ -20,6 +20,7 @@ use systemg::{
     config::load_config,
     daemon::{ServiceLifecycleStatus, ServiceStateFile},
     ipc::InspectPayload,
+    state_store::StateStore,
     status::{OverallHealth, StatusSnapshot},
 };
 #[cfg(target_os = "linux")]
@@ -81,7 +82,8 @@ services:
     let service = config.services.get("demo").expect("demo service");
     let hash = service.compute_hash();
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &hash,
@@ -139,7 +141,8 @@ services:
     let service = config.services.get("demo").expect("demo service");
     let hash = service.compute_hash();
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &hash,
@@ -187,7 +190,8 @@ services:
     let service = config.services.get("demo").expect("demo service");
     let hash = service.compute_hash();
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &hash,
@@ -237,7 +241,8 @@ services:
     let service = config.services.get("demo").expect("demo service");
     let hash = service.compute_hash();
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &hash,
@@ -298,7 +303,8 @@ services:
     let service = config.services.get("demo").expect("demo service");
     let hash = service.compute_hash();
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &hash,

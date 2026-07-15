@@ -9,6 +9,27 @@ use std::{
 
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use systemg::daemon::PidFile;
+use systemg::state_store::StateStore;
+
+/// Looks up a service's PID across every project directory.
+///
+/// The legacy in-process integration configs are single-project, so scanning
+/// all `projects/*/` dirs and returning the first match keeps these helpers
+/// project-agnostic without threading a project id through 30+ call sites.
+fn pid_for_service_anywhere(service: &str) -> Option<u32> {
+    let projects_dir = systemg::runtime::state_dir().join("projects");
+    let entries = fs::read_dir(&projects_dir).ok()?;
+    for entry in entries.flatten() {
+        let id = entry.file_name();
+        let store = StateStore::for_project(&id.to_string_lossy());
+        if let Ok(pid_file) = PidFile::load(store)
+            && let Some(pid) = pid_file.pid_for(service)
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
 
 pub struct HomeEnvGuard {
     previous: Option<String>,
@@ -84,9 +105,7 @@ pub fn wait_for_file_value(path: &Path, expected: &str) {
 pub fn wait_for_pid(service: &str) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(pid_file) = PidFile::load()
-            && let Some(pid) = pid_file.pid_for(service)
-        {
+        if let Some(pid) = pid_for_service_anywhere(service) {
             return pid;
         }
 
@@ -112,9 +131,7 @@ pub fn wait_for_path(path: &Path) {
 pub fn wait_for_pid_removed(service: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(pid_file) = PidFile::load()
-            && pid_file.pid_for(service).is_none()
-        {
+        if pid_for_service_anywhere(service).is_none() {
             return;
         }
 

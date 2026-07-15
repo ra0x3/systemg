@@ -2574,13 +2574,12 @@ impl LogManager {
             return Ok(());
         }
 
-        let pid_snapshot = {
+        let (pid_snapshot, store) = {
             let guard = self.pid_file.lock().unwrap();
-            guard.services().clone()
+            (guard.services().clone(), guard.store())
         };
 
-        let cron_state =
-            CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+        let cron_state = CronStateFile::load(store).unwrap_or_default();
 
         let hash_to_name: std::collections::HashMap<String, String> =
             crate::config::load_config(config_path)

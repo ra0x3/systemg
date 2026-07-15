@@ -33,16 +33,16 @@ use crate::{
     },
     constants::{
         DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
-        MAX_STATUS_LOG_LINES, PID_FILE_NAME, PID_LOCK_SUFFIX,
-        POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY, PROCESS_CHECK_INTERVAL,
-        PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT,
-        SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG, STATE_FILE_NAME,
+        MAX_STATUS_LOG_LINES, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
+        PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL,
+        SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_service_log_writers},
     opslot::OpSlot,
     runtime,
     spawn::SpawnedExit,
+    state_store::StateStore,
 };
 
 /// Provides systemtime serde support.
@@ -213,6 +213,10 @@ pub struct PidFile {
         deserialize_with = "deserialize_metadata"
     )]
     spawn_metadata: HashMap<u32, PersistedSpawnChild>,
+    /// The project state directory this file is bound to. Never serialized;
+    /// re-attached after every load/reload.
+    #[serde(skip)]
+    store: StateStore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,18 +401,18 @@ where
 
 impl PidFile {
     /// Handles path.
-    fn path() -> PathBuf {
-        runtime::state_dir().join(PID_FILE_NAME)
+    fn path(&self) -> PathBuf {
+        self.store.pid_path()
     }
 
     /// Handles lock path.
-    fn lock_path() -> PathBuf {
-        runtime::state_dir().join(format!("{}{}", PID_FILE_NAME, PID_LOCK_SUFFIX))
+    fn lock_path(&self) -> PathBuf {
+        self.store.pid_lock_path()
     }
 
     /// Gets exclusive lock (auto-releases on drop).
-    fn acquire_lock() -> Result<File, PidFileError> {
-        let lock_path = Self::lock_path();
+    fn acquire_lock(&self) -> Result<File, PidFileError> {
+        let lock_path = self.lock_path();
         runtime::create_private_dir(lock_path.parent().unwrap())?;
 
         let lock_file = File::options()
@@ -423,22 +427,60 @@ impl PidFile {
         Ok(lock_file)
     }
 
+    /// Re-reads the on-disk file into `self`, preserving the bound store.
+    ///
+    /// Deserialize cannot know which project this file belongs to, so the
+    /// store is re-attached after every reload — this is the single invariant
+    /// that keeps a project's handle pinned to its own directory.
+    fn reload_into(&mut self, path: &std::path::Path) -> Result<(), PidFileError> {
+        if path.exists() {
+            let contents = fs::read_to_string(path)?;
+            let store = self.store.clone();
+            *self = xml_from_str::<Self>(&contents)?;
+            self.store = store;
+        }
+        Ok(())
+    }
+
+    /// Writes `self` to `path`, creating the project directory if needed.
+    fn write_at(&self, path: &std::path::Path) -> Result<(), PidFileError> {
+        runtime::create_private_dir(path.parent().unwrap())?;
+        runtime::write_private_file(path, xml_to_string(self)?)?;
+        Ok(())
+    }
+
     /// Returns a reference to the services map.
     pub fn services(&self) -> &HashMap<String, u32> {
         &self.services
     }
 
-    /// Loads with file locking.
-    pub fn load() -> Result<Self, PidFileError> {
-        let _lock = Self::acquire_lock()?;
+    /// The project store this file is bound to.
+    pub fn store(&self) -> StateStore {
+        self.store.clone()
+    }
 
-        let path = Self::path();
+    /// Binds this file to a project store.
+    pub fn set_store(&mut self, store: StateStore) {
+        self.store = store;
+    }
+
+    /// Loads with file locking.
+    pub fn load(store: StateStore) -> Result<Self, PidFileError> {
+        let mut this = Self {
+            store,
+            ..Self::default()
+        };
+        let _lock = this.acquire_lock()?;
+
+        let path = this.path();
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(this);
         }
         let contents = fs::read_to_string(path)?;
-        let pid_data = xml_from_str::<Self>(&contents)?;
-        Ok(pid_data)
+        let bound = this.store.clone();
+        this = xml_from_str::<Self>(&contents)?;
+        this.store = bound;
+        Ok(this)
     }
 
     /// Returns the PID for a specific service.
@@ -456,24 +498,48 @@ impl PidFile {
         &self.service_groups
     }
 
-    /// Reloads from disk.
-    pub fn reload() -> Result<Self, PidFileError> {
-        let _lock = Self::acquire_lock()?;
+    /// Records a service PID in memory only, without persisting to disk.
+    /// Intended for constructing snapshots in tests.
+    pub fn insert_in_memory(&mut self, service: &str, pid: u32) {
+        self.services.insert(service.to_string(), pid);
+    }
 
-        let path = Self::path();
+    /// Records spawn metadata in memory only, without persisting to disk.
+    /// Intended for constructing snapshots in tests.
+    pub fn record_spawn_in_memory(&mut self, metadata: PersistedSpawnChild) {
+        let child_pid = metadata.pid;
+        let parent_pid = metadata.parent_pid;
+        let depth = metadata.depth;
+        self.parent_map.insert(child_pid, parent_pid);
+        self.children_map.entry(parent_pid).or_default().push(child_pid);
+        self.spawn_depth.insert(child_pid, depth);
+        self.spawn_metadata.insert(child_pid, metadata);
+    }
+
+    /// Reloads from disk. A missing file is treated as empty state.
+    pub fn reload(store: StateStore) -> Result<Self, PidFileError> {
+        let mut this = Self {
+            store,
+            ..Self::default()
+        };
+        let _lock = this.acquire_lock()?;
+
+        let path = this.path();
+        if !path.exists() {
+            return Ok(this);
+        }
         let contents = fs::read_to_string(&path)?;
-        let pid_data = xml_from_str::<Self>(&contents)?;
-        Ok(pid_data)
+        let bound = this.store.clone();
+        this = xml_from_str::<Self>(&contents)?;
+        this.store = bound;
+        Ok(this)
     }
 
     /// Saves to disk.
     pub fn save(&self) -> Result<(), PidFileError> {
-        let _lock = Self::acquire_lock()?;
-
-        let path = Self::path();
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
-        Ok(())
+        let _lock = self.acquire_lock()?;
+        let path = self.path();
+        self.write_at(&path)
     }
 
     /// Atomically inserts PID.
@@ -488,52 +554,39 @@ impl PidFile {
         pid: u32,
         pgid: Option<i32>,
     ) -> Result<(), PidFileError> {
-        let _lock = Self::acquire_lock()?;
+        let _lock = self.acquire_lock()?;
 
-        let path = Self::path();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            *self = xml_from_str::<Self>(&contents)?;
-        }
+        let path = self.path();
+        self.reload_into(&path)?;
 
         self.services.insert(service.to_string(), pid);
         if let Some(group) = pgid {
             self.service_groups.insert(service.to_string(), group);
         }
 
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
-        Ok(())
+        self.write_at(&path)
     }
 
     /// Atomically clears a service PID while preserving the last known process-group metadata.
     pub fn clear_pid(&mut self, service: &str) -> Result<(), PidFileError> {
-        let _lock = Self::acquire_lock()?;
+        let _lock = self.acquire_lock()?;
 
-        let path = Self::path();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            *self = xml_from_str::<Self>(&contents)?;
-        }
+        let path = self.path();
+        self.reload_into(&path)?;
 
         if self.services.remove(service).is_none() {
             return Err(PidFileError::ServiceNotFound);
         }
 
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
-        Ok(())
+        self.write_at(&path)
     }
 
     /// Atomically removes service.
     pub fn remove(&mut self, service: &str) -> Result<(), PidFileError> {
-        let _lock = Self::acquire_lock()?;
+        let _lock = self.acquire_lock()?;
 
-        let path = Self::path();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            *self = xml_from_str::<Self>(&contents)?;
-        }
+        let path = self.path();
+        self.reload_into(&path)?;
 
         let removed_pid = match self.services.remove(service) {
             Some(pid) => pid,
@@ -572,9 +625,7 @@ impl PidFile {
 
         let _ = self.service_groups.remove(service);
 
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
-        Ok(())
+        self.write_at(&path)
     }
 
     /// Gets the PID for a service.
@@ -587,13 +638,10 @@ impl PidFile {
         &mut self,
         metadata: PersistedSpawnChild,
     ) -> Result<(), PidFileError> {
-        let _lock = Self::acquire_lock()?;
+        let _lock = self.acquire_lock()?;
 
-        let path = Self::path();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            *self = xml_from_str::<Self>(&contents)?;
-        }
+        let path = self.path();
+        self.reload_into(&path)?;
 
         let child_pid = metadata.pid;
         let parent_pid = metadata.parent_pid;
@@ -607,9 +655,7 @@ impl PidFile {
         self.spawn_depth.insert(child_pid, depth);
         self.spawn_metadata.insert(child_pid, metadata);
 
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
-        Ok(())
+        self.write_at(&path)
     }
 
     /// Records spawn exit.
@@ -618,32 +664,24 @@ impl PidFile {
         child_pid: u32,
         exit: SpawnedExit,
     ) -> Result<(), PidFileError> {
-        let _lock = Self::acquire_lock()?;
+        let _lock = self.acquire_lock()?;
 
-        let path = Self::path();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            *self = xml_from_str::<Self>(&contents)?;
-        }
+        let path = self.path();
+        self.reload_into(&path)?;
 
         if let Some(metadata) = self.spawn_metadata.get_mut(&child_pid) {
             metadata.last_exit = Some(exit.clone());
         }
 
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
-        Ok(())
+        self.write_at(&path)
     }
 
     /// Atomically removes a spawned child process.
     pub fn remove_spawn(&mut self, child_pid: u32) -> Result<(), PidFileError> {
-        let _lock = Self::acquire_lock()?;
+        let _lock = self.acquire_lock()?;
 
-        let path = Self::path();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            *self = xml_from_str::<Self>(&contents)?;
-        }
+        let path = self.path();
+        self.reload_into(&path)?;
 
         if let Some(parent_pid) = self.parent_map.remove(&child_pid)
             && let Some(children) = self.children_map.get_mut(&parent_pid)
@@ -656,9 +694,7 @@ impl PidFile {
         self.spawn_depth.remove(&child_pid);
         self.spawn_metadata.remove(&child_pid);
 
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
-        Ok(())
+        self.write_at(&path)
     }
 
     /// Removes spawn subtree.
@@ -666,18 +702,14 @@ impl PidFile {
         &mut self,
         root_pid: u32,
     ) -> Result<Vec<u32>, PidFileError> {
-        let _lock = Self::acquire_lock()?;
+        let _lock = self.acquire_lock()?;
 
-        let path = Self::path();
-        if path.exists() {
-            let contents = fs::read_to_string(&path)?;
-            *self = xml_from_str::<Self>(&contents)?;
-        }
+        let path = self.path();
+        self.reload_into(&path)?;
 
         let removed = self.remove_spawn_subtree_in_memory(root_pid);
 
-        runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
+        self.write_at(&path)?;
 
         Ok(removed)
     }
@@ -812,6 +844,7 @@ mod pidfile_tests {
             parent_map: HashMap::from([(2, 1), (3, 2)]),
             children_map: HashMap::from([(1, vec![2]), (2, vec![3])]),
             spawn_depth: HashMap::from([(1, 0), (2, 1), (3, 2)]),
+            store: StateStore::for_project("test"),
             spawn_metadata: HashMap::from([
                 (
                     2,
@@ -883,7 +916,9 @@ mod pidfile_tests {
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
 
+        let store = StateStore::for_project("test");
         let pid_file = PidFile {
+            store: store.clone(),
             services: HashMap::from([("svc".to_string(), 10)]),
             service_groups: HashMap::from([("svc".to_string(), 10)]),
             parent_map: HashMap::from([(11, 10), (12, 11)]),
@@ -926,7 +961,7 @@ mod pidfile_tests {
         };
 
         pid_file.save().expect("save pid file");
-        let mut loaded = PidFile::load().expect("load pid file");
+        let mut loaded = PidFile::load(store).expect("load pid file");
         let removed = loaded.remove("svc");
         assert!(removed.is_ok());
         assert!(!loaded.services.contains_key("svc"));
@@ -999,6 +1034,10 @@ pub struct ServiceStateFile {
         deserialize_with = "deserialize_state_entries"
     )]
     services: HashMap<String, ServiceStateEntry>,
+    /// The project state directory this file is bound to. Never serialized;
+    /// re-attached after every load.
+    #[serde(skip)]
+    store: StateStore,
 }
 
 /// Serializes state entries.
@@ -1033,25 +1072,60 @@ where
 
 impl ServiceStateFile {
     /// Handles path.
-    fn path() -> PathBuf {
-        runtime::state_dir().join(STATE_FILE_NAME)
+    fn path(&self) -> PathBuf {
+        self.store.state_path()
     }
 
     /// Loads the service state file from disk, creating an empty one if it doesn't exist.
-    pub fn load() -> Result<Self, ServiceStateError> {
-        let path = Self::path();
+    pub fn load(store: StateStore) -> Result<Self, ServiceStateError> {
+        let path = store.state_path();
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self {
+                store,
+                ..Self::default()
+            });
         }
 
         let contents = fs::read_to_string(path)?;
-        let state = xml_from_str::<Self>(&contents)?;
+        let mut state = xml_from_str::<Self>(&contents)?;
+        state.store = store;
         Ok(state)
+    }
+
+    /// The project store this file is bound to.
+    pub fn store(&self) -> StateStore {
+        self.store.clone()
+    }
+
+    /// Binds this file to a project store.
+    pub fn set_store(&mut self, store: StateStore) {
+        self.store = store;
+    }
+
+    /// Sets a service's state in memory only, without persisting to disk.
+    /// Intended for constructing snapshots in tests.
+    pub fn set_in_memory(
+        &mut self,
+        service_hash: &str,
+        status: ServiceLifecycleStatus,
+        pid: Option<u32>,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) {
+        self.services.insert(
+            service_hash.to_string(),
+            ServiceStateEntry {
+                status,
+                pid,
+                exit_code,
+                signal,
+            },
+        );
     }
 
     /// Saves the state file to disk.
     pub fn save(&self) -> Result<(), ServiceStateError> {
-        let path = Self::path();
+        let path = self.path();
         if let Some(parent) = path.parent() {
             runtime::create_private_dir(parent)?;
         }
@@ -2022,6 +2096,14 @@ impl Daemon {
     ) -> Self {
         debug!("Initializing daemon...");
 
+        let store = StateStore::for_project(&config.project.id);
+        if let Ok(mut guard) = pid_file.lock() {
+            guard.set_store(store.clone());
+        }
+        if let Ok(mut guard) = state_file.lock() {
+            guard.set_store(store);
+        }
+
         let project_root = config
             .project_dir
             .as_ref()
@@ -2067,8 +2149,9 @@ impl Daemon {
         config: Config,
         detach_children: bool,
     ) -> Result<Self, ProcessManagerError> {
-        let pid_file = Arc::new(Mutex::new(PidFile::load()?));
-        let state_file = Arc::new(Mutex::new(ServiceStateFile::load()?));
+        let store = StateStore::for_project(&config.project.id);
+        let pid_file = Arc::new(Mutex::new(PidFile::load(store.clone())?));
+        let state_file = Arc::new(Mutex::new(ServiceStateFile::load(store)?));
         Ok(Self::new(config, pid_file, state_file, detach_children))
     }
 
@@ -2085,6 +2168,11 @@ impl Daemon {
     /// Returns a handle to the shared PID file so callers can inspect process IDs.
     pub fn pid_file_handle(&self) -> Arc<Mutex<PidFile>> {
         Arc::clone(&self.pid_file)
+    }
+
+    /// The project state store this daemon's files are bound to.
+    pub fn store(&self) -> StateStore {
+        StateStore::for_project(&self.config.project.id)
     }
 
     /// Returns a handle to the persisted service state store.
@@ -5174,7 +5262,7 @@ impl Daemon {
                             }
 
                             if let Ok(mut pid_file_guard) = ctx.pid_file.lock()
-                                && let Ok(latest) = PidFile::reload()
+                                && let Ok(latest) = PidFile::reload(pid_file_guard.store())
                             {
                                 *pid_file_guard = latest;
                             }
@@ -5745,7 +5833,10 @@ sleep 30
     #[test]
     fn concurrent_pid_file_operations_no_lost_updates() {
         with_temp_home(|_| {
-            let mut initial = PidFile::default();
+            let mut initial = PidFile {
+                store: StateStore::for_project("test"),
+                ..PidFile::default()
+            };
             initial.insert("baseline", 1000).unwrap();
             let num_threads = 10;
             let mut handles = vec![];
@@ -5753,7 +5844,7 @@ sleep 30
                 let handle = thread::spawn(move || {
                     thread::sleep(Duration::from_micros(i as u64 * 100));
                     for retry in 0..3 {
-                        match PidFile::load() {
+                        match PidFile::load(StateStore::for_project("test")) {
                             Ok(mut pid_file) => {
                                 let service_name = format!("cron_job_{}", i);
                                 if pid_file.insert(&service_name, 2000 + i).is_ok() {
@@ -5777,7 +5868,7 @@ sleep 30
                     thread::sleep(Duration::from_millis(2));
 
                     for retry in 0..3 {
-                        match PidFile::load() {
+                        match PidFile::load(StateStore::for_project("test")) {
                             Ok(mut pid_file) => {
                                 if i % 2 == 0 {
                                     let _ = pid_file.remove("baseline");
@@ -5800,7 +5891,8 @@ sleep 30
             for handle in handles {
                 handle.join().unwrap();
             }
-            let final_pid_file = PidFile::load().expect("Failed to load final PID file");
+            let final_pid_file =
+                PidFile::load(StateStore::for_project("test")).expect("Failed to load final PID file");
             let mut missing = vec![];
             for i in 0..num_threads {
                 let service_name = format!("cron_job_{}", i);

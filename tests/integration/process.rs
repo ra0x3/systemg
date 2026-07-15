@@ -218,7 +218,7 @@ services:
     daemon.stop_service("ghost_service").unwrap();
 
     // PID should be cleaned up
-    let pid_file = systemg::daemon::PidFile::load().unwrap();
+    let pid_file = systemg::daemon::PidFile::load(daemon.store()).unwrap();
     assert!(pid_file.pid_for("ghost_service").is_none());
 }
 

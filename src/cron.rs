@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::{Config, CronConfig},
     error::ProcessManagerError,
-    runtime,
+    state_store::StateStore,
 };
 
 /// Maximum number of execution history entries to keep per cron job.
@@ -451,19 +451,28 @@ pub struct CronManager {
 }
 
 impl Default for CronManager {
-    /// Returns the default this item.
+    /// Returns the default this item, bound to the loose project store.
     fn default() -> Self {
+        Self::for_store(StateStore::loose())
+    }
+}
+
+impl CronManager {
+    /// Creates a cron manager bound to a project's state store, loading any
+    /// persisted state from that project's directory.
+    pub fn for_store(store: StateStore) -> Self {
         let state_file =
-            CronStateFile::load().unwrap_or_else(|_| CronStateFile::default());
+            CronStateFile::load(store.clone()).unwrap_or_else(|_| CronStateFile {
+                store,
+                ..CronStateFile::default()
+            });
         Self {
             jobs: Arc::new(Mutex::new(Vec::new())),
             state_file: Arc::new(Mutex::new(state_file)),
         }
     }
-}
 
-impl CronManager {
-    /// Creates a new cron manager, loading any persisted state from disk.
+    /// Creates a new cron manager bound to the loose project store.
     pub fn new() -> Self {
         Self::default()
     }
@@ -890,6 +899,10 @@ pub struct CronStateFile {
         deserialize_with = "deserialize_cron_jobs"
     )]
     jobs: std::collections::BTreeMap<String, PersistedCronJobState>,
+    /// The project state directory this file is bound to. Never serialized;
+    /// re-attached after every load.
+    #[serde(skip)]
+    store: StateStore,
 }
 
 /// Serializes cron jobs.
@@ -924,13 +937,13 @@ where
 
 impl CronStateFile {
     /// Returns the path to the cron state file.
-    fn path() -> PathBuf {
-        runtime::state_dir().join("cron_state.xml")
+    fn path(&self) -> PathBuf {
+        self.store.cron_path()
     }
 
     /// Saves the cron state to disk.
     pub(crate) fn save(&self) -> Result<(), std::io::Error> {
-        let path = Self::path();
+        let path = self.path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -943,27 +956,39 @@ impl CronStateFile {
         Ok(())
     }
 
+    /// The project store this file is bound to.
+    pub fn store(&self) -> StateStore {
+        self.store.clone()
+    }
+
     /// Loads the cron state file from disk, creating an empty one if it doesn't exist.
-    pub fn load() -> Result<Self, std::io::Error> {
-        let path = Self::path();
+    pub fn load(store: StateStore) -> Result<Self, std::io::Error> {
+        let empty = || Self {
+            store: store.clone(),
+            ..Self::default()
+        };
+        let path = store.cron_path();
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(empty());
         }
 
         let raw = fs::read_to_string(&path)?;
 
         if raw.trim().is_empty() || raw.trim() == "<CronStateFile/>" {
-            return Ok(Self::default());
+            return Ok(empty());
         }
 
-        match quick_xml::de::from_str(&raw) {
-            Ok(state) => Ok(state),
+        match quick_xml::de::from_str::<Self>(&raw) {
+            Ok(mut state) => {
+                state.store = store;
+                Ok(state)
+            }
             Err(err) => {
                 eprintln!(
                     "Warning: Failed to deserialize cron state file at {:?}: {}. Using default state.",
                     path, err
                 );
-                Ok(Self::default())
+                Ok(empty())
             }
         }
     }
@@ -1320,7 +1345,7 @@ mod tests {
         );
 
         let service_hash = compute_test_hash(&cron_config);
-        let state = CronStateFile::load().expect("load cron state");
+        let state = CronStateFile::load(StateStore::loose()).expect("load cron state");
         let persisted = state.jobs().get(&service_hash).expect("persisted cron job");
 
         assert_eq!(persisted.execution_history.len(), 1);
@@ -1432,7 +1457,7 @@ mod tests {
         assert!(job_names.contains(&"job_three".to_string()));
         assert!(!job_names.contains(&"job_one".to_string()));
 
-        let state = CronStateFile::load().expect("load cron state");
+        let state = CronStateFile::load(StateStore::loose()).expect("load cron state");
         assert!(state.jobs().contains_key(&job_two_hash));
         assert!(state.jobs().contains_key(&job_three_hash));
         assert!(

@@ -50,7 +50,7 @@ services:
 
     // other_service should still be running
     assert!(
-        systemg::daemon::PidFile::load()
+        systemg::daemon::PidFile::load(daemon.store())
             .unwrap()
             .pid_for("other_service")
             .is_some()

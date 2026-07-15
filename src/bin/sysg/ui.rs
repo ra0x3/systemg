@@ -228,7 +228,7 @@ fn render_service_logs_from_snapshot(
         return Ok(());
     }
 
-    let cron_state = CronStateFile::load().unwrap_or_default();
+    let cron_state = CronStateFile::load(StateStore::loose()).unwrap_or_default();
     let combined_exists = get_service_log_path(service_name).exists();
     let stdout_exists = resolve_log_path(service_name, "stdout").exists();
     let stderr_exists = resolve_log_path(service_name, "stderr").exists();
