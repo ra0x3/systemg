@@ -506,9 +506,9 @@ impl Supervisor {
             )
             .map_err(|err| match err {
                 SupervisorError::Status(status_err) => status_err,
-                other => StatusError::Config(
-                    ProcessManagerError::MutexPoisonError(other.to_string()),
-                ),
+                other => StatusError::Config(ProcessManagerError::MutexPoisonError(
+                    other.to_string(),
+                )),
             })?;
             snapshots.push(snapshot);
         }
@@ -1702,7 +1702,9 @@ impl Supervisor {
                                                                             metrics,
                                                                         );
                                                             if let Ok(mut state_file) =
-                                                                ServiceStateFile::load(daemon.store())
+                                                                ServiceStateFile::load(
+                                                                    daemon.store(),
+                                                                )
                                                             {
                                                                 let lifecycle_status = match status {
                                                                                 CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
@@ -1779,7 +1781,9 @@ impl Supervisor {
                                                     let already_completed = if let Ok(
                                                         state_file,
                                                     ) =
-                                                        ServiceStateFile::load(daemon.store())
+                                                        ServiceStateFile::load(
+                                                            daemon.store(),
+                                                        )
                                                         && let Some(entry) =
                                                             state_file.get(&service_hash)
                                                     {
@@ -2723,8 +2727,12 @@ impl Supervisor {
 
         let mut last_id = None;
         for config in configs {
-            last_id =
-                Some(self.register_one_project(config, &resolved, &service_filter, mode)?);
+            last_id = Some(self.register_one_project(
+                config,
+                &resolved,
+                &service_filter,
+                mode,
+            )?);
         }
         last_id.ok_or_else(|| {
             io::Error::new(
@@ -4282,8 +4290,8 @@ services:
             .expect("beta project")
             .daemon
             .store();
-        let alpha_cron =
-            crate::cron::CronStateFile::load(alpha_store.clone()).expect("load alpha cron");
+        let alpha_cron = crate::cron::CronStateFile::load(alpha_store.clone())
+            .expect("load alpha cron");
         let beta_cron =
             crate::cron::CronStateFile::load(beta_store.clone()).expect("load beta cron");
         assert!(

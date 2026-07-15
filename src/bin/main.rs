@@ -1093,9 +1093,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 Some(id) => StateStore::for_project(&id),
                 None => StateStore::loose(),
             };
-            let pid = Arc::new(Mutex::new(
-                PidFile::load(log_store).unwrap_or_default(),
-            ));
+            let pid = Arc::new(Mutex::new(PidFile::load(log_store).unwrap_or_default()));
             let manager = LogManager::new(pid.clone());
 
             if purge {

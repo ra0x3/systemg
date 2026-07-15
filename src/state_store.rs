@@ -1,15 +1,17 @@
 //! Per-project on-disk state layout.
 //!
 //! Every project owns a directory `{state_dir}/projects/{project_id}/` holding
-//! its own `pid.xml`, `state.xml`, and `cron_state.xml`. A [`StateStore`] is the
+//! its own `pid.xml`, `state.xml`, and `cron_state.xml`. A `StateStore` is the
 //! single source of those paths — nothing else in the codebase should join a
 //! state-file name onto the raw state dir. Project-less ("loose") services live
-//! under the [`LOOSE_PROJECT_ID`] directory so the layout is uniform.
+//! under the `__loose__` directory so the layout is uniform.
 
 use std::path::PathBuf;
 
-use crate::constants::{PID_FILE_NAME, PID_LOCK_SUFFIX, STATE_FILE_NAME};
-use crate::runtime;
+use crate::{
+    constants::{PID_FILE_NAME, PID_LOCK_SUFFIX, STATE_FILE_NAME},
+    runtime,
+};
 
 /// Directory name holding every project's state directory.
 pub const PROJECTS_DIR: &str = "projects";
@@ -65,12 +67,19 @@ impl StateStore {
 
     /// Path to the PID file's lock.
     pub fn pid_lock_path(&self) -> PathBuf {
-        self.dir.join(format!("{}{}", PID_FILE_NAME, PID_LOCK_SUFFIX))
+        self.dir
+            .join(format!("{}{}", PID_FILE_NAME, PID_LOCK_SUFFIX))
     }
 
     /// Path to the project's service-state file.
     pub fn state_path(&self) -> PathBuf {
         self.dir.join(STATE_FILE_NAME)
+    }
+
+    /// Path to the service-state file's lock.
+    pub fn state_lock_path(&self) -> PathBuf {
+        self.dir
+            .join(format!("{}{}", STATE_FILE_NAME, PID_LOCK_SUFFIX))
     }
 
     /// Path to the project's cron-state file.

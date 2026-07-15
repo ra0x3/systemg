@@ -192,11 +192,9 @@ impl TryFrom<ConfigV1> for Config {
         }
 
         if value.project.is_some() && value.projects.is_some() {
-            return Err(
-                "a manifest may use 'project' or 'projects', not both; \
+            return Err("a manifest may use 'project' or 'projects', not both; \
                  run 'sysg migrate' to convert 'project' to 'projects'"
-                    .to_string(),
-            );
+                .to_string());
         }
 
         // Single-value callers (the CLI, validation, status fallbacks) get the
@@ -234,7 +232,7 @@ impl ConfigV1 {
     fn into_configs(self) -> Result<Vec<Config>, String> {
         if self.project.is_some() && self.projects.is_some() {
             return Err(
-                "a manifest may use 'project' or 'projects', not both".to_string(),
+                "a manifest may use 'project' or 'projects', not both".to_string()
             );
         }
 
@@ -1498,7 +1496,10 @@ pub fn migrate_manifest(content: &str) -> Result<String, ProcessManagerError> {
                         "legacy project block is missing an id",
                     ))
                 })?;
-            let name = pm.get(&name_key).and_then(Value::as_str).map(str::to_string);
+            let name = pm
+                .get(&name_key)
+                .and_then(Value::as_str)
+                .map(str::to_string);
             (id, name)
         }
         _ => {
@@ -1508,7 +1509,9 @@ pub fn migrate_manifest(content: &str) -> Result<String, ProcessManagerError> {
         }
     };
 
-    let services = map.remove(&services_key).unwrap_or(Value::Mapping(Mapping::new()));
+    let services = map
+        .remove(&services_key)
+        .unwrap_or(Value::Mapping(Mapping::new()));
 
     let mut entry = Mapping::new();
     if let Some(name) = name {
@@ -1646,8 +1649,8 @@ pub fn load_projects_from_file(
 
     // First pass over the raw text applies env-file side effects so ${VAR}
     // expansion below can see them, mirroring load_config_from_file.
-    for config in parse_config_projects(&content)
-        .map_err(ProcessManagerError::ConfigParseError)?
+    for config in
+        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?
     {
         apply_env_side_effects(&config, &base_path)?;
     }

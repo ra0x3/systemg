@@ -104,7 +104,8 @@ services:
     );
 
     // Verify other_service is still running (single service stop shouldn't affect others)
-    let other_pid = any_pid_file_with("other_service").and_then(|p| p.pid_for("other_service"));
+    let other_pid =
+        any_pid_file_with("other_service").and_then(|p| p.pid_for("other_service"));
     assert!(
         other_pid.is_some(),
         "other_service should still have PID entry"

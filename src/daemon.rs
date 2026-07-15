@@ -512,7 +512,10 @@ impl PidFile {
         let parent_pid = metadata.parent_pid;
         let depth = metadata.depth;
         self.parent_map.insert(child_pid, parent_pid);
-        self.children_map.entry(parent_pid).or_default().push(child_pid);
+        self.children_map
+            .entry(parent_pid)
+            .or_default()
+            .push(child_pid);
         self.spawn_depth.insert(child_pid, depth);
         self.spawn_metadata.insert(child_pid, metadata);
     }
@@ -1124,6 +1127,35 @@ impl ServiceStateFile {
         );
     }
 
+    /// Acquires an exclusive lock on the state file (auto-releases on drop).
+    fn acquire_lock(&self) -> Result<File, ServiceStateError> {
+        let lock_path = self.store.state_lock_path();
+        runtime::create_private_dir(lock_path.parent().unwrap())?;
+        let lock_file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        lock_file.lock_exclusive()?;
+        Ok(lock_file)
+    }
+
+    /// Re-reads the on-disk file into `self`, preserving the bound store.
+    /// A missing file is treated as empty. Keeps concurrent writers from
+    /// clobbering each other's entries: a write always merges onto current disk.
+    fn reload_locked(&mut self) -> Result<(), ServiceStateError> {
+        let path = self.path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let contents = fs::read_to_string(&path)?;
+        let store = self.store.clone();
+        *self = xml_from_str::<Self>(&contents)?;
+        self.store = store;
+        Ok(())
+    }
+
     /// Saves the state file to disk.
     pub fn save(&self) -> Result<(), ServiceStateError> {
         let path = self.path();
@@ -1146,6 +1178,9 @@ impl ServiceStateFile {
     }
 
     /// Sets the state for a service by its configuration hash and persists to disk.
+    ///
+    /// Takes the file lock and reloads from disk before applying, so a service
+    /// starting concurrently in the same project can't clobber another's entry.
     pub fn set(
         &mut self,
         service_hash: &str,
@@ -1154,6 +1189,8 @@ impl ServiceStateFile {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
         self.services.insert(
             service_hash.to_string(),
             ServiceStateEntry {
@@ -1168,6 +1205,8 @@ impl ServiceStateFile {
 
     /// Removes a service from the state file by its configuration hash and persists to disk.
     pub fn remove(&mut self, service_hash: &str) -> Result<(), ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
         if self.services.remove(service_hash).is_some() {
             self.save()
         } else {
@@ -5263,7 +5302,8 @@ impl Daemon {
                             }
 
                             if let Ok(mut pid_file_guard) = ctx.pid_file.lock()
-                                && let Ok(latest) = PidFile::reload(pid_file_guard.store())
+                                && let Ok(latest) =
+                                    PidFile::reload(pid_file_guard.store())
                             {
                                 *pid_file_guard = latest;
                             }
@@ -5892,8 +5932,8 @@ sleep 30
             for handle in handles {
                 handle.join().unwrap();
             }
-            let final_pid_file =
-                PidFile::load(StateStore::for_project("test")).expect("Failed to load final PID file");
+            let final_pid_file = PidFile::load(StateStore::for_project("test"))
+                .expect("Failed to load final PID file");
             let mut missing = vec![];
             for i in 0..num_threads {
                 let service_name = format!("cron_job_{}", i);

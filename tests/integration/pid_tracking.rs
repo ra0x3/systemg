@@ -86,7 +86,9 @@ fn wait_for_state_pid(service_hash: &str) -> systemg::daemon::ServiceStateEntry 
 fn build_daemon(config: Config) -> Daemon {
     let store = StateStore::for_project(&config.project.id);
     let pid_file = Arc::new(Mutex::new(PidFile::load(store.clone()).unwrap_or_default()));
-    let state_file = Arc::new(Mutex::new(ServiceStateFile::load(store).unwrap_or_default()));
+    let state_file = Arc::new(Mutex::new(
+        ServiceStateFile::load(store).unwrap_or_default(),
+    ));
     Daemon::new(config, pid_file, state_file, false)
 }
 
@@ -311,7 +313,8 @@ services:
         "Expected status output to treat the alive process as running, got: {stdout}"
     );
 
-    let refreshed_state = ServiceStateFile::load(daemon.store()).expect("reload state file");
+    let refreshed_state =
+        ServiceStateFile::load(daemon.store()).expect("reload state file");
     let entry = refreshed_state
         .get(&service_hash)
         .expect("state entry present after status call");

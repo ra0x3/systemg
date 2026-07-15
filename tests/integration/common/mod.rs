@@ -8,8 +8,7 @@ use std::{
 };
 
 use sysinfo::{Pid, ProcessesToUpdate, System};
-use systemg::daemon::PidFile;
-use systemg::state_store::StateStore;
+use systemg::{daemon::PidFile, state_store::StateStore};
 
 /// Looks up a service's PID across every project directory.
 ///

@@ -3550,7 +3550,13 @@ services:
         });
 
         let mut service_state = ServiceStateFile::default();
-        service_state.set_in_memory(&hash, ServiceLifecycleStatus::Running, Some(42), None, None);
+        service_state.set_in_memory(
+            &hash,
+            ServiceLifecycleStatus::Running,
+            Some(42),
+            None,
+            None,
+        );
         let mut cron_state = CronStateFile::default();
 
         let snapshot = build_snapshot(

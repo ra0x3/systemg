@@ -14,8 +14,7 @@ use assert_cmd::Command;
 use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
 use common::{is_process_alive, wait_for_path};
-use systemg::daemon::PidFile;
-use systemg::state_store::StateStore;
+use systemg::{daemon::PidFile, state_store::StateStore};
 use tempfile::tempdir;
 
 #[test]
