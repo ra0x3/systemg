@@ -309,6 +309,25 @@ jobs:
       - name: Run Tests
         run: cargo test --verbose
 
+  # Use-case tests: real end-to-end runs of the sysg binary in Docker.
+  # Each case boots a config via the CLI and asserts on ps / on-disk state /
+  # `sysg status` output — the coverage the in-process façade tests never had.
+  docker-usecase-tests:
+    name: Docker Use-Case Tests
+    runs-on: ubuntu-latest
+    needs: [changes, clippy]
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run use-case suite
+        run: tests/docker/usecase/run_all.sh
+
   # Docker UAT tests run in parallel with cargo-test
   # Tests both user mode and kernel mode scenarios
   docker-uat-tests:

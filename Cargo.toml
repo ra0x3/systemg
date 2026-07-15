@@ -61,18 +61,6 @@ predicates = { version = "2.1" }
 tempfile = { version = "3.14.0" }
 
 [[test]]
-name = "hooks"
-path = "tests/integration/hooks.rs"
-
-[[test]]
-name = "service_control"
-path = "tests/integration/service_control.rs"
-
-[[test]]
-name = "process"
-path = "tests/integration/process.rs"
-
-[[test]]
 name = "service_control_regression"
 path = "tests/integration/service_control_regression.rs"
 
@@ -93,16 +81,8 @@ name = "cron"
 path = "tests/integration/cron.rs"
 
 [[test]]
-name = "cron_pid_race"
-path = "tests/integration/cron_pid_race.rs"
-
-[[test]]
 name = "supervisor"
 path = "tests/integration/supervisor.rs"
-
-[[test]]
-name = "deployment"
-path = "tests/integration/deployment.rs"
 
 [[test]]
 name = "cli"
