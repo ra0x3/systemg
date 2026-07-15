@@ -597,7 +597,7 @@ impl CronManager {
             self.register_store(&project_id, StateStore::for_project(&project_id));
             for (service_name, service_config) in &config.services {
                 if let Some(cron_config) = &service_config.cron {
-                    let service_hash = service_config.compute_hash();
+                    let service_hash = config.state_key(service_name);
                     let (job_state, normalized, normalized_expression) = self
                         .build_job_state(
                             &project_id,
@@ -1487,9 +1487,9 @@ mod tests {
             status: crate::config::StatusConfig::default(),
         };
 
-        let job_two_hash = service_with_cron("*/2 * * * * *").compute_hash();
-        let job_three_hash = service_with_cron("0 */5 * * * *").compute_hash();
-        let job_one_hash = service_with_cron("* * * * * *").compute_hash();
+        let job_two_hash = config_v2.state_key("job_two");
+        let job_three_hash = config_v2.state_key("job_three");
+        let job_one_hash = config_v1.state_key("job_one");
 
         manager.sync_from_config(&config_v2).unwrap();
 

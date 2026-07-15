@@ -917,7 +917,7 @@ pub(crate) fn cron_hashes_for_config(config: &Config) -> HashSet<String> {
         .services
         .iter()
         .filter(|(_, svc)| svc.cron.is_some())
-        .map(|(_, svc)| svc.compute_hash())
+        .map(|(name, _)| config.state_key(name))
         .collect()
 }
 
@@ -988,14 +988,14 @@ fn build_snapshot(
 
     if let Some(cfg) = config {
         for (service_name, service_config) in &cfg.services {
-            let hash = service_config.compute_hash();
-            hash_to_name.insert(hash.clone(), service_name.clone());
+            let key = cfg.state_key(service_name);
+            hash_to_name.insert(key.clone(), service_name.clone());
             if service_config.cron.is_some() {
-                hash_kind.insert(hash.clone(), UnitKind::Cron);
+                hash_kind.insert(key.clone(), UnitKind::Cron);
             } else {
-                hash_kind.insert(hash.clone(), UnitKind::Service);
+                hash_kind.insert(key.clone(), UnitKind::Service);
             }
-            unit_hashes.insert(hash);
+            unit_hashes.insert(key);
         }
     }
 
@@ -1020,7 +1020,7 @@ fn build_snapshot(
         let display_name = actual_name
             .as_deref()
             .map(str::to_string)
-            .unwrap_or_else(|| format!("[orphaned] {}", truncate_hash(&hash)));
+            .unwrap_or_else(|| format!("[orphaned] {}", service_from_key(&hash)));
 
         let kind = hash_kind.get(&hash).copied().unwrap_or_else(|| {
             if cron_state.jobs().contains_key(&hash) {
@@ -1899,9 +1899,12 @@ pub fn compute_overall_health(units: &[UnitStatus]) -> OverallHealth {
 }
 
 /// Truncates hash.
-fn truncate_hash(hash: &str) -> String {
-    let prefix_length = hash.len().min(12);
-    hash[..prefix_length].to_string()
+/// The service segment of a composite state key `{version}:{project}:{service}`,
+/// for display. Falls back to the whole key if it isn't in composite form.
+fn service_from_key(key: &str) -> String {
+    key.rsplit_once(':')
+        .map(|(_, service)| service.to_string())
+        .unwrap_or_else(|| key.to_string())
 }
 
 /// Computes uptime.
@@ -2354,10 +2357,10 @@ impl StatusManager {
         config_path: Option<&str>,
     ) {
         if let Ok(config) = crate::config::load_config(config_path)
-            && let Some(service_config) = config.services.get(service_name)
+            && config.services.contains_key(service_name)
         {
-            let service_hash = service_config.compute_hash();
-            self.show_status_with_cron_info_by_hash(service_name, &service_hash, is_cron);
+            let key = config.state_key(service_name);
+            self.show_status_with_cron_info_by_hash(service_name, &key, is_cron);
             return;
         }
         println!("● {} - Not found in configuration", service_name);
@@ -2493,8 +2496,8 @@ impl StatusManager {
             .as_ref()
             .map(|cfg| {
                 cfg.services
-                    .iter()
-                    .map(|(name, svc_config)| (svc_config.compute_hash(), name.clone()))
+                    .keys()
+                    .map(|name| (cfg.state_key(name), name.clone()))
                     .collect()
             })
             .unwrap_or_default();
@@ -2533,7 +2536,7 @@ impl StatusManager {
             } else {
                 println!(
                     "● [orphaned] {} - Service not in current config",
-                    &hash[..16]
+                    service_from_key(&hash)
                 );
             }
         }
@@ -2550,11 +2553,11 @@ impl StatusManager {
         }
 
         println!("Service statuses:");
-        for (service_name, service_config) in &config.services {
-            let service_hash = service_config.compute_hash();
-            let is_cron = cron_state.jobs().contains_key(&service_hash);
-            self.show_status_with_cron_info_by_hash(service_name, &service_hash, is_cron);
-            if let Some(cron_job) = cron_state.jobs().get(&service_hash) {
+        for service_name in config.services.keys() {
+            let key = config.state_key(service_name);
+            let is_cron = cron_state.jobs().contains_key(&key);
+            self.show_status_with_cron_info_by_hash(service_name, &key, is_cron);
+            if let Some(cron_job) = cron_state.jobs().get(&key) {
                 Self::print_cron_history(service_name, cron_job);
             }
         }
@@ -3073,8 +3076,7 @@ services:
         let config =
             crate::config::load_config(Some(config_path.to_string_lossy().as_ref()))
                 .expect("load config");
-        let service = config.services.get("demo").expect("demo service");
-        let hash = service.compute_hash();
+        let hash = config.state_key("demo");
 
         let store = StateStore::for_project(&config.project.id);
         let mut pid_file = PidFile::load(store.clone()).expect("load pid file");
@@ -3191,7 +3193,6 @@ services:
             }),
             ..crate::config::ServiceConfig::default()
         };
-        let hash = service.compute_hash();
         services.insert("nightly".into(), service);
         let config = Config {
             version: crate::config::Version::V2,
@@ -3203,6 +3204,7 @@ services:
             logs: crate::config::LogsConfig::default(),
             status: crate::config::StatusConfig::default(),
         };
+        let hash = config.state_key("nightly");
 
         let mut pid_file = PidFile::default();
         pid_file.insert_in_memory("nightly", 2_000_000_000);
@@ -3331,7 +3333,6 @@ services:
             restart_policy: Some("never".into()),
             ..crate::config::ServiceConfig::default()
         };
-        let hash = service.compute_hash();
         services.insert("migrate".into(), service);
         let config = Config {
             version: crate::config::Version::V2,
@@ -3343,6 +3344,7 @@ services:
             logs: crate::config::LogsConfig::default(),
             status: crate::config::StatusConfig::default(),
         };
+        let hash = config.state_key("migrate");
 
         let mut pid_file = PidFile::default();
         pid_file.insert_in_memory("migrate", 2_000_000_000);
@@ -3389,7 +3391,6 @@ services:
             restart_policy: Some("always".into()),
             ..crate::config::ServiceConfig::default()
         };
-        let hash = service.compute_hash();
         services.insert("api".into(), service);
         let config = Config {
             version: crate::config::Version::V2,
@@ -3401,6 +3402,7 @@ services:
             logs: crate::config::LogsConfig::default(),
             status: crate::config::StatusConfig::default(),
         };
+        let hash = config.state_key("api");
 
         let mut pid_file = PidFile::default();
         pid_file.insert_in_memory("api", 2_000_000_000);
@@ -3520,7 +3522,6 @@ services:
             command: "/bin/sleep 30".into(),
             ..crate::config::ServiceConfig::default()
         };
-        let hash = service.compute_hash();
         services.insert("demo".into(), service);
         let config = Config {
             version: crate::config::Version::V2,
@@ -3532,6 +3533,7 @@ services:
             logs: crate::config::LogsConfig::default(),
             status: crate::config::StatusConfig::default(),
         };
+        let hash = config.state_key("demo");
 
         let mut pid_file = PidFile::default();
         pid_file.insert_in_memory("demo", 42);

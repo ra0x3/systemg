@@ -1240,7 +1240,35 @@ pub struct CronConfig {
     pub timezone: Option<String>,
 }
 
+/// Builds the persistent state key for a service: `{version}:{project}:{service}`.
+///
+/// This uniquely identifies a service in the state and cron files. Unlike a
+/// config hash, two services with identical commands get distinct keys because
+/// their names differ. A project-less (loose) service uses `none` as the
+/// project segment.
+pub fn state_key(version: Version, project_id: &str, service: &str) -> String {
+    let project = if project_id.is_empty() || project_id == LOOSE_PROJECT_ID {
+        "none"
+    } else {
+        project_id
+    };
+    format!("v{version}:{project}:{service}")
+}
+
 impl Config {
+    /// The persistent state key for one of this config's services.
+    pub fn state_key(&self, service: &str) -> String {
+        state_key(self.version, &self.project.id, service)
+    }
+
+    /// Maps each service name to its persistent state key.
+    pub fn state_keys(&self) -> HashMap<String, String> {
+        self.services
+            .keys()
+            .map(|name| (name.clone(), self.state_key(name)))
+            .collect()
+    }
+
     /// Computes a mapping from service names to their configuration hashes.
     /// This is used to identify services across renames.
     pub fn service_hashes(&self) -> HashMap<String, String> {
@@ -1718,6 +1746,21 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn state_key_is_unique_per_service_and_maps_loose_to_none() {
+        assert_eq!(state_key(Version::V2, "foo", "bar"), "v2:foo:bar");
+        assert_eq!(state_key(Version::V2, "", "bar"), "v2:none:bar");
+        assert_eq!(
+            state_key(Version::V2, crate::state_store::LOOSE_PROJECT_ID, "bar"),
+            "v2:none:bar"
+        );
+        // Same-command services in the same project get distinct keys by name.
+        assert_ne!(
+            state_key(Version::V2, "foo", "api"),
+            state_key(Version::V2, "foo", "worker")
+        );
+    }
 
     #[test]
     fn projects_map_fans_out_into_one_config_per_entry() {

@@ -1642,13 +1642,9 @@ impl Supervisor {
 
                     for due_job in due_jobs {
                         let project = projects.iter().find(|project| {
-                            project
-                                .config
-                                .services
-                                .get(&due_job.service_name)
-                                .is_some_and(|service_config| {
-                                    service_config.compute_hash() == due_job.service_hash
-                                })
+                            project.config.services.contains_key(&due_job.service_name)
+                                && project.config.state_key(&due_job.service_name)
+                                    == due_job.service_hash
                         });
 
                         let Some(project) = project else {
@@ -4267,7 +4263,7 @@ services:
         let beta_hash = supervisor
             .extra_projects
             .get("beta")
-            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .map(|project| project.daemon.config().state_key("beta_cron"))
             .expect("beta cron hash");
         assert!(
             jobs.iter().any(|job| job.service_hash == beta_hash),
@@ -4282,11 +4278,8 @@ services:
         assert!(
             cron_projects.iter().any(|project| {
                 project.project_id == "beta"
-                    && project
-                        .config
-                        .services
-                        .get("beta_cron")
-                        .is_some_and(|service| service.compute_hash() == beta_hash)
+                    && project.config.services.contains_key("beta_cron")
+                    && project.config.state_key("beta_cron") == beta_hash
             }),
             "extra project cron job should be routable to its project"
         );
@@ -4367,14 +4360,11 @@ services:
             })
             .expect("add beta project");
 
-        let alpha_hash = supervisor
-            .daemon
-            .get_service_hash("alpha_cron")
-            .expect("alpha cron hash");
+        let alpha_hash = supervisor.daemon.config().state_key("alpha_cron");
         let beta_hash = supervisor
             .extra_projects
             .get("beta")
-            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .map(|project| project.daemon.config().state_key("beta_cron"))
             .expect("beta cron hash");
 
         let alpha_store = supervisor.daemon.store();
@@ -4650,7 +4640,7 @@ services:
         let beta_hash = supervisor
             .extra_projects
             .get("beta")
-            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .map(|project| project.daemon.config().state_key("beta_cron"))
             .expect("beta cron hash");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(3);

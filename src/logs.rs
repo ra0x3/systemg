@@ -2587,10 +2587,8 @@ impl LogManager {
                 .map(|config| {
                     config
                         .services
-                        .iter()
-                        .map(|(name, svc_config)| {
-                            (svc_config.compute_hash(), name.clone())
-                        })
+                        .keys()
+                        .map(|name| (config.state_key(name), name.clone()))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -2635,9 +2633,9 @@ impl LogManager {
             }
 
             if let Ok(config) = crate::config::load_config(config_path)
-                && let Some(service_config) = config.services.get(&service_name)
+                && config.services.contains_key(&service_name)
             {
-                let service_hash = service_config.compute_hash();
+                let service_hash = config.state_key(&service_name);
                 if let Some(_cron_job) = cron_state.jobs().get(&service_hash) {
                     debug!("Showing inactive logs for cron service '{}'", service_name);
                     let result = if matches!(mode, TailMode::OneShot) {

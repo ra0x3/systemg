@@ -2099,9 +2099,9 @@ impl Daemon {
         }
     }
 
-    /// Persists service state to the state file using the service's configuration hash as the key.
-    /// Logs a warning if the service is not found in the config. This is the low-level function
-    /// that writes state directly to disk.
+    /// Persists service state to the state file using the service's composite
+    /// state key (`{version}:{project}:{service}`) as the key. This is the
+    /// low-level function that writes state directly to disk.
     fn persist_service_state(
         config: &Arc<Config>,
         state_file: &Arc<Mutex<ServiceStateFile>>,
@@ -2111,17 +2111,10 @@ impl Daemon {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ProcessManagerError> {
-        if let Some(service_hash) = config.get_service_hash(service_name) {
+        if config.services.contains_key(service_name) {
+            let key = config.state_key(service_name);
             let mut state_guard = state_file.lock()?;
-            state_guard.set(&service_hash, status, pid, exit_code, signal)?;
-            if service_hash != service_name
-                && let Err(err) = state_guard.remove(service_name)
-                && !matches!(err, ServiceStateError::ServiceNotFound)
-            {
-                warn!(
-                    "Failed to remove legacy state entry for '{service_name}' in state file: {err}"
-                );
-            }
+            state_guard.set(&key, status, pid, exit_code, signal)?;
         }
 
         Ok(())
@@ -2241,24 +2234,19 @@ impl Daemon {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ProcessManagerError> {
-        if let Some(service_hash) = self.get_service_hash(service) {
-            let mut state = self.state_file.lock()?;
-            state.set(&service_hash, status, pid, exit_code, signal)?;
-            if service_hash != service
-                && let Err(err) = state.remove(service)
-                && !matches!(err, ServiceStateError::ServiceNotFound)
-            {
-                warn!(
-                    "Failed to remove legacy state entry for '{service}' in state file: {err}"
-                );
-            }
-        } else {
-            warn!(
-                "Service '{}' not found in config, skipping state update",
-                service
-            );
+        if !self.config.services.contains_key(service) {
+            warn!("Service '{service}' not found in config, skipping state update");
+            return Ok(());
         }
-        Ok(())
+        Self::persist_service_state(
+            &self.config,
+            &self.state_file,
+            service,
+            status,
+            pid,
+            exit_code,
+            signal,
+        )
     }
 
     /// Marks a service as running in the state file and PID file. This is called when a service
@@ -3138,12 +3126,17 @@ impl Daemon {
                     });
                 }
                 ServiceProbe::NotStarted => {
-                    let status = self.get_service_hash(dep).and_then(|hash| {
-                        self.state_file
-                            .lock()
-                            .ok()
-                            .and_then(|state| state.get(&hash).map(|entry| entry.status))
-                    });
+                    let status = self
+                        .config
+                        .services
+                        .contains_key(dep)
+                        .then(|| {
+                            let key = self.config.state_key(dep);
+                            self.state_file.lock().ok().and_then(|state| {
+                                state.get(&key).map(|entry| entry.status)
+                            })
+                        })
+                        .flatten();
 
                     match status {
                         Some(
@@ -4665,22 +4658,10 @@ impl Daemon {
             Err(err) => return Err(err.into()),
         }
 
-        if let Some(service_hash) = config.get_service_hash(service_name) {
+        if config.services.contains_key(service_name) {
+            let key = config.state_key(service_name);
             let mut state_guard = state_file.lock()?;
-            state_guard.set(
-                &service_hash,
-                ServiceLifecycleStatus::Stopped,
-                None,
-                None,
-                None,
-            )?;
-
-            if service_hash != service_name
-                && let Err(err) = state_guard.remove(service_name)
-                && !matches!(err, ServiceStateError::ServiceNotFound)
-            {
-                warn!("Failed to remove legacy state entry for '{service_name}': {err}");
-            }
+            state_guard.set(&key, ServiceLifecycleStatus::Stopped, None, None, None)?;
         }
 
         debug!("Service '{service_name}' stopped successfully.");
@@ -5686,12 +5667,7 @@ fi
             assert!(daemon.pid_file.lock().unwrap().get("slow").is_none());
 
             let state_guard = daemon.state_file.lock().unwrap();
-            let service_hash = daemon
-                .config
-                .services
-                .get("slow")
-                .expect("service present")
-                .compute_hash();
+            let service_hash = daemon.config.state_key("slow");
             let entry = state_guard
                 .services()
                 .get(&service_hash)

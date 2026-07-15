@@ -55,5 +55,24 @@ itself — they are distinct downstream bugs the suite pinned.
          returning (or start must detect a dying supervisor and fork fresh).
 
 
+[BUG-5] stop/restart -p <project> kills ALL projects, not just the target
+  Code:  SG0001-ish (cross-project teardown)
+  Case:  stop-project, stop-service-in-project, stop-all, state-isolation (RED)
+  Repro: two-project config (alpha primary, beta extra). `sysg stop -p alpha`
+         (or `restart -p alpha`).
+  Seen:  alpha's services stop correctly, BUT beta's processes are ALSO killed
+         (ps empty; status -p beta shows 'lost'). Each service is in its OWN
+         process group (a1=pgid12, a2=pgid19, b1=pgid25 — distinct), so it's NOT
+         a shared-pgid-at-spawn issue. stop_service is killing MORE than the
+         target's group.
+  Where: stop_service's process-group resolution — it may read a stale/wrong
+         pgid, kill the supervisor's group, or iterate all pid-file entries.
+         Same family as BUG (restart drops extra projects). The stop/restart
+         rebuild's isolation guarantee must fix this.
+  Note:  the state re-key (v2 composite keys) made this newly VISIBLE/verifiable
+         by fixing the status lie; the teardown bug itself predates it.
+
+
 Cross-refs (agent memory): sysg-start-skip-and-dup, sysg-separate-config-pid-leak,
-sysg-stale-supervisor-restart-race.
+sysg-stale-supervisor-restart-race, sysg-stop-kills-siblings, sysg-state-key-and-v2,
+sysg-state-hash-collision.

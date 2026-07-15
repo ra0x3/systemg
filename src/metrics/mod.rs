@@ -609,8 +609,8 @@ fn gather_unit_targets(
     let mut targets = Vec::new();
     let mut seen_hashes = Vec::new();
 
-    for (service_name, service_config) in &config.services {
-        let hash = service_config.compute_hash();
+    for service_name in config.services.keys() {
+        let hash = config.state_key(service_name);
         let pid = state_guard
             .get(&hash)
             .and_then(|entry| entry.pid)
