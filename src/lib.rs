@@ -75,5 +75,8 @@ pub mod runtime;
 /// Per-project on-disk state layout.
 pub mod state_store;
 
+/// The `start` command, rebuilt from first principles.
+pub mod start;
+
 /// Privilege dropping.
 pub mod privilege;

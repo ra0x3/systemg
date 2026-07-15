@@ -203,7 +203,7 @@ impl Severity {
 }
 
 /// Where in the user's world the problem originates, e.g. a config file key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Origin {
     /// Path to the file, as the user knows it.
     pub file: String,
@@ -214,7 +214,7 @@ pub struct Origin {
 }
 
 /// A labeled block of captured facts, e.g. the service's last output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
     /// Short label, e.g. `last output`.
     pub label: String,
@@ -223,7 +223,7 @@ pub struct Evidence {
 }
 
 /// An actionable next step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Help {
     /// A command the user can run, with a short reason.
     Command {
@@ -240,7 +240,7 @@ pub enum Help {
 }
 
 /// A structured, renderable failure report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
     /// Severity of the report.
     pub severity: Severity,
