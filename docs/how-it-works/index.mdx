@@ -25,15 +25,18 @@ When you run `sysg start`, the supervisor launches and monitors your services. S
 
 ## State location
 
-All runtime data lives in one place:
+All runtime data lives under one root, with each project's PID/state/cron files
+nested in its own `projects/{project.id}/` subdirectory:
 
 **User mode** (default):
-- `~/.local/share/systemg/` - State files
+- `~/.local/share/systemg/` - Supervisor + per-project state (under `projects/`)
 - `~/.local/share/systemg/logs/` - Service logs
 
 **System mode** (`sudo sysg --sys`):
-- `/var/lib/systemg/` - State files
+- `/var/lib/systemg/` - Supervisor + per-project state (under `projects/`)
 - `/var/log/systemg/` - Service logs
+
+See [State](/how-it-works/state) for the full layout.
 
 ## Daemon vs foreground
 

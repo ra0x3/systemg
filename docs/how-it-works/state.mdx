@@ -13,28 +13,58 @@ Runtime files systemg uses to track services.
 
 ## Structure
 
+Supervisor-wide files live at the root. Everything a **project** persists —
+its PID map, service state, and cron history — is nested under its own
+directory, keyed by `project.id`:
+
 ```
 ~/.local/share/systemg/
-├── sysg.pid           # Supervisor PID
-├── control.sock       # Unix socket for IPC
-├── config_hint        # Last config path
-├── pid.xml           # Service → PID mapping
-├── state.xml         # Service metadata
-├── cron_state.xml    # Cron run history
-└── logs/             # Service output
+├── sysg.pid                    # Supervisor PID
+├── control.sock                # Unix socket for IPC
+├── config_hint                 # Last config path
+├── logs/                       # Service output
+└── projects/
+    ├── arbitration/            # one directory per project.id
+    │   ├── pid.xml             # Service → PID mapping
+    │   ├── state.xml           # Service metadata
+    │   └── cron_state.xml      # Cron run history
+    ├── gamecast/
+    │   ├── pid.xml
+    │   ├── state.xml
+    │   └── cron_state.xml
+    └── __loose__/              # project-less (top-level `services:`) bundle
+        ├── pid.xml
+        ├── state.xml
+        └── cron_state.xml
 ```
+
+<Info>
+  Each project owns its directory. A project's monitor, PID map, and state file
+  only ever touch `projects/{project.id}/` — so two projects that both declare a
+  service named `worker` keep entirely separate records, and one project's
+  status can never leak into another's. Isolation is structural, not a
+  convention we remember to honour.
+</Info>
+
+Services declared at the top level of a manifest — with no project — persist
+under `projects/__loose__/`. See [Projects](/how-it-works/projects) for how
+loose services and named projects coexist in one supervisor.
 
 ## Key files
 
 ### pid.xml
 
-Maps services to process IDs:
+Maps a project's services to process IDs:
 
 ```xml
 <PidFile>
   <services>
-    <web>67235</web>
-    <db>67236</db>
+    <name>web</name>
+    <pid>67235</pid>
+  </services>
+  <services>
+    <name>db</name>
+    <pid>67236</pid>
   </services>
 </PidFile>
 ```
@@ -47,7 +77,13 @@ it asks the supervisor for the aggregate status view.
 
 ### state.xml
 
-Tracks service status, restart counts, and exit codes.
+Tracks service status, restart counts, and exit codes — keyed by service
+configuration hash, scoped to the project directory.
+
+### cron_state.xml
+
+Per-project cron run history. Each project's scheduled jobs persist here; a
+shared scheduler loop routes every run to its own project's file.
 
 ## Persistence
 
@@ -55,7 +91,16 @@ State survives supervisor restarts. Services keep running even if the supervisor
 
 Clean shutdown removes `sysg.pid`, `control.sock`, and `config_hint`. Stale files after crash? Run `sysg purge`.
 
+<Warning>
+  **Upgrading to v0.55 requires `sysg purge` first.** The per-project
+  `projects/{project.id}/` layout replaces the older flat `pid.xml` /
+  `state.xml` / `cron_state.xml` that lived directly under the state directory.
+  There is no automatic migration of the old flat files — stop your services,
+  run `sysg purge`, then start on the new release.
+</Warning>
+
 ## See also
 
 - [`purge`](/how-it-works/commands/purge) - Clear all state
+- [Projects](/how-it-works/projects) - How one supervisor hosts many projects
 - [How It Works](/how-it-works) - Architecture overview

@@ -36,8 +36,12 @@ services:
           command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
 ```
 
-Run `sysg start` and your entire stack is running. Run `sysg stop` and the
-services in that project shut down cleanly.
+Run `sysg start` and your entire stack is running. Run `sysg stop` and every
+service shuts down cleanly.
+
+This example is a single loose bundle — services with no project. To run several
+independent stacks under one supervisor, group them under a `projects:` map; see
+[Projects](/how-it-works/projects).
 
 ## Built for production
 
