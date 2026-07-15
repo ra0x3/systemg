@@ -400,7 +400,7 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
 /// id rather than hunt for a file in the current directory.
 fn config_read_diag(message: &str) -> systemg::diag::Diagnostic {
     let mut diag = systemg::diag::Diagnostic::error(
-        systemg::diag::SgCode::Catchall,
+        systemg::diag::SgCode::ConfigFileUnreadable,
         "could not read a local config file",
     )
         .note(message)
@@ -545,71 +545,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             config,
             supervisor,
         } => {
-            if supervisor {
-                send_control_command(ControlCommand::Shutdown)?;
-                return Ok(());
-            }
-
-            let service_name = service.clone();
-            if supervisor_running() {
-                let target_project = if service_name.is_some() {
-                    resolve_command_project(&config, project, service_name.as_deref())?
-                } else if project.is_some() {
-                    project
-                } else {
-                    Some(resolve_project_context_from_config(&config)?)
-                };
-                let command = if let Some(name) = service_name.clone() {
-                    ControlCommand::Stop {
-                        service: Some(name),
-                        project: target_project,
-                    }
-                } else {
-                    ControlCommand::Stop {
-                        service: None,
-                        project: target_project,
-                    }
-                };
-                send_control_command(command)?;
-            } else {
-                match build_daemon(&config) {
-                    Ok(daemon) => {
-                        if let Some(service) = service_name.as_deref() {
-                            daemon.stop_service(service)?;
-                        } else {
-                            daemon.stop_services()?;
-                        }
-                    }
-                    Err(err) => {
-                        warn!(
-                            "No supervisor detected and unable to load config '{}': {}",
-                            config, err
-                        );
-                        if let Ok(Some(hint)) = ipc::read_config_hint() {
-                            let hint_str = hint.to_string_lossy();
-                            match build_daemon(hint_str.as_ref()) {
-                                Ok(daemon) => {
-                                    if let Some(service) = service_name.as_deref() {
-                                        daemon.stop_service(service)?;
-                                    } else {
-                                        daemon.stop_services()?;
-                                    }
-                                    info!(
-                                        "stop fallback executed using config hint {:?}",
-                                        hint
-                                    );
-                                }
-                                Err(hint_err) => {
-                                    warn!(
-                                        "Fallback using config hint {:?} failed: {}",
-                                        hint, hint_err
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let config_path =
+                resolve_config_path(&config).unwrap_or_else(|_| config.into());
+            let plan = systemg::stop::resolve_plan(
+                config_path,
+                service.as_deref(),
+                project.as_deref(),
+                supervisor,
+            )
+            .map_err(stop_plan_diag)?;
+            dispatch_stop(plan)?;
         }
         Commands::Restart {
             config,
@@ -3452,6 +3397,69 @@ fn supervisor_has_daemon_projects() -> Result<bool, Box<dyn Error>> {
     }
 }
 
+/// Renders a stop-plan resolution failure as a typed diagnostic.
+fn stop_plan_diag(err: systemg::stop::StopPlanError) -> DiagError {
+    use systemg::stop::StopPlanError;
+    let diag = match err {
+        StopPlanError::Mismatch(mismatch) => {
+            systemg::start::project_mismatch(&mismatch.flag, &mismatch.selector)
+        }
+        StopPlanError::SupervisorWithSelector => systemg::diag::Diagnostic::error(
+            systemg::diag::SgCode::ConflictingSelectors,
+            "--supervisor cannot be combined with a service or project selector",
+        )
+        .note("--supervisor shuts the whole supervisor down; drop -s/-p to use it")
+        .help_docs(),
+    };
+    DiagError(Box::new(diag))
+}
+
+/// Dispatches a resolved stop plan: shuts the supervisor down, sends the resident
+/// supervisor a scoped stop, or falls back to a local one-shot stop when no
+/// supervisor is running.
+fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
+    use systemg::stop::StopPlan;
+
+    if let StopPlan::Supervisor = plan {
+        send_control_command(ControlCommand::Shutdown)?;
+        return Ok(());
+    }
+
+    if supervisor_running() {
+        let command = match plan {
+            StopPlan::Supervisor => unreachable!("handled above"),
+            StopPlan::Everything { .. } => ControlCommand::Stop {
+                service: None,
+                project: None,
+            },
+            StopPlan::Project { project } => ControlCommand::Stop {
+                service: None,
+                project: Some(project),
+            },
+            StopPlan::Service { service, project } => ControlCommand::Stop {
+                service: Some(service),
+                project,
+            },
+        };
+        with_progress_spinner("Stopping", || send_control_command(command))?;
+        return Ok(());
+    }
+
+    // No supervisor: run a one-shot local stop from the config on disk.
+    let config = match &plan {
+        StopPlan::Everything { config } => config.to_string_lossy().to_string(),
+        _ => resolve_config_path(DEFAULT_CONFIG_PATH)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
+    };
+    let daemon = build_daemon(&config)?;
+    match plan {
+        StopPlan::Service { service, .. } => daemon.stop_service(&service)?,
+        _ => daemon.stop_services()?,
+    }
+    Ok(())
+}
+
 /// Dispatches a `--daemonize` start plan: routes to the resident supervisor
 /// when one is running, otherwise forks a fresh supervisor from the plan's
 /// config.
@@ -3943,15 +3951,6 @@ fn service_selector_name(selector: &str) -> &str {
         .split_once('/')
         .map(|(_, service)| service)
         .unwrap_or(selector)
-}
-
-/// Resolves the project represented by a required config-backed command context.
-fn resolve_project_context_from_config(
-    config_arg: &str,
-) -> Result<String, Box<dyn Error>> {
-    let config_path = resolve_config_path(config_arg)?;
-    let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
-    Ok(config.project.id)
 }
 
 /// Renders the project-mismatch diagnostic and exits: the requested project is

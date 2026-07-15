@@ -52,6 +52,9 @@ plain text with no escape codes, and `NO_COLOR` is respected.
 | `SG0103` | A service's `pre_start` command failed, so the service was not started |
 | `SG0104` | A service never passed its configured health check |
 | `SG0201` | The `-p` project does not match the config sysg resolved |
+| `SG0202` | The command names a service or project that does not exist |
+| `SG0203` | A config file could not be found or read |
+| `SG0204` | Mutually exclusive selectors were combined (e.g. `--supervisor` with `-s`/`-p`) |
 
 Codes are stable: a script can match on them, and each has a page at
 `https://docs.sysg.dev/errors/<code>`.

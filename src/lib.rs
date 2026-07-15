@@ -78,5 +78,8 @@ pub mod state_store;
 /// The `start` command, rebuilt from first principles.
 pub mod start;
 
+/// The `stop` command, rebuilt from first principles.
+pub mod stop;
+
 /// Privilege dropping.
 pub mod privilege;

@@ -71,6 +71,13 @@ pub enum SgCode {
     HealthUnmet,
     /// SG0201 — the `-p` project does not match the resolved config.
     TargetConfigMismatch,
+    /// SG0202 — the command names a service or project that does not exist.
+    TargetNotFound,
+    /// SG0203 — a config file could not be found or read.
+    ConfigFileUnreadable,
+    /// SG0204 — mutually exclusive selectors were combined (e.g. --supervisor
+    /// with a service/project selector).
+    ConflictingSelectors,
 }
 
 impl SgCode {
@@ -97,6 +104,9 @@ impl SgCode {
             SgCode::PreStartFailed => "SG0103",
             SgCode::HealthUnmet => "SG0104",
             SgCode::TargetConfigMismatch => "SG0201",
+            SgCode::TargetNotFound => "SG0202",
+            SgCode::ConfigFileUnreadable => "SG0203",
+            SgCode::ConflictingSelectors => "SG0204",
         }
     }
 
@@ -106,7 +116,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 20] = [
+    pub const ALL: [SgCode; 23] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -127,6 +137,9 @@ impl SgCode {
         SgCode::PreStartFailed,
         SgCode::HealthUnmet,
         SgCode::TargetConfigMismatch,
+        SgCode::TargetNotFound,
+        SgCode::ConfigFileUnreadable,
+        SgCode::ConflictingSelectors,
     ];
 }
 

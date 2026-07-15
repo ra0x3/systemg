@@ -3061,6 +3061,27 @@ impl Supervisor {
             .map(|(project_id, service_name)| (Some(project_id), service_name))
             .unwrap_or((None, selector));
 
+        // A stop that names a service no project declares is a false success
+        // waiting to happen — refuse it with a typed diagnostic (SG0202).
+        let known = match project.or(selector_project) {
+            Some(project_id) => {
+                let in_primary = self.daemon.config().project.id == project_id
+                    && self.daemon.config().services.contains_key(service_name);
+                let in_extra =
+                    self.extra_projects.get(project_id).is_some_and(|runtime| {
+                        runtime.daemon.config().services.contains_key(service_name)
+                    });
+                in_primary || in_extra
+            }
+            None => !self.projects_containing_service(service_name).is_empty(),
+        };
+        if !known {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::stop::service_not_found(service_name),
+            ))
+            .into());
+        }
+
         let target_project = self.resolve_service_target_project(
             service_name,
             project,

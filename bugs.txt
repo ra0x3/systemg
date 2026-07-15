@@ -55,9 +55,19 @@ itself — they are distinct downstream bugs the suite pinned.
          returning (or start must detect a dying supervisor and fork fresh).
 
 
-[BUG-5] stop/restart -p <project> kills ALL projects, not just the target
+[BUG-5] [FIXED] stop/restart -p <project> kills ALL projects, not just the target
   Code:  SG0001-ish (cross-project teardown)
-  Case:  stop-project, stop-service-in-project, stop-all, state-isolation (RED)
+  Case:  stop-project, stop-service-in-project, stop-all, state-isolation (now GREEN)
+  FIX (2026-07-15): two parts. (1) Every service now setsid()s into its OWN
+         session unconditionally (was setpgid when !detach_children, sharing the
+         supervisor session) — daemon.rs pre_exec; also dropped PR_SET_PDEATHSIG
+         (fired on parent-thread death, cascading SIGTERM to siblings). (2) The
+         REAL over-killer: cleanup_config_owned_service_processes matched escaped
+         processes BY COMMAND STRING, so same-command services (all "sleep 3000")
+         all matched — stopping a1 reaped a2 and b1. Removed that command-scan
+         sweep from the targeted per-service stop (pid/pgid termination + setsid
+         is authoritative); kept a sibling-pid exclusion on the remaining sweep.
+         Whole stop suite (10/10) + state-isolation GREEN.
   Repro: two-project config (alpha primary, beta extra). `sysg stop -p alpha`
          (or `restart -p alpha`).
   Seen:  alpha's services stop correctly, BUT beta's processes are ALSO killed
@@ -65,12 +75,43 @@ itself — they are distinct downstream bugs the suite pinned.
          process group (a1=pgid12, a2=pgid19, b1=pgid25 — distinct), so it's NOT
          a shared-pgid-at-spawn issue. stop_service is killing MORE than the
          target's group.
-  Where: stop_service's process-group resolution — it may read a stale/wrong
-         pgid, kill the supervisor's group, or iterate all pid-file entries.
-         Same family as BUG (restart drops extra projects). The stop/restart
-         rebuild's isolation guarantee must fix this.
+  ROOT CAUSE (confirmed via /proc): even `stop -s a1` (ONE service) kills all.
+         All service leaders share the SUPERVISOR'S SESSION (sid=9) and parent
+         (ppid=9) — they were never setsid'd into their own sessions. Combined
+         with PR_SET_PDEATHSIG=SIGTERM on every child (daemon.rs:2430), a stop
+         that ends one service's launcher context cascades SIGTERM to siblings.
+         The killpg sites are correctly scoped (own pgid, skip supervisor pgid);
+         the leak is the shared session + PDEATHSIG parent, not the pgid target.
+  Fix:   each service must setsid() into its OWN session at spawn so no
+         session-wide / PDEATHSIG-parent event can cross service boundaries.
+         Touches the spawn path (start/restart/stop all inherit it). Same root
+         as restart-drops-extra-projects.
   Note:  the state re-key (v2 composite keys) made this newly VISIBLE/verifiable
          by fixing the status lie; the teardown bug itself predates it.
+
+
+[BUG-6] many supervisor errors are untyped plain strings, not typed SgCode diagnostics
+  Code:  (should map to specific SG codes, currently none)
+  Where: src/supervisor.rs has ~20+ error sites returning io::Error /
+         ControlResponse::Error(String) that SHOULD be typed diagnostics with a
+         specific SG code, e.g.:
+           - "project '<id>' is not managed by this supervisor" -> SG0202 TargetNotFound
+             (supervisor.rs:747, 808, 840, 3006, 3107, 3152, ...)
+           - "Service '<name>' not found" / "not found in requested project"
+             -> SG0202 (supervisor.rs:2118, 2142)
+           - "service '<name>' exists in multiple projects" -> SG0006
+             TargetScopeAmbiguous (the INSPECT/RESTART copies at supervisor.rs
+             ~1418, 2090, 2390; the STOP/START copy in resolve_service_target_project
+             is already typed)
+           - duplicate project id -> SG0202-ish (supervisor.rs:923, 1190, 1197, 2828)
+  Note:  these belong to each command's own rebuild (restart, inspect, add-project
+         have NOT been rebuilt yet). Converting them all now would sprawl into
+         commands not currently being worked. Do it as each command is rebuilt.
+  Done so far: audited all SgCode CONSTRUCTION sites for MISCODING (wrong code
+         where a right one exists) and fixed 2: config-read used SG0001 Catchall
+         -> now SG0203 ConfigFileUnreadable; --supervisor+selector used SG0006
+         -> now SG0204 ConflictingSelectors. Added SG0202 TargetNotFound,
+         SG0203, SG0204. The stop path's not-found now returns SG0202.
 
 
 Cross-refs (agent memory): sysg-start-skip-and-dup, sysg-separate-config-pid-leak,
