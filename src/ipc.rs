@@ -191,6 +191,10 @@ pub enum ControlCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         log_level: Option<String>,
     },
+    /// Subscribe to the supervisor's initial-boot progress. The supervisor
+    /// replays every boot frame recorded so far, then streams live frames as
+    /// line-delimited JSON until the terminal `Done` frame.
+    BootStream,
 }
 
 /// Response sent by the supervisor.
@@ -457,6 +461,42 @@ pub fn stream_command_output(
     let mut reader = BufReader::new(stream);
     io::copy(&mut reader, &mut writer)?;
     writer.flush()?;
+    Ok(())
+}
+
+/// Subscribes to boot progress and invokes `on_frame` for each frame the
+/// supervisor streams, returning once the terminal `Done` frame arrives (or the
+/// stream closes). Frames are line-delimited JSON.
+pub fn stream_boot_frames(
+    mut on_frame: impl FnMut(crate::start::BootFrame),
+) -> Result<(), ControlError> {
+    let path = socket_path()?;
+    if !path.exists() {
+        return Err(ControlError::NotAvailable);
+    }
+
+    let mut stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+            return Err(ControlError::NotAvailable);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    write_command(&mut stream, &ControlCommand::BootStream)?;
+
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let frame: crate::start::BootFrame = serde_json::from_str(line.trim())?;
+        let done = frame.is_done();
+        on_frame(frame);
+        if done {
+            break;
+        }
+    }
     Ok(())
 }
 

@@ -34,6 +34,7 @@ use crate::{
     opslot::OpSlot,
     reconcile, runtime,
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
+    start::{self, BootFrame, BootJournal},
     status::{
         ProjectRunMode, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
         collect_runtime_snapshot, collect_runtime_snapshot_with_cron_hashes,
@@ -99,6 +100,8 @@ pub struct Supervisor {
     /// Additional projects declared in the primary config file (a multi-project
     /// manifest), registered as extra projects once the primary has booted.
     pending_projects: Vec<Config>,
+    /// Race-free record of the initial boot, streamed to a `BootStream` client.
+    boot_journal: BootJournal,
 }
 
 /// Runtime state for an additional project managed by the resident supervisor.
@@ -165,6 +168,7 @@ struct ReadContext {
     op_slot: OpSlot,
     pid_file: Arc<std::sync::Mutex<crate::daemon::PidFile>>,
     version: String,
+    boot_journal: BootJournal,
 }
 
 /// A mutation command routed from the acceptor to the single-writer owner thread,
@@ -334,12 +338,17 @@ impl Supervisor {
     }
 
     /// Starts services for a project daemon without blocking the supervisor control loop.
+    ///
+    /// `boot_journal` is `Some` only during the initial boot, so per-unit
+    /// outcomes stream to a `BootStream` client; live project adds pass `None`.
     fn start_project_services(
         daemon: &Daemon,
         config: &Config,
         service_filter: Option<&str>,
         spawn_manager: &DynamicSpawnManager,
+        boot_journal: Option<&BootJournal>,
     ) -> Result<(), SupervisorError> {
+        let project_id = &config.project.id;
         let service_order = Self::startup_service_order(config, service_filter)?;
         for service_name in service_order {
             let Some(service_config) = config.services.get(&service_name) else {
@@ -379,10 +388,31 @@ impl Supervisor {
                 }
             }
 
-            if let Err(err) = daemon.start_service(&service_name, service_config) {
+            if let Some(journal) = boot_journal {
+                journal.push(BootFrame::UnitStarting {
+                    project: project_id.clone(),
+                    service: service_name.clone(),
+                });
+            }
+            let result = daemon.start_service(&service_name, service_config);
+            let is_err = result.is_err();
+            let pid = daemon
+                .pid_file_handle()
+                .lock()
+                .ok()
+                .and_then(|pid_file| pid_file.services().get(&service_name).copied());
+            let outcome = start::outcome_of(&service_name, result, pid);
+            if let Some(diag) = outcome.diagnostic() {
                 error!(
-                    "Service '{service_name}' failed to start: {err}. Continuing; monitor will retry per its restart policy."
+                    "Service '{service_name}' failed to start [{}]: {}. Continuing; monitor will retry per its restart policy.",
+                    diag.code_str(),
+                    diag.title
                 );
+            }
+            if let Some(journal) = boot_journal {
+                journal.record(project_id, &service_name, outcome);
+            }
+            if is_err {
                 continue;
             }
 
@@ -732,6 +762,7 @@ impl Supervisor {
             project_runtime.daemon.config().as_ref(),
             None,
             &self.spawn_manager,
+            None,
         )?;
         Ok(())
     }
@@ -858,6 +889,7 @@ impl Supervisor {
             project.daemon.config().as_ref(),
             None,
             &self.spawn_manager,
+            None,
         )?;
         self.sync_cron_projects()?;
         Ok(())
@@ -951,6 +983,7 @@ impl Supervisor {
             op_slot,
             reconciler: None,
             pending_projects,
+            boot_journal: BootJournal::new(),
         })
     }
 
@@ -1081,11 +1114,30 @@ impl Supervisor {
                         }
                     }
                 }
-                if let Err(err) = self.daemon.start_service(&service_name, service_config)
-                {
+                let project_id = config.project.id.clone();
+                self.boot_journal.push(BootFrame::UnitStarting {
+                    project: project_id.clone(),
+                    service: service_name.clone(),
+                });
+                let result = self.daemon.start_service(&service_name, service_config);
+                let is_err = result.is_err();
+                let pid = self
+                    .daemon
+                    .pid_file_handle()
+                    .lock()
+                    .ok()
+                    .and_then(|pid_file| pid_file.services().get(&service_name).copied());
+                let outcome = start::outcome_of(&service_name, result, pid);
+                if let Some(diag) = outcome.diagnostic() {
                     error!(
-                        "Service '{service_name}' failed to start during boot: {err}. Continuing; monitor will retry per its restart policy."
+                        "Service '{service_name}' failed to start during boot [{}]: {}. Continuing; monitor will retry per its restart policy.",
+                        diag.code_str(),
+                        diag.title
                     );
+                }
+                self.boot_journal
+                    .record(&project_id, &service_name, outcome);
+                if is_err {
                     continue;
                 }
 
@@ -1116,6 +1168,16 @@ impl Supervisor {
                 );
             }
         }
+
+        let (started, failed) = self.boot_journal.snapshot().iter().fold(
+            (0usize, 0usize),
+            |(up, down), frame| match frame {
+                BootFrame::Unit { outcome, .. } if outcome.succeeded() => (up + 1, down),
+                BootFrame::Unit { .. } => (up, down + 1),
+                _ => (up, down),
+            },
+        );
+        self.boot_journal.push(BootFrame::Done { started, failed });
 
         self.op_slot.clear();
         Ok(())
@@ -1149,12 +1211,9 @@ impl Supervisor {
         self.op_slot
             .begin(format!("starting project '{project_id}'"));
         Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
-        let mut daemon = Daemon::new(
-            config,
-            self.daemon.pid_file_handle(),
-            self.daemon.service_state_handle(),
-            self.detach_children,
-        );
+        // Each project gets its OWN pid/state handles bound to its own store, so
+        // one project's services never land in a sibling's pid.xml.
+        let mut daemon = Daemon::from_config(config, self.detach_children)?;
         daemon.set_pipe_stderr(self.pipe_stderr);
         daemon.set_op_slot(self.op_slot.clone());
 
@@ -1163,6 +1222,7 @@ impl Supervisor {
             daemon.config().as_ref(),
             self.service_filter.as_deref(),
             &self.spawn_manager,
+            Some(&self.boot_journal),
         )?;
 
         self.extra_projects.insert(
@@ -1277,6 +1337,11 @@ impl Supervisor {
             return;
         }
 
+        if let ControlCommand::BootStream = command {
+            Self::serve_boot_stream(stream, &read_ctx);
+            return;
+        }
+
         if let Some(response) = Self::answer_read(&command, &read_ctx) {
             let _ = ipc::write_response(&mut stream, &response);
             return;
@@ -1371,6 +1436,38 @@ impl Supervisor {
 
     /// Streams logs on the connection worker using the cached snapshot for target
     /// resolution, so a wedged mutation never blocks a `logs` request.
+    /// Streams boot progress to a subscriber: replays every frame recorded so
+    /// far, then follows live frames until the terminal `Done`. Race-free — a
+    /// client that connects after boot still receives the whole journal.
+    fn serve_boot_stream(
+        mut stream: std::os::unix::net::UnixStream,
+        read_ctx: &ReadContext,
+    ) {
+        let journal = &read_ctx.boot_journal;
+        let mut seen = 0usize;
+        loop {
+            let batch = journal.wait_from(seen);
+            if batch.is_empty() {
+                break;
+            }
+            seen += batch.len();
+            let mut done = false;
+            for frame in batch {
+                done |= frame.is_done();
+                let Ok(line) = serde_json::to_string(&frame) else {
+                    return;
+                };
+                if writeln!(stream, "{line}").is_err() {
+                    return;
+                }
+            }
+            let _ = stream.flush();
+            if done {
+                break;
+            }
+        }
+    }
+
     fn serve_logs(
         mut stream: std::os::unix::net::UnixStream,
         command: ControlCommand,
@@ -1437,6 +1534,7 @@ impl Supervisor {
             op_slot: self.op_slot.clone(),
             pid_file: self.daemon.pid_file_handle(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            boot_journal: self.boot_journal.clone(),
         };
         Self::spawn_acceptor(listener, read_ctx, mutation_tx);
 
@@ -2324,6 +2422,9 @@ impl Supervisor {
             ControlCommand::Logs { .. } => Ok(ControlResponse::Error(
                 "logs command is streamed separately".into(),
             )),
+            ControlCommand::BootStream => Ok(ControlResponse::Error(
+                "boot stream is served separately".into(),
+            )),
             ControlCommand::Spawn {
                 parent_pid,
                 name,
@@ -2768,6 +2869,7 @@ impl Supervisor {
                 self.daemon.config().as_ref(),
                 service_filter.as_deref(),
                 &self.spawn_manager,
+                None,
             )?;
             self.sync_cron_projects()?;
             self.refresh_status_cache();
@@ -2776,12 +2878,10 @@ impl Supervisor {
 
         if !self.extra_projects.contains_key(&project_id) {
             Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
-            let mut daemon = Daemon::new(
-                config.clone(),
-                self.daemon.pid_file_handle(),
-                self.daemon.service_state_handle(),
-                self.detach_children,
-            );
+            // Own pid/state handles bound to this project's store, so a
+            // separately-added project never leaks services into a sibling's
+            // pid.xml.
+            let mut daemon = Daemon::from_config(config.clone(), self.detach_children)?;
             daemon.set_pipe_stderr(self.pipe_stderr);
             daemon.set_op_slot(self.op_slot.clone());
             self.extra_projects.insert(
@@ -2817,6 +2917,7 @@ impl Supervisor {
                     daemon.config().as_ref(),
                     boot_filter.as_deref(),
                     &spawn_manager,
+                    None,
                 ) {
                     error!("Background boot of project '{boot_project}' failed: {err}");
                 }
@@ -2835,6 +2936,7 @@ impl Supervisor {
             project.daemon.config().as_ref(),
             service_filter.as_deref(),
             &self.spawn_manager,
+            None,
         )?;
         self.sync_cron_projects()?;
 

@@ -11,4 +11,4 @@ pub mod boot;
 pub mod outcome;
 
 pub use boot::{BootFrame, BootJournal};
-pub use outcome::{Liveness, Outcome};
+pub use outcome::{Liveness, Outcome, outcome_of};
