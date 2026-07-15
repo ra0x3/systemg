@@ -5,7 +5,7 @@ use std::{
     io,
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, mpsc},
     thread,
     time::{Duration, SystemTime},
 };
@@ -31,6 +31,7 @@ use crate::{
         spawn_dynamic_child_log_writer, write_log_section_header,
     },
     metrics::{self, MetricsCollector, MetricsHandle},
+    opslot::OpSlot,
     runtime,
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
@@ -90,6 +91,7 @@ pub struct Supervisor {
     primary_project_mode: ProjectRunMode,
     extra_projects: BTreeMap<String, ProjectRuntime>,
     cron_projects: Arc<RwLock<Vec<CronProjectRuntime>>>,
+    op_slot: OpSlot,
 }
 
 /// Runtime state for an additional project managed by the resident supervisor.
@@ -146,6 +148,23 @@ struct SupervisorLogRequest<'a> {
 struct CronCompletionOutcome {
     status: CronExecutionStatus,
     exit_code: Option<i32>,
+}
+
+/// Cheap-to-clone handles the acceptor uses to answer read commands without
+/// touching the supervisor's mutation state.
+#[derive(Clone)]
+struct ReadContext {
+    status_cache: StatusCache,
+    op_slot: OpSlot,
+    pid_file: Arc<std::sync::Mutex<crate::daemon::PidFile>>,
+    version: String,
+}
+
+/// A mutation command routed from the acceptor to the single-writer owner thread,
+/// paired with a channel to return the owner's response to the waiting connection.
+struct MutationRequest {
+    command: ControlCommand,
+    reply: mpsc::Sender<ControlResponse>,
 }
 
 /// Handles fallback cron user.
@@ -820,7 +839,9 @@ impl Supervisor {
         let cron_manager = CronManager::new();
         cron_manager.sync_from_config(&config)?;
 
-        let daemon = Daemon::from_config(config.clone(), detach_children)?;
+        let op_slot = OpSlot::new();
+        let mut daemon = Daemon::from_config(config.clone(), detach_children)?;
+        daemon.set_op_slot(op_slot.clone());
         let config_arc = daemon.config();
         let cron_projects = Arc::new(RwLock::new(vec![CronProjectRuntime {
             project_id: config_arc.project.id.clone(),
@@ -858,6 +879,7 @@ impl Supervisor {
             primary_project_mode,
             extra_projects: BTreeMap::new(),
             cron_projects,
+            op_slot,
         })
     }
 
@@ -921,12 +943,13 @@ impl Supervisor {
         }
     }
 
-    /// Runs the supervisor event loop.
-    fn run_internal(&mut self) -> Result<(), SupervisorError> {
-        ipc::cleanup_runtime()?;
-        ipc::write_config_hint(&self.config_path)?;
-        let listener = ipc::bind_control_socket()?;
-        ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
+    /// Starts the primary project's services in dependency order, tolerating
+    /// per-unit failures so one bad unit cannot abort the whole boot.
+    fn boot_primary_services(&mut self) -> Result<(), SupervisorError> {
+        self.op_slot.begin(format!(
+            "starting project '{}'",
+            self.daemon.config().project.id
+        ));
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
         let service_order =
             Self::startup_service_order(&config, self.service_filter.as_deref())?;
@@ -1004,6 +1027,242 @@ impl Supervisor {
                 }
             }
         }
+        self.op_slot.clear();
+        Ok(())
+    }
+
+    /// Spawns the acceptor thread that owns the control socket. Each connection
+    /// runs on its own worker so a slow client, a streaming log follow, or a
+    /// long-running mutation cannot mute the socket for everyone else.
+    fn spawn_acceptor(
+        listener: std::os::unix::net::UnixListener,
+        read_ctx: ReadContext,
+        mutation_tx: mpsc::Sender<MutationRequest>,
+    ) {
+        thread::spawn(move || {
+            let _ = listener.set_nonblocking(false);
+            loop {
+                match listener.accept() {
+                    Ok((stream, _addr)) => {
+                        let read_ctx = read_ctx.clone();
+                        let mutation_tx = mutation_tx.clone();
+                        thread::spawn(move || {
+                            Self::serve_connection(stream, read_ctx, mutation_tx);
+                        });
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(err) => {
+                        error!("Supervisor listener error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Handles a single control connection: authenticates, reads one command, and
+    /// dispatches it. Reads answer from the shared cache; mutations serialize
+    /// through the owner thread.
+    fn serve_connection(
+        mut stream: std::os::unix::net::UnixStream,
+        read_ctx: ReadContext,
+        mutation_tx: mpsc::Sender<MutationRequest>,
+    ) {
+        if let Err(err) = ipc::authenticate_peer(&stream) {
+            warn!("Rejected unauthorized control connection: {err}");
+            let _ = ipc::write_response(
+                &mut stream,
+                &ControlResponse::Error(err.to_string()),
+            );
+            return;
+        }
+
+        let command = match ipc::read_command(&mut stream) {
+            Ok(command) => command,
+            Err(err) => {
+                warn!("Invalid supervisor command: {err}");
+                let _ = ipc::write_response(
+                    &mut stream,
+                    &ControlResponse::Error(err.to_string()),
+                );
+                return;
+            }
+        };
+        debug!("Supervisor received command: {:?}", command);
+
+        if let ControlCommand::Logs { .. } = command {
+            Self::serve_logs(stream, command, &read_ctx);
+            return;
+        }
+
+        if let Some(response) = Self::answer_read(&command, &read_ctx) {
+            let _ = ipc::write_response(&mut stream, &response);
+            return;
+        }
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let request = MutationRequest {
+            command,
+            reply: reply_tx,
+        };
+        if mutation_tx.send(request).is_err() {
+            let _ = ipc::write_response(
+                &mut stream,
+                &ControlResponse::Error("supervisor is shutting down".into()),
+            );
+            return;
+        }
+        match reply_rx.recv() {
+            Ok(response) => {
+                let _ = ipc::write_response(&mut stream, &response);
+            }
+            Err(_) => {
+                let _ = ipc::write_response(
+                    &mut stream,
+                    &ControlResponse::Error(
+                        "supervisor dropped the command before replying".into(),
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Answers read-only commands directly from shared state, or returns `None`
+    /// when the command must go through the single-writer owner thread.
+    fn answer_read(
+        command: &ControlCommand,
+        read_ctx: &ReadContext,
+    ) -> Option<ControlResponse> {
+        match command {
+            ControlCommand::Status { live: false } => {
+                Some(ControlResponse::Status(read_ctx.status_cache.snapshot()))
+            }
+            ControlCommand::Version => {
+                Some(ControlResponse::DaemonVersion(read_ctx.version.clone()))
+            }
+            ControlCommand::CurrentOp => {
+                Some(ControlResponse::CurrentOp(read_ctx.op_slot.report()))
+            }
+            ControlCommand::Inspect {
+                unit,
+                project,
+                live: false,
+                ..
+            } => Some(Self::inspect_from_cache(unit, project.as_deref(), read_ctx)),
+            _ => None,
+        }
+    }
+
+    /// Builds an inspect response from the cached snapshot without touching
+    /// mutation state or the metrics store.
+    fn inspect_from_cache(
+        unit: &str,
+        project: Option<&str>,
+        read_ctx: &ReadContext,
+    ) -> ControlResponse {
+        let snapshot = read_ctx.status_cache.snapshot();
+        let matching: Vec<_> = snapshot
+            .units
+            .iter()
+            .filter(|status| unit_matches_selector(status, unit, project))
+            .cloned()
+            .collect();
+        if project.is_none() && matching.len() > 1 {
+            let projects = matching
+                .iter()
+                .filter_map(|unit| {
+                    unit.project.as_ref().map(|project| project.id.as_str())
+                })
+                .collect::<BTreeSet<_>>();
+            if projects.len() > 1 {
+                return ControlResponse::Error(format!(
+                    "service '{unit}' exists in multiple projects ({}); pass --project to choose one",
+                    projects.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+        ControlResponse::Inspect(Box::new(InspectPayload {
+            unit: matching.into_iter().next(),
+            samples: Vec::new(),
+        }))
+    }
+
+    /// Streams logs on the connection worker using the cached snapshot for target
+    /// resolution, so a wedged mutation never blocks a `logs` request.
+    fn serve_logs(
+        mut stream: std::os::unix::net::UnixStream,
+        command: ControlCommand,
+        read_ctx: &ReadContext,
+    ) {
+        let ControlCommand::Logs {
+            service,
+            project,
+            lines,
+            kind,
+            follow,
+            since,
+            until,
+            grep,
+            all,
+            structured,
+        } = command
+        else {
+            return;
+        };
+
+        let filter = match crate::logs::LogFilter::from_parts(
+            since.as_deref(),
+            until.as_deref(),
+            grep.as_deref(),
+            all,
+            chrono::Utc::now(),
+        ) {
+            Ok(filter) => filter,
+            Err(err) => {
+                let _ = writeln!(stream, "{err}");
+                return;
+            }
+        };
+
+        let request = SupervisorLogRequest {
+            snapshot: read_ctx.status_cache.snapshot(),
+            pid_file: Arc::clone(&read_ctx.pid_file),
+            service,
+            project,
+            lines,
+            kind: kind.as_deref(),
+            follow,
+            filter,
+            structured,
+            stream: &stream,
+        };
+        if let Err(err) = Supervisor::handle_logs_command(request) {
+            error!("Supervisor logs command failed: {err}");
+            let _ = writeln!(stream, "{err}");
+        }
+    }
+
+    /// Runs the supervisor event loop.
+    fn run_internal(&mut self) -> Result<(), SupervisorError> {
+        ipc::cleanup_runtime()?;
+        ipc::write_config_hint(&self.config_path)?;
+        let listener = ipc::bind_control_socket()?;
+        ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
+
+        let (mutation_tx, mutation_rx) = mpsc::channel::<MutationRequest>();
+        let read_ctx = ReadContext {
+            status_cache: self.status_cache.clone(),
+            op_slot: self.op_slot.clone(),
+            pid_file: self.daemon.pid_file_handle(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        Self::spawn_acceptor(listener, read_ctx, mutation_tx);
+
+        if let Ok(socket_path) = ipc::socket_path() {
+            info!("systemg supervisor listening on {:?}", socket_path);
+        }
+
+        self.boot_primary_services()?;
         self.daemon.ensure_monitoring()?;
 
         let config_handle = self.daemon.config();
@@ -1440,139 +1699,64 @@ impl Supervisor {
             }
         });
 
-        if let Ok(socket_path) = ipc::socket_path() {
-            info!("systemg supervisor listening on {:?}", socket_path);
-        }
-
-        let mut shutdown_requested = false;
-        listener.set_nonblocking(false)?;
-
-        while !shutdown_requested {
-            match listener.accept() {
-                Ok((mut stream, _addr)) => {
-                    if let Err(err) = ipc::authenticate_peer(&stream) {
-                        warn!("Rejected unauthorized control connection: {err}");
-                        let _ = ipc::write_response(
-                            &mut stream,
-                            &ControlResponse::Error(err.to_string()),
-                        );
-                        continue;
-                    }
-                    match ipc::read_command(&mut stream) {
-                        Ok(command) => {
-                            let should_shutdown =
-                                matches!(command, ControlCommand::Shutdown);
-                            debug!("Supervisor received command: {:?}", command);
-                            if let ControlCommand::Logs {
-                                service,
-                                project,
-                                lines,
-                                kind,
-                                follow,
-                                since,
-                                until,
-                                grep,
-                                all,
-                                structured,
-                            } = command
-                            {
-                                let filter = match crate::logs::LogFilter::from_parts(
-                                    since.as_deref(),
-                                    until.as_deref(),
-                                    grep.as_deref(),
-                                    all,
-                                    chrono::Utc::now(),
-                                ) {
-                                    Ok(filter) => filter,
-                                    Err(err) => {
-                                        let _ = writeln!(stream, "{err}");
-                                        continue;
-                                    }
-                                };
-                                let snapshot = match self.collect_configured_snapshot() {
-                                    Ok(snapshot) => {
-                                        self.status_cache.replace(snapshot.clone());
-                                        snapshot
-                                    }
-                                    Err(err) => {
-                                        error!("Supervisor logs command failed: {err}");
-                                        let _ = writeln!(stream, "{err}");
-                                        continue;
-                                    }
-                                };
-                                let pid_file = self.daemon.pid_file_handle();
-                                let mut log_stream = match stream.try_clone() {
-                                    Ok(stream) => stream,
-                                    Err(err) => {
-                                        error!(
-                                            "Failed to clone supervisor log stream: {err}"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                thread::spawn(move || {
-                                    let request = SupervisorLogRequest {
-                                        snapshot,
-                                        pid_file,
-                                        service,
-                                        project,
-                                        lines,
-                                        kind: kind.as_deref(),
-                                        follow,
-                                        filter,
-                                        structured,
-                                        stream: &log_stream,
-                                    };
-                                    if let Err(err) =
-                                        Supervisor::handle_logs_command(request)
-                                    {
-                                        error!("Supervisor logs command failed: {err}");
-                                        let _ = writeln!(log_stream, "{err}");
-                                    }
-                                });
-                                continue;
-                            }
-                            match self.handle_command(command) {
-                                Ok(response) => {
-                                    if let Err(err) =
-                                        ipc::write_response(&mut stream, &response)
-                                    {
-                                        error!(
-                                            "Failed to write supervisor response: {err}"
-                                        );
-                                    }
-                                    if should_shutdown {
-                                        shutdown_requested = true;
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("Supervisor command failed: {err}");
-                                    let _ = ipc::write_response(
-                                        &mut stream,
-                                        &error_response(&err),
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            warn!("Invalid supervisor command: {err}");
-                            let _ = ipc::write_response(
-                                &mut stream,
-                                &ControlResponse::Error(err.to_string()),
-                            );
-                        }
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+        while let Ok(request) = mutation_rx.recv() {
+            let should_shutdown = matches!(request.command, ControlCommand::Shutdown);
+            let owns_slot = !matches!(request.command, ControlCommand::AddProject { .. });
+            if owns_slot {
+                self.op_slot.begin(Self::mutation_label(&request.command));
+            }
+            let response = match self.handle_command(request.command) {
+                Ok(response) => response,
                 Err(err) => {
-                    error!("Supervisor listener error: {err}");
-                    shutdown_requested = true;
+                    error!("Supervisor command failed: {err}");
+                    error_response(&err)
                 }
+            };
+            if owns_slot {
+                self.op_slot.clear();
+            }
+            let _ = request.reply.send(response);
+            if should_shutdown {
+                break;
             }
         }
 
         self.shutdown_runtime()?;
         Ok(())
+    }
+
+    /// Short label describing a mutation, shown by `sysg` when the supervisor is
+    /// busy so a slow command names itself instead of spinning opaquely.
+    fn mutation_label(command: &ControlCommand) -> String {
+        match command {
+            ControlCommand::Start { service, project } => {
+                Self::target_label("starting", service.as_deref(), project.as_deref())
+            }
+            ControlCommand::Stop { service, project } => {
+                Self::target_label("stopping", service.as_deref(), project.as_deref())
+            }
+            ControlCommand::Restart {
+                service, project, ..
+            } => Self::target_label("restarting", service.as_deref(), project.as_deref()),
+            ControlCommand::StopProject { project } => {
+                format!("stopping project '{project}'")
+            }
+            ControlCommand::Spawn { name, .. } => format!("spawning '{name}'"),
+            ControlCommand::Shutdown => "shutting down".to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Builds a "<verb> <service|all services>[ in project '<p>']" label.
+    fn target_label(verb: &str, service: Option<&str>, project: Option<&str>) -> String {
+        let subject = match service {
+            Some(service) => format!("'{service}'"),
+            None => "all services".to_string(),
+        };
+        match project {
+            Some(project) => format!("{verb} {subject} in project '{project}'"),
+            None => format!("{verb} {subject}"),
+        }
     }
 
     /// Streams logs through the supervisor-owned control socket.
@@ -1972,6 +2156,9 @@ impl Supervisor {
             ControlCommand::Version => Ok(ControlResponse::DaemonVersion(
                 env!("CARGO_PKG_VERSION").to_string(),
             )),
+            ControlCommand::CurrentOp => {
+                Ok(ControlResponse::CurrentOp(self.op_slot.report()))
+            }
         }
     }
 
@@ -2358,6 +2545,7 @@ impl Supervisor {
                 self.detach_children,
             );
             daemon.set_pipe_stderr(self.pipe_stderr);
+            daemon.set_op_slot(self.op_slot.clone());
             self.extra_projects.insert(
                 project_id.clone(),
                 ProjectRuntime {
@@ -2377,6 +2565,33 @@ impl Supervisor {
                 format!("project '{project_id}' was not registered"),
             )
         })?;
+
+        if matches!(mode, ProjectRunMode::Daemon) {
+            let daemon = project.daemon.clone();
+            let spawn_manager = self.spawn_manager.clone();
+            let op_slot = self.op_slot.clone();
+            let boot_project = project_id.clone();
+            let boot_filter = service_filter.clone();
+            thread::spawn(move || {
+                op_slot.begin(format!("starting project '{boot_project}'"));
+                if let Err(err) = Self::start_project_services(
+                    &daemon,
+                    daemon.config().as_ref(),
+                    boot_filter.as_deref(),
+                    &spawn_manager,
+                ) {
+                    error!("Background boot of project '{boot_project}' failed: {err}");
+                }
+                op_slot.clear();
+            });
+            self.sync_cron_projects()?;
+            if let Some(refresher) = self.status_refresher.take() {
+                refresher.stop();
+            }
+            self.refresh_status_cache();
+            return Ok(project_id);
+        }
+
         Self::start_project_services(
             &project.daemon,
             project.daemon.config().as_ref(),

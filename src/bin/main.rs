@@ -61,6 +61,7 @@ const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
 const FETCH_SPINNER_DELAY: Duration = Duration::from_millis(120);
 const FETCH_SPINNER_TICK: Duration = Duration::from_millis(80);
 const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+const BUSY_PROBE_EVERY_TICKS: usize = 12;
 const RESTART_DAEMON_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_CONFIG_PATH: &str = "systemg.yaml";
 
@@ -327,6 +328,8 @@ where
 
         let mut stderr = io::stderr().lock();
         let mut frame_idx = 0usize;
+        let mut op_label: Option<String> = None;
+        let mut ticks_since_probe = 0usize;
         loop {
             if spinner_stop.load(Ordering::Relaxed) {
                 let _ = write!(stderr, "{}", clear_progress_spinner_line());
@@ -334,8 +337,17 @@ where
                 return;
             }
 
+            if ticks_since_probe == 0 {
+                op_label = ipc::current_op().map(|op| op.describe());
+            }
+            ticks_since_probe = (ticks_since_probe + 1) % BUSY_PROBE_EVERY_TICKS;
+
+            let shown = match &op_label {
+                Some(detail) => format!("{label}: {detail}"),
+                None => label.to_string(),
+            };
             let frame = FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
-            let _ = write!(stderr, "{}", format_progress_spinner_frame(frame, label));
+            let _ = write!(stderr, "{}", format_progress_spinner_frame(frame, &shown));
             let _ = stderr.flush();
             frame_idx += 1;
             thread::sleep(FETCH_SPINNER_TICK);
@@ -4013,12 +4025,28 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
         }
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
+        Ok(ControlResponse::CurrentOp(_)) => Ok(()),
         Err(ControlError::NotAvailable) => {
             warn!("No running systemg supervisor found; skipping command");
             let _ = ipc::cleanup_runtime();
             Ok(())
         }
+        Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
         Err(err) => Err(err.into()),
+    }
+}
+
+/// Builds an error explaining the supervisor is busy, naming its current
+/// operation when one can be probed, so a timeout is never a bare spinner.
+fn supervisor_busy_error() -> io::Error {
+    match ipc::current_op() {
+        Some(op) => io::Error::other(format!(
+            "supervisor busy: {}; command not confirmed",
+            op.describe()
+        )),
+        None => {
+            io::Error::other("supervisor did not respond in time; command not confirmed")
+        }
     }
 }
 
@@ -4123,7 +4151,9 @@ fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {
     match err {
         ControlError::Serde(_) | ControlError::NotAvailable => true,
         ControlError::Server(message) => supervisor_error_is_protocol_mismatch(message),
-        ControlError::MissingHome | ControlError::Unauthorized(_) => false,
+        ControlError::MissingHome
+        | ControlError::Unauthorized(_)
+        | ControlError::Timeout => false,
         ControlError::Io(err) => matches!(
             err.kind(),
             io::ErrorKind::UnexpectedEof

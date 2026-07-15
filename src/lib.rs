@@ -44,6 +44,9 @@ pub mod daemon;
 /// IPC with supervisor.
 pub mod ipc;
 
+/// Current-operation tracking for the control plane.
+pub mod opslot;
+
 /// Errors.
 pub mod error;
 

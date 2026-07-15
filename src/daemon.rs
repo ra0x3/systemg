@@ -40,6 +40,7 @@ use crate::{
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_service_log_writers},
+    opslot::OpSlot,
     runtime,
     spawn::SpawnedExit,
 };
@@ -1453,6 +1454,8 @@ pub struct Daemon {
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     /// Pipe stderr to stdout.
     pipe_stderr: Arc<AtomicBool>,
+    /// Reports what a blocking boot step is currently waiting on.
+    op_slot: OpSlot,
 }
 
 impl Daemon {
@@ -2039,7 +2042,14 @@ impl Daemon {
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             pipe_stderr: Arc::new(AtomicBool::new(false)),
+            op_slot: OpSlot::new(),
         }
+    }
+
+    /// Points the daemon at the supervisor's shared operation slot so blocking
+    /// boot steps report what they are waiting on.
+    pub fn set_op_slot(&mut self, op_slot: OpSlot) {
+        self.op_slot = op_slot;
     }
 
     /// Convenience constructor that loads the PID file automatically.
@@ -2596,11 +2606,37 @@ impl Daemon {
             .as_ref()
             .and_then(|deployment| deployment.pre_start.as_ref())
         {
-            info!("Running pre-start command for '{name}': {pre_start}");
-            self.run_pre_start_command(name, pre_start)?;
+            if let Some(dep) = self.pre_start_duplicate_dependency(service, pre_start) {
+                info!(
+                    "Skipping pre-start for '{name}': identical to completed dependency '{dep}' which already ran"
+                );
+            } else {
+                info!("Running pre-start command for '{name}': {pre_start}");
+                self.op_slot
+                    .detail(format!("running pre-start for '{name}'"));
+                self.run_pre_start_command(name, pre_start)?;
+            }
         }
 
         Ok(None)
+    }
+
+    /// Returns the name of a `condition: completed` dependency whose command is
+    /// identical to this service's pre-start, so the shared build is not run twice.
+    fn pre_start_duplicate_dependency(
+        &self,
+        service: &ServiceConfig,
+        pre_start: &str,
+    ) -> Option<String> {
+        let deps = service.depends_on.as_ref()?;
+        deps.iter()
+            .filter(|dep| dep.condition() == DependsOnCondition::Completed)
+            .find_map(|dep| {
+                let dep_name = dep.service();
+                let dep_config = self.config.services.get(dep_name)?;
+                (dep_config.command.trim() == pre_start.trim())
+                    .then(|| dep_name.to_string())
+            })
     }
 
     /// Starts all services and blocks until they exit.
@@ -2927,6 +2963,8 @@ impl Daemon {
         dep: &str,
     ) -> Result<(), ProcessManagerError> {
         info!("Waiting for dependency '{dep}' of '{service_name}' to complete");
+        self.op_slot
+            .detail(format!("waiting on dependency '{dep}' of '{service_name}'"));
 
         loop {
             match Self::probe_service_state(dep, &self.processes, &self.pid_file)? {
@@ -3621,6 +3659,9 @@ impl Daemon {
         let deadline = Instant::now() + timeout;
 
         for attempt in 1..=retries {
+            self.op_slot.detail(format!(
+                "health check for '{service_name}' (attempt {attempt}/{retries})"
+            ));
             match self.perform_configured_health_check(
                 service_name,
                 health_check,

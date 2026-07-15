@@ -15,6 +15,14 @@ use crate::{
     status::{ProjectRunMode, StatusSnapshot, UnitStatus},
 };
 
+/// Upper bound on how long a CLI command waits for the supervisor to reply
+/// before giving up, so a wedged supervisor surfaces as an error instead of an
+/// unbounded spinner.
+const COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Short bound for the diagnostic current-op probe, which must never itself hang.
+const CURRENT_OP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Directory under `$HOME` where runtime artifacts (PID/socket files) are stored.
 fn runtime_dir() -> Result<PathBuf, ControlError> {
     let path = runtime::state_dir();
@@ -166,6 +174,8 @@ pub enum ControlCommand {
     },
     /// Report the version of the resident supervisor binary.
     Version,
+    /// Report the operation the supervisor is currently blocked on, if any.
+    CurrentOp,
     /// Spawn a dynamic child process.
     Spawn {
         /// Parent process PID (from Unix socket peer credentials).
@@ -205,6 +215,8 @@ pub enum ControlResponse {
     },
     /// Version of the resident supervisor binary.
     DaemonVersion(String),
+    /// The operation the supervisor is currently working on, if any.
+    CurrentOp(Option<crate::opslot::OpReport>),
 }
 
 /// Result of sending a command with a short acknowledgement window.
@@ -244,6 +256,9 @@ pub enum ControlError {
     /// Control socket not available or supervisor not running.
     #[error("control socket not available")]
     NotAvailable,
+    /// The supervisor accepted the command but did not reply in time.
+    #[error("supervisor did not respond in time")]
+    Timeout,
     /// The connecting peer is not authorized to use the control socket.
     #[error("unauthorized control socket peer (uid {0})")]
     Unauthorized(u32),
@@ -307,12 +322,25 @@ pub fn authenticate_peer(stream: &UnixStream) -> Result<(), ControlError> {
 
 /// Sends a command to the supervisor and waits for a response.
 pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, ControlError> {
-    let mut stream = connect_stream()?;
+    let stream = connect_stream()?;
+    stream.set_read_timeout(Some(COMMAND_READ_TIMEOUT))?;
+    let mut stream = stream;
     write_command(&mut stream, command)?;
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    reader.read_line(&mut response_line)?;
+    match reader.read_line(&mut response_line) {
+        Ok(_) => {}
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Err(ControlError::Timeout);
+        }
+        Err(err) => return Err(err.into()),
+    }
 
     if response_line.trim().is_empty() {
         return Err(ControlError::NotAvailable);
@@ -324,6 +352,22 @@ pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, Control
     }
 
     Ok(response)
+}
+
+/// Fetches the supervisor's current operation without disturbing an in-flight
+/// command. Returns `None` when the supervisor is idle or unreachable.
+pub fn current_op() -> Option<crate::opslot::OpReport> {
+    let stream = connect_stream().ok()?;
+    stream.set_read_timeout(Some(CURRENT_OP_TIMEOUT)).ok()?;
+    let mut stream = stream;
+    write_command(&mut stream, &ControlCommand::CurrentOp).ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    match serde_json::from_str(line.trim()).ok()? {
+        ControlResponse::CurrentOp(report) => report,
+        _ => None,
+    }
 }
 
 /// Sends a command to the supervisor without waiting for a response.

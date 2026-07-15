@@ -46,8 +46,13 @@ sysg status --format json >/dev/null 2>&1
 check "$?" "precondition: supervisor is up and answering on the control socket"
 
 section "now 'sysg start' a second project -> goes through AddProject over IPC"
-START_NS=$(date +%s%N)
-sysg start --config "$CONFIG" --log-level debug --daemonize &
+# Measure the CLI's OWN duration, not wall-clock across an unrelated probe sleep:
+# the CLI writes its elapsed time to a file the moment it returns.
+(
+  s=$(date +%s%N)
+  sysg start --config "$CONFIG" --log-level debug --daemonize
+  printf '%s' "$(( ($(date +%s%N) - s) / 1000000 ))" > /tmp/start_cli_ms
+) &
 START_CLI_PID=$!
 
 # While the CLI spins on "Starting", is the control socket still usable?
@@ -64,7 +69,7 @@ echo "sysg status during boot: rc=$PROBE_RC after ${PROBE_MS} ms"
 check "$?" "sysg status stays responsive while another project boots"
 
 wait "$START_CLI_PID"
-BLOCKED_MS=$(( ($(date +%s%N) - START_NS) / 1000000 ))
+BLOCKED_MS=$(cat /tmp/start_cli_ms 2>/dev/null || echo 999999)
 echo "sysg start blocked the CLI for: ${BLOCKED_MS} ms"
 
 # barrier(6s) + pre_start(6s) + health checks(~6s) + grace(3s). Any of this in
