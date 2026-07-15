@@ -9,6 +9,8 @@
 
 pub mod boot;
 pub mod outcome;
+pub mod render;
 
 pub use boot::{BootFrame, BootJournal};
 pub use outcome::{Liveness, Outcome, outcome_of};
+pub use render::{BootReport, render_boot};

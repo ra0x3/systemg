@@ -492,6 +492,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    let verbose = args.verbose;
     match args.command {
         Commands::Start {
             config,
@@ -588,6 +589,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     start_target.config_path,
                     start_target.service,
                     stderr,
+                    verbose,
                 )?;
             } else {
                 if supervisor_running() {
@@ -757,7 +759,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 }
             } else if daemonize {
                 let config_path = resolve_config_path(&config)?;
-                start_supervisor_daemon(config_path, None, false)?;
+                start_supervisor_daemon(config_path, None, false, verbose)?;
             } else {
                 warn!(
                     "No running supervisor detected; executing restart in local one-shot mode. \
@@ -3553,6 +3555,7 @@ fn start_supervisor_daemon(
     config_path: PathBuf,
     service: Option<String>,
     pipe_stderr: bool,
+    verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
     let child_pid = unsafe { libc::fork() };
     if child_pid < 0 {
@@ -3577,15 +3580,60 @@ fn start_supervisor_daemon(
         process::exit(0);
     }
 
-    with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid)).map_err(
-        |err| {
-            io::Error::other(format!(
-                "supervisor failed to start; see {}: {err}",
-                supervisor_log_path().display()
-            ))
-            .into()
-        },
-    )
+    // Wait for the child to publish its socket, then follow the boot stream so
+    // the parent reports the truth of what came up — not just "socket is live".
+    wait_for_supervisor_ready(child_pid).map_err(|err| -> Box<dyn Error> {
+        io::Error::other(format!(
+            "supervisor failed to start; see {}: {err}",
+            supervisor_log_path().display()
+        ))
+        .into()
+    })?;
+
+    let report = follow_boot(verbose)?;
+    if let Some(diag) = report.failures.into_iter().next() {
+        return Err(Box::new(DiagError(Box::new(diag))));
+    }
+    Ok(())
+}
+
+/// Subscribes to the supervisor's boot stream and renders it, returning the
+/// report. In quiet mode a spinner is the feedback; in verbose mode each unit
+/// prints a line to stderr as it comes up.
+///
+/// A freshly forked supervisor may not be answering the control socket the
+/// instant its PID appears, so the subscription is retried briefly. If the
+/// stream never becomes available the boot is treated as reported-nothing
+/// rather than failing the command — the services still boot in the daemon.
+fn follow_boot(verbose: bool) -> Result<systemg::start::BootReport, Box<dyn Error>> {
+    let collect = |verbose: bool| -> systemg::start::BootReport {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut frames = Vec::new();
+            match ipc::stream_boot_frames(|frame| frames.push(frame)) {
+                Ok(()) => {
+                    return systemg::start::render_boot(frames, verbose, io::stderr());
+                }
+                Err(_) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => {
+                    return systemg::start::render_boot(
+                        Vec::new(),
+                        verbose,
+                        io::stderr(),
+                    );
+                }
+            }
+        }
+    };
+
+    let report = if verbose {
+        collect(true)
+    } else {
+        with_progress_spinner("Starting", || Ok::<_, Box<dyn Error>>(collect(false)))?
+    };
+    Ok(report)
 }
 
 /// Builds daemon.
@@ -4234,7 +4282,7 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
     stop_supervisors();
     let _ = ipc::cleanup_runtime();
     let recovery_path = config_path.clone();
-    start_supervisor_daemon(config_path, None, false).map_err(|err| {
+    start_supervisor_daemon(config_path, None, false, false).map_err(|err| {
         io::Error::other(format!(
             "supervisor recycle FAILED: the old supervisor was stopped but the new one did not start ({err}). Run `sysg start --daemonize --config {}` to recover.",
             recovery_path.display()

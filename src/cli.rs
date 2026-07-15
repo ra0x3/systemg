@@ -140,6 +140,11 @@ pub struct Cli {
     #[arg(long, value_name = "LEVEL", global = true)]
     pub log_level: Option<LogLevelArg>,
 
+    /// Print live per-service progress to the terminal (e.g. `Starting web...`)
+    /// as the supervisor boots, independent of the supervisor log.
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
+
     /// Opt into privileged system mode. Requires running as root.
     #[arg(long = "sys", global = true)]
     pub sys: bool,
