@@ -15,6 +15,7 @@ use tracing::warn;
 use crate::{
     error::ProcessManagerError,
     metrics::{MetricsSettings, SpilloverSettings},
+    state_store::LOOSE_PROJECT_ID,
 };
 
 /// Current manifest schema version used by the runtime after migration.
@@ -362,25 +363,13 @@ fn validate_project_id(id: &str) -> Result<(), ProcessManagerError> {
 
 fn resolve_project_config(
     mut project: ProjectConfig,
-    base_path: &Path,
+    _base_path: &Path,
 ) -> Result<ProjectConfig, ProcessManagerError> {
     if project.id.is_empty() {
-        let canonical = base_path
-            .canonicalize()
-            .unwrap_or_else(|_| base_path.to_path_buf());
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.to_string_lossy().as_bytes());
-        let result = hasher.finalize();
-        project.id = format!(
-            "legacy-{:016x}",
-            u64::from_be_bytes(result[0..8].try_into().unwrap())
-        );
-        project.name = canonical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty())
-            .unwrap_or(project.id.as_str())
-            .to_string();
+        // A project-less manifest (top-level `services:`) is the single loose
+        // bundle; all such services share one `__loose__` namespace.
+        project.id = LOOSE_PROJECT_ID.to_string();
+        project.name = "loose".to_string();
     } else {
         validate_project_id(&project.id)?;
         if project.name.trim().is_empty() {
@@ -1443,8 +1432,9 @@ fn uses_legacy_project_shape(config: &ConfigV1) -> bool {
 }
 
 /// Scope marker for the project-less (loose) service bundle in a multi-project
-/// manifest, so loose services hash distinctly from any real project's.
-const LOOSE_PROJECT_SCOPE: &str = "__loose__";
+/// manifest, so loose services hash distinctly from any real project's. Shares
+/// the on-disk loose id so the scope and the state directory always agree.
+const LOOSE_PROJECT_SCOPE: &str = LOOSE_PROJECT_ID;
 
 /// Stamps each service with its owning project so identical service configs in
 /// different projects hash distinctly and never collide in shared state.
@@ -1902,7 +1892,7 @@ services:
     }
 
     #[test]
-    fn load_config_migrates_missing_project_to_legacy_identity() {
+    fn load_config_maps_missing_project_to_loose_bundle() {
         let dir = tempdir().expect("tempdir");
         let yaml_path = dir.path().join("systemg.yaml");
         fs::write(
@@ -1918,11 +1908,8 @@ services:
 
         let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
 
-        assert!(config.project.id.starts_with("legacy-"));
-        assert_eq!(
-            config.project.name,
-            dir.path().file_name().unwrap().to_string_lossy()
-        );
+        assert_eq!(config.project.id, crate::state_store::LOOSE_PROJECT_ID);
+        assert_eq!(config.project.name, "loose");
     }
 
     #[test]
