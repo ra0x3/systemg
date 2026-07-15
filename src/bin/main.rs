@@ -519,122 +519,24 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
 
             let start_target =
-                resolve_start_target(&config, service, name.as_deref(), command)?;
-            let command_project = resolve_command_project(
-                &config,
-                project.clone(),
+                resolve_start_target(&config, service.clone(), name.as_deref(), command)?;
+            let plan = systemg::start::resolve_plan(
+                start_target.config_path.clone(),
                 start_target.service.as_deref(),
-            )?;
+                project.as_deref(),
+                start_target.ad_hoc,
+            )
+            .map_err(|mismatch| {
+                DiagError(Box::new(systemg::start::project_mismatch(
+                    &mismatch.flag,
+                    &mismatch.selector,
+                )))
+            })?;
 
             if daemonize {
-                if supervisor_running() {
-                    if args.drop_privileges {
-                        warn!(
-                            "--drop-privileges is managed by the running supervisor and has no effect for this start request"
-                        );
-                    }
-
-                    if start_target.ad_hoc {
-                        info!(
-                            "Staged unit config at {:?}. Running supervisor was left unchanged.",
-                            start_target.config_path
-                        );
-                        println!(
-                            "Unit staged at {}. Run `sysg restart --daemonize --config {}` to apply it.",
-                            start_target.config_path.display(),
-                            start_target.config_path.display()
-                        );
-                    } else if let Some(service_name) = start_target.service {
-                        let command = ControlCommand::Start {
-                            service: Some(service_name.clone()),
-                            project: command_project
-                                .clone()
-                                .or(start_target.project_id.clone()),
-                        };
-                        with_progress_spinner("Starting", || {
-                            send_control_command(command)
-                        })?;
-                        info!(
-                            "Service '{service_name}' start command sent to supervisor"
-                        );
-                    } else if project.is_some() {
-                        let command = ControlCommand::Start {
-                            service: None,
-                            project: project.clone(),
-                        };
-                        with_progress_spinner("Starting", || {
-                            send_control_command(command)
-                        })?;
-                    } else {
-                        let command = ControlCommand::AddProject {
-                            config: start_target
-                                .config_path
-                                .to_string_lossy()
-                                .to_string(),
-                            service: None,
-                            mode: ProjectRunMode::Daemon,
-                        };
-                        with_progress_spinner("Starting", || {
-                            send_control_command(command)
-                        })?;
-                    }
-                    return Ok(());
-                }
-
-                info!(
-                    "Starting systemg supervisor with config {:?}",
-                    start_target.config_path
-                );
-                start_supervisor_daemon(
-                    start_target.config_path,
-                    start_target.service,
-                    stderr,
-                    verbose,
-                )?;
+                dispatch_start_daemonize(plan, stderr, verbose, args.drop_privileges)?;
             } else {
-                if supervisor_running() {
-                    match start_target.service {
-                        Some(service_name) => {
-                            let command = ControlCommand::Start {
-                                service: Some(service_name.clone()),
-                                project: command_project.or(start_target.project_id),
-                            };
-                            with_progress_spinner("Starting", || {
-                                send_control_command(command)
-                            })?;
-                            info!(
-                                "Service '{service_name}' start command sent to supervisor"
-                            );
-                        }
-                        None => {
-                            if let Some(project_id) =
-                                command_project.or(start_target.project_id.clone())
-                            {
-                                let command = ControlCommand::Start {
-                                    service: None,
-                                    project: Some(project_id.clone()),
-                                };
-                                with_progress_spinner("Starting", || {
-                                    send_control_command(command)
-                                })?;
-                                info!(
-                                    "Project '{project_id}' start command sent to supervisor"
-                                );
-                            } else {
-                                start_foreground_attached(
-                                    start_target.config_path,
-                                    None,
-                                )?;
-                            }
-                        }
-                    }
-                } else {
-                    start_foreground(
-                        start_target.config_path,
-                        start_target.service,
-                        stderr,
-                    )?;
-                }
+                dispatch_start_foreground(plan, stderr)?;
             }
         }
         Commands::Stop {
@@ -3550,6 +3452,115 @@ fn supervisor_has_daemon_projects() -> Result<bool, Box<dyn Error>> {
     }
 }
 
+/// Dispatches a `--daemonize` start plan: routes to the resident supervisor
+/// when one is running, otherwise forks a fresh supervisor from the plan's
+/// config.
+fn dispatch_start_daemonize(
+    plan: systemg::start::StartPlan,
+    stderr: bool,
+    verbose: bool,
+    drop_privileges: bool,
+) -> Result<(), Box<dyn Error>> {
+    if supervisor_running() {
+        if drop_privileges {
+            warn!(
+                "--drop-privileges is managed by the running supervisor and has no effect for this start request"
+            );
+        }
+        return dispatch_start_resident(plan);
+    }
+
+    // No resident supervisor: fork one from the plan's config. An ad-hoc unit
+    // is started the same way — its staged config becomes the new supervisor's.
+    let service = plan_service_name(&plan);
+    let config = plan_config(plan);
+    info!("Starting systemg supervisor with config {:?}", config);
+    start_supervisor_daemon(config, service, stderr, verbose)
+}
+
+/// The config path a plan carries.
+fn plan_config(plan: systemg::start::StartPlan) -> PathBuf {
+    use systemg::start::StartPlan;
+    match plan {
+        StartPlan::WholeConfig { config }
+        | StartPlan::Project { config, .. }
+        | StartPlan::Service { config, .. }
+        | StartPlan::StageAdHoc { config } => config,
+    }
+}
+
+/// Sends a resident supervisor the control command for `plan`.
+fn dispatch_start_resident(
+    plan: systemg::start::StartPlan,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::start::StartPlan;
+
+    let command = match plan {
+        StartPlan::StageAdHoc { config } => {
+            info!(
+                "Staged unit config at {config:?}. Running supervisor was left unchanged."
+            );
+            println!(
+                "Unit staged at {}. Run `sysg restart --daemonize --config {}` to apply it.",
+                config.display(),
+                config.display()
+            );
+            return Ok(());
+        }
+        StartPlan::WholeConfig { config } => ControlCommand::AddProject {
+            config: config.to_string_lossy().to_string(),
+            service: None,
+            mode: ProjectRunMode::Daemon,
+        },
+        StartPlan::Project { project, .. } => ControlCommand::Start {
+            service: None,
+            project: Some(project),
+        },
+        StartPlan::Service {
+            service, project, ..
+        } => ControlCommand::Start {
+            service: Some(service),
+            project,
+        },
+    };
+    with_progress_spinner("Starting", || send_control_command(command))?;
+    Ok(())
+}
+
+/// Dispatches a foreground (non-daemonize) start plan.
+fn dispatch_start_foreground(
+    plan: systemg::start::StartPlan,
+    stderr: bool,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::start::StartPlan;
+
+    if supervisor_running() {
+        // A targeted service/project routes to the resident supervisor; a whole
+        // foreground config attaches to it and owns the terminal lifetime.
+        return match plan {
+            StartPlan::WholeConfig { config } => start_foreground_attached(config, None),
+            other => dispatch_start_resident(other),
+        };
+    }
+
+    match plan {
+        StartPlan::StageAdHoc { config }
+        | StartPlan::WholeConfig { config }
+        | StartPlan::Project { config, .. } => start_foreground(config, None, stderr),
+        StartPlan::Service {
+            config, service, ..
+        } => start_foreground(config, Some(service), stderr),
+    }
+}
+
+/// The service name a plan targets, if it targets a single service.
+fn plan_service_name(plan: &systemg::start::StartPlan) -> Option<String> {
+    match plan {
+        systemg::start::StartPlan::Service { service, .. } => Some(service.clone()),
+        _ => None,
+    }
+}
+
 /// Starts supervisor daemon.
 fn start_supervisor_daemon(
     config_path: PathBuf,
@@ -3647,7 +3658,6 @@ fn build_daemon(config_path: &str) -> Result<Daemon, Box<dyn Error>> {
 struct StartTarget {
     config_path: PathBuf,
     service: Option<String>,
-    project_id: Option<String>,
     ad_hoc: bool,
 }
 
@@ -3743,17 +3753,9 @@ fn resolve_start_target(
             .into());
         }
         let config_path = resolve_config_path(config)?;
-        // The local manifest is only consulted to recover a fallback project id.
-        // A start that targets a resident project/service by id (-p/-s) does not
-        // need it, and the caller falls back to an explicit -p or supervisor-side
-        // resolution — so a missing local config here is not fatal.
-        let project_id = load_config(Some(config_path.to_string_lossy().as_ref()))
-            .ok()
-            .map(|config| config.project.id);
         return Ok(StartTarget {
             config_path,
             service,
-            project_id,
             ad_hoc: false,
         });
     }
@@ -3770,7 +3772,6 @@ fn resolve_start_target(
     Ok(StartTarget {
         config_path,
         service: None,
-        project_id: None,
         ad_hoc: true,
     })
 }

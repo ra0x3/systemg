@@ -112,6 +112,29 @@ pub fn unit_start_failed(service: &str, reason: impl Into<String>) -> Diagnostic
     .help_docs()
 }
 
+/// Builds the SG0006 diagnostic for a service name that exists in more than one
+/// project, with no `-p` to disambiguate.
+pub fn ambiguous_service(service: &str, projects: &[String]) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::TargetScopeAmbiguous,
+        format!("service `{service}` exists in more than one project"),
+    )
+    .note(format!("it is declared in: {}", projects.join(", ")))
+    .note("pass -p/--project to choose which one to target")
+    .help_docs()
+}
+
+/// Builds the SG0201 diagnostic for a `-p`/selector/config project that
+/// disagrees with the project actually resolved.
+pub fn project_mismatch(requested: &str, actual: &str) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::TargetConfigMismatch,
+        format!("project `{requested}` does not match the resolved project `{actual}`"),
+    )
+    .note("the -p flag, any service selector prefix, and the config must agree")
+    .help_docs()
+}
+
 /// Maps a `start_service` result into a typed [`Outcome`].
 ///
 /// The daemon already returns the specific SG0102/0103/0104 diagnostic through

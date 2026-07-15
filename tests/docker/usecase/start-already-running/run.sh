@@ -27,9 +27,14 @@ echo "web pid after first start: $PID1"
 [ -n "$PID1" ] && [ "$PID1" != "absent" ] && [ "$PID1" != "None" ]
 check "$?" "web has a pid after first start"
 
-WEB_PROCS_1="$(ps -eo args | grep -c "[s]leep 3000")"
-[ "$WEB_PROCS_1" = "1" ]
-check "$?" "exactly one web process running"
+# Count service instances by their distinct process-group leaders, not raw
+# process lines: one service is a `sh -c sleep 3000` shell plus its `sleep`
+# child sharing one pgid. Count distinct pgids whose leader runs the command.
+web_instances() {
+  ps -eo pgid,args | awk '/[s]h -c sleep 3000/ {print $1}' | sort -u | wc -l | tr -d ' '
+}
+[ "$(web_instances)" = "1" ]
+check "$?" "exactly one web instance running"
 
 section "second start is idempotent -- no duplicate supervisor or service"
 sysg start --config "$CONFIG" --daemonize
@@ -43,9 +48,8 @@ check "$?" "web pid unchanged by second start (not restarted/duplicated)"
 [ "$(unit_count "$STATUS2")" = "1" ]
 check "$?" "still exactly one unit"
 
-WEB_PROCS_2="$(ps -eo args | grep -c "[s]leep 3000")"
-[ "$WEB_PROCS_2" = "1" ]
-check "$?" "still exactly one web process (no duplicate)"
+[ "$(web_instances)" = "1" ]
+check "$?" "still exactly one web instance (no duplicate)"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish

@@ -9,8 +9,10 @@
 
 pub mod boot;
 pub mod outcome;
+pub mod plan;
 pub mod render;
 
 pub use boot::{BootFrame, BootJournal};
-pub use outcome::{Liveness, Outcome, outcome_of};
+pub use outcome::{Liveness, Outcome, ambiguous_service, outcome_of, project_mismatch};
+pub use plan::{ProjectMismatch, StartPlan, resolve_plan};
 pub use render::{BootReport, render_boot};

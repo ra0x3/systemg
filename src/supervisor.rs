@@ -626,12 +626,10 @@ impl Supervisor {
         if let (Some(flag), Some(selector_project)) = (project, selector_project)
             && flag != selector_project
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project flag '{flag}' does not match service selector project '{selector_project}'"
-                ),
-            )
+            return Err(ProcessManagerError::Diag(Box::new(start::project_mismatch(
+                flag,
+                selector_project,
+            )))
             .into());
         }
 
@@ -640,12 +638,10 @@ impl Supervisor {
             (requested_project, config_project)
             && requested != config_project
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project '{requested}' does not match config project '{config_project}'"
-                ),
-            )
+            return Err(ProcessManagerError::Diag(Box::new(start::project_mismatch(
+                requested,
+                config_project,
+            )))
             .into());
         }
 
@@ -657,13 +653,9 @@ impl Supervisor {
         match matching_projects.as_slice() {
             [project_id] => Ok(project_id.clone()),
             [] => Ok(self.daemon.config().project.id.clone()),
-            projects => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "service '{service_name}' exists in multiple projects ({}); pass --project to choose one",
-                    projects.join(", ")
-                ),
-            )
+            projects => Err(ProcessManagerError::Diag(Box::new(
+                start::ambiguous_service(service_name, projects),
+            ))
             .into()),
         }
     }
