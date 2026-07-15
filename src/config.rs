@@ -19,21 +19,26 @@ use crate::{
 };
 
 /// Current manifest schema version used by the runtime after migration.
-pub const CURRENT_MANIFEST_VERSION: Version = Version::V1;
+pub const CURRENT_MANIFEST_VERSION: Version = Version::V2;
 
 /// Supported manifest schema versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Version {
-    /// Initial Systemg manifest schema.
-    V1,
+    /// The current Systemg manifest schema.
+    V2,
 }
 
 impl Version {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "1" => Ok(Self::V1),
+            "2" => Ok(Self::V2),
+            "1" => Err(
+                "manifest version '1' is no longer supported; bump `version` to \"2\" \
+                 (run `sysg migrate` and `sysg purge` before upgrading)"
+                    .to_string(),
+            ),
             other => Err(format!(
-                "unsupported manifest version '{other}'; supported versions: 1"
+                "unsupported manifest version '{other}'; supported versions: 2"
             )),
         }
     }
@@ -42,7 +47,7 @@ impl Version {
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::V1 => f.write_str("1"),
+            Self::V2 => f.write_str("2"),
         }
     }
 }
@@ -185,9 +190,9 @@ impl TryFrom<ConfigV1> for Config {
     type Error = String;
 
     fn try_from(value: ConfigV1) -> Result<Self, Self::Error> {
-        if value.version != Version::V1 {
+        if value.version != Version::V2 {
             return Err(format!(
-                "cannot migrate manifest version {} as version 1",
+                "unsupported manifest version {}; expected version 2",
                 value.version
             ));
         }
@@ -1399,7 +1404,7 @@ fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
 pub fn parse_config_manifest(content: &str) -> Result<Config, serde_yaml::Error> {
     let header: ManifestHeader = serde_yaml::from_str(content)?;
     match header.version {
-        Version::V1 => {
+        Version::V2 => {
             let config: ConfigV1 = serde_yaml::from_str(content)?;
             config.try_into().map_err(serde_yaml::Error::custom)
         }
@@ -1413,7 +1418,7 @@ pub fn parse_config_manifest(content: &str) -> Result<Config, serde_yaml::Error>
 pub fn parse_config_projects(content: &str) -> Result<Vec<Config>, serde_yaml::Error> {
     let header: ManifestHeader = serde_yaml::from_str(content)?;
     match header.version {
-        Version::V1 => {
+        Version::V2 => {
             let config: ConfigV1 = serde_yaml::from_str(content)?;
             if config.projects.is_none() && uses_legacy_project_shape(&config) {
                 warn!(
@@ -1512,6 +1517,13 @@ pub fn migrate_manifest(content: &str) -> Result<String, ProcessManagerError> {
     let mut projects = Mapping::new();
     projects.insert(Value::String(id), Value::Mapping(entry));
     map.insert(projects_key, Value::Mapping(projects));
+
+    // A migrated manifest is a current manifest: bump the schema version so the
+    // output boots on the current runtime without a second edit.
+    map.insert(
+        Value::String("version".into()),
+        Value::String(CURRENT_MANIFEST_VERSION.to_string()),
+    );
 
     serde_yaml::to_string(&root).map_err(ProcessManagerError::ConfigParseError)
 }
@@ -1711,7 +1723,7 @@ mod tests {
     fn projects_map_fans_out_into_one_config_per_entry() {
         let configs = parse_config_projects(
             r#"
-version: "1"
+version: "2"
 projects:
   foo:
     name: "Foo"
@@ -1742,7 +1754,7 @@ services:
     fn legacy_single_project_still_parses_as_one_config() {
         let configs = parse_config_projects(
             r#"
-version: "1"
+version: "2"
 project: { id: legacy }
 services:
   worker: { command: "sleep 1" }
@@ -1758,7 +1770,7 @@ services:
     fn migrate_converts_legacy_project_to_projects() {
         let converted = migrate_manifest(
             r#"
-version: "1"
+version: "2"
 project:
   id: shop
   name: "Shop"
@@ -1788,7 +1800,7 @@ services:
     fn project_and_projects_together_is_rejected() {
         let err = parse_config_projects(
             r#"
-version: "1"
+version: "2"
 project: { id: a }
 projects:
   b:
@@ -1817,7 +1829,7 @@ projects:
     fn parse_manifest_accepts_string_version() {
         let config = parse_config_manifest(
             r#"
-version: "1"
+version: "2"
 services:
   api:
     command: "echo ok"
@@ -1825,7 +1837,7 @@ services:
         )
         .expect("parse manifest");
 
-        assert_eq!(config.version, Version::V1);
+        assert_eq!(config.version, Version::V2);
         assert_eq!(config.services["api"].command, "echo ok");
     }
 
@@ -1833,7 +1845,7 @@ services:
     fn parse_manifest_accepts_integer_version() {
         let config = parse_config_manifest(
             r#"
-version: 1
+version: 2
 services:
   api:
     command: "echo ok"
@@ -1841,7 +1853,7 @@ services:
         )
         .expect("parse manifest");
 
-        assert_eq!(config.version, Version::V1);
+        assert_eq!(config.version, Version::V2);
         assert_eq!(config.services["api"].command, "echo ok");
     }
 
@@ -1852,7 +1864,7 @@ services:
         fs::write(
             &yaml_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: arbitration
   name: Arbitration
@@ -1876,7 +1888,7 @@ services:
         fs::write(
             &yaml_path,
             r#"
-version: "1"
+version: "2"
 project: arbitration
 services:
   api:
@@ -1898,7 +1910,7 @@ services:
         fs::write(
             &yaml_path,
             r#"
-version: "1"
+version: "2"
 services:
   api:
     command: "echo ok"
@@ -1930,7 +1942,7 @@ services:
     fn parse_manifest_rejects_unsupported_version() {
         let err = parse_config_manifest(
             r#"
-version: "2"
+version: "3"
 services:
   api:
     command: "echo ok"
@@ -1940,7 +1952,26 @@ services:
 
         assert!(
             err.to_string()
-                .contains("unsupported manifest version '2'; supported versions: 1"),
+                .contains("unsupported manifest version '3'; supported versions: 2"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_rejects_v1_with_bump_hint() {
+        let err = parse_config_manifest(
+            r#"
+version: "1"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect_err("v1 should be rejected");
+
+        assert!(
+            err.to_string().contains("no longer supported")
+                && err.to_string().contains("\"2\""),
             "unexpected error: {err}"
         );
     }
@@ -1951,7 +1982,7 @@ services:
         services.insert("api".into(), minimal_service(None));
 
         let current = Config::try_from(ConfigV1 {
-            version: Version::V1,
+            version: Version::V2,
             project: Some(ProjectConfigInput::Fields {
                 id: "systemg".into(),
                 name: Some("Systemg".into()),
@@ -2017,7 +2048,7 @@ services:
         writeln!(
             yaml_file,
             r#"
-        version: "1"
+        version: "2"
         services:
           service1:
             command: "echo ${{MY_TEST_VAR}}"
@@ -2051,7 +2082,7 @@ services:
         writeln!(
             yaml_file,
             r#"
-version: "1"
+version: "2"
 services:
   rel_service:
     command: "echo ${{REL_VAR}}"
@@ -2105,7 +2136,7 @@ services:
         services.insert("c".into(), minimal_service(Some(vec!["b"])));
 
         let config = Config {
-            version: Version::V1,
+            version: Version::V2,
             project: ProjectConfig::default(),
             services,
             project_dir: None,
@@ -2125,7 +2156,7 @@ services:
         services.insert("a".into(), minimal_service(Some(vec!["missing"])));
 
         let config = Config {
-            version: Version::V1,
+            version: Version::V2,
             project: ProjectConfig::default(),
             services,
             project_dir: None,
@@ -2154,7 +2185,7 @@ services:
         services.insert("b".into(), minimal_service(Some(vec!["a"])));
 
         let config = Config {
-            version: Version::V1,
+            version: Version::V2,
             project: ProjectConfig::default(),
             services,
             project_dir: None,
@@ -2177,7 +2208,7 @@ services:
     fn logs_config_defaults_to_file_with_rotation() {
         let config: Config = serde_yaml::from_str(
             r#"
-version: "1"
+version: "2"
 services:
   api:
     command: "echo ok"
@@ -2196,7 +2227,7 @@ services:
     fn service_logs_override_global_logs_config() {
         let config: Config = serde_yaml::from_str(
             r#"
-version: "1"
+version: "2"
 logs:
   sink: file
   max_bytes: 2048
@@ -2222,7 +2253,7 @@ services:
     fn logs_config_rejects_unknown_sink() {
         let err = serde_yaml::from_str::<Config>(
             r#"
-version: "1"
+version: "2"
 logs:
   sink: journald
 services:
@@ -2239,7 +2270,7 @@ services:
     fn status_config_defaults_to_summary_snapshots() {
         let config: Config = serde_yaml::from_str(
             r#"
-version: "1"
+version: "2"
 services:
   api:
     command: "echo ok"
@@ -2256,7 +2287,7 @@ services:
     fn status_config_parses_detailed_mode_and_clamps_interval() {
         let config: Config = serde_yaml::from_str(
             r#"
-version: "1"
+version: "2"
 status:
   snapshot_mode: detailed
   snapshot_interval_secs: 0
@@ -2275,7 +2306,7 @@ services:
     fn status_config_rejects_unknown_snapshot_mode() {
         let err = serde_yaml::from_str::<Config>(
             r#"
-version: "1"
+version: "2"
 status:
   snapshot_mode: deep
 services:
@@ -2512,7 +2543,7 @@ RUST_LOG: "debug"
         writeln!(
             yaml_file,
             r#"
-version: "1"
+version: "2"
 env:
   file: "root.env"
   vars:
@@ -2543,7 +2574,7 @@ services:
         writeln!(
             yaml_file,
             r#"
-version: "1"
+version: "2"
 services:
   service1:
     command: "echo ok"
@@ -2573,7 +2604,7 @@ services:
         writeln!(
             yaml_file,
             r#"
-version: "1"
+version: "2"
 env:
   REDIS_URI: "redis://127.0.0.1:6379"
 services:
@@ -2612,7 +2643,7 @@ services:
         writeln!(
             yaml_file,
             r#"
-version: "1"
+version: "2"
 env:
   file: "root.env"
   vars:
@@ -2657,7 +2688,7 @@ services:
         writeln!(
             yaml_file,
             r#"
-version: "1"
+version: "2"
 services:
   web:
     command: "python app.py"
@@ -2722,7 +2753,7 @@ services:
         writeln!(
             yaml_file,
             r#"
-version: "1"
+version: "2"
 services:
   web:
     command: "python app.py"

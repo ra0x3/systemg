@@ -28,10 +28,10 @@ services:
     restart_policy: always
 ```
 
-it emits the equivalent `projects:` form:
+it emits the equivalent `projects:` form, bumped to the current schema version:
 
 ```yaml
-version: "1"
+version: "2"
 projects:
   shop:
     name: Shop
@@ -45,9 +45,10 @@ projects:
 ```
 
 <Info>
-  `migrate` is a pure shape conversion: same version, same services, same
-  settings — only the `project:` block becomes a `projects:` entry keyed by its
-  id. A manifest that is already in `projects:` form passes through unchanged.
+  `migrate` converts the shape and bumps the schema `version` to the current one
+  (`2`): the `project:` block becomes a `projects:` entry keyed by its id, and
+  the services and settings are otherwise unchanged. A manifest already in
+  `projects:` form at the current version passes through unchanged.
 </Info>
 
 ## Options

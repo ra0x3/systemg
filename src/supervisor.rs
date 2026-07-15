@@ -3367,7 +3367,7 @@ mod tests {
         services.insert("beacon".into(), test_service(&[]));
 
         let config = Config {
-            version: Version::V1,
+            version: Version::V2,
             project: ProjectConfig::default(),
             services,
             project_dir: None,
@@ -3389,7 +3389,7 @@ mod tests {
         services.insert("beacon".into(), test_service(&[]));
 
         let config = Config {
-            version: Version::V1,
+            version: Version::V2,
             project: ProjectConfig::default(),
             services,
             project_dir: None,
@@ -3459,7 +3459,7 @@ mod tests {
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 services:
   api:
     command: "/bin/true"
@@ -3506,7 +3506,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 status:
   snapshot_mode: summary
 services:
@@ -3622,7 +3622,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -3635,7 +3635,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -3652,7 +3652,7 @@ services:
         fs::write(
             &beta_updated_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta Updated
@@ -3885,7 +3885,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -3903,7 +3903,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -3987,7 +3987,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
 services:
@@ -4001,7 +4001,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
 services:
@@ -4026,7 +4026,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
 services:
@@ -4117,7 +4117,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -4140,7 +4140,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -4221,7 +4221,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -4234,7 +4234,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -4327,7 +4327,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -4343,7 +4343,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -4473,7 +4473,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -4486,7 +4486,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -4610,7 +4610,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -4623,7 +4623,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta

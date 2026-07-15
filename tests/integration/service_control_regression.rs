@@ -42,7 +42,7 @@ fn purge_retains_config_services() {
 
     let config_path = dir.join("sysg.yaml");
     let config_yaml = r#"
-version: "1"
+version: "2"
 services:
   sample:
     command: "sleep 30"
@@ -126,7 +126,7 @@ services:
 fn config_with_marker(marker: &std::path::Path, tag: &str) -> String {
     format!(
         r#"
-version: '1'
+version: '2'
 project:
   id: repro-proj
 services:

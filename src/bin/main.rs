@@ -2811,7 +2811,7 @@ mod tests {
 
         for idx in 0..3 {
             let path = units_dir.join(format!("unit-{idx}.yaml"));
-            fs::write(path, "version: \"1\"\nservices: {}\n").expect("write unit file");
+            fs::write(path, "version: \"2\"\nservices: {}\n").expect("write unit file");
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -2840,7 +2840,7 @@ mod tests {
         let now = SystemTime::now();
 
         let path = units_dir.join("old.yaml");
-        fs::write(&path, "version: \"1\"\nservices: {}\n").expect("write unit file");
+        fs::write(&path, "version: \"2\"\nservices: {}\n").expect("write unit file");
 
         prune_unit_configs_with_limits(
             units_dir,
@@ -3800,7 +3800,8 @@ fn write_ad_hoc_config(
 
     let config_path = units_dir.join(format!("{service_name}-{hash}.yaml"));
     let yaml = format!(
-        "version: \"1\"\nservices:\n  {name}:\n    command: {command}\n",
+        "version: \"{version}\"\nservices:\n  {name}:\n    command: {command}\n",
+        version = systemg::config::CURRENT_MANIFEST_VERSION,
         name = service_name,
         command = yaml_single_quoted(&shell_command)
     );

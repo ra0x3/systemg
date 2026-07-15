@@ -3057,7 +3057,7 @@ mod tests {
         let config_path = home.join("systemg.yaml");
         fs::write(
             &config_path,
-            r#"version: "1"
+            r#"version: "2"
 services:
   demo:
     command: "/bin/true"
@@ -3129,7 +3129,7 @@ services:
     fn build_snapshot_omits_orphaned_cron_units() {
         let services = std::collections::HashMap::new();
         let config = Config {
-            version: crate::config::Version::V1,
+            version: crate::config::Version::V2,
             project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,
@@ -3194,7 +3194,7 @@ services:
         let hash = service.compute_hash();
         services.insert("nightly".into(), service);
         let config = Config {
-            version: crate::config::Version::V1,
+            version: crate::config::Version::V2,
             project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,
@@ -3266,7 +3266,7 @@ services:
         let live_hash = service.compute_hash();
         services.insert("nightly".into(), service);
         let config = Config {
-            version: crate::config::Version::V1,
+            version: crate::config::Version::V2,
             project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,
@@ -3334,7 +3334,7 @@ services:
         let hash = service.compute_hash();
         services.insert("migrate".into(), service);
         let config = Config {
-            version: crate::config::Version::V1,
+            version: crate::config::Version::V2,
             project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,
@@ -3392,7 +3392,7 @@ services:
         let hash = service.compute_hash();
         services.insert("api".into(), service);
         let config = Config {
-            version: crate::config::Version::V1,
+            version: crate::config::Version::V2,
             project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,
@@ -3523,7 +3523,7 @@ services:
         let hash = service.compute_hash();
         services.insert("demo".into(), service);
         let config = Config {
-            version: crate::config::Version::V1,
+            version: crate::config::Version::V2,
             project: crate::config::ProjectConfig::default(),
             services,
             project_dir: None,

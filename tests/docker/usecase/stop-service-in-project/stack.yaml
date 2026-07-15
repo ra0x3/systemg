@@ -1,0 +1,11 @@
+version: "2"
+projects:
+  shop:
+    name: Shop
+    services:
+      api:
+        command: "sleep 3000"
+        restart_policy: "always"
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"

@@ -69,7 +69,7 @@ fn status_json_falls_back_to_snapshot_without_supervisor() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/true"
@@ -128,7 +128,7 @@ fn status_format_defaults_to_json_when_value_is_omitted() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/true"
@@ -177,7 +177,7 @@ fn status_xml_falls_back_to_snapshot_without_supervisor() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/true"
@@ -228,7 +228,7 @@ fn inspect_json_falls_back_without_supervisor() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/true"
@@ -290,7 +290,7 @@ fn inspect_xml_falls_back_without_supervisor() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/true"
@@ -347,7 +347,7 @@ fn status_flags_zombie_processes() {
     let config_path = dir.join("config.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   arb_rs:
     command: "sleep 60"
@@ -451,7 +451,7 @@ fn status_reports_skipped_services() {
     let config_path = dir.join("config.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   skipped_service:
     command: "echo should be skipped"
@@ -517,7 +517,7 @@ fn status_reports_successful_exit() {
     let config_path = dir.join("config.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   oneshot:
     command: "sh -c 'echo done'"

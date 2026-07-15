@@ -156,14 +156,16 @@ fn classify_yaml(err: &serde_yaml::Error) -> Diagnostic {
         (
             "missing-version",
             "Every manifest must declare its schema version at the top level.",
-            "Add `version: \"1\"` as the first key in the file.",
+            "Add `version: \"2\"` as the first key in the file.",
             "/how-it-works/configuration",
         )
-    } else if lower.contains("unsupported manifest version") {
+    } else if lower.contains("unsupported manifest version")
+        || lower.contains("no longer supported")
+    {
         (
             "unsupported-version",
             "The declared version is not one systemg knows how to read.",
-            "Set `version: \"1\"` — the only supported schema version today.",
+            "Set `version: \"2\"` — the current supported schema version.",
             "/how-it-works/configuration",
         )
     } else if lower.contains("missing field `command`") {
@@ -233,7 +235,7 @@ mod tests {
     #[test]
     fn valid_config_reports_ok() {
         let (_dir, path) =
-            write_config("version: \"1\"\nservices:\n  api:\n    command: \"echo ok\"\n");
+            write_config("version: \"2\"\nservices:\n  api:\n    command: \"echo ok\"\n");
         let (report, content) = validate(&path);
         assert!(report.valid);
         assert!(report.diagnostics.is_empty());
@@ -251,7 +253,7 @@ mod tests {
     #[test]
     fn unsupported_version_is_classified() {
         let (_dir, path) =
-            write_config("version: \"2\"\nservices:\n  api:\n    command: \"echo ok\"\n");
+            write_config("version: \"3\"\nservices:\n  api:\n    command: \"echo ok\"\n");
         let (report, _) = validate(&path);
         assert!(!report.valid);
         assert_eq!(report.diagnostics[0].kind, "unsupported-version");
@@ -260,7 +262,7 @@ mod tests {
     #[test]
     fn bad_health_check_is_classified() {
         let (_dir, path) = write_config(
-            "version: \"1\"\nservices:\n  api:\n    command: \"echo ok\"\n    deployment:\n      health_check:\n        interval: \"2s\"\n",
+            "version: \"2\"\nservices:\n  api:\n    command: \"echo ok\"\n    deployment:\n      health_check:\n        interval: \"2s\"\n",
         );
         let (report, _) = validate(&path);
         assert!(!report.valid);
@@ -278,7 +280,7 @@ mod tests {
     #[test]
     fn unknown_dependency_is_classified() {
         let (_dir, path) = write_config(
-            "version: \"1\"\nservices:\n  api:\n    command: \"echo ok\"\n    depends_on: [missing]\n",
+            "version: \"2\"\nservices:\n  api:\n    command: \"echo ok\"\n    depends_on: [missing]\n",
         );
         let (report, _) = validate(&path);
         assert!(!report.valid);
@@ -288,7 +290,7 @@ mod tests {
     #[test]
     fn dependency_cycle_is_classified() {
         let (_dir, path) = write_config(
-            "version: \"1\"\nservices:\n  a:\n    command: \"x\"\n    depends_on: [b]\n  b:\n    command: \"y\"\n    depends_on: [a]\n",
+            "version: \"2\"\nservices:\n  a:\n    command: \"x\"\n    depends_on: [b]\n  b:\n    command: \"y\"\n    depends_on: [a]\n",
         );
         let (report, _) = validate(&path);
         assert!(!report.valid);
@@ -298,7 +300,7 @@ mod tests {
     #[test]
     fn location_is_captured_for_syntax_errors() {
         let (_dir, path) = write_config(
-            "version: \"1\"\nservices:\n  api:\n   command: \"x\"\n  bad: [unclosed\n",
+            "version: \"2\"\nservices:\n  api:\n   command: \"x\"\n  bad: [unclosed\n",
         );
         let (report, _) = validate(&path);
         assert!(!report.valid);

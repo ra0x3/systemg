@@ -18,7 +18,7 @@ fn supervisor_logs_operational_events() {
     let config_path = dir.join("systemg.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 30"

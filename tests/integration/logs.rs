@@ -41,7 +41,7 @@ fn logs_streams_when_pid_has_no_fds() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   arb_rs:
     command: "/bin/sleep 30"
@@ -91,7 +91,7 @@ fn logs_sink_none_discards_service_output_without_files() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 logs:
   sink: none
 services:
@@ -137,7 +137,7 @@ fn logs_uses_snapshot_runtime_when_pid_file_is_missing_service() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/sleep 30"
@@ -215,7 +215,7 @@ fn logs_lines_returns_last_lines_for_service() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/sleep 30"
@@ -300,7 +300,7 @@ fn logs_default_reads_combined_stdout_stderr_in_capture_order() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   demo:
     command: "/bin/sleep 30"
@@ -393,7 +393,7 @@ fn logs_without_service_groups_running_before_offline() {
     fs::write(
         &config_path,
         r#"
-version: "1"
+version: "2"
 services:
   beta:
     command: "/bin/sleep 30"

@@ -48,7 +48,7 @@ fn supervisor_persists_cron_execution_history() {
     fs::write(
         &config_path,
         format!(
-            r#"version: "1"
+            r#"version: "2"
 services:
   history_cron:
     command: "sh -c 'date +%s >> \"{marker}\"'"

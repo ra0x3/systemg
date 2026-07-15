@@ -40,7 +40,7 @@ fn stale_socket_doesnt_block_commands() {
     let config_path = dir.join("systemg.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 5"
@@ -98,7 +98,7 @@ fn purge_removes_all_state() {
     let config_path = dir.join("systemg.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 2"
@@ -257,7 +257,7 @@ fn restart_daemonize_returns_without_waiting_for_supervisor_restart() {
     let config_path = dir.join("systemg.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 30"
@@ -277,7 +277,7 @@ services:
 
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 30"
@@ -356,7 +356,7 @@ while true; do sleep 1; done\n",
     fs::write(
         &config_path,
         format!(
-            r#"version: "1"
+            r#"version: "2"
 services:
   long_lived:
     command: "{}"
@@ -460,7 +460,7 @@ while true; do sleep 1; done\n",
     fs::write(
         &config_path,
         format!(
-            r#"version: "1"
+            r#"version: "2"
 services:
   long_lived:
     command: "{}"

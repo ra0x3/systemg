@@ -35,7 +35,7 @@ fn status_recovers_from_stale_exit_state() {
 
     let config_path = home.join("sysg.yaml");
     let config_contents = r#"
-version: "1"
+version: "2"
 services:
   steady:
     command: "sleep 30"

@@ -9,7 +9,7 @@ systemg uses YAML files to define services and their relationships.
 ## Complete example
 
 ```yaml
-version: "1"
+version: "2"
 projects:
   myapp:
     name: My App
@@ -22,7 +22,7 @@ project id. The example below shows one project's full set of sections; the same
 `env` / `logs` / `status` / `services` blocks apply inside each project entry.
 
 ```yaml
-version: "1"
+version: "2"
 project:
   id: myapp
   name: My App
@@ -89,10 +89,13 @@ services:
 
 ### `version`
 
-**Required**. Specifies the configuration schema version.
+**Required**. Specifies the configuration schema version. The current schema is
+`2`. Older `version: "1"` manifests are no longer accepted — bump them to `"2"`
+(run [`sysg migrate`](/how-it-works/commands/migrate), which emits `version: "2"`,
+and `sysg purge` before upgrading).
 
 ```yaml
-version: "1"
+version: "2"
 ```
 
 ### `projects`
@@ -102,7 +105,7 @@ entry carries that project's `name`, `services`, and optional `env` / `logs`
 sections. One file can hold as many projects as you like:
 
 ```yaml
-version: "1"
+version: "2"
 projects:
   arbitration:
     name: Arbitration
@@ -133,7 +136,7 @@ Top-level `services:` with no project form a **loose bundle**. They still run,
 and their state persists under `projects/__loose__/`:
 
 ```yaml
-version: "1"
+version: "2"
 services:
   web:
     command: "python app.py"
@@ -484,7 +487,7 @@ Single-host zero-downtime options for alternating between two rollout slots (typ
 
 ::::info Manifest schema migrations
 
-The top-level `version` field declares the manifest schema version. systemg accepts the current version as either a string or integer, so `version: "1"` and `version: 1` are equivalent.
+The top-level `version` field declares the manifest schema version. The current schema is `2`, accepted as either a string or integer, so `version: "2"` and `version: 2` are equivalent. `version: "1"` is no longer accepted.
 
 When upgrading systemg, the binary reads the declared manifest version first, then migrates supported older manifest schemas into the current runtime configuration before starting services. This compatibility step happens in memory; systemg does not rewrite your YAML file just because it can migrate it.
 
