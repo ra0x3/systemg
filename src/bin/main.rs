@@ -3968,9 +3968,12 @@ fn resolve_status_project_filter(
             Ok(Some(project))
         }
         (Some(config_arg), None) => {
+            // `-c <file>` targets EVERY project the file declares, not just the
+            // first. Validate the file is loadable, then apply no project filter
+            // so the aggregate snapshot surfaces all of its projects.
             let config_path = resolve_config_path(config_arg)?;
-            let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
-            Ok(Some(config.project.id))
+            load_config(Some(config_path.to_string_lossy().as_ref()))?;
+            Ok(None)
         }
         (None, project) => Ok(project),
     }

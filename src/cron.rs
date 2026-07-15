@@ -1,6 +1,6 @@
 //! Cron scheduling for services.
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     path::PathBuf,
     str::FromStr,
@@ -319,6 +319,8 @@ pub struct CronExecutionRecord {
 /// Tracks execution history and state for a single cron job.
 #[derive(Debug, Clone)]
 pub struct CronJobState {
+    /// Project this cron job belongs to; selects its persistence directory.
+    pub project_id: String,
     /// Name of the service this cron job manages.
     pub service_name: String,
     /// Configuration hash of the service (used for persistence across renames).
@@ -351,6 +353,7 @@ pub struct CronDueJob {
 impl CronJobState {
     /// Creates a new cron job state, optionally restoring from persisted state.
     pub fn new(
+        project_id: String,
         service_name: String,
         service_hash: String,
         schedule: Schedule,
@@ -361,6 +364,7 @@ impl CronJobState {
         let next_execution = compute_next_execution(&schedule, timezone);
 
         let mut state = Self {
+            project_id,
             service_name,
             service_hash,
             schedule,
@@ -444,42 +448,62 @@ fn compute_next_execution(
 }
 
 /// Manager for all cron jobs in the system.
+///
+/// Jobs from every project share one scheduler loop, but each job persists to
+/// and restores from **its own** project's state directory — `stores` maps a
+/// project id to that directory so no project's cron history can leak into
+/// another's file.
 #[derive(Clone)]
 pub struct CronManager {
     jobs: Arc<Mutex<Vec<CronJobState>>>,
-    state_file: Arc<Mutex<CronStateFile>>,
+    stores: Arc<Mutex<HashMap<String, StateStore>>>,
 }
 
 impl Default for CronManager {
-    /// Returns the default this item, bound to the loose project store.
+    /// Returns the default this item, seeded with the loose project store.
     fn default() -> Self {
         Self::for_store(StateStore::loose())
     }
 }
 
 impl CronManager {
-    /// Creates a cron manager bound to a project's state store, loading any
-    /// persisted state from that project's directory.
+    /// Creates a cron manager seeded with a single project's state store.
     pub fn for_store(store: StateStore) -> Self {
-        let state_file =
-            CronStateFile::load(store.clone()).unwrap_or_else(|_| CronStateFile {
-                store,
-                ..CronStateFile::default()
-            });
+        let mut stores = HashMap::new();
+        stores.insert(String::new(), store);
         Self {
             jobs: Arc::new(Mutex::new(Vec::new())),
-            state_file: Arc::new(Mutex::new(state_file)),
+            stores: Arc::new(Mutex::new(stores)),
         }
     }
 
-    /// Creates a new cron manager bound to the loose project store.
+    /// Creates a new cron manager seeded with the loose project store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Registers a project's state store so its cron jobs persist to their own
+    /// directory. Idempotent.
+    pub fn register_store(&self, project_id: &str, store: StateStore) {
+        if let Ok(mut stores) = self.stores.lock() {
+            stores.insert(project_id.to_string(), store);
+        }
+    }
+
+    /// The state store for a project, falling back to a project-derived store
+    /// if one was never registered.
+    fn store_for(&self, project_id: &str) -> StateStore {
+        self.stores
+            .lock()
+            .ok()
+            .and_then(|stores| stores.get(project_id).cloned())
+            .unwrap_or_else(|| StateStore::for_project(project_id))
     }
 
     /// Builds a CronJobState from service configuration and optionally restores persisted state.
     fn build_job_state(
         &self,
+        project_id: &str,
         service_name: &str,
         service_hash: &str,
         cron_config: &CronConfig,
@@ -499,13 +523,12 @@ impl CronManager {
             }
         })?;
 
-        let persisted_state = self
-            .state_file
-            .lock()
+        let persisted_state = CronStateFile::load(self.store_for(project_id))
             .ok()
-            .and_then(|state| state.jobs.get(service_hash).cloned());
+            .and_then(|state| state.jobs().get(service_hash).cloned());
 
         let job_state = CronJobState::new(
+            project_id.to_string(),
             service_name.to_string(),
             service_hash.to_string(),
             schedule,
@@ -520,12 +543,13 @@ impl CronManager {
     /// Register a cron job from service configuration.
     pub fn register_job(
         &self,
+        project_id: &str,
         service_name: &str,
         service_hash: &str,
         cron_config: &CronConfig,
     ) -> Result<(), ProcessManagerError> {
         let (job_state, normalized, normalized_expression) =
-            self.build_job_state(service_name, service_hash, cron_config)?;
+            self.build_job_state(project_id, service_name, service_hash, cron_config)?;
         let timezone_label = job_state.timezone_label.clone();
         let mut jobs = self.jobs.lock().unwrap();
         self.persist_job_state(&job_state);
@@ -569,11 +593,18 @@ impl CronManager {
         let mut active_jobs = Vec::new();
 
         for config in configs {
+            let project_id = config.project.id.clone();
+            self.register_store(&project_id, StateStore::for_project(&project_id));
             for (service_name, service_config) in &config.services {
                 if let Some(cron_config) = &service_config.cron {
                     let service_hash = service_config.compute_hash();
-                    let (job_state, normalized, normalized_expression) =
-                        self.build_job_state(service_name, &service_hash, cron_config)?;
+                    let (job_state, normalized, normalized_expression) = self
+                        .build_job_state(
+                            &project_id,
+                            service_name,
+                            &service_hash,
+                            cron_config,
+                        )?;
                     let timezone_label = job_state.timezone_label.clone();
 
                     self.persist_job_state(&job_state);
@@ -822,6 +853,7 @@ impl CronManager {
         let jobs = self.jobs.lock().unwrap();
         jobs.iter()
             .map(|job| CronJobState {
+                project_id: job.project_id.clone(),
                 service_name: job.service_name.clone(),
                 service_hash: job.service_hash.clone(),
                 schedule: Schedule::from_str(&job.schedule.to_string()).unwrap(),
@@ -856,9 +888,21 @@ impl CronManager {
         }
     }
 
-    /// Persists the state of a cron job to disk.
+    /// Persists the state of a cron job to its own project's state directory.
+    ///
+    /// Reads the project's current cron file, upserts just this job, and writes
+    /// it back — so sibling jobs in the same project are never clobbered, and no
+    /// other project's file is touched.
     fn persist_job_state(&self, job: &CronJobState) {
-        if let Ok(mut state) = self.state_file.lock() {
+        let store = self.store_for(&job.project_id);
+        let mut state = match CronStateFile::load(store.clone()) {
+            Ok(state) => state,
+            Err(_) => CronStateFile {
+                store,
+                ..CronStateFile::default()
+            },
+        };
+        {
             state.jobs.insert(
                 job.service_hash.clone(),
                 PersistedCronJobState {
@@ -1131,7 +1175,7 @@ mod tests {
 
         assert!(
             manager
-                .register_job("test_service", &service_hash, &cron_config)
+                .register_job("", "test_service", &service_hash, &cron_config)
                 .is_ok()
         );
 
@@ -1152,7 +1196,7 @@ mod tests {
 
         assert!(
             manager
-                .register_job("test_service", &service_hash, &cron_config)
+                .register_job("", "test_service", &service_hash, &cron_config)
                 .is_err()
         );
     }
@@ -1168,7 +1212,7 @@ mod tests {
 
         assert!(
             manager
-                .register_job("test_service", &service_hash, &cron_config)
+                .register_job("", "test_service", &service_hash, &cron_config)
                 .is_ok()
         );
         let jobs = manager.get_all_jobs();
@@ -1192,6 +1236,7 @@ mod tests {
         });
 
         let state = CronJobState::new(
+            String::new(),
             "live_service".to_string(),
             "live-hash".to_string(),
             schedule,
@@ -1243,6 +1288,7 @@ mod tests {
             metrics: vec![],
         });
         let mut job = CronJobState::new(
+            String::new(),
             "stale_service".to_string(),
             "stale-hash".to_string(),
             schedule,
@@ -1316,7 +1362,7 @@ mod tests {
         let service_hash = compute_test_hash(&cron_config);
 
         manager
-            .register_job("persisted_service", &service_hash, &cron_config)
+            .register_job("", "persisted_service", &service_hash, &cron_config)
             .unwrap();
 
         {

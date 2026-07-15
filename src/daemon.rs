@@ -506,7 +506,8 @@ impl PidFile {
 
     /// Records spawn metadata in memory only, without persisting to disk.
     /// Intended for constructing snapshots in tests.
-    pub fn record_spawn_in_memory(&mut self, metadata: PersistedSpawnChild) {
+    #[cfg(test)]
+    pub(crate) fn record_spawn_in_memory(&mut self, metadata: PersistedSpawnChild) {
         let child_pid = metadata.pid;
         let parent_pid = metadata.parent_pid;
         let depth = metadata.depth;
