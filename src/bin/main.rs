@@ -389,7 +389,7 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
         return config_read_diag(message);
     }
 
-    systemg::diag::Diagnostic::error("SG0001", "command failed")
+    systemg::diag::Diagnostic::error(systemg::diag::SgCode::Catchall, "command failed")
         .note(message)
         .help_cmd("supervisor logs", "sysg logs")
         .help_docs()
@@ -399,7 +399,10 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
 /// holds each project's manifest, so the real fix is to target the project by
 /// id rather than hunt for a file in the current directory.
 fn config_read_diag(message: &str) -> systemg::diag::Diagnostic {
-    let mut diag = systemg::diag::Diagnostic::error("SG0001", "could not read a local config file")
+    let mut diag = systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::Catchall,
+        "could not read a local config file",
+    )
         .note(message)
         .note(
             "the resident supervisor keeps each project's config; you usually do not need a local file. \
@@ -3906,7 +3909,7 @@ fn resolve_project_context_from_config(
 /// up a different config than the user expects. Lists what the running
 /// supervisor actually has loaded so the user can retarget without guessing.
 fn fail_project_mismatch(requested: &str, config_project: &str) -> ! {
-    use systemg::diag::Diagnostic;
+    use systemg::diag::{Diagnostic, SgCode};
 
     let loaded: Vec<String> =
         match ipc::send_command(&ControlCommand::Status { live: false }) {
@@ -3924,7 +3927,7 @@ fn fail_project_mismatch(requested: &str, config_project: &str) -> ! {
         };
 
     let mut diag = Diagnostic::error(
-        "SG0201",
+        SgCode::TargetConfigMismatch,
         format!("project `{requested}` does not match the resolved config"),
     )
     .note(format!(

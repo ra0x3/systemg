@@ -5,10 +5,14 @@
 //! run — colored on a terminal, plain when piped, structured over IPC. The
 //! design goal is the Rust compiler's: assume the user made an honest mistake
 //! and hand it back with a map, not a dead end.
+//!
+//! Every diagnostic carries a typed [`SgCode`]. The enum *is* the error
+//! taxonomy: a code that isn't a variant cannot be constructed, and adding a
+//! failure mode means adding a variant. There is no stringly-typed seam.
 
 use std::{fmt, io::IsTerminal};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Base URL for per-code documentation pages.
 pub const DOCS_BASE: &str = "https://docs.sysg.dev/errors";
@@ -21,6 +25,153 @@ const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const UNDERLINE: &str = "\x1b[4;34m";
 const RESET: &str = "\x1b[0m";
+
+/// The stable sysg error taxonomy. Each variant owns its `SG####` string, a
+/// canonical one-line title, and its docs slug; the wire form is the code
+/// string so scripts and IPC stay stable across renames of the Rust variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SgCode {
+    /// SG0001 — a failure with no more specific diagnosis yet.
+    Catchall,
+    /// SG0002 — cron history/active state could not be restored.
+    CronStateRecoveryFailed,
+    /// SG0003 — a cron unit could not be safely registered.
+    CronRegistrationConflict,
+    /// SG0004 — a finite unit that exited cleanly was misclassified as failed.
+    FiniteUnitMisclassified,
+    /// SG0005 — the supervisor is using an outdated or wrong manifest.
+    StaleProjectConfiguration,
+    /// SG0006 — a command resolves ambiguously between projects/services.
+    TargetScopeAmbiguous,
+    /// SG0007 — the supervisor cannot safely restart or transfer ownership.
+    SupervisorRestartConflict,
+    /// SG0008 — a service or `pre_start` failed during boot or restart.
+    UnitStartFailed,
+    /// SG0009 — status/inspect disagrees with live process state.
+    StatusStateInconsistent,
+    /// SG0010 — expected service logs are unavailable or misrouted.
+    LogSourceUnavailable,
+    /// SG0011 — a live log-follow session is stale or cannot reconnect.
+    LogStreamDesynchronized,
+    /// SG0012 — log output exceeded safe storage/display bounds.
+    LogLimitExceeded,
+    /// SG0013 — a daemonized service inherited an invalid environment.
+    DaemonEnvironmentInvalid,
+    /// SG0014 — the installer cannot obtain the expected binary.
+    ReleaseArtifactUnavailable,
+    /// SG0015 — IPC/PID/tracking disagrees with the running processes.
+    SupervisorStateDesynchronized,
+    /// SG0016 — a rolling deployment failed without a useful error.
+    RollingDeploymentFailed,
+    /// SG0102 — a service exited immediately at start, before it came up.
+    UnitImmediateExit,
+    /// SG0103 — a service's `pre_start` failed, so it was not started.
+    PreStartFailed,
+    /// SG0104 — a service never passed its configured health check.
+    HealthUnmet,
+    /// SG0201 — the `-p` project does not match the resolved config.
+    TargetConfigMismatch,
+}
+
+impl SgCode {
+    /// The stable `SG####` string. This is the wire and docs identity.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SgCode::Catchall => "SG0001",
+            SgCode::CronStateRecoveryFailed => "SG0002",
+            SgCode::CronRegistrationConflict => "SG0003",
+            SgCode::FiniteUnitMisclassified => "SG0004",
+            SgCode::StaleProjectConfiguration => "SG0005",
+            SgCode::TargetScopeAmbiguous => "SG0006",
+            SgCode::SupervisorRestartConflict => "SG0007",
+            SgCode::UnitStartFailed => "SG0008",
+            SgCode::StatusStateInconsistent => "SG0009",
+            SgCode::LogSourceUnavailable => "SG0010",
+            SgCode::LogStreamDesynchronized => "SG0011",
+            SgCode::LogLimitExceeded => "SG0012",
+            SgCode::DaemonEnvironmentInvalid => "SG0013",
+            SgCode::ReleaseArtifactUnavailable => "SG0014",
+            SgCode::SupervisorStateDesynchronized => "SG0015",
+            SgCode::RollingDeploymentFailed => "SG0016",
+            SgCode::UnitImmediateExit => "SG0102",
+            SgCode::PreStartFailed => "SG0103",
+            SgCode::HealthUnmet => "SG0104",
+            SgCode::TargetConfigMismatch => "SG0201",
+        }
+    }
+
+    /// The docs URL for this code.
+    pub fn docs_url(self) -> String {
+        format!("{DOCS_BASE}/{}", self.as_str())
+    }
+
+    /// Every code, so callers can enumerate or round-trip the taxonomy.
+    pub const ALL: [SgCode; 20] = [
+        SgCode::Catchall,
+        SgCode::CronStateRecoveryFailed,
+        SgCode::CronRegistrationConflict,
+        SgCode::FiniteUnitMisclassified,
+        SgCode::StaleProjectConfiguration,
+        SgCode::TargetScopeAmbiguous,
+        SgCode::SupervisorRestartConflict,
+        SgCode::UnitStartFailed,
+        SgCode::StatusStateInconsistent,
+        SgCode::LogSourceUnavailable,
+        SgCode::LogStreamDesynchronized,
+        SgCode::LogLimitExceeded,
+        SgCode::DaemonEnvironmentInvalid,
+        SgCode::ReleaseArtifactUnavailable,
+        SgCode::SupervisorStateDesynchronized,
+        SgCode::RollingDeploymentFailed,
+        SgCode::UnitImmediateExit,
+        SgCode::PreStartFailed,
+        SgCode::HealthUnmet,
+        SgCode::TargetConfigMismatch,
+    ];
+}
+
+impl fmt::Display for SgCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The wire form does not resolve to a known code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSgCode(pub String);
+
+impl fmt::Display for UnknownSgCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown sysg code `{}`", self.0)
+    }
+}
+
+impl std::error::Error for UnknownSgCode {}
+
+impl std::str::FromStr for SgCode {
+    type Err = UnknownSgCode;
+
+    fn from_str(code: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|c| c.as_str() == code)
+            .ok_or_else(|| UnknownSgCode(code.to_string()))
+    }
+}
+
+impl Serialize for SgCode {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SgCode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 /// How severe a diagnostic is; controls the header color and label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,8 +244,8 @@ pub enum Help {
 pub struct Diagnostic {
     /// Severity of the report.
     pub severity: Severity,
-    /// Stable sysg error code, e.g. `SG0104`.
-    pub code: String,
+    /// Stable sysg error code.
+    pub code: SgCode,
     /// One-line statement of what happened.
     pub title: String,
     /// Where the problem originates, when known.
@@ -109,16 +260,21 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     /// Starts an error-severity diagnostic with the given code and title.
-    pub fn error(code: &str, title: impl Into<String>) -> Self {
+    pub fn error(code: SgCode, title: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
-            code: code.to_string(),
+            code,
             title: title.into(),
             origin: None,
             notes: Vec::new(),
             evidence: Vec::new(),
             help: Vec::new(),
         }
+    }
+
+    /// The stable `SG####` string for this diagnostic's code.
+    pub fn code_str(&self) -> &'static str {
+        self.code.as_str()
     }
 
     /// Attaches the originating file/key.
@@ -164,8 +320,9 @@ impl Diagnostic {
 
     /// Adds the documentation link for this diagnostic's code.
     pub fn help_docs(mut self) -> Self {
-        let url = format!("{DOCS_BASE}/{}", self.code);
-        self.help.push(Help::Link { url });
+        self.help.push(Help::Link {
+            url: self.code.docs_url(),
+        });
         self
     }
 
@@ -186,7 +343,7 @@ impl Diagnostic {
             "{}{}[{}]{}{}: {}{}\n",
             paint(self.severity.color()),
             self.severity.label(),
-            self.code,
+            self.code.as_str(),
             reset,
             paint(BOLD),
             self.title,
@@ -269,19 +426,22 @@ mod tests {
     use super::*;
 
     fn sample() -> Diagnostic {
-        Diagnostic::error("SG0104", "service `api` failed to become healthy")
-            .origin(
-                "sysg.yaml",
-                Some(31),
-                Some("services.api.health_check".into()),
-            )
-            .note("5 health checks failed over 45s")
-            .evidence(
-                "last output",
-                vec!["password authentication failed".to_string()],
-            )
-            .help_cmd("view logs", "sysg logs -s api")
-            .help_docs()
+        Diagnostic::error(
+            SgCode::HealthUnmet,
+            "service `api` failed to become healthy",
+        )
+        .origin(
+            "sysg.yaml",
+            Some(31),
+            Some("services.api.health_check".into()),
+        )
+        .note("5 health checks failed over 45s")
+        .evidence(
+            "last output",
+            vec!["password authentication failed".to_string()],
+        )
+        .help_cmd("view logs", "sysg logs -s api")
+        .help_docs()
     }
 
     #[test]
@@ -302,7 +462,25 @@ mod tests {
         assert!(text.contains(RED));
         let json = serde_json::to_string(&sample()).unwrap();
         let back: Diagnostic = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.code, "SG0104");
+        assert_eq!(back.code, SgCode::HealthUnmet);
         assert_eq!(back.render(false), sample().render(false));
+    }
+
+    #[test]
+    fn code_strings_are_unique_and_round_trip() {
+        let mut seen = std::collections::HashSet::new();
+        for code in SgCode::ALL {
+            assert!(
+                seen.insert(code.as_str()),
+                "duplicate code {}",
+                code.as_str()
+            );
+            assert_eq!(code.as_str().parse(), Ok(code));
+        }
+    }
+
+    #[test]
+    fn unknown_code_fails_to_deserialize() {
+        assert!(serde_json::from_str::<SgCode>("\"SG9999\"").is_err());
     }
 }

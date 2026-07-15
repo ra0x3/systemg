@@ -3056,7 +3056,7 @@ impl Daemon {
                     };
 
                     let diag = crate::diag::Diagnostic::error(
-                        "SG0102",
+                        crate::diag::SgCode::UnitImmediateExit,
                         format!("service `{service_name}` exited immediately at start"),
                     )
                     .note(format!("the process {how} before it finished starting"))
@@ -3741,7 +3741,7 @@ impl Daemon {
                 .unwrap_or_default();
             let project = self.config.project.id.clone();
             let diag = crate::diag::Diagnostic::error(
-                "SG0103",
+                crate::diag::SgCode::PreStartFailed,
                 format!("pre_start for `{service_name}` failed"),
             )
             .origin(
@@ -3849,7 +3849,7 @@ impl Daemon {
         timeout: Duration,
         retries: u32,
     ) -> crate::diag::Diagnostic {
-        use crate::diag::Diagnostic;
+        use crate::diag::{Diagnostic, SgCode};
 
         let project = self.config.project.id.clone();
         let target = health_check
@@ -3876,7 +3876,7 @@ impl Daemon {
             });
 
         let mut diag = Diagnostic::error(
-            "SG0104",
+            SgCode::HealthUnmet,
             format!("service `{service_name}` failed to become healthy"),
         )
         .note(format!(
