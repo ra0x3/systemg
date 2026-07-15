@@ -451,6 +451,11 @@ impl PidFile {
         self.service_groups.get(service).copied()
     }
 
+    /// Returns the service-name to process-group map for all recorded services.
+    pub fn service_pgids(&self) -> &HashMap<String, i32> {
+        &self.service_groups
+    }
+
     /// Reloads from disk.
     pub fn reload() -> Result<Self, PidFileError> {
         let _lock = Self::acquire_lock()?;
@@ -1504,7 +1509,7 @@ impl Daemon {
     }
 
     /// Returns the process-group ID for `pid` if it can be resolved.
-    fn process_group_for_pid(pid: u32) -> Option<libc::pid_t> {
+    pub(crate) fn process_group_for_pid(pid: u32) -> Option<libc::pid_t> {
         let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
         if pgid >= 0 { Some(pgid) } else { None }
     }

@@ -384,13 +384,36 @@ impl Error for DiagError {}
 /// Wraps errors that never became a structured diagnostic, so every failure
 /// leaves the user with next steps instead of a bare message.
 fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
+    if message.contains("Failed to read config") {
+        return config_read_diag(message);
+    }
+
     systemg::diag::Diagnostic::error("SG0001", "command failed")
         .note(message)
-        .help_cmd(
-            "supervisor log",
-            format!("tail -n 50 {}", supervisor_log_path().display()),
-        )
-        .help_cmd("check status", "sysg status")
+        .help_cmd("supervisor logs", "sysg logs")
+        .help_docs()
+}
+
+/// Diagnostic for a failed local config read. The resident supervisor already
+/// holds each project's manifest, so the real fix is to target the project by
+/// id rather than hunt for a file in the current directory.
+fn config_read_diag(message: &str) -> systemg::diag::Diagnostic {
+    let mut diag = systemg::diag::Diagnostic::error("SG0001", "could not read a local config file")
+        .note(message)
+        .note(
+            "the resident supervisor keeps each project's config; you usually do not need a local file. \
+Target the project by id with -p instead.",
+        );
+
+    if let Ok(Some(hint)) = ipc::read_config_hint() {
+        diag = diag.note(format!(
+            "the running supervisor last loaded: {}",
+            hint.display()
+        ));
+    }
+
+    diag.help_cmd("list what is loaded", "sysg status")
+        .help_cmd("start a resident project", "sysg start -p <project>")
         .help_docs()
 }
 
@@ -578,7 +601,25 @@ fn run() -> Result<(), Box<dyn Error>> {
                             );
                         }
                         None => {
-                            start_foreground_attached(start_target.config_path, None)?;
+                            if let Some(project_id) =
+                                command_project.or(start_target.project_id.clone())
+                            {
+                                let command = ControlCommand::Start {
+                                    service: None,
+                                    project: Some(project_id.clone()),
+                                };
+                                with_progress_spinner("Starting", || {
+                                    send_control_command(command)
+                                })?;
+                                info!(
+                                    "Project '{project_id}' start command sent to supervisor"
+                                );
+                            } else {
+                                start_foreground_attached(
+                                    start_target.config_path,
+                                    None,
+                                )?;
+                            }
                         }
                     }
                 } else {
@@ -3624,11 +3665,13 @@ fn resolve_start_target(
             .into());
         }
         let config_path = resolve_config_path(config)?;
-        let project_id = Some(
-            load_config(Some(config_path.to_string_lossy().as_ref()))?
-                .project
-                .id,
-        );
+        // The local manifest is only consulted to recover a fallback project id.
+        // A start that targets a resident project/service by id (-p/-s) does not
+        // need it, and the caller falls back to an explicit -p or supervisor-side
+        // resolution — so a missing local config here is not fatal.
+        let project_id = load_config(Some(config_path.to_string_lossy().as_ref()))
+            .ok()
+            .map(|config| config.project.id);
         return Ok(StartTarget {
             config_path,
             service,

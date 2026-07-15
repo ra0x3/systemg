@@ -32,7 +32,7 @@ use crate::{
     },
     metrics::{self, MetricsCollector, MetricsHandle},
     opslot::OpSlot,
-    runtime,
+    reconcile, runtime,
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     status::{
         ProjectRunMode, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
@@ -40,6 +40,9 @@ use crate::{
         compute_overall_health, cron_hashes_for_config,
     },
 };
+
+/// How often the steady-state reconciler re-checks ports against procfs.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Supervisor errors.
 #[derive(Debug, Error)]
@@ -92,6 +95,7 @@ pub struct Supervisor {
     extra_projects: BTreeMap<String, ProjectRuntime>,
     cron_projects: Arc<RwLock<Vec<CronProjectRuntime>>>,
     op_slot: OpSlot,
+    reconciler: Option<reconcile::Reconciler>,
 }
 
 /// Runtime state for an additional project managed by the resident supervisor.
@@ -880,6 +884,7 @@ impl Supervisor {
             extra_projects: BTreeMap::new(),
             cron_projects,
             op_slot,
+            reconciler: None,
         })
     }
 
@@ -950,6 +955,7 @@ impl Supervisor {
             "starting project '{}'",
             self.daemon.config().project.id
         ));
+        self.sweep_port_ghosts();
         let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
         let service_order =
             Self::startup_service_order(&config, self.service_filter.as_deref())?;
@@ -1029,6 +1035,41 @@ impl Supervisor {
         }
         self.op_slot.clear();
         Ok(())
+    }
+
+    /// Kills processes squatting on a managed unit's port before boot, so a
+    /// fresh instance can bind. These are ghosts left by a prior supervisor that
+    /// was killed hard — none of our current children exist yet, so any holder
+    /// of a configured port is an orphan to reclaim.
+    fn sweep_port_ghosts(&self) {
+        // At boot nothing we manage is alive yet, so the pid file only records
+        // the previous incarnation — which is exactly the orphans we must
+        // reclaim. Treat every port holder as a ghost.
+        let tracked = reconcile::Tracked::default();
+        let config = self.daemon.config();
+        let services = config
+            .services
+            .iter()
+            .filter(|(_, service)| service.cron.is_none())
+            .map(|(name, service)| (name.as_str(), service));
+        for ghost in reconcile::find_port_ghosts(services, &tracked) {
+            self.op_slot.detail(format!(
+                "reclaiming port {} for '{}'",
+                ghost.port, ghost.service
+            ));
+            if let Err(err) = Daemon::terminate_process_tree(
+                &ghost.service,
+                ghost.pid,
+                Daemon::process_group_for_pid(ghost.pid),
+            ) {
+                warn!(
+                    "Failed to reclaim port {} from ghost PID {}: {err}",
+                    ghost.port, ghost.pid
+                );
+            } else {
+                reconcile::log_reclaimed(&ghost);
+            }
+        }
     }
 
     /// Spawns the acceptor thread that owns the control socket. Each connection
@@ -1328,6 +1369,51 @@ impl Supervisor {
             pid_handle,
             state_handle,
         ));
+
+        let reconcile_projects = Arc::clone(&self.cron_projects);
+        let reconcile_pid = self.daemon.pid_file_handle();
+        let op_slot = self.op_slot.clone();
+        self.reconciler = Some(reconcile::Reconciler::spawn(
+            RECONCILE_INTERVAL,
+            move || {
+                let configs = reconcile_projects
+                    .read()
+                    .map(|projects| {
+                        projects
+                            .iter()
+                            .map(|project| Arc::clone(&project.config))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let tracked = reconcile_pid
+                    .lock()
+                    .map(|pid_file| reconcile::Tracked {
+                        pids: pid_file.services().values().copied().collect(),
+                        pgids: pid_file.service_pgids().values().copied().collect(),
+                    })
+                    .unwrap_or_default();
+                reconcile::ManagedSnapshot { configs, tracked }
+            },
+            move |ghost| {
+                op_slot.detail(format!(
+                    "reclaiming port {} for '{}'",
+                    ghost.port, ghost.service
+                ));
+                if let Err(err) = Daemon::terminate_process_tree(
+                    &ghost.service,
+                    ghost.pid,
+                    Daemon::process_group_for_pid(ghost.pid),
+                ) {
+                    warn!(
+                        "Reconciler failed to reclaim port {} from ghost PID {}: {err}",
+                        ghost.port, ghost.pid
+                    );
+                } else {
+                    reconcile::log_reclaimed(ghost);
+                }
+            },
+        ));
+
         let cron_manager = self.cron_manager.clone();
         let cron_projects = Arc::clone(&self.cron_projects);
         let metrics_store = self.metrics_store.clone();
@@ -2839,6 +2925,9 @@ impl Supervisor {
         }
         if let Some(refresher) = self.status_refresher.take() {
             refresher.stop();
+        }
+        if let Some(reconciler) = self.reconciler.take() {
+            reconciler.stop();
         }
         for project in self.extra_projects.values() {
             project.daemon.stop_services()?;

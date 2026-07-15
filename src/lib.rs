@@ -47,6 +47,9 @@ pub mod ipc;
 /// Current-operation tracking for the control plane.
 pub mod opslot;
 
+/// Reconciles supervisor bookkeeping against procfs and port ownership.
+pub mod reconcile;
+
 /// Errors.
 pub mod error;
 
