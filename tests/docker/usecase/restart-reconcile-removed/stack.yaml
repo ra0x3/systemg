@@ -1,0 +1,11 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "sleep 3000"
+        restart_policy: "always"
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"
