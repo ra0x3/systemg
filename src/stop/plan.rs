@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use crate::start::plan::{ProjectMismatch, split_selector};
+use crate::selector::{ProjectMismatch, Target, resolve_target};
 
 /// What a `stop` invocation targets, resolved from its selectors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,32 +67,12 @@ pub fn resolve_plan(
         return Ok(StopPlan::Supervisor);
     }
 
-    if let Some(selector) = service {
-        let (selector_project, service_name) = match split_selector(selector) {
-            Some((p, s)) => (Some(p), s),
-            None => (None, selector),
-        };
-
-        if let (Some(flag), Some(sel)) = (project, selector_project)
-            && flag != sel
-        {
-            return Err(StopPlanError::Mismatch(ProjectMismatch {
-                flag: flag.to_string(),
-                selector: sel.to_string(),
-            }));
+    match resolve_target(service, project).map_err(StopPlanError::Mismatch)? {
+        Target::Everything => Ok(StopPlan::Everything { config }),
+        Target::Project { project } => Ok(StopPlan::Project { project }),
+        Target::Service { service, project } => {
+            Ok(StopPlan::Service { service, project })
         }
-
-        return Ok(StopPlan::Service {
-            service: service_name.to_string(),
-            project: project.or(selector_project).map(str::to_string),
-        });
-    }
-
-    match project {
-        Some(project) => Ok(StopPlan::Project {
-            project: project.to_string(),
-        }),
-        None => Ok(StopPlan::Everything { config }),
     }
 }
 

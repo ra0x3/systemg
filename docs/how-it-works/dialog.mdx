@@ -55,6 +55,9 @@ plain text with no escape codes, and `NO_COLOR` is respected.
 | `SG0202` | The command names a service or project that does not exist |
 | `SG0203` | A config file could not be found or read |
 | `SG0204` | Mutually exclusive selectors were combined (e.g. `--supervisor` with `-s`/`-p`) |
+| `SG0301` | A restart's new manifest is invalid, so the restart was refused and nothing changed |
+| `SG0302` | A restart ran but left one or more units short of their target state |
+| `SG0303` | A supervisor recycle stopped the old daemon but the new one did not come up |
 
 Codes are stable: a script can match on them, and each has a page at
 `https://docs.sysg.dev/errors/<code>`.

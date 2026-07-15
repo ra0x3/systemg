@@ -562,62 +562,39 @@ fn run() -> Result<(), Box<dyn Error>> {
             project,
             daemonize,
         } => {
-            if supervisor_running() {
-                if args.drop_privileges {
-                    warn!(
-                        "--drop-privileges is managed by the running supervisor and has no effect for this restart request"
-                    );
-                }
-                let target_project = if service.is_some() {
-                    resolve_command_project(&config, project.clone(), service.as_deref())?
-                } else {
-                    project.clone()
-                };
-                let config_override = if config.is_empty()
-                    || (config == DEFAULT_CONFIG_PATH && project.is_some())
-                {
-                    None
-                } else {
-                    Some(resolve_config_path(&config)?.display().to_string())
-                };
-
-                let command = ControlCommand::Restart {
-                    config: config_override.clone(),
-                    service: service.clone(),
-                    project: target_project,
-                };
-                if daemonize {
-                    let recycle_config_path = config_override
-                        .as_ref()
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| {
-                            resolve_config_path(&config)
-                                .unwrap_or_else(|_| PathBuf::from(&config))
-                        });
-                    restart_daemonized(
-                        command,
-                        recycle_config_path,
-                        service.is_none() && project.is_none(),
-                    )?;
-                } else {
-                    with_progress_spinner("Restarting", || {
-                        send_control_command(command)
-                    })?;
-                }
-            } else if daemonize {
-                let config_path = resolve_config_path(&config)?;
-                start_supervisor_daemon(config_path, None, false, verbose)?;
-            } else {
+            if args.drop_privileges && supervisor_running() {
                 warn!(
-                    "No running supervisor detected; executing restart in local one-shot mode. \
-Use --daemonize in deployment scripts to ensure daemonized supervision is restored if detection fails."
+                    "--drop-privileges is managed by the running supervisor and has no effect for this restart request"
                 );
-                let daemon = build_daemon(&config)?;
-                with_progress_spinner("Restarting", || {
-                    daemon
-                        .restart_services()
-                        .map_err(|err| Box::new(err) as Box<dyn Error>)
-                })?;
+            }
+            let config_path =
+                resolve_config_path(&config).unwrap_or_else(|_| config.clone().into());
+            let plan = systemg::restart::resolve_plan(
+                config_path,
+                service.as_deref(),
+                project.as_deref(),
+            )
+            .map_err(|mismatch| {
+                DiagError(Box::new(systemg::start::project_mismatch(
+                    &mismatch.flag,
+                    &mismatch.selector,
+                )))
+            })?;
+
+            let world = systemg::restart::World {
+                supervisor_running: supervisor_running(),
+                version_drifted: matches!(
+                    daemon_version_drift(),
+                    VersionDrift::Drifted(_) | VersionDrift::PreVersionDaemon
+                ),
+            };
+            match systemg::restart::preflight(plan, world) {
+                systemg::restart::Preflight::Refused(diag) => {
+                    return Err(Box::new(DiagError(diag)));
+                }
+                systemg::restart::Preflight::Ready(plan) => {
+                    dispatch_restart(plan, daemonize, verbose)?;
+                }
             }
         }
         Commands::Status {
@@ -3394,6 +3371,76 @@ fn supervisor_has_daemon_projects() -> Result<bool, Box<dyn Error>> {
         .into()),
         Err(ControlError::NotAvailable) => Ok(false),
         Err(err) => Err(err.into()),
+    }
+}
+
+/// Dispatches a resolved (preflight-cleared) restart plan.
+fn dispatch_restart(
+    plan: systemg::restart::RestartPlan,
+    daemonize: bool,
+    verbose: bool,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::restart::RestartPlan;
+
+    if let RestartPlan::Recycle { config } = plan {
+        return recycle_supervisor_for_restart(config);
+    }
+
+    let config_path = restart_plan_config(&plan);
+
+    if !supervisor_running() {
+        if daemonize {
+            return start_supervisor_daemon(config_path, None, false, verbose);
+        }
+        warn!(
+            "No running supervisor detected; executing restart in local one-shot mode. \
+Use --daemonize in deployment scripts to ensure daemonized supervision is restored if detection fails."
+        );
+        let daemon = build_daemon(&config_path.to_string_lossy())?;
+        return with_progress_spinner("Restarting", || {
+            daemon
+                .restart_services()
+                .map_err(|err| Box::new(err) as Box<dyn Error>)
+        });
+    }
+
+    let command = match plan {
+        RestartPlan::Recycle { .. } => unreachable!("handled above"),
+        RestartPlan::Everything { config } => ControlCommand::Restart {
+            config: Some(config.to_string_lossy().to_string()),
+            service: None,
+            project: None,
+        },
+        RestartPlan::Project { project } => ControlCommand::Restart {
+            config: None,
+            service: None,
+            project: Some(project),
+        },
+        RestartPlan::Service { service, project } => ControlCommand::Restart {
+            config: None,
+            service: Some(service),
+            project,
+        },
+    };
+
+    if daemonize {
+        restart_daemonized(command, config_path, false)
+    } else {
+        with_progress_spinner("Restarting", || send_control_command(command))
+    }
+}
+
+/// The config path a restart plan carries (for the not-running fork/one-shot).
+fn restart_plan_config(plan: &systemg::restart::RestartPlan) -> PathBuf {
+    use systemg::restart::RestartPlan;
+    match plan {
+        RestartPlan::Everything { config } | RestartPlan::Recycle { config } => {
+            config.clone()
+        }
+        RestartPlan::Project { .. } | RestartPlan::Service { .. } => {
+            resolve_config_path(DEFAULT_CONFIG_PATH)
+                .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH))
+        }
     }
 }
 

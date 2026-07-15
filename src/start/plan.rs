@@ -11,6 +11,9 @@
 
 use std::path::PathBuf;
 
+pub use crate::selector::{ProjectMismatch, split_selector};
+use crate::selector::{Target, resolve_target};
+
 /// What a `start` invocation targets, resolved from its selectors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartPlan {
@@ -47,13 +50,6 @@ pub enum StartPlan {
     },
 }
 
-/// Splits a `project/service` selector into its parts, or `None` if unqualified.
-pub fn split_selector(selector: &str) -> Option<(&str, &str)> {
-    selector
-        .split_once('/')
-        .filter(|(p, s)| !p.is_empty() && !s.is_empty())
-}
-
 /// Resolves the selectors into a [`StartPlan`]. `ad_hoc` marks a bare-command
 /// invocation; `config` is the already-resolved config path.
 ///
@@ -69,44 +65,15 @@ pub fn resolve_plan(
         return Ok(StartPlan::StageAdHoc { config });
     }
 
-    if let Some(selector) = service {
-        let (selector_project, service_name) = match split_selector(selector) {
-            Some((p, s)) => (Some(p), s),
-            None => (None, selector),
-        };
-
-        if let (Some(flag), Some(sel)) = (project, selector_project)
-            && flag != sel
-        {
-            return Err(ProjectMismatch {
-                flag: flag.to_string(),
-                selector: sel.to_string(),
-            });
-        }
-
-        return Ok(StartPlan::Service {
+    Ok(match resolve_target(service, project)? {
+        Target::Everything => StartPlan::WholeConfig { config },
+        Target::Project { project } => StartPlan::Project { config, project },
+        Target::Service { service, project } => StartPlan::Service {
             config,
-            service: service_name.to_string(),
-            project: project.or(selector_project).map(str::to_string),
-        });
-    }
-
-    match project {
-        Some(project) => Ok(StartPlan::Project {
-            config,
-            project: project.to_string(),
-        }),
-        None => Ok(StartPlan::WholeConfig { config }),
-    }
-}
-
-/// A `-p` flag disagreeing with a `project/service` selector prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectMismatch {
-    /// The project named by `-p`.
-    pub flag: String,
-    /// The project named by the selector prefix.
-    pub selector: String,
+            service,
+            project,
+        },
+    })
 }
 
 #[cfg(test)]

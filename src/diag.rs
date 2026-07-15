@@ -78,6 +78,13 @@ pub enum SgCode {
     /// SG0204 — mutually exclusive selectors were combined (e.g. --supervisor
     /// with a service/project selector).
     ConflictingSelectors,
+    /// SG0301 — a restart's new manifest is invalid; nothing was changed.
+    ManifestRejected,
+    /// SG0302 — a reconcile ran but left units short of their manifest target.
+    ReconcileIncomplete,
+    /// SG0303 — a supervisor recycle stopped the old daemon but the new one did
+    /// not come up.
+    SupervisorRecycleFailed,
 }
 
 impl SgCode {
@@ -107,6 +114,9 @@ impl SgCode {
             SgCode::TargetNotFound => "SG0202",
             SgCode::ConfigFileUnreadable => "SG0203",
             SgCode::ConflictingSelectors => "SG0204",
+            SgCode::ManifestRejected => "SG0301",
+            SgCode::ReconcileIncomplete => "SG0302",
+            SgCode::SupervisorRecycleFailed => "SG0303",
         }
     }
 
@@ -116,7 +126,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 23] = [
+    pub const ALL: [SgCode; 26] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -140,6 +150,9 @@ impl SgCode {
         SgCode::TargetNotFound,
         SgCode::ConfigFileUnreadable,
         SgCode::ConflictingSelectors,
+        SgCode::ManifestRejected,
+        SgCode::ReconcileIncomplete,
+        SgCode::SupervisorRecycleFailed,
     ];
 }
 

@@ -75,11 +75,17 @@ pub mod runtime;
 /// Per-project on-disk state layout.
 pub mod state_store;
 
+/// The shared command selector (`-s`/`-p`) resolution.
+pub mod selector;
+
 /// The `start` command, rebuilt from first principles.
 pub mod start;
 
 /// The `stop` command, rebuilt from first principles.
 pub mod stop;
+
+/// The `restart` command, rebuilt from first principles.
+pub mod restart;
 
 /// Privilege dropping.
 pub mod privilege;
