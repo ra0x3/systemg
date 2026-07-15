@@ -112,6 +112,33 @@ pub fn unit_start_failed(service: &str, reason: impl Into<String>) -> Diagnostic
     .help_docs()
 }
 
+/// Maps a `start_service` result into a typed [`Outcome`].
+///
+/// The daemon already returns the specific SG0102/0103/0104 diagnostic through
+/// [`ProcessManagerError::Diag`](crate::error::ProcessManagerError::Diag); any
+/// other error becomes a generic SG0008. `pid` is the unit's recorded PID,
+/// consulted only on the `Running` path to build [`Liveness`].
+pub fn outcome_of(
+    service: &str,
+    result: Result<crate::daemon::ServiceReadyState, crate::error::ProcessManagerError>,
+    pid: Option<u32>,
+) -> Outcome {
+    use crate::{daemon::ServiceReadyState, error::ProcessManagerError};
+
+    match result {
+        Ok(ServiceReadyState::Running) => match pid {
+            Some(pid) => Outcome::Up(Liveness { pid }),
+            None => Outcome::Failed(unit_start_failed(
+                service,
+                "the service reported running but no PID was recorded",
+            )),
+        },
+        Ok(ServiceReadyState::CompletedSuccess) => Outcome::Completed,
+        Err(ProcessManagerError::Diag(diag)) => Outcome::Failed(*diag),
+        Err(err) => Outcome::Failed(unit_start_failed(service, err.to_string())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +154,37 @@ mod tests {
     fn failed_carries_its_diagnostic_code() {
         let out = Outcome::Failed(pre_start_failed("api", Some(3)));
         assert_eq!(out.diagnostic().unwrap().code, SgCode::PreStartFailed);
+    }
+
+    #[test]
+    fn outcome_of_maps_each_result_variant() {
+        use crate::{daemon::ServiceReadyState, error::ProcessManagerError};
+
+        assert_eq!(
+            outcome_of("web", Ok(ServiceReadyState::Running), Some(9)),
+            Outcome::Up(Liveness { pid: 9 })
+        );
+        assert_eq!(
+            outcome_of("job", Ok(ServiceReadyState::CompletedSuccess), None),
+            Outcome::Completed
+        );
+
+        let running_without_pid = outcome_of("web", Ok(ServiceReadyState::Running), None);
+        assert_eq!(
+            running_without_pid.diagnostic().unwrap().code,
+            SgCode::UnitStartFailed
+        );
+
+        let diag = immediate_exit("web", Some(1));
+        let out = outcome_of("web", Err(ProcessManagerError::Diag(Box::new(diag))), None);
+        assert_eq!(out.diagnostic().unwrap().code, SgCode::UnitImmediateExit);
+
+        let generic = outcome_of(
+            "web",
+            Err(ProcessManagerError::SpawnLimitExceeded("x".into())),
+            None,
+        );
+        assert_eq!(generic.diagnostic().unwrap().code, SgCode::UnitStartFailed);
     }
 
     #[test]

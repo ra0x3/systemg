@@ -5,7 +5,10 @@
 //! total pieces:
 //!
 //! - [`outcome`] — the typed per-unit "came up" ladder every boot step produces.
+//! - [`boot`] — the race-free boot journal that records and replays progress.
 
+pub mod boot;
 pub mod outcome;
 
+pub use boot::{BootFrame, BootJournal};
 pub use outcome::{Liveness, Outcome};
