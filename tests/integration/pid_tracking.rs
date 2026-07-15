@@ -55,11 +55,7 @@ services:
     // Force the state file to claim the service exited in error,
     // simulating the stale metadata the user encountered.
     let config_arc = daemon.config();
-    let service_hash = config_arc
-        .services
-        .get("steady")
-        .expect("service present")
-        .compute_hash();
+    let service_hash = config_arc.state_key("steady");
     let mut state_file = ServiceStateFile::load(daemon.store()).expect("load state file");
     state_file
         .set(

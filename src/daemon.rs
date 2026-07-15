@@ -1884,6 +1884,7 @@ impl Daemon {
         service_name: &str,
         service: &ServiceConfig,
         project_root: &Path,
+        owned_by_others: &HashSet<u32>,
     ) -> HashSet<u32> {
         let canonical_root = project_root
             .canonicalize()
@@ -1903,6 +1904,18 @@ impl Daemon {
                 if raw_pid == std::process::id() {
                     return None;
                 }
+                // A process that belongs to another tracked service (its pid or
+                // any member of its process group) is that service's, not an
+                // orphan of this one — never reap it here. This is what keeps a
+                // same-command sibling from being caught by the command match.
+                if owned_by_others.contains(&raw_pid) {
+                    return None;
+                }
+                if Self::process_group_for_pid(raw_pid)
+                    .is_some_and(|pgid| owned_by_others.contains(&(pgid as u32)))
+                {
+                    return None;
+                }
                 if Self::process_outside_project_root(process, &canonical_root) {
                     return None;
                 }
@@ -1920,13 +1933,38 @@ impl Daemon {
             .collect()
     }
 
+    /// The pids and process-group ids the pid file tracks for every service
+    /// *other* than `exclude`. Used to protect a same-command sibling's
+    /// processes from a command-matching cleanup.
+    fn pids_owned_by_other_services(&self, exclude: &str) -> HashSet<u32> {
+        let mut owned = HashSet::new();
+        if let Ok(pid_file) = self.pid_file.lock() {
+            for (name, &pid) in pid_file.services() {
+                if name != exclude {
+                    owned.insert(pid);
+                }
+            }
+            for (name, &pgid) in pid_file.service_pgids() {
+                if name != exclude {
+                    owned.insert(pgid as u32);
+                }
+            }
+        }
+        owned
+    }
+
     fn cleanup_config_owned_service_processes(
         service_name: &str,
         service: &ServiceConfig,
         project_root: &Path,
+        owned_by_others: &HashSet<u32>,
     ) -> Result<(), ProcessManagerError> {
-        let roots =
-            Self::collect_config_owned_service_roots(service_name, service, project_root);
+        let roots = Self::collect_config_owned_service_roots(
+            service_name,
+            service,
+            project_root,
+            owned_by_others,
+        );
 
         for pid in roots {
             if !Self::signal_pid(service_name, pid, None)? {
@@ -2331,7 +2369,10 @@ impl Daemon {
         service_config: &ServiceConfig,
         working_dir: PathBuf,
         processes: Arc<Mutex<HashMap<String, Child>>>,
-        detach_children: bool,
+        // Vestigial: every service now leads its own session unconditionally, so
+        // this flag no longer changes spawn behaviour. Kept until the plumbing
+        // is removed.
+        _detach_children: bool,
         pipe_stderr: bool,
         log_settings: EffectiveLogsConfig,
     ) -> Result<(u32, Option<libc::pid_t>), ProcessManagerError> {
@@ -2413,29 +2454,22 @@ impl Daemon {
 
         unsafe {
             cmd.pre_exec(move || {
-                if detach_children {
-                    if libc::setsid() < 0 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!("systemg pre_exec: setsid failed: {:?}", err);
-                        return Err(err);
-                    }
-                } else if libc::setpgid(0, 0) < 0 {
+                // Every service leads its own session. This detaches it from the
+                // supervisor's session and thread lifecycle so tearing down one
+                // service can never signal a sibling. setsid also makes the
+                // process its own group leader, giving it a private process
+                // group for targeted, scoped termination.
+                //
+                // We deliberately do NOT set PR_SET_PDEATHSIG: on Linux it fires
+                // on parent-*thread* death, and the per-service launcher threads
+                // come and go during stop/restart, which cascaded SIGTERM across
+                // sibling services. Orphaned services (if the supervisor dies)
+                // are recoverable — reconciled and reaped from the pid files on
+                // restart — whereas a wrongly-killed sibling is not.
+                if libc::setsid() < 0 {
                     let err = std::io::Error::last_os_error();
-                    eprintln!("systemg pre_exec: setpgid(0, 0) failed: {:?}", err);
+                    eprintln!("systemg pre_exec: setsid failed: {:?}", err);
                     return Err(err);
-                }
-
-                #[cfg(target_os = "linux")]
-                {
-                    use libc::{PR_SET_PDEATHSIG, SIGTERM, prctl};
-                    if prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0) < 0 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!(
-                            "systemg pre_exec: prctl PR_SET_PDEATHSIG failed: {:?}",
-                            err
-                        );
-                        return Err(err);
-                    }
                 }
 
                 privilege_clone.apply_pre_exec().map_err(|err| {
@@ -4724,15 +4758,12 @@ impl Daemon {
             );
         }
 
-        if result.is_ok()
-            && let Some(service) = self.config.services.get(service_name)
-        {
-            Self::cleanup_config_owned_service_processes(
-                service_name,
-                service,
-                &self.project_root,
-            )?;
-        }
+        // A targeted stop relies on the recorded pid/pgid, which — now that
+        // every service leads its own session — terminates the whole service
+        // tree authoritatively. The command-matching stale sweep is deliberately
+        // NOT run here: two services with the same command are indistinguishable
+        // by command line, so scanning would reap same-command siblings (even in
+        // other projects, whose pids this daemon does not know).
 
         result
     }
@@ -4825,10 +4856,12 @@ impl Daemon {
             if cleaned_services.contains(service_name) {
                 continue;
             }
+            let owned_by_others = self.pids_owned_by_other_services(service_name);
             if let Err(err) = Self::cleanup_config_owned_service_processes(
                 service_name,
                 service,
                 &self.project_root,
+                &owned_by_others,
             ) {
                 error!(
                     "Failed to clean up stale config-owned process for '{service_name}': {err}"

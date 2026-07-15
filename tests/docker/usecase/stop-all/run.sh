@@ -48,7 +48,17 @@ if pid_alive "$PID1"; then check 1 "svc1 pid is dead"; else check 0 "svc1 pid is
 if pid_alive "$PID2"; then check 1 "svc2 pid is dead"; else check 0 "svc2 pid is dead"; fi
 
 section "the supervisor is still up after stop-all"
-check_ok "supervisor still running after stop-all" sysg status --format json
+# `sysg status` exit code reflects HEALTH, not supervisor liveness (all
+# services stopped => non-zero). Liveness is: the status query is answered by
+# the supervisor (no "No running supervisor") and its pid file remains.
+sysg status --format json 2>/tmp/sa_err.txt >/dev/null
+if grep -qi "No running supervisor" /tmp/sa_err.txt; then
+  check 1 "supervisor still answers status after stop-all"
+else
+  check 0 "supervisor still answers status after stop-all"
+fi
+[ -f "$HOME/.local/share/systemg/sysg.pid" ]
+check "$?" "supervisor pid file still present after stop-all"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish
