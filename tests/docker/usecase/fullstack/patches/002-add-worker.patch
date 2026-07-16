@@ -1,0 +1,11 @@
+diff --git a/stack.yaml b/stack.yaml
+index c11ca49..1d77ab5 100644
+--- a/stack.yaml
++++ b/stack.yaml
+@@ -39,3 +39,6 @@ projects:
+             command: "curl -fsS http://127.0.0.1:8080/health"
+             interval: "2s"
+             retries: 15
++      worker:
++        command: "sleep 3000"
++        restart_policy: always

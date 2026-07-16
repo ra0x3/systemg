@@ -1,0 +1,9 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      chatty:
+        command: "sh -c 'echo OUT_MARKER_HELLO; echo ERR_MARKER_OOPS 1>&2; sleep 3000'"
+      quiet:
+        command: "sh -c 'echo SECOND_UNIT_LINE; sleep 3000'"
