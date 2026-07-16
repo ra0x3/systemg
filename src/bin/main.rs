@@ -3467,12 +3467,32 @@ fn stop_plan_diag(err: systemg::stop::StopPlanError) -> DiagError {
 fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
     use systemg::stop::StopPlan;
 
+    let health = supervisor_health();
+
     if let StopPlan::Supervisor = plan {
+        // A dying supervisor is already on its way out — a Shutdown that can't be
+        // delivered would error spuriously. Clear the wedged runtime and report
+        // it down.
+        if health == SupervisorHealth::Dying {
+            warn!(
+                "Supervisor is not answering its control socket; clearing the stale runtime instead of messaging it"
+            );
+            let _ = ipc::cleanup_runtime();
+            return Ok(());
+        }
         send_control_command(ControlCommand::Shutdown)?;
         return Ok(());
     }
 
-    if supervisor_running() {
+    // Never route a unit stop into a daemon that is alive but not serving — the
+    // command would hang or be silently dropped (BUG-4). Refuse with SG0205.
+    if health == SupervisorHealth::Dying {
+        return Err(Box::new(DiagError(Box::new(
+            supervisor_not_responding_diag(),
+        ))));
+    }
+
+    if health == SupervisorHealth::Serving {
         let command = match plan {
             StopPlan::Supervisor => unreachable!("handled above"),
             StopPlan::Everything { .. } => ControlCommand::Stop {
@@ -3516,16 +3536,29 @@ fn dispatch_start_daemonize(
     verbose: bool,
     drop_privileges: bool,
 ) -> Result<(), Box<dyn Error>> {
-    if supervisor_running() {
-        if drop_privileges {
-            warn!(
-                "--drop-privileges is managed by the running supervisor and has no effect for this start request"
-            );
+    match supervisor_health() {
+        SupervisorHealth::Serving => {
+            if drop_privileges {
+                warn!(
+                    "--drop-privileges is managed by the running supervisor and has no effect for this start request"
+                );
+            }
+            return dispatch_start_resident(plan);
         }
-        return dispatch_start_resident(plan);
+        SupervisorHealth::Dying => {
+            // A supervisor whose pid is alive but not serving would swallow a
+            // resident start. Clear the wedged runtime and fork fresh rather
+            // than route into it — this is the "had to sysg purge" prod pain,
+            // recovered automatically.
+            warn!(
+                "Resident supervisor is not answering its control socket; clearing the stale runtime and forking a fresh supervisor"
+            );
+            let _ = ipc::cleanup_runtime();
+        }
+        SupervisorHealth::Down => {}
     }
 
-    // No resident supervisor: fork one from the plan's config. An ad-hoc unit
+    // No usable supervisor: fork one from the plan's config. An ad-hoc unit
     // is started the same way — its staged config becomes the new supervisor's.
     let service = plan_service_name(&plan);
     let config = plan_config(plan);
@@ -4175,6 +4208,87 @@ fn supervisor_running() -> bool {
             false
         }
     }
+}
+
+/// How much of a running supervisor is actually usable, distinguishing a healthy
+/// daemon from one whose process is alive but no longer answering — the stale /
+/// dying case that `supervisor_running()`'s bare liveness check cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorHealth {
+    /// Process alive and answering its control socket. Safe to route commands to.
+    Serving,
+    /// Process alive but not answering the socket within the probe window. A
+    /// command routed here would hang or be dropped — treat as unusable.
+    Dying,
+    /// No usable supervisor: no pid and no live socket (stale runtime cleaned).
+    Down,
+}
+
+const SUPERVISOR_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const SUPERVISOR_PROBE_DEADLINE: Duration = Duration::from_millis(1500);
+
+/// Probes the resident supervisor's health. Liveness alone is a lie during
+/// shutdown — a frozen or mid-teardown daemon keeps its pid but stops serving —
+/// so a live pid is confirmed with a bounded `Status` ping over the socket.
+fn supervisor_health() -> SupervisorHealth {
+    match ipc::read_supervisor_pid() {
+        Ok(Some(pid)) => {
+            let target = Pid::from_raw(pid);
+            match signal::kill(target, None) {
+                Ok(_) => {
+                    // A live pid is not enough: confirm it is actually serving.
+                    // The probe runs on its own thread with a hard join deadline
+                    // because even connecting to a frozen listener can block past
+                    // any socket-level timeout. Only a real response within the
+                    // window counts as Serving; a timeout, a Pending, or any
+                    // error means the daemon is alive but wedged/shutting down.
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let serving = matches!(
+                            ipc::send_command_with_timeout(
+                                &ControlCommand::Status { live: false },
+                                SUPERVISOR_PROBE_TIMEOUT,
+                            ),
+                            Ok(ipc::CommandAck::Response(_))
+                        );
+                        let _ = tx.send(serving);
+                    });
+                    match rx.recv_timeout(SUPERVISOR_PROBE_DEADLINE) {
+                        Ok(true) => SupervisorHealth::Serving,
+                        Ok(false) | Err(_) => SupervisorHealth::Dying,
+                    }
+                }
+                Err(err) => {
+                    if err == nix::Error::from(nix::errno::Errno::ESRCH) {
+                        let _ = ipc::cleanup_runtime();
+                    } else {
+                        warn!("Failed to query supervisor pid {pid}: {err}");
+                    }
+                    SupervisorHealth::Down
+                }
+            }
+        }
+        Ok(None) | Err(_) => {
+            if supervisor_running() {
+                SupervisorHealth::Serving
+            } else {
+                SupervisorHealth::Down
+            }
+        }
+    }
+}
+
+/// Diagnostic for a command refused because the supervisor is alive but not
+/// answering — the caller must not route a command into a dying daemon.
+fn supervisor_not_responding_diag() -> systemg::diag::Diagnostic {
+    systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::SupervisorNotResponding,
+        "the supervisor is running but not answering its control socket",
+    )
+    .note("its process is alive but did not reply within the probe window; it may be shutting down or wedged")
+    .help_cmd("force it down", "sysg stop --supervisor")
+    .help_cmd("then restart", "sysg start --daemonize")
+    .help_docs()
 }
 
 /// Sends control command.

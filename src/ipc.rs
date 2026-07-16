@@ -386,6 +386,7 @@ pub fn send_command_with_timeout(
     timeout: Duration,
 ) -> Result<CommandAck, ControlError> {
     let mut stream = connect_stream()?;
+    stream.set_write_timeout(Some(timeout))?;
     write_command(&mut stream, command)?;
     stream.set_read_timeout(Some(timeout))?;
 
