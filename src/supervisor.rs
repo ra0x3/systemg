@@ -801,10 +801,18 @@ impl Supervisor {
 
         let primary_project = self.daemon.config().project.id.clone();
         if project_id == primary_project {
-            // Bounce the primary project's own running services, isolated from
-            // any sibling project. `restart -p` without `-c` restarts what is
-            // running; use `restart -c <file>` to reconcile manifest changes.
-            let config = (*self.daemon.config()).clone();
+            // Reload the primary project's stored manifest and reconcile it,
+            // isolated from any sibling. load_config_from_file returns the FIRST
+            // project only, so a multi-project file's siblings are never touched.
+            let stored = self.config_path.clone();
+            let config = match runtime::open_trusted_config(&stored)
+                .map_err(SupervisorError::from)
+                .and_then(|trusted| {
+                    load_config_from_file(trusted, &stored).map_err(SupervisorError::from)
+                }) {
+                Ok(config) if config.project.id == primary_project => config,
+                _ => (*self.daemon.config()).clone(),
+            };
             self.reconcile_primary_project(config)?;
             return Ok(());
         }
@@ -853,14 +861,31 @@ impl Supervisor {
 
         // `restart -p` bounces every service the project declares. Added
         // services (not yet running) start fresh; the rest are restarted.
+        let mut failed: Vec<String> = Vec::new();
         for (name, service) in &new_config.services {
-            if diff.added.contains(name) {
-                self.daemon.start_service(name, service)?;
-            } else if !diff.removed.contains(name) {
-                self.daemon.restart_service(name, service)?;
+            if diff.removed.contains(name) {
+                continue;
+            }
+            let outcome = if diff.added.contains(name) {
+                self.daemon.start_service(name, service).map(|_| ())
+            } else {
+                self.daemon.restart_service(name, service)
+            };
+            if let Err(err) = outcome {
+                error!("Service '{name}' failed to restart in project: {err}");
+                failed.push(name.clone());
             }
         }
 
+        // Adopt the new config so status reflects the project's new manifest.
+        self.daemon.set_config(new_config);
+
+        if !failed.is_empty() {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(&failed),
+            ))
+            .into());
+        }
         Ok(())
     }
 
@@ -2770,18 +2795,51 @@ impl Supervisor {
             refresher.stop();
         }
 
-        self.daemon.stop_services()?;
-        self.daemon.shutdown_monitor();
-
         let metrics_settings = config
             .metrics
             .to_settings(config.project_dir.as_deref().map(Path::new));
-        self.daemon = Daemon::from_config(config.clone(), self.detach_children)?;
+
+        // A whole restart bounces every non-removed service so app-code changes
+        // are picked up even when the manifest is byte-identical. The diff only
+        // Two intents share this path, told apart by the diff. A non-empty diff
+        // means the manifest changed: reconcile surgically — start added, stop
+        // removed, restart changed, and ADOPT unchanged units so a config edit
+        // never disturbs services it did not touch. An empty diff means the
+        // manifest is byte-identical: this is a plain `restart` to pick up new
+        // app code, so every service is bounced. The monitor is paused during
+        // the apply and rebuilt afterward against the new config.
+        let diff =
+            crate::restart::ManifestDiff::compute(self.daemon.config().as_ref(), &config);
+        let bounce_all = diff.is_empty();
+        self.daemon.shutdown_monitor();
+
+        let mut failed: Vec<String> = Vec::new();
+        for name in &diff.removed {
+            if let Err(err) = self.daemon.stop_service(name) {
+                warn!("Failed to stop removed service '{name}' during reconcile: {err}");
+            }
+        }
+        for (name, service) in &config.services {
+            let outcome = if diff.added.contains(name) {
+                self.daemon.start_service(name, service).map(|_| ())
+            } else if bounce_all || diff.changed.contains(name) {
+                self.daemon.restart_service(name, service)
+            } else {
+                continue;
+            };
+            if let Err(err) = outcome {
+                error!("Service '{name}' failed to reconcile during restart: {err}");
+                failed.push(name.clone());
+            }
+        }
+
+        self.daemon.set_config(config.clone());
         self.config_path = resolved;
 
         self.sync_cron_projects()?;
 
-        self.daemon.start_services()?;
+        // Rebuild the monitor against the new config (it captured a snapshot of
+        // the old one).
         self.daemon.ensure_monitoring()?;
 
         self.metrics_store = metrics::shared_store(metrics_settings)?;
@@ -2846,6 +2904,16 @@ impl Supervisor {
             pid_handle,
             state_handle,
         ));
+
+        // The supervisor is fully reconfigured and healthy; but if any unit
+        // missed its target, the restart is a hard failure (SG0302) so the
+        // caller never sees a partial reconcile reported as success.
+        if !failed.is_empty() {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(&failed),
+            ))
+            .into());
+        }
         Ok(())
     }
 
@@ -3931,12 +3999,6 @@ services:
             .collect()
     }
 
-    // Asserts that `restart -p <primary>` (no -c) re-reads the stored file and
-    // applies added/removed services. That requires a Daemon config-swap
-    // primitive (the daemon's config + its monitor snapshot must update after a
-    // surgical reconcile) which is a focused follow-up; the current in-memory
-    // bounce is isolated and correct but does not yet re-read the file.
-    #[ignore = "needs Daemon config-swap: restart -p re-read-file reconcile (bugs.txt BUG-7)"]
     #[test]
     fn restart_primary_project_without_config_reloads_stored_manifest() {
         let _guard = crate::test_utils::env_lock();

@@ -1547,7 +1547,7 @@ pub struct Daemon {
     /// Running processes.
     processes: Arc<Mutex<HashMap<String, Child>>>,
     /// Service config.
-    config: Arc<Config>,
+    config: Arc<std::sync::Mutex<Arc<Config>>>,
     /// PID tracking.
     pid_file: Arc<Mutex<PidFile>>,
     /// Lifecycle state.
@@ -1582,13 +1582,18 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Returns the current config snapshot.
+    fn cfg(&self) -> Arc<Config> {
+        Arc::clone(&self.config.lock().expect("daemon config poisoned"))
+    }
+
     /// Creates context snapshot.
     fn context(&self) -> DaemonContext {
         DaemonContext {
             processes: Arc::clone(&self.processes),
             pid_file: Arc::clone(&self.pid_file),
             state_file: Arc::clone(&self.state_file),
-            config: Arc::clone(&self.config),
+            config: Arc::clone(&self.cfg()),
             project_root: self.project_root.clone(),
             detach_children: self.detach_children,
             restart_counts: Arc::clone(&self.restart_counts),
@@ -2190,7 +2195,7 @@ impl Daemon {
 
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
-            config: Arc::new(config),
+            config: Arc::new(std::sync::Mutex::new(Arc::new(config))),
             pid_file,
             state_file,
             detach_children,
@@ -2233,7 +2238,12 @@ impl Daemon {
 
     /// Returns a reference to the configuration.
     pub fn config(&self) -> Arc<Config> {
-        Arc::clone(&self.config)
+        self.cfg()
+    }
+
+    /// Swaps the daemon's live config for a live reconcile.
+    pub fn set_config(&self, config: Config) {
+        *self.config.lock().expect("daemon config poisoned") = Arc::new(config);
     }
 
     /// Returns a handle to the shared PID file so callers can inspect process IDs.
@@ -2243,7 +2253,7 @@ impl Daemon {
 
     /// The project state store this daemon's files are bound to.
     pub fn store(&self) -> StateStore {
-        StateStore::for_project(&self.config.project.id)
+        StateStore::for_project(&self.cfg().project.id)
     }
 
     /// Returns a handle to the persisted service state store.
@@ -2259,7 +2269,7 @@ impl Daemon {
     /// Gets the configuration hash for a service by name.
     /// Returns None if the service doesn't exist in the config.
     pub fn get_service_hash(&self, service_name: &str) -> Option<String> {
-        self.config.get_service_hash(service_name)
+        self.cfg().get_service_hash(service_name)
     }
 
     /// Updates the service state in the persistent state file. This is a convenience wrapper
@@ -2272,12 +2282,13 @@ impl Daemon {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ProcessManagerError> {
-        if !self.config.services.contains_key(service) {
+        let config = self.cfg();
+        if !config.services.contains_key(service) {
             warn!("Service '{service}' not found in config, skipping state update");
             return Ok(());
         }
         Self::persist_service_state(
-            &self.config,
+            &config,
             &self.state_file,
             service,
             status,
@@ -2793,7 +2804,8 @@ impl Daemon {
             .filter(|dep| dep.condition() == DependsOnCondition::Completed)
             .find_map(|dep| {
                 let dep_name = dep.service();
-                let dep_config = self.config.services.get(dep_name)?;
+                let config = self.cfg();
+                let dep_config = config.services.get(dep_name)?;
                 (dep_config.command.trim() == pre_start.trim())
                     .then(|| dep_name.to_string())
             })
@@ -2822,14 +2834,15 @@ impl Daemon {
     fn start_all_services(&self) -> Result<(), ProcessManagerError> {
         info!("Starting all services...");
 
-        let order = self.config.service_start_order()?;
+        let config = self.cfg();
+        let order = config.service_start_order()?;
         let mut healthy_services = HashSet::new();
         let mut completed_services = HashSet::new();
         let mut failed_services = HashSet::new();
         let mut first_error: Option<ProcessManagerError> = None;
 
         'service_loop: for service_name in order {
-            let service = match self.config.services.get(&service_name) {
+            let service = match config.services.get(&service_name) {
                 Some(service) => service,
                 None => continue,
             };
@@ -3012,16 +3025,16 @@ impl Daemon {
         &self,
         service_name: &str,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
+        let config = self.cfg();
         let state = Self::wait_for_ready(
             service_name,
-            &self.config.project.id,
+            &config.project.id,
             &self.processes,
             &self.pid_file,
         )?;
 
         if let ServiceReadyState::Running = state
-            && let Some(health_check) = self
-                .config
+            && let Some(health_check) = config
                 .services
                 .get(service_name)
                 .and_then(|service| service.deployment.as_ref())
@@ -3160,12 +3173,12 @@ impl Daemon {
                     });
                 }
                 ServiceProbe::NotStarted => {
-                    let status = self
-                        .config
+                    let config = self.cfg();
+                    let status = config
                         .services
                         .contains_key(dep)
                         .then(|| {
-                            let key = self.config.state_key(dep);
+                            let key = config.state_key(dep);
                             self.state_file.lock().ok().and_then(|state| {
                                 state.get(&key).map(|entry| entry.status)
                             })
@@ -3241,12 +3254,13 @@ impl Daemon {
     pub fn restart_services(&self) -> Result<(), ProcessManagerError> {
         info!("Restarting all services...");
 
-        let order = self.config.service_start_order()?;
+        let config = self.cfg();
+        let order = config.service_start_order()?;
         let mut restarted_services = Vec::new();
         let mut completed_services = HashSet::new();
 
         for service_name in order {
-            let service = match self.config.services.get(&service_name) {
+            let service = match config.services.get(&service_name) {
                 Some(service) => service,
                 None => continue,
             };
@@ -3766,7 +3780,7 @@ impl Daemon {
                 .lock()
                 .map(|guard| guard.iter().cloned().collect())
                 .unwrap_or_default();
-            let project = self.config.project.id.clone();
+            let project = self.cfg().project.id.clone();
             let diag = crate::diag::Diagnostic::error(
                 crate::diag::SgCode::PreStartFailed,
                 format!("pre_start for `{service_name}` failed"),
@@ -3878,7 +3892,7 @@ impl Daemon {
     ) -> crate::diag::Diagnostic {
         use crate::diag::{Diagnostic, SgCode};
 
-        let project = self.config.project.id.clone();
+        let project = self.cfg().project.id.clone();
         let target = health_check
             .url
             .as_deref()
@@ -4242,7 +4256,8 @@ impl Daemon {
                 continue;
             }
 
-            let Some(service_cfg) = self.config.services.get(service_name) else {
+            let config = self.cfg();
+            let Some(service_cfg) = config.services.get(service_name) else {
                 continue;
             };
 
@@ -4390,7 +4405,8 @@ impl Daemon {
         let detach_children = self.detach_children;
         let working_dir = self.project_root.clone();
         let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
-        let log_settings = service.effective_logs(&self.config.logs);
+        let config = self.cfg();
+        let log_settings = service.effective_logs(&config.logs);
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
@@ -4515,7 +4531,8 @@ impl Daemon {
         }
 
         let ctx = self.context();
-        let log_settings = service.effective_logs(&self.config.logs);
+        let config = self.cfg();
+        let log_settings = service.effective_logs(&config.logs);
         let launch_result = Self::launch_service_with_lifetime_thread(
             &ctx,
             name.to_string(),
@@ -4725,12 +4742,13 @@ impl Daemon {
 
         let was_running = { self.pid_file.lock()?.get(service_name).is_some() };
 
+        let config = self.cfg();
         let result = Self::stop_service_with_handles(
             service_name,
             &self.processes,
             &self.pid_file,
             &self.state_file,
-            &self.config,
+            &config,
         );
 
         if result.is_err() {
@@ -4744,7 +4762,7 @@ impl Daemon {
 
         if was_running
             && result.is_ok()
-            && let Some(service) = self.config.services.get(service_name)
+            && let Some(service) = config.services.get(service_name)
             && let Some(hooks) = &service.hooks
             && let Some(action) = hooks.action(HookStage::OnStop, HookOutcome::Success)
         {
@@ -4852,7 +4870,8 @@ impl Daemon {
             cleaned_services.insert(service);
         }
 
-        for (service_name, service) in &self.config.services {
+        let config = self.cfg();
+        for (service_name, service) in &config.services {
             if cleaned_services.contains(service_name) {
                 continue;
             }
@@ -5639,7 +5658,8 @@ fi
 
             fs::write(dir.join("mode.txt"), "restart\n").unwrap();
 
-            let svc = daemon.config.services.get("app").unwrap();
+            let config = daemon.config();
+            let svc = config.services.get("app").unwrap();
             let err = daemon.restart_service("app", svc).unwrap_err();
 
             match err {
@@ -5687,7 +5707,8 @@ fi
             services.insert("slow".into(), service);
 
             let daemon = create_daemon(dir, services);
-            let svc = daemon.config.services.get("slow").unwrap();
+            let config = daemon.config();
+            let svc = config.services.get("slow").unwrap();
 
             assert!(matches!(
                 daemon.start_service("slow", svc).unwrap(),
@@ -5700,7 +5721,7 @@ fi
             assert!(daemon.pid_file.lock().unwrap().get("slow").is_none());
 
             let state_guard = daemon.state_file.lock().unwrap();
-            let service_hash = daemon.config.state_key("slow");
+            let service_hash = daemon.config().state_key("slow");
             let entry = state_guard
                 .services()
                 .get(&service_hash)
