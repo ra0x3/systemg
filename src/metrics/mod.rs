@@ -650,7 +650,10 @@ fn sample_process(system: &mut System, pid: u32) -> MetricSample {
         MetricSample {
             timestamp: Utc::now(),
             cpu_percent: process.cpu_usage(),
-            rss_bytes: process.memory() * 1024,
+            // sysinfo's `Process::memory()` returns bytes (since v0.30); do NOT
+            // scale it. Multiplying by 1024 inflated RSS 1024x — a 66MB API read
+            // as 63GB.
+            rss_bytes: process.memory(),
             io_read_bytes: 0,
             io_write_bytes: 0,
             net_rx_bytes: 0,

@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      hungry:
+        command: "python3 -c 'x = bytearray(60*1024*1024)\nimport time\nwhile True: time.sleep(1)'"
+        restart_policy: always

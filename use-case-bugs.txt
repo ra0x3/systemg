@@ -171,3 +171,19 @@ INSPECT  (rebuild 2026-07-16)
           first project). FIX: config_declared_projects enumerates ALL projects
           the config declares; -p is accepted if it names any of them. Fixes the
           multi-project -p selector for status, logs, AND inspect at once.
+
+
+============================================================================
+STATUS METRICS
+============================================================================
+
+[UC-15] [FIXED] status reports RSS 1024x too large (66MB shown as 63GB)
+  Case:  status-rss-units  (reproduced RED at exactly 1024.00x, then GREEN at 1.00x)
+  Origin: spotted in PROD — gamecast_api shown at 20.5GB RSS; `ps` said 18.9MB.
+  Symptom: sysg's latest_rss_bytes was exactly 1024x the OS bytes.
+  Cause:  the metrics collector did `rss_bytes: process.memory() * 1024`, but
+          sysinfo's Process::memory() returns BYTES since v0.30 (confirmed: ps
+          1136KB -> .memory() 1163264 = *1024 = bytes). The stale *1024 assumed
+          the old KB semantics. FIX: drop the *1024 (src/metrics/mod.rs:653).
+          The usecase asserts sysg RSS is within 4x of `ps rss`, so a units
+          regression can never silently return.
