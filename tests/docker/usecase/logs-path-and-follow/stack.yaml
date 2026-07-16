@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      chatty:
+        command: "sh -c 'while true; do echo LOG_LINE_MARKER; sleep 1; done'"
+        restart_policy: always

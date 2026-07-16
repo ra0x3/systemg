@@ -1,0 +1,148 @@
+systemg — bugs found by the use-case suite
+============================================================================
+Every entry here is a real defect that a docker use-case test in
+tests/docker/usecase/<case>/ dragged into the light by running the actual sysg
+binary end-to-end and asserting that what `ps`/disk shows and what `sysg` shows
+AGREE. Ordered by the command rebuild that surfaced it. `bugs.txt` holds the
+broader known-bug backlog; this file is specifically "what the use-cases caught."
+
+Legend:  [FIXED] proven green   [OPEN] still red / deferred
+
+
+============================================================================
+START  (rebuild 2026-07-15)
+============================================================================
+
+[UC-1] [OPEN] Second start is not idempotent — bounces the running service
+  Case:  start-already-running
+  Symptom: `sysg start -c f --daemonize` twice changes the service PID; the
+           repeat should be a no-op for already-running services.
+  Cause:  daemonize + supervisor-running dispatch re-sends AddProject/Start for
+          services already up. (Tracked; see bugs.txt BUG-1.)
+
+[UC-2] [OPEN] Explicit start of a skip:true service does not un-skip it
+  Case:  start-resident-target, start-ambiguous-selector
+  Symptom: `start -p <proj> -s <svc>` on a skip:true service exits 0 but the
+           service stays `skipped` and never runs.
+  Cause:  skip evaluation on the explicit-start path ignores the by-id target.
+
+
+============================================================================
+STATUS  (rebuild 2026-07-15)
+============================================================================
+
+[UC-3] [FIXED] Separately-added project shows stopped in status while alive
+  Case:  start-multi-config-separate, status-many-projects-fast
+  Symptom: register N projects via separate `start -c` calls; the last-added
+           project's services are alive in ps but status reports them stopped.
+  Cause:  add_project_config killed the StatusRefresher and never respawned it;
+          async boot recorded PIDs after the synchronous refresh; and
+          collect_projects_snapshot used `?` so one mid-boot project aborted the
+          whole aggregate. FIX: respawn refresher over all projects on add/reload,
+          per-project best-effort snapshot, async boot re-seeds the cache. Proven
+          120 units, ps == status == 120. Memory: sysg-status-cache-stale-at-scale.
+
+[UC-4] [FIXED] status renders stale cached state.xml as HEALTHY after runtime clear
+  Case:  status-no-supervisor-offline, status-frozen-no-hang
+  Symptom: kill supervisor (services survive), clear pid+socket, run status —
+           it printed HEALTHY/exit 0 as if supervised, and HUNG on a frozen
+           supervisor.
+  Cause:  status trusted the persisted snapshot + used an untimed send_command.
+          FIX: gate status on SupervisorHealth — Serving→live, Dying→SG0205
+          bounded, Down→SG0206 offline. New codes SG0205/SG0206.
+
+
+============================================================================
+RESTART / VERSION-UPGRADE HANDOFF  (rebuild 2026-07-16)
+============================================================================
+
+[UC-5] [FIXED] Redundant `start -c` of an unchanged config bounces services
+  Case:  abuse-double-register
+  Symptom: re-registering an already-running single-project config restarted its
+           services (new PIDs) and took a fixed ~2.7s.
+  Cause:  the CLI health probe mapped a busy supervisor's `Pending` ack to Dying
+          → cleanup_runtime + fork fresh → full re-boot. FIX:
+          probe_serving_supervisor retries the ping before condemning; only
+          all-attempts-fail is Dying. Memory: sysg-health-probe-pending-fix.
+
+[UC-6] [FIXED] compute_hash nondeterminism — same manifest hashes differently
+  Case:  abuse-double-register (surfaced alongside UC-5)
+  Symptom: env HashMap serialized in random order, so an unchanged manifest
+           hashed differently across loads → phantom "changed" diffs poisoning
+           idempotent-start and restart reconcile.
+  Cause:  ServiceConfig::compute_hash hashed a nondeterministic serialization.
+          FIX: serialize via serde_json::Value (canonical/sorted key order).
+
+[UC-7] [FIXED] Version-upgrade restart leaves services UNMANAGED (fork-after-threads)
+  Case:  restart-version-handoff
+  Symptom: after `sysg restart` recycles a version-drifted supervisor, the
+           services run on new PIDs but a killed service is NEVER respawned —
+           the v2 supervisor "owns" processes it cannot actually supervise.
+           Linux-only; macOS masked it.
+  Cause:  recycle forked the new daemon AFTER stop_supervisors + version probe
+          had spun up threads; fork() in a multithreaded process leaves inherited
+          mutexes locked, wedging the daemon so it suppressed its own services'
+          restart. FIX: after fork the child execs a fresh `sysg supervise`
+          subcommand → single-threaded, pristine locks. Memory:
+          sysg-recycle-drops-monitoring.
+
+[UC-8] [FIXED] Dying daemon deletes the successor's IPC runtime files
+  Case:  restart-version-handoff (surfaced during UC-7 fix)
+  Symptom: after recycle the new supervisor was alive but UNDISCOVERABLE —
+           status printed OFFLINE though the daemon ran.
+  Cause:  the old daemon's async cleanup_runtime unlinked socket+pid by PATH,
+          ~2s late, clobbering the new daemon's fresh files. FIX:
+          cleanup_runtime_owned(pid) no-ops if the pid file no longer names me;
+          wait_for_runtime_cleared before the recycle fork.
+
+[UC-9] [FIXED] Duplicate-restart race self-kills a respawned service
+  Case:  restart-version-handoff (surfaced during UC-7 fix)
+  Symptom: a crashed always-restart service was occasionally respawned then
+           immediately re-killed, leaving nothing running.
+  Cause:  the monitor_loop crash sweep queued a restart WITHOUT claiming
+          restart_in_flight, so reconcile_lost_services queued a second one →
+          two handle_restart + two reap_orphaned_group; pgid reuse let the
+          second reap murder the first respawn. FIX: crash sweep claims the
+          in-flight guard; clear it when a config-dropped service skips restart.
+
+[UC-10] [FIXED] Start-vs-shutdown TOCTOU drops the command
+  Case:  abuse-stop-start-race
+  Symptom: under stop/start churn a start probed Serving, then its AddProject
+           landed on a supervisor mid-shutdown → "supervisor dropped the command
+           before replying" (SG0001), no supervisor came up.
+  Cause:  health probe was healthy at check, gone at command (widened by the
+          UC-7 re-exec boot window). FIX: error_is_supervisor_shutting_down →
+          CLI clears runtime + forks fresh instead of surfacing the race.
+
+
+============================================================================
+PURGE  (rebuild 2026-07-16)
+============================================================================
+
+[UC-11] [FIXED] Purge missed system-mode logs (out-of-root blind spot)
+  Case:  purge-force-kills-and-wipes, purge-no-supervisor-clean
+  Symptom: the old flag-less purge removed the state root but, in system mode,
+           logs live at /var/log/systemg OUTSIDE that root and survived.
+  Cause:  purge did a single remove_dir_all(state_dir). FIX: the rebuilt purge
+          also removes runtime::log_dir() when it is outside the state root.
+          Memory: sysg-purge-rebuild.
+
+
+============================================================================
+LOGS  (rebuild 2026-07-16)
+============================================================================
+
+[UC-12] [FIXED] `logs --purge` empties files but the reader still serves purged lines
+  Case:  logs-purge-clears
+  Symptom: after `sysg logs --purge` with the service stopped, every on-disk log
+           file is 0 bytes and grep finds the content NOWHERE — yet
+           `sysg logs -s <svc>` still returned the purged lines (6 before, 6 after).
+  Cause:  the supervisor serves `sysg logs` from a process-global in-memory
+          live_log_registry (src/logs.rs), NOT from disk. clear_service_logs
+          truncated files CLI-side; the CLI cannot touch the supervisor's buffer,
+          so the reader kept replaying "purged" lines. Disk ≠ reader. FIX: new
+          ControlCommand::ClearLogs + Supervisor::clear_logs clears the files AND
+          the live buffer (crate::logs::clear_live_log) inside the supervisor;
+          the CLI routes `logs --purge` through IPC when a supervisor is up,
+          falling back to a local file clear when it is not. Proven: reader 6
+          before, 0 after. Memory: sysg-logs-purge-reader-stale.

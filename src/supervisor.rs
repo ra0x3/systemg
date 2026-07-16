@@ -621,6 +621,39 @@ impl Supervisor {
         projects
     }
 
+    /// Clears captured logs for a service (or all services) inside the
+    /// supervisor: truncates the on-disk files AND drops the in-memory live-log
+    /// buffer the log reader serves from. Doing this CLI-side would leave the
+    /// buffer intact, so the reader would keep replaying "cleared" lines.
+    fn clear_logs(
+        &self,
+        service: Option<&str>,
+        _project: Option<&str>,
+    ) -> Result<(), SupervisorError> {
+        let manager = LogManager::new(self.daemon.pid_file_handle());
+        let mut targets: Vec<String> = Vec::new();
+        match service {
+            Some(name) => targets.push(name.to_string()),
+            None => {
+                for name in self.daemon.config().services.keys() {
+                    targets.push(name.clone());
+                }
+                for project in self.extra_projects.values() {
+                    for name in project.daemon.config().services.keys() {
+                        targets.push(name.clone());
+                    }
+                }
+            }
+        }
+        for name in targets {
+            manager
+                .clear_service_logs(&name)
+                .map_err(SupervisorError::from)?;
+            crate::logs::clear_live_log(&name);
+        }
+        Ok(())
+    }
+
     /// Resolves the target project for a service request, rejecting ambiguous selectors.
     fn resolve_service_target_project(
         &self,
@@ -2477,6 +2510,13 @@ impl Supervisor {
             ControlCommand::Logs { .. } => Ok(ControlResponse::Error(
                 "logs command is streamed separately".into(),
             )),
+            ControlCommand::ClearLogs { service, project } => {
+                self.clear_logs(service.as_deref(), project.as_deref())?;
+                Ok(ControlResponse::Message(match service {
+                    Some(name) => format!("Cleared logs for '{name}'"),
+                    None => "Cleared logs for all services".into(),
+                }))
+            }
             ControlCommand::BootStream => Ok(ControlResponse::Error(
                 "boot stream is served separately".into(),
             )),

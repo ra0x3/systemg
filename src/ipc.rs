@@ -172,6 +172,18 @@ pub enum ControlCommand {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         structured: bool,
     },
+    /// Clear captured logs for one or all services, inside the supervisor, so
+    /// both the on-disk files and the supervisor's in-memory live-log buffer are
+    /// dropped together (a CLI-side truncate leaves the reader serving stale
+    /// buffered lines).
+    ClearLogs {
+        /// Optional service name to clear. None clears all managed services.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        /// Optional project id to scope the clear.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
     /// Report the version of the resident supervisor binary.
     Version,
     /// Report the operation the supervisor is currently blocked on, if any.

@@ -43,6 +43,25 @@ $ sysg logs
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
+## Modes
+
+`logs` is really five modes: show (the default), follow (`--follow`), print-path
+(`--path`), purge (`--purge`), and prune (`--prune`). The mode flags are mutually
+exclusive, and none combines with `--follow` — an illegal combination is refused
+with `SG0204` rather than guessed at.
+
+<Note>
+`--purge` clears logs **through the running supervisor** when one is up, so both
+the on-disk files and the supervisor's in-memory buffer that `sysg logs` replays
+from are dropped together. Clearing files alone would leave `sysg logs` still
+showing the "purged" lines.
+</Note>
+
+<Warning>
+`--prune` needs a bound to prune against. Running it with neither `--max-size`
+nor `--max-age` is refused with `SG0017`.
+</Warning>
+
 ## Examples
 
 ### View recent logs from all services

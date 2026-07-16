@@ -792,6 +792,17 @@ fn append_live_log_chunk(service: &str, stream: LogStream, chunk: &[u8]) {
     }
 }
 
+/// Drops the in-memory live-log buffer for every stream of a service.
+///
+/// The supervisor serves `sysg logs` from this registry, not from disk, so
+/// truncating the files alone leaves the reader showing "purged" content. A
+/// purge that runs inside the supervisor must clear this too.
+pub fn clear_live_log(service: &str) {
+    if let Ok(mut registry) = live_log_registry().lock() {
+        registry.retain(|(name, _), _| name != service);
+    }
+}
+
 /// Returns the buffered live log bytes for a service stream, if any.
 fn snapshot_live_log(service: &str, stream: LogStream) -> Option<Vec<u8>> {
     let key = (service.to_string(), stream.as_str().to_string());

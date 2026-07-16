@@ -90,5 +90,8 @@ pub mod restart;
 /// The `purge` command, rebuilt from first principles.
 pub mod purge;
 
+/// The `logs` command's plan layer, rebuilt from first principles.
+pub mod logs_cmd;
+
 /// Privilege dropping.
 pub mod privilege;

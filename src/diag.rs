@@ -63,6 +63,9 @@ pub enum SgCode {
     SupervisorStateDesynchronized,
     /// SG0016 — a rolling deployment failed without a useful error.
     RollingDeploymentFailed,
+    /// SG0017 — `logs --prune` was run without a `--max-size` or `--max-age`
+    /// bound, so there is nothing to prune against.
+    PruneBoundMissing,
     /// SG0102 — a service exited immediately at start, before it came up.
     UnitImmediateExit,
     /// SG0103 — a service's `pre_start` failed, so it was not started.
@@ -122,6 +125,7 @@ impl SgCode {
             SgCode::ReleaseArtifactUnavailable => "SG0014",
             SgCode::SupervisorStateDesynchronized => "SG0015",
             SgCode::RollingDeploymentFailed => "SG0016",
+            SgCode::PruneBoundMissing => "SG0017",
             SgCode::UnitImmediateExit => "SG0102",
             SgCode::PreStartFailed => "SG0103",
             SgCode::HealthUnmet => "SG0104",
@@ -146,7 +150,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 31] = [
+    pub const ALL: [SgCode; 32] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -163,6 +167,7 @@ impl SgCode {
         SgCode::ReleaseArtifactUnavailable,
         SgCode::SupervisorStateDesynchronized,
         SgCode::RollingDeploymentFailed,
+        SgCode::PruneBoundMissing,
         SgCode::UnitImmediateExit,
         SgCode::PreStartFailed,
         SgCode::HealthUnmet,

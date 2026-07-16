@@ -877,6 +877,39 @@ fn run() -> Result<(), Box<dyn Error>> {
             no_strip_ansi,
             stream,
         } => {
+            let logs_modes = systemg::logs_cmd::Modes {
+                path,
+                purge,
+                prune,
+                follow,
+            };
+            if let Err(err) = systemg::logs_cmd::resolve_plan(
+                logs_modes,
+                service.as_deref(),
+                project.as_deref(),
+                max_size.clone(),
+                max_age.clone(),
+            ) {
+                use systemg::logs_cmd::LogsPlanError;
+                let diag = match err {
+                    LogsPlanError::ConflictingModes { modes } => {
+                        systemg::logs_cmd::conflicting_modes(&modes)
+                    }
+                    LogsPlanError::FollowWithMode { mode } => {
+                        systemg::logs_cmd::follow_with_mode(mode)
+                    }
+                    LogsPlanError::PruneBoundMissing => {
+                        systemg::logs_cmd::prune_bound_missing()
+                    }
+                    LogsPlanError::Mismatch(mismatch) => {
+                        systemg::start::project_mismatch(
+                            &mismatch.flag,
+                            &mismatch.selector,
+                        )
+                    }
+                };
+                return Err(Box::new(DiagError(Box::new(diag))));
+            }
             if path {
                 match service.as_deref() {
                     Some(service_name) => {
@@ -898,10 +931,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
             if prune {
                 if max_size.is_none() && max_age.is_none() {
-                    eprintln!(
-                        "Specify --max-size and/or --max-age to prune rotated logs."
-                    );
-                    process::exit(2);
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::logs_cmd::prune_bound_missing(),
+                    ))));
                 }
                 let summary = prune_logs(max_size.as_deref(), max_age.as_deref())?;
                 println!(
@@ -939,39 +971,41 @@ fn run() -> Result<(), Box<dyn Error>> {
             let manager = LogManager::new(pid.clone());
 
             if purge {
-                if target_project.is_some() {
-                    let snapshot = with_progress_spinner("Purging logs", || {
-                        fetch_status_snapshot(Some(&effective_config), false)
-                    })?;
-                    let matching_units: Vec<_> = snapshot
-                        .units
-                        .iter()
-                        .filter(|unit| {
-                            status_unit_matches_selector(
-                                unit,
-                                service.as_deref(),
-                                target_project.as_deref(),
-                            )
-                        })
-                        .collect();
-                    if matching_units.is_empty() {
-                        eprintln!("No matching units found.");
-                        process::exit(2);
-                    }
-                    for unit in matching_units {
-                        info!("Purging logs for service: {}", unit.name);
-                        manager.clear_service_logs(&unit.name)?;
-                    }
-                } else {
-                    match service.as_deref() {
-                        Some(service_name) => {
-                            info!("Purging logs for service: {service_name}");
-                            manager.clear_service_logs(service_name)?;
+                // A serving supervisor owns the in-memory live-log buffer the
+                // reader replays from, so clearing files CLI-side would leave it
+                // showing "purged" lines. Route the clear through the supervisor
+                // when one is up; fall back to a local file clear when it is not.
+                if supervisor_running() {
+                    match ipc::send_command(&ControlCommand::ClearLogs {
+                        service: service.clone(),
+                        project: target_project.clone(),
+                    }) {
+                        Ok(ControlResponse::Message(message)) => {
+                            println!("{message}");
+                            return Ok(());
                         }
-                        None => {
-                            info!("Purging logs for all services");
-                            manager.clear_all_logs()?;
+                        Ok(ControlResponse::Ok) => return Ok(()),
+                        Ok(ControlResponse::Error(message)) => {
+                            return Err(ControlError::Server(message).into());
                         }
+                        Ok(other) => {
+                            return Err(io::Error::other(format!(
+                                "unexpected supervisor response: {other:?}"
+                            ))
+                            .into());
+                        }
+                        Err(ControlError::NotAvailable) => {}
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+                match service.as_deref() {
+                    Some(service_name) => {
+                        info!("Purging logs for service: {service_name}");
+                        manager.clear_service_logs(service_name)?;
+                    }
+                    None => {
+                        info!("Purging logs for all services");
+                        manager.clear_all_logs()?;
                     }
                 }
                 return Ok(());
@@ -988,8 +1022,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             let log_format = match format {
                 Some(OutputFormat::Json) => LogFormat::Json,
                 Some(OutputFormat::Xml) => {
-                    eprintln!("`sysg logs` does not support --format xml; use json.");
-                    process::exit(2);
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::logs_cmd::unsupported_format("xml"),
+                    ))));
                 }
                 None if raw => LogFormat::Raw,
                 None => LogFormat::Text,
