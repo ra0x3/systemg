@@ -5066,6 +5066,9 @@ impl Daemon {
 
                         if should_restart {
                             warn!("Service '{name}' crashed. Restarting...");
+                            if let Ok(mut guard) = ctx.lock_restart_in_flight() {
+                                guard.insert(name.clone());
+                            }
                             restarted_services.push((name.clone(), recorded_pgid));
                         } else {
                             warn!(
@@ -5127,6 +5130,8 @@ impl Daemon {
                 Self::reap_orphaned_group_before_restart(&name, recorded_pgid);
                 if let Some(service) = ctx.config.services.get(&name) {
                     Self::handle_restart(&name, service, ctx.clone());
+                } else if let Ok(mut guard) = ctx.lock_restart_in_flight() {
+                    guard.remove(&name);
                 }
             }
 

@@ -480,6 +480,28 @@ pub enum Commands {
     /// Purge all systemg state and runtime files.
     Purge,
 
+    /// INTERNAL: boot the resident supervisor. Not for direct use — the daemon
+    /// re-execs into this after forking so it starts from a clean, single-threaded
+    /// process image (no mutexes inherited-locked from the launching CLI's threads).
+    #[command(hide = true)]
+    Supervise {
+        /// Path to the manifest the supervisor boots from.
+        #[arg(long)]
+        config: String,
+
+        /// Boot only this single service instead of the whole config.
+        #[arg(long)]
+        service: Option<String>,
+
+        /// Pipe service stderr through the supervisor.
+        #[arg(long)]
+        pipe_stderr: bool,
+
+        /// Verbose boot reporting.
+        #[arg(long)]
+        verbose: bool,
+    },
+
     /// DEPRECATED: Spawn a dynamic child process from a parent service.
     #[command(hide = true)]
     Spawn {

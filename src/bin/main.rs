@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
+    ffi::CString,
     fs, io,
     io::Write,
     os::unix::io::IntoRawFd,
@@ -30,7 +31,7 @@ use sysinfo::{Pid as SysPid, ProcessRefreshKind, ProcessesToUpdate, System, User
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
     cli::{Cli, Commands, OutputFormat, parse_args},
-    config::{EffectiveLogsConfig, load_config},
+    config::{Config, EffectiveLogsConfig, load_config},
     cron::{CronExecutionStatus, CronStateFile},
     daemon::{Daemon, PidFile, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
@@ -469,7 +470,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         } | Commands::Restart {
             daemonize: true,
             ..
-        }
+        } | Commands::Supervise { .. }
     );
     init_logging(&args, use_file_logging);
 
@@ -612,13 +613,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 resolve_status_project_filter(config.as_deref(), project.clone())?;
             let render_config = config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH);
 
-            let render_opts = StatusRenderOptions {
+            let mut render_opts = StatusRenderOptions {
                 format,
                 no_color: no_color || agent_mode(),
                 full_cmd,
                 include_orphans: all,
                 service_filter: service.as_deref(),
                 project_filter: target_project.as_deref(),
+                offline: false,
             };
 
             if let Some(stream_interval) = stream {
@@ -634,10 +636,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 };
                 let sleep_interval = Duration::from_secs(stream_seconds);
                 loop {
-                    match fetch_status_snapshot(config.as_deref(), live) {
-                        Ok(snapshot) => {
+                    match fetch_status_reading(config.as_deref(), live) {
+                        Ok(reading) => {
+                            print!("\x1B[2J\x1B[H");
+                            print_presence_banner(reading.presence);
+                            render_opts.offline =
+                                reading.presence != SupervisorPresence::Live;
                             if let Err(e) = render_status(
-                                &snapshot,
+                                &reading.snapshot,
                                 &render_opts,
                                 true,
                                 render_config,
@@ -660,18 +666,25 @@ fn run() -> Result<(), Box<dyn Error>> {
                     thread::sleep(sleep_interval);
                 }
             } else {
-                let snapshot = with_progress_spinner("Computing", || {
-                    fetch_status_snapshot(config.as_deref(), live)
+                let reading = with_progress_spinner("Computing", || {
+                    fetch_status_reading(config.as_deref(), live)
                 })?;
 
-                let health =
-                    render_status(&snapshot, &render_opts, false, render_config)?;
+                if let Some(diag) = status_ambiguous_service(
+                    &reading.snapshot,
+                    service.as_deref(),
+                    target_project.as_deref(),
+                ) {
+                    eprintln!("{}", diag.render_for_terminal());
+                    process::exit(2);
+                }
 
-                let exit_code = match health {
-                    OverallHealth::Healthy => 0,
-                    OverallHealth::Warn => 1,
-                    OverallHealth::Failing => 2,
-                };
+                print_presence_banner(reading.presence);
+                render_opts.offline = reading.presence != SupervisorPresence::Live;
+                let health =
+                    render_status(&reading.snapshot, &render_opts, false, render_config)?;
+
+                let exit_code = status_exit_code(reading.presence, health);
                 process::exit(exit_code);
             }
         }
@@ -1212,6 +1225,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             purge_all_state()?;
             println!("All systemg state has been purged");
         }
+        Commands::Supervise {
+            config,
+            service,
+            pipe_stderr,
+            verbose: _,
+        } => {
+            run_supervisor_in_process(PathBuf::from(config), service, pipe_stderr);
+        }
         Commands::Spawn {
             name,
             ttl,
@@ -1680,7 +1701,8 @@ mod tests {
             },
         ];
 
-        let lines = status_overview_lines(&columns, &units, OverallHealth::Warn, true);
+        let lines =
+            status_overview_lines(&columns, &units, OverallHealth::Warn, true, false);
         let rendered = lines.join("\n");
 
         assert!(rendered.contains("Status: WARN"));
@@ -1693,6 +1715,12 @@ mod tests {
         assert!(rendered.contains("Lost 1"));
         assert!(rendered.contains("Intent"));
         assert!(rendered.contains("Serve 2"));
+
+        let offline =
+            status_overview_lines(&columns, &units, OverallHealth::Warn, true, true)
+                .join("\n");
+        assert!(offline.contains("Status: OFFLINE"));
+        assert!(!offline.contains("Status: WARN"));
     }
 
     #[test]
@@ -3118,6 +3146,28 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     false
 }
 
+/// Blocks until the supervisor runtime files (socket + pid) are gone, or the
+/// deadline passes.
+///
+/// A stopped daemon tears its runtime down asynchronously — service stop, monitor
+/// join, then `cleanup_runtime` — so `stop_supervisors` returning (process dead)
+/// does not mean the socket and pid file are unlinked yet. Recycling must wait
+/// for that teardown to finish before forking a successor, otherwise the old
+/// daemon's late cleanup races the new daemon's fresh files.
+fn wait_for_runtime_cleared(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let socket_gone = ipc::socket_path().map(|p| !p.exists()).unwrap_or(true);
+        let pid_gone = ipc::supervisor_pid_path()
+            .map(|p| !p.exists())
+            .unwrap_or(true);
+        if socket_gone && pid_gone {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Forcefully terminates kill.
 fn force_kill(pid: libc::pid_t) {
     if wait_for_supervisor_exit(pid, Duration::from_millis(100)) {
@@ -3543,7 +3593,22 @@ fn dispatch_start_daemonize(
                     "--drop-privileges is managed by the running supervisor and has no effect for this start request"
                 );
             }
-            return dispatch_start_resident(plan);
+            match dispatch_start_resident(plan.clone()) {
+                Ok(()) => return Ok(()),
+                Err(err) if error_is_supervisor_shutting_down(err.as_ref()) => {
+                    // Healthy at probe, gone at command: a concurrent
+                    // `stop --supervisor` tore the resident daemon down between
+                    // the health check and the command landing, so its owner
+                    // thread dropped our request. Clear the dead runtime and
+                    // fork fresh instead of surfacing a race as a failure.
+                    warn!(
+                        "Resident supervisor shut down while starting; clearing the runtime and forking a fresh supervisor"
+                    );
+                    let _ = ipc::cleanup_runtime();
+                    wait_for_runtime_cleared(Duration::from_secs(5));
+                }
+                Err(err) => return Err(err),
+            }
         }
         SupervisorHealth::Dying => {
             // A supervisor whose pid is alive but not serving would swallow a
@@ -3615,6 +3680,16 @@ fn dispatch_start_resident(
     Ok(())
 }
 
+/// Whether an error means the resident supervisor was tearing down as the
+/// command arrived, so its owner thread dropped the request. Distinct from a
+/// real failure: the caller should fork a fresh supervisor rather than surface
+/// it. Matches the two shutdown-window signatures the supervisor emits.
+fn error_is_supervisor_shutting_down(err: &(dyn Error + 'static)) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("dropped the command before replying")
+        || message.contains("supervisor is shutting down")
+}
+
 /// Dispatches a foreground (non-daemonize) start plan.
 fn dispatch_start_foreground(
     plan: systemg::start::StartPlan,
@@ -3663,20 +3738,8 @@ fn start_supervisor_daemon(
 
     if child_pid == 0 {
         detach_daemon()?;
-
-        let mut supervisor = match Supervisor::new(config_path, false, service) {
-            Ok(supervisor) => supervisor,
-            Err(err) => {
-                error!("Supervisor failed to initialize: {err}");
-                process::exit(1);
-            }
-        };
-        supervisor.set_pipe_stderr(pipe_stderr);
-        if let Err(err) = supervisor.run() {
-            error!("Supervisor exited with error: {err}");
-            process::exit(1);
-        }
-        process::exit(0);
+        reexec_supervisor(&config_path, service.as_deref(), pipe_stderr, verbose);
+        run_supervisor_in_process(config_path, service, pipe_stderr);
     }
 
     // Wait for the child to publish its socket, then follow the boot stream so
@@ -3694,6 +3757,73 @@ fn start_supervisor_daemon(
         return Err(Box::new(DiagError(Box::new(diag))));
     }
     Ok(())
+}
+
+/// Re-execs this binary into the internal `supervise` subcommand so the daemon
+/// starts from a clean, single-threaded process image.
+///
+/// `fork()` in a multithreaded process is a trap: only the forking thread
+/// survives in the child, and any mutex a vanished thread held stays locked
+/// forever. A recycle forks the daemon *after* `stop_supervisors` and the
+/// version probe have already spun up IPC / sysinfo / spinner threads, so the
+/// forked daemon inherited those poisoned locks and wedged — silent, and
+/// suppressing its own services' restarts. `execv` replaces the image wholesale,
+/// dropping every inherited thread and lock, so the daemon always boots pristine.
+/// On success this never returns; on failure it falls through to the in-process
+/// boot so a daemon still comes up.
+fn reexec_supervisor(
+    config: &Path,
+    service: Option<&str>,
+    pipe_stderr: bool,
+    verbose: bool,
+) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut args: Vec<CString> = Vec::new();
+    let push = |args: &mut Vec<CString>, s: &str| {
+        if let Ok(c) = CString::new(s) {
+            args.push(c);
+        }
+    };
+    push(&mut args, &exe.to_string_lossy());
+    push(&mut args, "supervise");
+    push(&mut args, "--config");
+    push(&mut args, &config.to_string_lossy());
+    if let Some(service) = service {
+        push(&mut args, "--service");
+        push(&mut args, service);
+    }
+    if pipe_stderr {
+        push(&mut args, "--pipe-stderr");
+    }
+    if verbose {
+        push(&mut args, "--verbose");
+    }
+    let _ = nix::unistd::execv(&args[0], &args);
+}
+
+/// Boots the supervisor in the current process and exits — the daemon's actual
+/// run body. Reached post-`execv` via the `supervise` subcommand, or as the
+/// fallback when the re-exec itself fails.
+fn run_supervisor_in_process(
+    config_path: PathBuf,
+    service: Option<String>,
+    pipe_stderr: bool,
+) -> ! {
+    let mut supervisor = match Supervisor::new(config_path, false, service) {
+        Ok(supervisor) => supervisor,
+        Err(err) => {
+            error!("Supervisor failed to initialize: {err}");
+            process::exit(1);
+        }
+    };
+    supervisor.set_pipe_stderr(pipe_stderr);
+    if let Err(err) = supervisor.run() {
+        error!("Supervisor exited with error: {err}");
+        process::exit(1);
+    }
+    process::exit(0);
 }
 
 /// Subscribes to the supervisor's boot stream and renders it, returning the
@@ -4226,6 +4356,7 @@ enum SupervisorHealth {
 
 const SUPERVISOR_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 const SUPERVISOR_PROBE_DEADLINE: Duration = Duration::from_millis(1500);
+const SUPERVISOR_PROBE_ATTEMPTS: usize = 3;
 
 /// Probes the resident supervisor's health. Liveness alone is a lie during
 /// shutdown — a frozen or mid-teardown daemon keeps its pid but stops serving —
@@ -4235,29 +4366,7 @@ fn supervisor_health() -> SupervisorHealth {
         Ok(Some(pid)) => {
             let target = Pid::from_raw(pid);
             match signal::kill(target, None) {
-                Ok(_) => {
-                    // A live pid is not enough: confirm it is actually serving.
-                    // The probe runs on its own thread with a hard join deadline
-                    // because even connecting to a frozen listener can block past
-                    // any socket-level timeout. Only a real response within the
-                    // window counts as Serving; a timeout, a Pending, or any
-                    // error means the daemon is alive but wedged/shutting down.
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
-                        let serving = matches!(
-                            ipc::send_command_with_timeout(
-                                &ControlCommand::Status { live: false },
-                                SUPERVISOR_PROBE_TIMEOUT,
-                            ),
-                            Ok(ipc::CommandAck::Response(_))
-                        );
-                        let _ = tx.send(serving);
-                    });
-                    match rx.recv_timeout(SUPERVISOR_PROBE_DEADLINE) {
-                        Ok(true) => SupervisorHealth::Serving,
-                        Ok(false) | Err(_) => SupervisorHealth::Dying,
-                    }
-                }
+                Ok(_) => probe_serving_supervisor(),
                 Err(err) => {
                     if err == nix::Error::from(nix::errno::Errno::ESRCH) {
                         let _ = ipc::cleanup_runtime();
@@ -4276,6 +4385,31 @@ fn supervisor_health() -> SupervisorHealth {
             }
         }
     }
+}
+
+/// Classifies a live-pid supervisor as Serving or Dying by pinging its control
+/// socket. A single busy tick is not death: under load a healthy daemon whose
+/// op-slot is momentarily occupied answers `Pending` rather than a response, so
+/// each attempt runs on its own hard-deadline thread and a `Pending` retries
+/// within the remaining budget. Only when every attempt fails to draw a real
+/// response — timeout, `Pending`, or error to the last try — is the daemon
+/// declared Dying. A real response at any point is Serving.
+fn probe_serving_supervisor() -> SupervisorHealth {
+    for _ in 0..SUPERVISOR_PROBE_ATTEMPTS {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ack = ipc::send_command_with_timeout(
+                &ControlCommand::Status { live: false },
+                SUPERVISOR_PROBE_TIMEOUT,
+            );
+            let _ = tx.send(matches!(ack, Ok(ipc::CommandAck::Response(_))));
+        });
+        match rx.recv_timeout(SUPERVISOR_PROBE_DEADLINE) {
+            Ok(true) => return SupervisorHealth::Serving,
+            Ok(false) | Err(_) => continue,
+        }
+    }
+    SupervisorHealth::Dying
 }
 
 /// Diagnostic for a command refused because the supervisor is alive but not
@@ -4440,6 +4574,7 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
     }
 
     stop_supervisors();
+    wait_for_runtime_cleared(Duration::from_secs(5));
     let _ = ipc::cleanup_runtime();
     let recovery_path = config_path.clone();
     start_supervisor_daemon(config_path, None, false, false).map_err(|err| {

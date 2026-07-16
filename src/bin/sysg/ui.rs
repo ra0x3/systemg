@@ -7,6 +7,9 @@ struct StatusRenderOptions<'a> {
     include_orphans: bool,
     service_filter: Option<&'a str>,
     project_filter: Option<&'a str>,
+    /// When set, the overview reads `OFFLINE` instead of a health label — no
+    /// supervisor stands behind the data, so a HEALTHY headline would lie.
+    offline: bool,
 }
 
 /// Represents inspect render options.
@@ -79,49 +82,169 @@ type StatusProjectGroup<'a> = (String, Vec<(usize, &'a UnitStatus)>);
 /// Internal grouping state that keeps the stable project id separate from the display label.
 type WorkingStatusProjectGroup<'a> = (String, String, Vec<(usize, &'a UnitStatus)>);
 
-/// Fetches a status snapshot from the live supervisor, falling back to the
-/// persisted on-disk snapshot when no supervisor is available.
+/// Whether the state in a reading is backed by a live supervisor. A status must
+/// never present unsupervised disk state as if a supervisor were managing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorPresence {
+    /// A live supervisor answered; the snapshot is authoritative.
+    Live,
+    /// The supervisor's process is alive but did not answer in time; the reading
+    /// may be stale (SG0205).
+    NotResponding,
+    /// No supervisor is running; the snapshot was read off disk and any live
+    /// process in it is unsupervised (SG0206).
+    Offline,
+}
+
+/// A status reading plus the verdict on whether a supervisor stands behind it.
+struct StatusReading {
+    snapshot: StatusSnapshot,
+    presence: SupervisorPresence,
+}
+
+/// Fetches a status snapshot, gated on the supervisor's actual health rather
+/// than mere socket connectability. A live daemon's snapshot is authoritative; a
+/// daemon that is alive but not answering is probed within a bounded window and
+/// its disk state returned as `NotResponding`; a truly absent supervisor yields
+/// the on-disk state marked `Offline`, never dressed up as a supervised reading.
+fn fetch_status_reading(
+    config_path: Option<&str>,
+    live: bool,
+) -> Result<StatusReading, Box<dyn Error>> {
+    if supervisor_health() == SupervisorHealth::Serving
+        && let Some(reading) = try_live_status(live)
+    {
+        return Ok(reading);
+    }
+
+    let presence = match supervisor_health() {
+        SupervisorHealth::Dying => SupervisorPresence::NotResponding,
+        _ => SupervisorPresence::Offline,
+    };
+
+    let Some(config_path) = config_path else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No running supervisor",
+        )
+        .into());
+    };
+    let config = load_status_config(config_path)?;
+    let snapshot =
+        collect_disk_snapshot(config).map_err(|err| Box::new(err) as Box<dyn Error>)?;
+    Ok(StatusReading { snapshot, presence })
+}
+
+/// Refuses a `-s <service>` that resolves ambiguously — the service is declared
+/// in more than one project and no `-p` narrowed it. status is read-only, but it
+/// keeps the same selector contract as the mutating commands: an ambiguous unit
+/// selector is SG0006, not a guess. Returns `None` when the selector is
+/// unambiguous, absent, or already project-scoped.
+fn status_ambiguous_service(
+    snapshot: &StatusSnapshot,
+    service_filter: Option<&str>,
+    project_filter: Option<&str>,
+) -> Option<systemg::diag::Diagnostic> {
+    let service = service_filter?;
+    if project_filter.is_some() {
+        return None;
+    }
+    let service_name = match split_status_project_selector(service) {
+        Some((_project, _service)) => return None,
+        None => service,
+    };
+
+    let mut projects: Vec<String> = snapshot
+        .units
+        .iter()
+        .filter(|unit| unit.name == service_name && unit.kind != UnitKind::Orphaned)
+        .filter_map(|unit| unit.project.as_ref().map(|project| project.id.clone()))
+        .collect();
+    projects.sort_unstable();
+    projects.dedup();
+
+    if projects.len() > 1 {
+        Some(systemg::start::ambiguous_service(service_name, &projects))
+    } else {
+        None
+    }
+}
+
+/// Prints the supervisor-presence banner to stderr for a non-`Live` reading, so
+/// an offline or wedged supervisor is never silently rendered as a supervised
+/// HEALTHY stack. Renders nothing when a live supervisor stands behind the data.
+fn print_presence_banner(presence: SupervisorPresence) {
+    let diag = match presence {
+        SupervisorPresence::Live => return,
+        SupervisorPresence::NotResponding => {
+            systemg::status::diagnostics::supervisor_not_responding()
+        }
+        SupervisorPresence::Offline => {
+            systemg::status::diagnostics::supervisor_offline()
+        }
+    };
+    eprintln!("{}", diag.render_for_terminal());
+}
+
+/// The process exit code for a status run. An unsupervised or wedged reading is
+/// never a clean `0`, even when every surviving process looks healthy — the
+/// absence of a supervisor is itself the failing condition.
+fn status_exit_code(presence: SupervisorPresence, health: OverallHealth) -> i32 {
+    match presence {
+        SupervisorPresence::Offline => 2,
+        SupervisorPresence::NotResponding => 1,
+        SupervisorPresence::Live => match health {
+            OverallHealth::Healthy => 0,
+            OverallHealth::Warn => 1,
+            OverallHealth::Failing => 2,
+        },
+    }
+}
+
+/// Fetches just the snapshot (discarding the presence verdict) for callers that
+/// only need the unit list, such as the log commands.
 fn fetch_status_snapshot(
     config_path: Option<&str>,
     live: bool,
 ) -> Result<StatusSnapshot, Box<dyn Error>> {
-    match ipc::send_command(&ControlCommand::Status { live }) {
-        Ok(ControlResponse::Status(snapshot)) => Ok(snapshot),
-        Ok(other) => Err(io::Error::other(format!(
-            "unexpected supervisor response: {:?}",
-            other
-        ))
-        .into()),
-        Err(ControlError::NotAvailable) => {
-            let Some(config_path) = config_path else {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "No running supervisor",
-                )
-                .into());
-            };
-            let config = match load_config(Some(config_path)) {
-                Ok(config) => Some(config),
-                Err(primary_err) => {
-                    if let Ok(Some(hint)) = ipc::read_config_hint() {
-                        let hint_path = hint.to_string_lossy().to_string();
-                        match load_config(Some(&hint_path)) {
-                            Ok(config) => Some(config),
-                            Err(hint_err) => {
-                                return Err(io::Error::other(format!(
-                                    "failed to load config '{config_path}' ({primary_err}); fallback config hint '{hint_path}' also failed ({hint_err})"
-                                ))
-                                .into());
-                            }
-                        }
-                    } else {
-                        return Err(primary_err.into());
-                    }
-                }
-            };
-            collect_disk_snapshot(config).map_err(|err| Box::new(err) as Box<dyn Error>)
+    fetch_status_reading(config_path, live).map(|reading| reading.snapshot)
+}
+
+/// Asks a serving supervisor for its snapshot within the probe deadline. Returns
+/// `None` if the daemon stops serving between the health check and the request.
+fn try_live_status(live: bool) -> Option<StatusReading> {
+    match ipc::send_command_with_timeout(
+        &ControlCommand::Status { live },
+        SUPERVISOR_PROBE_TIMEOUT,
+    ) {
+        Ok(ipc::CommandAck::Response(ControlResponse::Status(snapshot))) => {
+            Some(StatusReading {
+                snapshot,
+                presence: SupervisorPresence::Live,
+            })
         }
-        Err(err) => Err(Box::new(err)),
+        _ => None,
+    }
+}
+
+/// Loads the config for an offline reading, falling back to the persisted config
+/// hint the last supervisor left behind.
+fn load_status_config(config_path: &str) -> Result<Option<Config>, Box<dyn Error>> {
+    match load_config(Some(config_path)) {
+        Ok(config) => Ok(Some(config)),
+        Err(primary_err) => {
+            if let Ok(Some(hint)) = ipc::read_config_hint() {
+                let hint_path = hint.to_string_lossy().to_string();
+                load_config(Some(&hint_path)).map(Some).map_err(|hint_err| {
+                    io::Error::other(format!(
+                        "failed to load config '{config_path}' ({primary_err}); fallback config hint '{hint_path}' also failed ({hint_err})"
+                    ))
+                    .into()
+                })
+            } else {
+                Err(primary_err.into())
+            }
+        }
     }
 }
 
@@ -1157,7 +1280,8 @@ fn render_status_table_with_focus(
     ];
 
     let columns = &columns_array;
-    for line in status_overview_lines(columns, units, health, opts.no_color) {
+    for line in status_overview_lines(columns, units, health, opts.no_color, opts.offline)
+    {
         println!("{line}");
     }
     println!();
@@ -1337,7 +1461,9 @@ fn render_status_non_interactive(
     ];
 
     let columns = &columns_array;
-    for line in status_overview_lines(columns, &units, health, opts.no_color) {
+    for line in
+        status_overview_lines(columns, &units, health, opts.no_color, opts.offline)
+    {
         println!("{line}");
     }
     println!();
@@ -1909,6 +2035,7 @@ fn status_overview_lines(
     units: &[UnitStatus],
     health: OverallHealth,
     no_color: bool,
+    offline: bool,
 ) -> Vec<String> {
     let inner_width = total_inner_width(columns);
     let rail_width = 15usize.min(inner_width.saturating_sub(8));
@@ -1916,16 +2043,18 @@ fn status_overview_lines(
     let summary_rows = status_summary_rows(units, no_color);
     let mut lines = Vec::new();
 
+    let (label, color) = if offline {
+        ("OFFLINE".to_string(), YELLOW_BOLD)
+    } else {
+        (
+            overall_health_label(health).to_ascii_uppercase(),
+            overall_health_color(health),
+        )
+    };
+
     lines.push(make_overview_top_border(columns));
     lines.push(format_overview_line(
-        &format!(
-            " Status: {}",
-            colorize(
-                &overall_health_label(health).to_ascii_uppercase(),
-                overall_health_color(health),
-                no_color
-            )
-        ),
+        &format!(" Status: {}", colorize(&label, color, no_color)),
         columns,
     ));
     lines.push(make_overview_split_border(inner_width, rail_width));

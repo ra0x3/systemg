@@ -925,9 +925,19 @@ impl ServiceConfig {
     ///
     /// # Returns
     /// A 16-character hexadecimal string representing the first 64 bits of the SHA256 hash.
+    ///
+    /// Serializes through `serde_json::Value` (a `BTreeMap`-backed object) so map
+    /// fields like `env.vars` emit their keys in sorted order. Serializing `self`
+    /// directly walks the source `HashMap`s in random per-instance order, so two
+    /// independent loads of the same manifest would hash differently and every
+    /// hash-based comparison (idempotent re-registration, restart reconcile
+    /// diffing, state keys) would spuriously see a change. This canonical form is
+    /// stable across loads.
     pub fn compute_hash(&self) -> String {
-        let json = serde_json::to_string(self)
+        let value = serde_json::to_value(self)
             .expect("ServiceConfig should always be serializable");
+        let json =
+            serde_json::to_string(&value).expect("JSON value is always serializable");
         let mut hasher = Sha256::new();
         hasher.update(json.as_bytes());
         let result = hasher.finalize();
@@ -2480,6 +2490,59 @@ services:
         };
         let stripped = env.vars_to_strip();
         assert_eq!(stripped, vec!["FOO".to_string()]);
+    }
+
+    #[test]
+    fn compute_hash_is_stable_across_independent_env_maps() {
+        // Two independently-built HashMaps with the same entries iterate in
+        // different orders; the canonical hash must not depend on that order.
+        let build = || {
+            let mut vars = HashMap::new();
+            for (k, v) in [
+                ("ALPHA", "1"),
+                ("BRAVO", "2"),
+                ("CHARLIE", "3"),
+                ("DELTA", "4"),
+                ("ECHO", "5"),
+                ("FOXTROT", "6"),
+                ("PATH", "/usr/bin"),
+                ("RUST_LOG", "debug"),
+            ] {
+                vars.insert(k.to_string(), v.to_string());
+            }
+            ServiceConfig {
+                command: "run".into(),
+                env: Some(EnvConfig {
+                    vars: Some(vars),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        };
+        let first = build().compute_hash();
+        for _ in 0..64 {
+            assert_eq!(build().compute_hash(), first);
+        }
+    }
+
+    #[test]
+    fn compute_hash_still_changes_on_a_real_change() {
+        let base = ServiceConfig {
+            command: "run".into(),
+            ..Default::default()
+        };
+        let changed = ServiceConfig {
+            command: "run --v2".into(),
+            ..Default::default()
+        };
+        assert_ne!(base.compute_hash(), changed.compute_hash());
+
+        let mut env_added = base.clone();
+        env_added.env = Some(EnvConfig {
+            vars: Some(HashMap::from([("A".into(), "1".into())])),
+            ..Default::default()
+        });
+        assert_ne!(base.compute_hash(), env_added.compute_hash());
     }
 
     #[test]

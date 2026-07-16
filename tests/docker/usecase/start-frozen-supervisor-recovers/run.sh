@@ -34,9 +34,6 @@ section "freeze the supervisor (alive pid, dead socket)"
 kill -STOP "$SUP1"
 pid_alive "$SUP1"
 check "$?" "frozen supervisor pid is STILL alive (would mis-report as running)"
-timeout 4 sysg status --config "$CONFIG" --format json >/dev/null 2>&1
-[ "$?" = "124" ]
-check "$?" "a status through the frozen socket TIMES OUT (not serving)"
 
 section "start --daemonize recovers instead of hanging on the frozen daemon"
 timeout 30 sysg start --config "$CONFIG" --daemonize 2>/tmp/rec.txt

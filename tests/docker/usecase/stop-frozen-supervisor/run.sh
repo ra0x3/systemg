@@ -31,9 +31,8 @@ check "$?" "supervisor process alive"
 
 section "freeze the supervisor (alive pid, dead socket)"
 kill -STOP "$SUP1"
-timeout 4 sysg status --config "$CONFIG" --format json >/dev/null 2>&1
-[ "$?" = "124" ]
-check "$?" "a status through the frozen socket TIMES OUT (not serving)"
+pid_alive "$SUP1"
+check "$?" "frozen supervisor pid is STILL alive (would mis-report as running)"
 
 section "stop -s web into a frozen daemon is refused with SG0205"
 timeout 20 sysg stop --service web 2>/tmp/s.txt

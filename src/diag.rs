@@ -82,6 +82,9 @@ pub enum SgCode {
     /// answering its control socket, so the command was refused rather than
     /// routed into a dying daemon.
     SupervisorNotResponding,
+    /// SG0206 — no supervisor is running, so the reported state is off disk and
+    /// unsupervised; any surviving processes are orphaned.
+    SupervisorOffline,
     /// SG0301 — a restart's new manifest is invalid; nothing was changed.
     ManifestRejected,
     /// SG0302 — a reconcile ran but left units short of their manifest target.
@@ -119,6 +122,7 @@ impl SgCode {
             SgCode::ConfigFileUnreadable => "SG0203",
             SgCode::ConflictingSelectors => "SG0204",
             SgCode::SupervisorNotResponding => "SG0205",
+            SgCode::SupervisorOffline => "SG0206",
             SgCode::ManifestRejected => "SG0301",
             SgCode::ReconcileIncomplete => "SG0302",
             SgCode::SupervisorRecycleFailed => "SG0303",
@@ -131,7 +135,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 27] = [
+    pub const ALL: [SgCode; 28] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -156,6 +160,7 @@ impl SgCode {
         SgCode::ConfigFileUnreadable,
         SgCode::ConflictingSelectors,
         SgCode::SupervisorNotResponding,
+        SgCode::SupervisorOffline,
         SgCode::ManifestRejected,
         SgCode::ReconcileIncomplete,
         SgCode::SupervisorRecycleFailed,
@@ -295,6 +300,20 @@ impl Diagnostic {
     pub fn error(code: SgCode, title: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
+            code,
+            title: title.into(),
+            origin: None,
+            notes: Vec::new(),
+            evidence: Vec::new(),
+            help: Vec::new(),
+        }
+    }
+
+    /// Starts a warning-severity diagnostic — a degraded but non-fatal reading,
+    /// such as a status shown off disk while the supervisor is offline.
+    pub fn warn(code: SgCode, title: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
             code,
             title: title.into(),
             origin: None,

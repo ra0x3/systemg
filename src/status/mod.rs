@@ -1,5 +1,9 @@
 #![allow(missing_docs)]
 //! Status management for services in the daemon.
+
+pub mod diagnostics;
+pub mod plan;
+
 #[cfg(target_os = "linux")]
 use std::time::UNIX_EPOCH;
 use std::{
@@ -20,6 +24,7 @@ use chrono_tz::Tz;
 #[cfg(not(target_os = "linux"))]
 use nix::sys::signal;
 use nix::unistd::{Pid, getpgid};
+pub use plan::{StatusPlan, resolve_plan};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid as SysPid, ProcessesToUpdate, System};
 use thiserror::Error;

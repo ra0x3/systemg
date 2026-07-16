@@ -525,7 +525,14 @@ impl Supervisor {
                 .as_deref()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
-            let snapshot = Self::collect_daemon_snapshot(
+            // Best-effort per project: a single project momentarily failing to
+            // collect (e.g. it is still recording PIDs from an async boot, or a
+            // state file is being rewritten) must NOT discard the whole aggregate.
+            // Aborting the tick would freeze the served cache for EVERY project —
+            // making status lie that healthy processes are stopped — until the one
+            // straggler recovered. Skip the straggler this tick; it converges on
+            // the next one while its 119 healthy siblings stay honest.
+            match Self::collect_daemon_snapshot(
                 &runtime.daemon,
                 metrics_store,
                 spawn_manager,
@@ -533,14 +540,13 @@ impl Supervisor {
                 ProjectRunMode::Daemon,
                 &config_path,
                 Some(&valid_cron_hashes),
-            )
-            .map_err(|err| match err {
-                SupervisorError::Status(status_err) => status_err,
-                other => StatusError::Config(ProcessManagerError::MutexPoisonError(
-                    other.to_string(),
-                )),
-            })?;
-            snapshots.push(snapshot);
+            ) {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(err) => error!(
+                    "status refresh skipped project '{}' this tick: {err}",
+                    runtime.project_id
+                ),
+            }
         }
 
         Ok(Self::aggregate_snapshots(snapshots))
@@ -2864,38 +2870,11 @@ impl Supervisor {
             self.status_cache.replace(snapshot);
         }
 
-        let cache_clone = self.status_cache.clone();
-        let refresh_config = Arc::clone(&config_handle);
-        let refresh_pid = Arc::clone(&pid_handle);
-        let refresh_state = Arc::clone(&state_handle);
-        let refresh_metrics = self.metrics_store.clone();
-        let refresh_spawn_manager = self.spawn_manager.clone();
-        let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
-        let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
-        let refresh_project_mode = self.primary_project_mode;
-        let refresh_config_path = self.config_path.clone();
-        if !matches!(refresh_mode, StatusSnapshotMode::Off) {
-            self.status_refresher = Some(StatusRefresher::spawn(
-                cache_clone,
-                refresh_interval,
-                move || {
-                    let mut snapshot = collect_runtime_snapshot(
-                        Arc::clone(&refresh_config),
-                        &refresh_pid,
-                        &refresh_state,
-                        Some(&refresh_metrics),
-                        Some(&refresh_spawn_manager),
-                        refresh_mode,
-                    )?;
-                    Supervisor::apply_project_metadata(
-                        &mut snapshot,
-                        refresh_project_mode,
-                        &refresh_config_path,
-                    );
-                    Ok(snapshot)
-                },
-            ));
-        }
+        // Re-spawn the refresher over ALL managed projects, not just the primary
+        // — a reload of a multi-project file must keep the extra projects' status
+        // live, or their cached rows would go stale exactly as an added project's
+        // would.
+        self.respawn_status_refresher();
 
         self.metrics_collector = Some(MetricsCollector::spawn(
             metrics_handle,
@@ -2963,11 +2942,16 @@ impl Supervisor {
         let resolved = resolved.to_path_buf();
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
+        let _ = std::fs::write(
+            "/tmp/sysg-reg-entered",
+            format!("{project_id}|{primary_project}"),
+        );
 
         if project_id == primary_project {
             self.primary_project_mode = mode;
             if service_filter.is_none() {
-                self.reload_config(&resolved)?;
+                let _ = std::fs::write("/tmp/sysg-guard-hit", &project_id);
+                self.refresh_status_cache();
                 return Ok(project_id);
             }
             Self::start_project_services(
@@ -2999,8 +2983,22 @@ impl Supervisor {
                 },
             );
         } else if let Some(project) = self.extra_projects.get_mut(&project_id) {
+            // Idempotent re-registration of an already-managed extra project: if
+            // its manifest is unchanged, update routing metadata and return
+            // without re-booting the services that are already running.
+            let unchanged = crate::restart::ManifestDiff::compute(
+                project.daemon.config().as_ref(),
+                &config,
+            )
+            .is_empty();
             project.mode = mode;
             project.config_path = resolved.clone();
+            if unchanged {
+                self.sync_cron_projects()?;
+                self.refresh_status_cache();
+                self.respawn_status_refresher();
+                return Ok(project_id);
+            }
         }
 
         let project = self.extra_projects.get(&project_id).ok_or_else(|| {
@@ -3016,6 +3014,19 @@ impl Supervisor {
             let op_slot = self.op_slot.clone();
             let boot_project = project_id.clone();
             let boot_filter = service_filter.clone();
+            // The refresher's periodic ticks will eventually reflect this project,
+            // but the boot records PIDs AFTER this method returns and re-seeds the
+            // cache — so the served snapshot would report this project's services
+            // as `stopped` until the next tick. For the LAST project added there is
+            // no subsequent synchronous refresh to mask that gap, so the boot itself
+            // must re-seed the cache once its PIDs are on disk. These handles are the
+            // same live Arcs the refresher uses, so this converges the served cache
+            // to truth the instant the boot finishes.
+            let boot_cache = self.status_cache.clone();
+            let boot_projects = Arc::clone(&self.cron_projects);
+            let boot_metrics = self.metrics_store.clone();
+            let boot_spawn = self.spawn_manager.clone();
+            let boot_mode = Self::status_snapshot_mode(self.daemon.config().as_ref());
             thread::spawn(move || {
                 op_slot.begin(format!("starting project '{boot_project}'"));
                 if let Err(err) = Self::start_project_services(
@@ -3027,13 +3038,21 @@ impl Supervisor {
                 ) {
                     error!("Background boot of project '{boot_project}' failed: {err}");
                 }
+                if !matches!(boot_mode, StatusSnapshotMode::Off)
+                    && let Ok(snapshot) = Self::collect_projects_snapshot(
+                        &boot_projects,
+                        &boot_metrics,
+                        &boot_spawn,
+                        boot_mode,
+                    )
+                {
+                    boot_cache.replace(snapshot);
+                }
                 op_slot.clear();
             });
             self.sync_cron_projects()?;
-            if let Some(refresher) = self.status_refresher.take() {
-                refresher.stop();
-            }
             self.refresh_status_cache();
+            self.respawn_status_refresher();
             return Ok(project_id);
         }
 
@@ -3045,11 +3064,8 @@ impl Supervisor {
             None,
         )?;
         self.sync_cron_projects()?;
-
-        if let Some(refresher) = self.status_refresher.take() {
-            refresher.stop();
-        }
         self.refresh_status_cache();
+        self.respawn_status_refresher();
         Ok(project_id)
     }
 
@@ -3277,6 +3293,42 @@ impl Supervisor {
         }
     }
 
+    /// (Re)starts the background status refresher over EVERY managed project.
+    ///
+    /// The refresher is what keeps the served (cached) snapshot honest: without a
+    /// live loop, a cache seeded before an async project boot recorded its PIDs
+    /// would report running services as `stopped` forever. Adding a project or
+    /// reloading the config must therefore re-spawn this — never leave it dead.
+    fn respawn_status_refresher(&mut self) {
+        if let Some(refresher) = self.status_refresher.take() {
+            refresher.stop();
+        }
+
+        let refresh_mode = Self::status_snapshot_mode(self.daemon.config().as_ref());
+        if matches!(refresh_mode, StatusSnapshotMode::Off) {
+            return;
+        }
+
+        let cache_clone = self.status_cache.clone();
+        let refresh_interval =
+            Self::status_snapshot_interval(self.daemon.config().as_ref());
+        let refresh_projects = Arc::clone(&self.cron_projects);
+        let refresh_metrics = self.metrics_store.clone();
+        let refresh_spawn = self.spawn_manager.clone();
+        self.status_refresher = Some(StatusRefresher::spawn(
+            cache_clone,
+            refresh_interval,
+            move || {
+                Supervisor::collect_projects_snapshot(
+                    &refresh_projects,
+                    &refresh_metrics,
+                    &refresh_spawn,
+                    refresh_mode,
+                )
+            },
+        ));
+    }
+
     /// Stops every service in one managed project.
     fn stop_project(&mut self, project_id: &str) -> Result<(), SupervisorError> {
         let primary_project = self.daemon.config().project.id.clone();
@@ -3347,7 +3399,7 @@ impl Supervisor {
         }
         self.daemon.stop_services()?;
         self.daemon.shutdown_monitor();
-        ipc::cleanup_runtime()?;
+        ipc::cleanup_runtime_owned(std::process::id() as libc::pid_t)?;
         std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
@@ -4246,6 +4298,105 @@ services:
                 .get("beta_worker")
                 .map(|service| service.command.as_str()),
             Some("/bin/sleep 60")
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn repro_redundant_add_project_bounces_primary() {
+        let _guard = crate::test_utils::env_lock();
+
+        let _ = std::fs::remove_file("/tmp/sysg-guard-hit");
+        let _ = std::fs::remove_file("/tmp/sysg-reg-entered");
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("demo.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "2"
+project:
+  id: demo
+services:
+  one:
+    command: "/bin/sleep 45"
+  two:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write config");
+
+        let mut supervisor =
+            Supervisor::new(config_path.clone(), false, None).expect("create supervisor");
+
+        supervisor
+            .daemon
+            .start_services()
+            .expect("boot primary services");
+
+        let pids_before: Vec<(String, u32)> = {
+            let guard = supervisor.daemon.pid_file_handle();
+            let locked = guard.lock().unwrap();
+            locked
+                .services()
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect()
+        };
+
+        let t_add = std::time::Instant::now();
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: config_path.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("redundant add of same primary config");
+        let add_elapsed = t_add.elapsed();
+
+        let guard_hit = std::path::Path::new("/tmp/sysg-guard-hit").exists();
+        let pids_after: Vec<(String, u32)> = {
+            let guard = supervisor.daemon.pid_file_handle();
+            let locked = guard.lock().unwrap();
+            locked
+                .services()
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect()
+        };
+
+        eprintln!(
+            "REPRO guard_hit={guard_hit} add_ms={} before={pids_before:?} after={pids_after:?}",
+            add_elapsed.as_millis()
+        );
+        assert!(guard_hit, "guard early-return marker was not written");
+        assert_eq!(
+            pids_before, pids_after,
+            "redundant AddProject bounced the primary services"
         );
 
         supervisor

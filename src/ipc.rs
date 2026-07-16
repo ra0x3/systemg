@@ -614,6 +614,27 @@ pub fn cleanup_runtime() -> Result<(), ControlError> {
     Ok(())
 }
 
+/// Clears runtime files only if they still belong to `owner_pid`.
+///
+/// A daemon shutting down must not delete a successor's runtime files. During a
+/// recycle the CLI stops the old daemon and immediately forks a new one that
+/// binds a fresh socket and writes its own pid; the old daemon's teardown runs
+/// ~2s behind, so a path-only `cleanup_runtime` would unlink the live
+/// successor's socket and pid file, leaving it alive but undiscoverable. This
+/// variant no-ops when the on-disk pid no longer names `owner_pid`, so a dying
+/// predecessor can never clobber whoever took over.
+pub fn cleanup_runtime_owned(owner_pid: libc::pid_t) -> Result<(), ControlError> {
+    let still_ours = match read_supervisor_pid() {
+        Ok(Some(pid)) => pid == owner_pid,
+        Ok(None) => true,
+        Err(_) => false,
+    };
+    if !still_ours {
+        return Ok(());
+    }
+    cleanup_runtime()
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixListener;

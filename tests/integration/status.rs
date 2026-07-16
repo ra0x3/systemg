@@ -103,17 +103,25 @@ services:
         .output()
         .expect("run sysg status");
 
+    // With NO supervisor running, status must NOT present the disk state as a
+    // supervised HEALTHY stack. It exits non-zero (2) and names SG0206 on
+    // stderr, while still serializing the disk-read units on stdout.
     let code = output.status.code().unwrap_or_default();
-    assert!(
-        (0..=2).contains(&code),
-        "status command should exit with a defined health code before supervisor is running, got {code}"
+    assert_eq!(
+        code, 2,
+        "status with no supervisor must exit 2 (offline), got {code}"
     );
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
-    assert_eq!(payload["overall_health"], "healthy");
     assert!(
-        output.stderr.is_empty(),
-        "status json output should not emit progress noise on stderr in non-interactive mode"
+        payload.get("units").is_some(),
+        "offline status should still serialize the disk-read units"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SG0206"),
+        "offline status must name SG0206 on stderr, got: {stderr}"
     );
 
     drop(home_guard);
@@ -382,16 +390,15 @@ services:
 
     let payload: Value =
         serde_json::from_slice(&output.stdout).expect("parse status json");
-    let expected_exit = match payload["overall_health"].as_str() {
-        Some("healthy") => 0,
-        Some("warn") => 1,
-        Some("failing") => 2,
-        _ => 2,
-    };
     let code = output.status.code().unwrap_or_default();
     assert_eq!(
-        code, expected_exit,
-        "unexpected exit code for zombie process"
+        code, 2,
+        "status with no supervisor must exit 2 (offline), got {code}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SG0206"),
+        "offline status must name SG0206 on stderr, got: {stderr}"
     );
     assert_eq!(payload["overall_health"].as_str(), Some("failing"));
 
@@ -481,13 +488,16 @@ services:
 
     let payload: Value =
         serde_json::from_slice(&output.stdout).expect("parse status json");
-    let expected_exit = match payload["overall_health"].as_str() {
-        Some("healthy") => 0,
-        Some("warn") => 1,
-        Some("failing") => 2,
-        _ => 1,
-    };
-    assert_eq!(output.status.code(), Some(expected_exit));
+    let code = output.status.code().unwrap_or_default();
+    assert_eq!(
+        code, 2,
+        "status with no supervisor must exit 2 (offline), got {code}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SG0206"),
+        "offline status must name SG0206 on stderr, got: {stderr}"
+    );
     assert_eq!(payload["overall_health"].as_str(), Some("healthy"));
 
     let units = payload["units"].as_array().expect("units array");
@@ -546,13 +556,16 @@ services:
 
     let payload: Value =
         serde_json::from_slice(&output.stdout).expect("parse status json");
-    let expected_exit = match payload["overall_health"].as_str() {
-        Some("healthy") => 0,
-        Some("warn") => 1,
-        Some("failing") => 2,
-        _ => 0,
-    };
-    assert_eq!(output.status.code(), Some(expected_exit));
+    let code = output.status.code().unwrap_or_default();
+    assert_eq!(
+        code, 2,
+        "status with no supervisor must exit 2 (offline), got {code}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("SG0206"),
+        "offline status must name SG0206 on stderr, got: {stderr}"
+    );
     assert_eq!(payload["overall_health"].as_str(), Some("healthy"));
 
     let units = payload["units"].as_array().expect("units array");
