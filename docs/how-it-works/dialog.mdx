@@ -60,6 +60,9 @@ plain text with no escape codes, and `NO_COLOR` is respected.
 | `SG0301` | A restart's new manifest is invalid, so the restart was refused and nothing changed |
 | `SG0302` | A restart ran but left one or more units short of their target state |
 | `SG0303` | A supervisor recycle stopped the old daemon but the new one did not come up |
+| `SG0401` | A purge was refused because a live supervisor is still managing processes; stop it or pass `--force` |
+| `SG0402` | A purge removed some state but hit an IO error before finishing, so the on-disk state may be partial |
+| `SG0403` | A scoped purge named a project that has no state on disk; nothing was deleted |
 
 Codes are stable: a script can match on them, and each has a page at
 `https://docs.sysg.dev/errors/<code>`.

@@ -22,6 +22,16 @@ they print a drift warning instead; run a full restart (or `sysg stop` +
 `sysg start`) to pick up the new binary.
 </Warning>
 
+<Note>
+**The recycle transfers supervision, not just the processes.** After a
+version-drift restart, your services stop being managed by the old supervisor
+and start being managed by the new one: the old daemon is stopped, a fresh
+daemon boots on the installed binary, and it actively supervises the
+re-spawned services — a crash after the upgrade is respawned by the new
+supervisor, exactly as before. If the replacement config fails to validate,
+the recycle is refused (`SG0303`) and the working stack is left untouched.
+</Note>
+
 ## Options
 
 | Short | Long | Description |

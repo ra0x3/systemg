@@ -477,8 +477,25 @@ pub enum Commands {
         in_place: bool,
     },
 
-    /// Purge all systemg state and runtime files.
-    Purge,
+    /// Purge systemg state and runtime files.
+    ///
+    /// With no selector, wipes the entire state root. `-c` scopes to every
+    /// project a config declares; `-p` scopes to one project. Refuses to run
+    /// while a live supervisor is managing processes unless `--force` is given.
+    Purge {
+        /// Purge only the projects this config declares (or `__loose__` if it is
+        /// project-less). Omit to wipe the whole state root.
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Purge only this project's state.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+
+        /// Purge even while a supervisor is managing processes (stops it first).
+        #[arg(long)]
+        force: bool,
+    },
 
     /// INTERNAL: boot the resident supervisor. Not for direct use — the daemon
     /// re-execs into this after forking so it starts from a clean, single-threaded

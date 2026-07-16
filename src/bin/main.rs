@@ -1221,9 +1221,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                 print!("{converted}");
             }
         }
-        Commands::Purge => {
-            purge_all_state()?;
-            println!("All systemg state has been purged");
+        Commands::Purge {
+            config,
+            project,
+            force,
+        } => {
+            dispatch_purge(config, project, force)?;
         }
         Commands::Supervise {
             config,
@@ -2987,21 +2990,150 @@ mod tests {
 
 include!("sysg/ui.rs");
 
-/// Handles purge all state.
-fn purge_all_state() -> Result<(), Box<dyn Error>> {
-    stop_supervisors();
+/// Resolves the purge selectors into a plan, runs preflight, and — if cleared —
+/// deletes the targeted state.
+fn dispatch_purge(
+    config: Option<String>,
+    project: Option<String>,
+    force: bool,
+) -> Result<(), Box<dyn Error>> {
+    let config_projects = match (&config, &project) {
+        (Some(path), None) => Some(purge_config_project_ids(path)?),
+        _ => None,
+    };
 
-    let runtime_dir = runtime::state_dir();
+    let plan =
+        match systemg::purge::resolve_plan(None, project.as_deref(), config_projects) {
+            Ok(plan) => plan,
+            Err(mismatch) => {
+                return Err(Box::new(DiagError(Box::new(
+                    systemg::start::project_mismatch(&mismatch.flag, &mismatch.selector),
+                ))));
+            }
+        };
 
-    if runtime_dir.exists() {
-        info!("Removing systemg runtime directory: {:?}", runtime_dir);
-        fs::remove_dir_all(&runtime_dir)?;
-        info!("Successfully purged all systemg state");
-    } else {
-        info!("No systemg runtime directory found at {:?}", runtime_dir);
+    let world = purge_world(force);
+    let plan = match systemg::purge::preflight(plan, world) {
+        systemg::purge::Preflight::Ready(plan) => plan,
+        systemg::purge::Preflight::Refused(diag) => {
+            return Err(Box::new(DiagError(diag)));
+        }
+    };
+
+    if force {
+        stop_supervisors();
+        wait_for_runtime_cleared(Duration::from_secs(5));
     }
 
+    execute_purge(plan)
+}
+
+/// A live snapshot of the world for the purge preflight.
+fn purge_world(force: bool) -> systemg::purge::World {
+    match supervisor_health() {
+        SupervisorHealth::Serving => {
+            let managed_units = try_live_status(true)
+                .map(|reading| {
+                    reading
+                        .snapshot
+                        .units
+                        .iter()
+                        .filter(|u| u.process.is_some())
+                        .count()
+                })
+                .unwrap_or(0);
+            systemg::purge::World {
+                supervisor_serving: true,
+                managed_units,
+                force,
+            }
+        }
+        SupervisorHealth::Dying | SupervisorHealth::Down => systemg::purge::World {
+            supervisor_serving: false,
+            managed_units: 0,
+            force,
+        },
+    }
+}
+
+/// Reads a config and returns the project ids it declares (or `__loose__`).
+fn purge_config_project_ids(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let content = fs::read_to_string(path).map_err(|err| -> Box<dyn Error> {
+        Box::new(DiagError(Box::new(config_read_diag(&err.to_string()))))
+    })?;
+    let configs = systemg::config::parse_config_projects(&content)?;
+    Ok(configs.into_iter().map(|c| c.project.id).collect())
+}
+
+/// Deletes the state a cleared [`PurgePlan`] targets.
+fn execute_purge(plan: systemg::purge::PurgePlan) -> Result<(), Box<dyn Error>> {
+    use systemg::purge::PurgePlan;
+    match plan {
+        PurgePlan::Everything => {
+            purge_state_root()?;
+            println!("All systemg state has been purged");
+        }
+        PurgePlan::Config { projects } => {
+            purge_projects(&projects)?;
+            purge_runtime_files();
+            println!("Purged state for {} project(s)", projects.len());
+        }
+        PurgePlan::Project { project } => {
+            let dir = runtime::state_dir()
+                .join(systemg::state_store::PROJECTS_DIR)
+                .join(&project);
+            if !dir.exists() {
+                return Err(Box::new(DiagError(Box::new(
+                    systemg::purge::project_not_found(&project),
+                ))));
+            }
+            remove_tree(&dir)?;
+            println!("Purged state for project '{project}'");
+        }
+    }
     Ok(())
+}
+
+/// Removes the whole state root plus the out-of-root system-mode log dir.
+fn purge_state_root() -> Result<(), Box<dyn Error>> {
+    let runtime_dir = runtime::state_dir();
+    if runtime_dir.exists() {
+        info!("Removing systemg runtime directory: {:?}", runtime_dir);
+        remove_tree(&runtime_dir)?;
+    }
+    // In system mode logs live outside the state root; take them too.
+    let log_dir = runtime::log_dir();
+    if log_dir.exists() && !log_dir.starts_with(&runtime_dir) {
+        remove_tree(&log_dir)?;
+    }
+    Ok(())
+}
+
+/// Removes each named project's state directory.
+fn purge_projects(projects: &[String]) -> Result<(), Box<dyn Error>> {
+    let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+    for project in projects {
+        let dir = root.join(project);
+        if dir.exists() {
+            remove_tree(&dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes the supervisor-level runtime files (socket, pid, config hint).
+fn purge_runtime_files() {
+    let _ = ipc::cleanup_runtime();
+}
+
+/// Removes a directory tree, mapping any IO error to the partial-purge SG0402.
+fn remove_tree(dir: &Path) -> Result<(), Box<dyn Error>> {
+    fs::remove_dir_all(dir).map_err(|err| -> Box<dyn Error> {
+        Box::new(DiagError(Box::new(systemg::purge::incomplete(format!(
+            "failed to remove {}: {err}",
+            dir.display()
+        )))))
+    })
 }
 
 /// Stops supervisors.
@@ -3105,17 +3237,20 @@ fn is_supervisor(process: &sysinfo::Process) -> bool {
 
     let mut has_supervisor_command = false;
     let mut has_daemonize = false;
+    let mut is_reexec_supervise = false;
 
     for arg in cmd {
         let value = arg.to_string_lossy();
         if value == "start" || value == "restart" {
             has_supervisor_command = true;
+        } else if value == "supervise" {
+            is_reexec_supervise = true;
         } else if value == "--daemonize" {
             has_daemonize = true;
         }
     }
 
-    has_supervisor_command && has_daemonize
+    is_reexec_supervise || (has_supervisor_command && has_daemonize)
 }
 
 /// Waits for for supervisor exit.

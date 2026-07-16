@@ -87,5 +87,8 @@ pub mod stop;
 /// The `restart` command, rebuilt from first principles.
 pub mod restart;
 
+/// The `purge` command, rebuilt from first principles.
+pub mod purge;
+
 /// Privilege dropping.
 pub mod privilege;
