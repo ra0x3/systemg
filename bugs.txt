@@ -1,0 +1,243 @@
+systemg — known bugs to circle back on
+========================================
+Found during the `start` command rebuild (2026-07-15). Each has a failing
+usecase under tests/docker/usecase/. None are the start selector/boot logic
+itself — they are distinct downstream bugs the suite pinned.
+
+
+[BUG-1] Second start is not idempotent (restarts the running service)
+  Code:  SG0001-ish (idempotency)
+  Case:  start-already-running  (RED)
+  Repro: sysg start -c f.yaml --daemonize ; then run the SAME command again.
+  Seen:  the second start changes the service's PID — it bounces the running
+         service instead of being a no-op. Process count stays 1 (no dup), but
+         a repeat start should leave already-running services untouched.
+  Where: the daemonize + supervisor-running dispatch re-sends AddProject/Start
+         for services that are already up.
+
+
+[BUG-2] Explicit start of a skip:true service does not un-skip it
+  Code:  (skip override)
+  Case:  start-resident-target, start-ambiguous-selector  (RED)
+  Repro: service declared `skip: true`; then `sysg start -p <proj> -s <svc>`.
+  Seen:  the by-id start resolves and is sent (exits 0, reads no file), but the
+         service stays `skipped` in status and never runs. Explicitly targeting
+         a skipped service by id should override the skip and start it.
+  Where: start_single_service_target / skip evaluation on the explicit-start
+         path in supervisor.rs.
+
+
+[BUG-3] [FIXED] Separately-added project shows stopped in status while alive
+  Code:  SG0009 (STATUS_STATE_INCONSISTENT)
+  Case:  start-multi-config-separate; status-many-projects-fast (now GREEN)
+  Repro: register N projects via SEPARATE `start -c <file>` calls into one
+         supervisor. The LAST-added project's services are alive in ps but
+         status reports them stopped.
+  ROOT (2026-07-15, found via the 4-config/40-project status scale test): the
+         served (cached) status is answered from status_cache, but (1)
+         add_project_config KILLED the background StatusRefresher and never
+         re-spawned it, so the timed liveness re-probe loop went dead after the
+         first extra-project add; and (2) a project boots its services on a
+         detached thread that records PIDs AFTER the synchronous refresh runs,
+         so the last-added project's cache is frozen pre-PID; and (3)
+         collect_projects_snapshot used `?` so ONE mid-boot project aborted the
+         WHOLE aggregate refresh. --live was always correct (rebuilds fresh on
+         the owner thread). FIX: respawn_status_refresher() over ALL projects on
+         every add and on reload; collect_projects_snapshot is now per-project
+         best-effort (one straggler can't freeze the other 119); and the async
+         boot thread re-seeds the served cache once its PIDs land. Proven: 120
+         units, ps == status == 120, cached latency ~4ms. See memory
+         [[sysg-status-cache-stale-at-scale]].
+
+[BUG-9] [FIXED] status renders stale cached state.xml as HEALTHY after runtime clear
+  Code:  SG0206 SupervisorOffline (new)
+  Case:  status-no-supervisor-offline, status-frozen-no-hang (GREEN)
+  Repro: kill the supervisor (services survive), clear pid+socket, run status.
+  Seen:  status read the persisted snapshot and rendered "HEALTHY / exit 0" as
+         if a supervisor were managing everything; also HUNG on a frozen
+         supervisor (untimed send_command).
+  FIX (2026-07-15): status is now gated on SupervisorHealth (the BUG-4 probe).
+         Serving -> live snapshot; Dying -> SG0205, bounded, no hang; Down ->
+         OFFLINE banner (SG0206) + PID-verified disk units, exit 2, overview
+         reads OFFLINE not HEALTHY. New StatusPlan + resolve_plan on the shared
+         selector; ambiguous `status -s` across a multi-project config now
+         refused with SG0006 (status-service-ambiguity GREEN), uniform with the
+         other commands. See [[sysg-status-stale-after-runtime-clear]].
+
+
+[BUG-4] [FIXED] stop --supervisor then immediate start hits the dying supervisor
+  FIX (2026-07-15): the root was supervisor_running() trusting a live pid —
+  signal::kill(pid, None) only proves the PROCESS exists, not that it is
+  SERVING. A daemon whose pid is alive but whose control socket is dead (mid-
+  shutdown, wedged, or SIGSTOP'd) was mis-reported as usable, so start/stop
+  routed a command into it and hung ("supervisor dropped the command before
+  replying"). Added a SupervisorHealth probe (main.rs): a live pid is confirmed
+  with a bounded Status ping over the socket, run on its own thread with a hard
+  join deadline (connecting to a frozen listener can block past any socket-level
+  timeout). Serving = pid alive AND socket answered; Dying = pid alive but no
+  answer; Down = no pid + no live socket. Also set a WRITE timeout in
+  send_command_with_timeout (was read-only). Wired into dispatch:
+    - start --daemonize: Dying -> clear the stale runtime and fork fresh (the
+      "had to sysg purge" pain, auto-recovered); Serving -> resident; Down -> fork.
+    - stop --supervisor: Dying -> clear the runtime and report down (a Shutdown
+      that can't be delivered would error spuriously); Serving -> Shutdown.
+    - stop <unit selector>: Dying -> refuse with typed SG0205 (never route a
+      unit stop into a wedged daemon).
+  New code SG0205 SupervisorNotResponding + supervisor_not_responding_diag.
+  Proven by start-frozen-supervisor-recovers (8/8: SIGSTOP the daemon, start
+  recovers without hanging, forks a NEW supervisor, web runs) and
+  stop-frozen-supervisor (10/10: stop -s web -> SG0205 no hang; stop
+  --supervisor -> clears pid+socket, exits 0). Note: a residual gap surfaced —
+  after the runtime is cleared, `status` still renders the STALE cached
+  state.xml snapshot as HEALTHY instead of "No running supervisor". That is the
+  STATUS command's world-detection, not stop's job (stop correctly cleared the
+  runtime); belongs to the status rebuild. See [[sysg-status-drops-services]].
+
+[BUG-4-orig] stop --supervisor then immediate start hits the dying supervisor
+  Code:  SG0007 / SG0015 (SUPERVISOR_RESTART_CONFLICT / STATE_DESYNCHRONIZED)
+  Case:  (surfaced while wiring start; not a dedicated case yet)
+  Repro: sysg stop --supervisor ; then immediately sysg start --daemonize.
+  Seen:  fails with "supervisor reported error: supervisor dropped the command
+         before replying". supervisor_running() returned TRUE off a stale
+         pidfile, so start routed to the dying supervisor instead of forking.
+         With a ~3s gap it succeeds. This is the "No running supervisor / had to
+         sysg purge" prod pain.
+  Where: supervisor_running() must verify the pidfile's process is actually
+         alive AND serving; stop --supervisor must clear socket+pidfile before
+         returning (or start must detect a dying supervisor and fork fresh).
+
+
+[BUG-5] [FIXED] stop/restart -p <project> kills ALL projects, not just the target
+  Code:  SG0001-ish (cross-project teardown)
+  Case:  stop-project, stop-service-in-project, stop-all, state-isolation (now GREEN)
+  FIX (2026-07-15): two parts. (1) Every service now setsid()s into its OWN
+         session unconditionally (was setpgid when !detach_children, sharing the
+         supervisor session) — daemon.rs pre_exec; also dropped PR_SET_PDEATHSIG
+         (fired on parent-thread death, cascading SIGTERM to siblings). (2) The
+         REAL over-killer: cleanup_config_owned_service_processes matched escaped
+         processes BY COMMAND STRING, so same-command services (all "sleep 3000")
+         all matched — stopping a1 reaped a2 and b1. Removed that command-scan
+         sweep from the targeted per-service stop (pid/pgid termination + setsid
+         is authoritative); kept a sibling-pid exclusion on the remaining sweep.
+         Whole stop suite (10/10) + state-isolation GREEN.
+  Repro: two-project config (alpha primary, beta extra). `sysg stop -p alpha`
+         (or `restart -p alpha`).
+  Seen:  alpha's services stop correctly, BUT beta's processes are ALSO killed
+         (ps empty; status -p beta shows 'lost'). Each service is in its OWN
+         process group (a1=pgid12, a2=pgid19, b1=pgid25 — distinct), so it's NOT
+         a shared-pgid-at-spawn issue. stop_service is killing MORE than the
+         target's group.
+  ROOT CAUSE (confirmed via /proc): even `stop -s a1` (ONE service) kills all.
+         All service leaders share the SUPERVISOR'S SESSION (sid=9) and parent
+         (ppid=9) — they were never setsid'd into their own sessions. Combined
+         with PR_SET_PDEATHSIG=SIGTERM on every child (daemon.rs:2430), a stop
+         that ends one service's launcher context cascades SIGTERM to siblings.
+         The killpg sites are correctly scoped (own pgid, skip supervisor pgid);
+         the leak is the shared session + PDEATHSIG parent, not the pgid target.
+  Fix:   each service must setsid() into its OWN session at spawn so no
+         session-wide / PDEATHSIG-parent event can cross service boundaries.
+         Touches the spawn path (start/restart/stop all inherit it). Same root
+         as restart-drops-extra-projects.
+  Note:  the state re-key (v2 composite keys) made this newly VISIBLE/verifiable
+         by fixing the status lie; the teardown bug itself predates it.
+
+
+[BUG-6] many supervisor errors are untyped plain strings, not typed SgCode diagnostics
+  Code:  (should map to specific SG codes, currently none)
+  Where: src/supervisor.rs has ~20+ error sites returning io::Error /
+         ControlResponse::Error(String) that SHOULD be typed diagnostics with a
+         specific SG code, e.g.:
+           - "project '<id>' is not managed by this supervisor" -> SG0202 TargetNotFound
+             (supervisor.rs:747, 808, 840, 3006, 3107, 3152, ...)
+           - "Service '<name>' not found" / "not found in requested project"
+             -> SG0202 (supervisor.rs:2118, 2142)
+           - "service '<name>' exists in multiple projects" -> SG0006
+             TargetScopeAmbiguous (the INSPECT/RESTART copies at supervisor.rs
+             ~1418, 2090, 2390; the STOP/START copy in resolve_service_target_project
+             is already typed)
+           - duplicate project id -> SG0202-ish (supervisor.rs:923, 1190, 1197, 2828)
+  Note:  these belong to each command's own rebuild (restart, inspect, add-project
+         have NOT been rebuilt yet). Converting them all now would sprawl into
+         commands not currently being worked. Do it as each command is rebuilt.
+  Done so far: audited all SgCode CONSTRUCTION sites for MISCODING (wrong code
+         where a right one exists) and fixed 2: config-read used SG0001 Catchall
+         -> now SG0203 ConfigFileUnreadable; --supervisor+selector used SG0006
+         -> now SG0204 ConflictingSelectors. Added SG0202 TargetNotFound,
+         SG0203, SG0204. The stop path's not-found now returns SG0202.
+
+
+[BUG-7] [FIXED] restart reconcile is not surgical; needs a Daemon config-swap primitive
+  FIX (2026-07-15): landed Daemon::set_config (config: Arc<Mutex<Arc<Config>>>,
+         cfg() reader, all internal reads via cfg(); monitor rebuilt on swap).
+         reload_config now: validate whole manifest first (SG0301, touches
+         nothing on reject) -> compute ManifestDiff -> shutdown_monitor -> apply
+         -> set_config -> ensure_monitoring. The apply is DIFF-AWARE by intent:
+         a NON-empty diff (manifest edited) reconciles surgically (start added,
+         stop removed, restart changed, ADOPT unchanged so an edit never
+         disturbs untouched services); an EMPTY diff (byte-identical manifest =
+         a plain `restart` to pick up new app code) BOUNCES every service. Any
+         unit that misses its came-up target -> SG0302 ReconcileIncomplete.
+         reconcile_primary_project (restart -p) re-reads the stored file for
+         that project's slice only, same diff apply, isolated from siblings.
+         Whole restart suite GREEN 10/10 (restart-all, -reconcile-added/-removed/
+         -changed, -unit-fails-to-come-up, -project-isolation, -manifest-rejected,
+         -single-service, -ambiguous, -no-supervisor). The ignored test
+         restart_primary_project_without_config_reloads_stored_manifest is
+         un-ignored and passes.
+
+[BUG-7-orig] restart reconcile is not surgical; needs a Daemon config-swap primitive
+  Code:  SG0302 ReconcileIncomplete (for the fail path), plus general reconcile
+  Where: reload_config (src/supervisor.rs) still nuke-and-rebuilds (stop ALL,
+         Daemon::from_config, start ALL) after the SG0301 validate. So a
+         whole-config restart or `restart -p` that re-reads the file BOUNCES
+         UNCHANGED services (restart-reconcile-added / -removed usecases RED on
+         "existing service pid UNCHANGED") and cannot report per-unit SG0302.
+  Root:  a truly surgical reconcile (touch only added/removed/changed, adopt the
+         unchanged) requires updating the LIVE daemon's config after applying the
+         diff. Daemon.config is `Arc<Config>` with NO setter, and the monitor
+         thread captures its OWN Arc::clone(&self.config) snapshot (daemon.rs:1591)
+         — so a naive swap leaves the monitor on the old config. Fix needs a
+         config-swap primitive: either config: Arc<ArcSwap<Config>> (all readers
+         see updates) OR rebuild/refresh the monitor on swap. Contained but real
+         daemon refactor.
+  Done:  DEFENSIVE CORE landed — validate-the-whole-manifest-BEFORE-teardown
+         (SG0301 ManifestRejected, nothing touched: restart-manifest-rejected
+         GREEN) and restart -p ISOLATION (reconcile_primary_project bounces only
+         the primary project's own services, never siblings: restart-project-
+         isolation GREEN, same setsid-family root as stop).
+  Ignored test: supervisor::restart_primary_project_without_config_reloads_stored_manifest
+         is #[ignore]'d until this lands (it asserts restart -p re-reads the file
+         and applies gamma-added/beta-removed — needs the config swap). Decision
+         locked with Master: restart -p SHOULD re-read the file (that project's
+         slice only, isolated), so this is a real follow-up not a behavior change.
+  Remaining RED restart usecases: restart-reconcile-added, -removed (bounce
+         unchanged), restart-unit-fails-to-come-up (needs SG0302 + came-up gate).
+
+
+[BUG-8] [FIXED] restart had NO target-existence guard (stop did)
+  Found 2026-07-15 while writing adversarial restart cases. stop_single_
+  service_target refuses an unknown service with a typed SG0202 ("a stop that
+  names a service no project declares is a false success waiting to happen"),
+  but restart_single_service_target had no such pre-check — `restart -s ghost`
+  fell through to an untyped DependencyError, and `restart -p ghost` returned an
+  untyped io::NotFound string. FIX: ported the SG0202 existence guard into
+  restart_single_service_target (checks override config + primary + extra
+  projects before resolving a target) and typed the restart_project_target
+  not-found site via a new crate::stop::project_not_found (SG0202). Proven by
+  restart-target-not-found (SG0202 for -s ghost / -p ghost / -p demo -s ghost,
+  siblings untouched, a real restart still works after).
+
+SG0303 recycle (task 27): typed via crate::restart::recycle_refused /
+recycle_failed (both SG0303). recycle_supervisor_for_restart now returns a
+DiagError instead of plain io::Error strings; the refused path keeps the old
+supervisor running, the failed path carries the exact recovery command. Proven
+end-to-end with a TWO-VERSION docker image (resident daemon built at v0.0.1,
+CLI at real version, forcing genuine drift): restart-recycle-refused (bad
+config -> SG0303, old daemon still answering) and restart-recycle-succeeds
+(valid config -> clean stop-old/start-new, services on new pids). Restart
+suite now 15/15 GREEN (added: -target-not-found, -partial-reconcile,
+-removed-verifies-death, -recycle-refused, -recycle-succeeds).
+
+Cross-refs (agent memory): sysg-start-skip-and-dup, sysg-separate-config-pid-leak,
+sysg-stale-supervisor-restart-race, sysg-stop-kills-siblings, sysg-state-key-and-v2,
+sysg-state-hash-collision, sysg-restart-rebuild-design.

@@ -93,5 +93,8 @@ pub mod purge;
 /// The `logs` command's plan layer, rebuilt from first principles.
 pub mod logs_cmd;
 
+/// The `inspect` command's plan layer, rebuilt from first principles.
+pub mod inspect;
+
 /// Privilege dropping.
 pub mod privilege;

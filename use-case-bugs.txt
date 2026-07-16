@@ -146,3 +146,28 @@ LOGS  (rebuild 2026-07-16)
           the CLI routes `logs --purge` through IPC when a supervisor is up,
           falling back to a local file clear when it is not. Proven: reader 6
           before, 0 after. Memory: sysg-logs-purge-reader-stale.
+
+
+============================================================================
+INSPECT  (rebuild 2026-07-16)
+============================================================================
+
+[UC-13] [FIXED] Ambiguous `inspect -s <svc>` silently inspects one of several
+  Case:  inspect-ambiguous
+  Symptom: two projects each declare `web`; `sysg inspect -s web` (no -p) exited
+           0 and inspected whichever resolved first, instead of refusing (status
+           refuses this with SG0006, inspect did not).
+  Cause:  inspect never ran the cross-project ambiguity check — the InspectPlan
+          validated the selector SHAPE, not the loaded project set. FIX: inspect
+          now runs status_ambiguous_service on a snapshot and refuses a bare -s
+          matching >1 project with SG0006.
+
+[UC-14] [FIXED] `-p <non-primary>` on a multi-project config falsely fails SG0201
+  Case:  inspect-project-scoped (also affected status/logs — shared code)
+  Symptom: a config declaring alpha+beta; `inspect -s web -p beta` was rejected
+           with SG0201 ("project beta does not match the resolved config, which
+           defines alpha") — `-p` could only select the PRIMARY project.
+  Cause:  resolve_command_project compared -p only against config.project.id (the
+          first project). FIX: config_declared_projects enumerates ALL projects
+          the config declares; -p is accepted if it names any of them. Fixes the
+          multi-project -p selector for status, logs, AND inspect at once.

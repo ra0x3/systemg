@@ -67,6 +67,17 @@ stable project id:
 $ sysg inspect --project arbitration --service api
 ```
 
+`--project` may name any project the supervisor has loaded, not just the first
+one a multi-project config declares.
+
+<Note>
+Inspect refuses rather than guesses:
+- a service name that does not exist → `SG0202`,
+- a bare `-s <name>` that matches a service in more than one project → `SG0006`
+  (pass `-p` to choose),
+- a `-p` that disagrees with a `project/service` prefix → `SG0201`.
+</Note>
+
 Shows CPU and memory usage chart:
 
 ```

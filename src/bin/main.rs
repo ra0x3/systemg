@@ -703,18 +703,50 @@ fn run() -> Result<(), Box<dyn Error>> {
             {
                 effective_config = hint.to_string_lossy().to_string();
             }
+            if let Err(err) =
+                systemg::inspect::resolve_plan(&service, project.as_deref(), live)
+            {
+                use systemg::inspect::InspectPlanError;
+                let diag = match err {
+                    InspectPlanError::Mismatch(mismatch) => {
+                        systemg::start::project_mismatch(
+                            &mismatch.flag,
+                            &mismatch.selector,
+                        )
+                    }
+                    InspectPlanError::NotAService => {
+                        systemg::inspect::service_not_found(&service)
+                    }
+                };
+                return Err(Box::new(DiagError(Box::new(diag))));
+            }
             let target_project = resolve_command_project(
                 &effective_config,
                 project.clone(),
                 Some(&service),
             )?;
 
+            // A bare `-s web` that matches a `web` in more than one loaded
+            // project is ambiguous — refuse with SG0006 rather than silently
+            // inspecting whichever one resolves first, exactly as status does.
+            if project.is_none()
+                && let Ok(snapshot) = fetch_status_snapshot(Some(&effective_config), live)
+                && let Some(diag) =
+                    status_ambiguous_service(&snapshot, Some(&service), None)
+            {
+                return Err(Box::new(DiagError(Box::new(diag))));
+            }
+
             let stream_seconds = match stream.as_deref() {
                 Some(value) => match parse_stream_duration(value) {
                     Ok(seconds) => seconds,
                     Err(err) => {
-                        eprintln!("Invalid stream duration '{}': {}", value, err);
-                        process::exit(1);
+                        return Err(Box::new(DiagError(Box::new(
+                            systemg::inspect::invalid_stream_duration(
+                                value,
+                                err.to_string(),
+                            ),
+                        ))));
                     }
                 },
                 None => 5,
@@ -756,7 +788,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 live,
                             )?;
                             if payload.unit.is_none() {
-                                eprintln!("Service '{service}' not found.");
+                                let _ = terminal::disable_raw_mode();
+                                eprint!(
+                                    "{}",
+                                    systemg::inspect::service_not_found(&service)
+                                        .render_for_terminal()
+                                );
                                 process::exit(2);
                             }
 
@@ -841,8 +878,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                     )
                 })?;
                 if payload.unit.is_none() {
-                    eprintln!("Service '{service}' not found.");
-                    process::exit(2);
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::inspect::service_not_found(&service),
+                    ))));
                 }
 
                 let health = render_inspect(&payload, &render_opts)?;
@@ -4409,6 +4447,14 @@ fn resolve_status_project_filter(
     }
 }
 
+/// Returns every project id a config file declares (one for a single-project or
+/// loose config, N for a multi-project config).
+fn config_declared_projects(config_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let content = fs::read_to_string(config_path)?;
+    let configs = systemg::config::parse_config_projects(&content)?;
+    Ok(configs.into_iter().map(|c| c.project.id).collect())
+}
+
 /// Resolves the project a command should target from an explicit project flag and config.
 fn resolve_command_project(
     config_arg: &str,
@@ -4419,11 +4465,19 @@ fn resolve_command_project(
     let config_value = load_config(Some(config_path.to_string_lossy().as_ref())).ok();
 
     if let Some(project) = explicit_project {
+        // A multi-project config declares several projects; `-p` may name any of
+        // them, not just the primary. Only reject when the config genuinely does
+        // not declare the requested project.
         if config_arg != DEFAULT_CONFIG_PATH
-            && let Some(config) = config_value.as_ref()
-            && config.project.id != project
+            && let Ok(declared) = config_declared_projects(&config_path)
+            && !declared.is_empty()
+            && !declared.iter().any(|id| id == &project)
         {
-            fail_project_mismatch(&project, &config.project.id);
+            let primary = config_value
+                .as_ref()
+                .map(|c| c.project.id.clone())
+                .unwrap_or_else(|| declared.join(", "));
+            fail_project_mismatch(&project, &primary);
         }
         return Ok(Some(project));
     }
