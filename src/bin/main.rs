@@ -4320,22 +4320,19 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
     // leaves the box with no supervisor at all — never trade a running stack for
     // an unvalidated one.
     if let Err(err) = load_config(Some(config_path.to_string_lossy().as_ref())) {
-        return Err(io::Error::other(format!(
-            "refusing to recycle supervisor: replacement config {} failed to load ({err}); the existing supervisor was left running",
-            config_path.display()
-        ))
-        .into());
+        return Err(Box::new(DiagError(Box::new(
+            systemg::restart::recycle_refused(&config_path, err.to_string()),
+        ))));
     }
 
     stop_supervisors();
     let _ = ipc::cleanup_runtime();
     let recovery_path = config_path.clone();
     start_supervisor_daemon(config_path, None, false, false).map_err(|err| {
-        io::Error::other(format!(
-            "supervisor recycle FAILED: the old supervisor was stopped but the new one did not start ({err}). Run `sysg start --daemonize --config {}` to recover.",
-            recovery_path.display()
-        ))
-        .into()
+        Box::new(DiagError(Box::new(systemg::restart::recycle_failed(
+            &recovery_path,
+            err.to_string(),
+        )))) as Box<dyn Error>
     })
 }
 

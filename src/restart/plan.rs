@@ -115,6 +115,42 @@ pub fn manifest_rejected(reason: impl Into<String>) -> Diagnostic {
     .help_docs()
 }
 
+/// Builds the SG0303 diagnostic for a supervisor recycle that was refused
+/// because the replacement config failed to validate. The old supervisor is
+/// left running — a bad config never costs you the working stack.
+pub fn recycle_refused(
+    config: &std::path::Path,
+    reason: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::SupervisorRecycleFailed,
+        "refused to recycle the supervisor: the replacement config is invalid",
+    )
+    .note(reason)
+    .note(format!(
+        "the existing supervisor was left running; {} was not applied",
+        config.display()
+    ))
+    .help_docs()
+}
+
+/// Builds the SG0303 diagnostic for a recycle that stopped the old supervisor
+/// but could not start the new one — the box is now unsupervised. The help
+/// carries the exact command to bring supervision back.
+pub fn recycle_failed(config: &std::path::Path, reason: impl Into<String>) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::SupervisorRecycleFailed,
+        "supervisor recycle failed: the old daemon was stopped but the new one did not start",
+    )
+    .note(reason)
+    .note("the box is currently unsupervised")
+    .help_cmd(
+        "recover",
+        format!("sysg start --daemonize --config {}", config.display()),
+    )
+    .help_docs()
+}
+
 /// Builds the SG0302 diagnostic for a reconcile that ran but left one or more
 /// units short of their manifest target.
 pub fn reconcile_incomplete(failed: &[String]) -> Diagnostic {
@@ -136,6 +172,23 @@ mod tests {
 
     fn cfg() -> PathBuf {
         PathBuf::from("/x/systemg.yaml")
+    }
+
+    #[test]
+    fn recycle_refused_is_sg0303_and_names_the_untouched_stack() {
+        let diag = recycle_refused(std::path::Path::new("/x/stack.yaml"), "bad yaml");
+        assert_eq!(diag.code, SgCode::SupervisorRecycleFailed);
+        assert!(diag.notes.iter().any(|n| n.contains("bad yaml")));
+        assert!(diag.notes.iter().any(|n| n.contains("left running")));
+    }
+
+    #[test]
+    fn recycle_failed_carries_the_recovery_command() {
+        let diag = recycle_failed(std::path::Path::new("/x/stack.yaml"), "no port");
+        assert_eq!(diag.code, SgCode::SupervisorRecycleFailed);
+        assert!(diag.notes.iter().any(|n| n.contains("unsupervised")));
+        let help = format!("{diag}");
+        assert!(help.contains("sysg start --daemonize --config /x/stack.yaml"));
     }
 
     #[test]

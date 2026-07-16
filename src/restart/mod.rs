@@ -9,6 +9,6 @@ pub mod reconcile;
 
 pub use plan::{
     Preflight, RestartPlan, World, manifest_rejected, preflight, reconcile_incomplete,
-    resolve_plan,
+    recycle_failed, recycle_refused, resolve_plan,
 };
 pub use reconcile::ManifestDiff;

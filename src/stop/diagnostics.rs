@@ -13,6 +13,18 @@ pub fn service_not_found(service: &str) -> Diagnostic {
     .help_docs()
 }
 
+/// Builds the diagnostic for a command that targets a project this supervisor
+/// does not manage.
+pub fn project_not_found(project: &str) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::TargetNotFound,
+        format!("no managed project named `{project}`"),
+    )
+    .note("this supervisor is not managing a project with that id")
+    .help_cmd("list what's running", "sysg status")
+    .help_docs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -20,6 +32,13 @@ mod tests {
     #[test]
     fn service_not_found_is_typed() {
         let diag = service_not_found("ghost");
+        assert_eq!(diag.code, SgCode::TargetNotFound);
+        assert!(diag.render(false).contains("ghost"));
+    }
+
+    #[test]
+    fn project_not_found_is_typed() {
+        let diag = project_not_found("ghost");
         assert_eq!(diag.code, SgCode::TargetNotFound);
         assert!(diag.render(false).contains("ghost"));
     }

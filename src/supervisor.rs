@@ -818,10 +818,9 @@ impl Supervisor {
         }
 
         let Some(project_runtime) = self.extra_projects.get(project_id) else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("project '{project_id}' is not managed by this supervisor"),
-            )
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::stop::project_not_found(project_id),
+            ))
             .into());
         };
 
@@ -3074,6 +3073,37 @@ impl Supervisor {
         let config_project = override_config
             .as_ref()
             .map(|config| config.project.id.as_str());
+
+        // A restart that names a service no project declares is a false success
+        // waiting to happen — refuse it with a typed diagnostic (SG0202) before
+        // resolving a target, exactly as the stop path does.
+        let known = match project.or(selector_project) {
+            Some(project_id) => {
+                let in_override = override_config
+                    .as_ref()
+                    .is_some_and(|config| config.services.contains_key(service_name));
+                let in_primary = self.daemon.config().project.id == project_id
+                    && self.daemon.config().services.contains_key(service_name);
+                let in_extra =
+                    self.extra_projects.get(project_id).is_some_and(|runtime| {
+                        runtime.daemon.config().services.contains_key(service_name)
+                    });
+                in_override || in_primary || in_extra
+            }
+            None => {
+                let in_override = override_config
+                    .as_ref()
+                    .is_some_and(|config| config.services.contains_key(service_name));
+                in_override || !self.projects_containing_service(service_name).is_empty()
+            }
+        };
+        if !known {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::stop::service_not_found(service_name),
+            ))
+            .into());
+        }
+
         let target_project = self.resolve_service_target_project(
             service_name,
             project,

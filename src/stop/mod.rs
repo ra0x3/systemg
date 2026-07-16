@@ -6,5 +6,5 @@
 pub mod diagnostics;
 pub mod plan;
 
-pub use diagnostics::service_not_found;
+pub use diagnostics::{project_not_found, service_not_found};
 pub use plan::{StopPlan, StopPlanError, resolve_plan};
