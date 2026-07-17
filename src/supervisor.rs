@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{
         Config, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
-        load_config, load_config_from_file, load_projects_from_file,
+        load_config_from_file, load_projects_from_file,
     },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
@@ -217,6 +217,34 @@ fn split_project_selector(selector: &str) -> Option<(&str, &str)> {
     } else {
         Some((project, service))
     }
+}
+
+/// Picks the sub-config for the targeted service from a file that may declare
+/// many projects. Prefers the project the user named (`-p`/prefix) that also
+/// declares the service, then any project declaring it, then the sole project
+/// for a single-project file. Returns `None` if nothing matches.
+fn select_override_project(
+    mut projects: Vec<Config>,
+    service_name: &str,
+    requested_project: Option<&str>,
+) -> Option<Config> {
+    if let Some(requested) = requested_project
+        && let Some(idx) = projects.iter().position(|config| {
+            config.project.id == requested && config.services.contains_key(service_name)
+        })
+    {
+        return Some(projects.swap_remove(idx));
+    }
+    if let Some(idx) = projects
+        .iter()
+        .position(|config| config.services.contains_key(service_name))
+    {
+        return Some(projects.swap_remove(idx));
+    }
+    if projects.len() == 1 {
+        return Some(projects.swap_remove(0));
+    }
+    None
 }
 
 /// Orders `root` and its transitive dependents so a dependency is always
@@ -3233,9 +3261,17 @@ impl Supervisor {
             .map(|(project_id, service_name)| (Some(project_id), service_name))
             .unwrap_or((None, selector));
 
+        // A single config FILE may declare MANY projects. The single-project
+        // loader collapses it to one arbitrary project, which for a `-p other`
+        // targeting a sibling project hands the wrong sub-config downstream.
+        // Load every project and pick the one owning the targeted service,
+        // preferring the requested project when one is named.
+        let requested_project = project.or(selector_project);
         let override_config = if let Some(path) = config_path {
             runtime::ensure_trusted_config(path)?;
-            Some(load_config(Some(path.to_string_lossy().as_ref()))?)
+            let file = runtime::open_trusted_config(path)?;
+            let projects = load_projects_from_file(file, path)?;
+            select_override_project(projects, service_name, requested_project)
         } else {
             None
         };
