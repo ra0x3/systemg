@@ -37,12 +37,21 @@ check "$?" "stderr names SG0006 (target scope ambiguous)"
 section "disambiguated -p alpha -s worker starts only alpha's worker"
 sysg start --project alpha --service worker 2>/tmp/disambig_err.txt
 check "$?" "start -p alpha -s worker exits 0"
-sleep 2
-ALPHA="$(sysg status --project alpha --format json 2>/dev/null)"
-BETA="$(sysg status --project beta --format json 2>/dev/null)"
-[ "$(unit_field "$ALPHA" worker state alpha)" = "running" ]
+# Poll one aggregate snapshot until alpha/worker is up, rather than a fixed
+# sleep — the resident start settles asynchronously and a tight sleep flakes
+# under load. beta/worker is read from the SAME snapshot so the two agree.
+A_STATE=""; B_STATE=""
+for _ in $(seq 1 15); do
+  sleep 1
+  S="$(sysg status --config "$CONFIG" --format json 2>/dev/null)"
+  A_STATE="$(unit_field "$S" worker state alpha)"
+  B_STATE="$(unit_field "$S" worker state beta)"
+  [ "$A_STATE" = "running" ] && break
+done
+echo "alpha/worker=$A_STATE beta/worker=$B_STATE"
+[ "$A_STATE" = "running" ]
 check "$?" "alpha/worker is running"
-[ "$(unit_field "$BETA" worker state beta)" != "running" ]
+[ "$B_STATE" != "running" ]
 check "$?" "beta/worker stayed stopped (only alpha targeted)"
 
 sysg stop --supervisor >/dev/null 2>&1

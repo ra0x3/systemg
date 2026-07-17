@@ -219,6 +219,28 @@ fn split_project_selector(selector: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Loads the project named `project_id` from a file that may declare many
+/// projects. The single-project loader collapses a `projects:` map to one
+/// arbitrary project, so a per-project reload must fan out and pick the match.
+/// Falls back to the sole project for a single-project file.
+fn load_named_project(
+    path: &Path,
+    project_id: &str,
+) -> Result<Option<Config>, SupervisorError> {
+    let file = runtime::open_trusted_config(path)?;
+    let mut projects = load_projects_from_file(file, path)?;
+    if let Some(idx) = projects
+        .iter()
+        .position(|config| config.project.id == project_id)
+    {
+        return Ok(Some(projects.swap_remove(idx)));
+    }
+    if projects.len() == 1 {
+        return Ok(Some(projects.swap_remove(0)));
+    }
+    Ok(None)
+}
+
 /// Picks the sub-config for the targeted service from a file that may declare
 /// many projects. Prefers the project the user named (`-p`/prefix) that also
 /// declares the service, then any project declaring it, then the sole project
@@ -824,6 +846,12 @@ impl Supervisor {
             "schedule",
         )?;
 
+        // Explicitly naming a service is a direct order to run THIS one, so it
+        // overrides a `skip` default — a skipped service you ask for by name must
+        // actually start, not silently no-op.
+        let mut service_config = service_config;
+        service_config.skip = None;
+
         daemon.start_service(service_name, &service_config)?;
 
         if let Some(ref spawn) = service_config.spawn
@@ -877,18 +905,13 @@ impl Supervisor {
                 std::env::current_dir()?.join(config_path)
             };
             let resolved = resolved.canonicalize().unwrap_or(resolved);
-            let trusted = runtime::open_trusted_config(&resolved)?;
-            let config = load_config_from_file(trusted, &resolved)?;
-            if config.project.id != project_id {
+            let Some(config) = load_named_project(&resolved, project_id)? else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "project '{project_id}' does not match config project '{}'",
-                        config.project.id
-                    ),
+                    format!("project '{project_id}' is not declared by the config"),
                 )
                 .into());
-            }
+            };
 
             let primary_project = self.daemon.config().project.id.clone();
             if project_id == primary_project {
@@ -907,15 +930,11 @@ impl Supervisor {
         let primary_project = self.daemon.config().project.id.clone();
         if project_id == primary_project {
             // Reload the primary project's stored manifest and reconcile it,
-            // isolated from any sibling. load_config_from_file returns the FIRST
-            // project only, so a multi-project file's siblings are never touched.
+            // isolated from any sibling. A multi-project file is fanned out and
+            // the primary's own entry selected, so siblings are never touched.
             let stored = self.config_path.clone();
-            let config = match runtime::open_trusted_config(&stored)
-                .map_err(SupervisorError::from)
-                .and_then(|trusted| {
-                    load_config_from_file(trusted, &stored).map_err(SupervisorError::from)
-                }) {
-                Ok(config) if config.project.id == primary_project => config,
+            let config = match load_named_project(&stored, &primary_project) {
+                Ok(Some(config)) => config,
                 _ => (*self.daemon.config()).clone(),
             };
             self.reconcile_primary_project(config)?;
@@ -930,18 +949,15 @@ impl Supervisor {
         };
 
         let stored = project_runtime.config_path.clone();
-        let trusted = runtime::open_trusted_config(&stored)?;
-        let config = load_config_from_file(trusted, &stored)?;
-        if config.project.id != project_id {
+        let Some(config) = load_named_project(&stored, project_id)? else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "project '{project_id}' stored config now declares project '{}'",
-                    config.project.id
+                    "project '{project_id}' is no longer declared by its stored config"
                 ),
             )
             .into());
-        }
+        };
         self.replace_extra_project_runtime(config, stored)?;
         Ok(())
     }
@@ -1020,12 +1036,11 @@ impl Supervisor {
         existing.daemon.shutdown_monitor();
 
         Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
-        let mut daemon = Daemon::new(
-            config,
-            self.daemon.pid_file_handle(),
-            self.daemon.service_state_handle(),
-            self.detach_children,
-        );
+        // Give the replaced project its OWN pid/state handles bound to its own
+        // store — reusing the primary daemon's shared handles would rebind their
+        // store to this project and evict every sibling's live pid/state from the
+        // in-memory maps (status would then report living siblings as pid-less).
+        let mut daemon = Daemon::from_config(config, self.detach_children)?;
         daemon.set_pipe_stderr(self.pipe_stderr);
         self.extra_projects.insert(
             project_id.clone(),

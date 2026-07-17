@@ -75,8 +75,11 @@ grep -q "alpha_svc" "$STATE_DIR/projects/alpha/pid.xml" 2>/dev/null \
 check "$?" "alpha/pid.xml records ONLY alpha_svc (no sibling leakage)"
 
 section "exactly one supervisor process (not three)"
-SUP_COUNT="$(ps -eo args | grep -c "[s]ysg .*--daemonize")"
-echo "supervisor-ish process count: $SUP_COUNT"
+# The resident supervisor runs as `sysg supervise ...` (after the daemonize
+# re-exec). Match that exact form — NOT `--daemonize`, which also appears in the
+# transient start CLIs and even this test's own shell command line.
+SUP_COUNT="$(ps -eo args | grep -c "[s]ysg supervise")"
+echo "supervisor process count: $SUP_COUNT"
 [ "$SUP_COUNT" = "1" ]
 check "$?" "exactly one resident supervisor"
 

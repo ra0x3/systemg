@@ -12,21 +12,7 @@ set -u
 
 CONFIG=/usecase/stack.yaml
 
-# unit_field <status-json> <unit-name> <field>
-unit_field() {
-  printf '%s' "$1" | python3 -c '
-import json,sys
-name,field=sys.argv[1],sys.argv[2]
-try: data=json.load(sys.stdin)
-except Exception: print("noparse"); sys.exit()
-for u in data.get("units",[]):
-    if u.get("name")==name:
-        v=u.get(field)
-        if isinstance(v,dict): v=v.get("id","?")
-        print(v); break
-else: print("absent")
-' "$2" "$3"
-}
+# Uses lib.sh's unit_field, which reads the nested process.pid correctly.
 
 section "start the whole file"
 sysg start --config "$CONFIG" --daemonize
