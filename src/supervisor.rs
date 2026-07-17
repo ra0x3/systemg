@@ -2897,6 +2897,14 @@ impl Supervisor {
         let bounce_all = diff.is_empty();
         self.daemon.shutdown_monitor();
 
+        // Swap the live config BEFORE reconciling. Each reconciled service is
+        // health-checked via wait_for_service_ready, which reads the LIVE config
+        // (self.cfg()) — if the swap happened after the restart loop, a service
+        // launched on its NEW config would be health-checked against the STALE
+        // old manifest (e.g. a moved port), never pass, and fail the restart
+        // (SG0302). The diff above already captured the old-vs-new comparison.
+        self.daemon.set_config(config.clone());
+
         let mut failed: Vec<String> = Vec::new();
         for name in &diff.removed {
             if let Err(err) = self.daemon.stop_service(name) {
@@ -2917,7 +2925,6 @@ impl Supervisor {
             }
         }
 
-        self.daemon.set_config(config.clone());
         self.config_path = resolved;
         // Refresh the hint + content hash so a later bare command sees this
         // freshly-submitted manifest as current, not dirty.

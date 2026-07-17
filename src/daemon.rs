@@ -5296,7 +5296,11 @@ impl Daemon {
             warn!(
                 "Service '{name}' is not running and was not manually stopped; restarting per its restart policy."
             );
-            to_restart.push((name.clone(), None));
+            let recorded_pgid = ctx
+                .lock_pid_file()
+                .ok()
+                .and_then(|guard| guard.pgid_for(name));
+            to_restart.push((name.clone(), recorded_pgid));
         }
 
         to_restart

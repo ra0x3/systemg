@@ -44,8 +44,8 @@ apply_patch() {
 curl_body() { curl -fsS "http://127.0.0.1:${2:-8080}${1}" 2>/dev/null; }
 
 wait_http() {
-  local path="$1" port="${2:-8080}" i=0
-  while [ "$i" -lt 30 ]; do
+  local path="$1" port="${2:-8080}" max="${3:-30}" i=0
+  while [ "$i" -lt "$max" ]; do
     curl -fsS "http://127.0.0.1:${port}${path}" >/dev/null 2>&1 && return 0
     sleep 1
     i=$((i+1))
@@ -184,7 +184,13 @@ while [ "$i" -lt 25 ]; do
 done
 [ "$RESPAWN" = "1" ]
 check "$?" "sysg respawned the crashed db (real supervision on a real datastore)"
-wait_http /health 8090
+# The respawned postgres pid appears before it finishes WAL recovery and accepts
+# connections; wait for the DB to actually be ready, then for web to recover.
+for _ in $(seq 1 30); do
+  pg_isready -h 127.0.0.1 -p 5433 -q && break
+  sleep 1
+done
+wait_http /health 8090 60
 check "$?" "web recovers to healthy once db is back"
 
 # ============================================================================
