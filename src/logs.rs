@@ -998,7 +998,14 @@ impl TailMode {
         combined_path: &Path,
         kind: Option<&str>,
     ) {
-        cmd.arg("-n").arg(lines.to_string());
+        // usize::MAX is the "show everything" sentinel (no -l given). `-n +1`
+        // is the portable "from the first line" form; a literal huge -n can
+        // overflow some `tail` implementations.
+        if lines == usize::MAX {
+            cmd.arg("-n").arg("+1");
+        } else {
+            cmd.arg("-n").arg(lines.to_string());
+        }
         if matches!(self, TailMode::Follow) {
             cmd.arg("-F");
         }

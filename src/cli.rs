@@ -369,8 +369,9 @@ pub enum Commands {
         #[arg(short = 'p', long)]
         project: Option<String>,
 
-        /// Number of lines to show (default: 50).
-        #[arg(short, long, default_value = "50")]
+        /// Number of trailing lines to show. Omit to show the FULL captured log;
+        /// pass `-l N` to limit to the last N lines.
+        #[arg(short, long, default_value_t = usize::MAX)]
         lines: usize,
 
         /// Kind of logs to show: stdout or stderr. Defaults to stdout+stderr.

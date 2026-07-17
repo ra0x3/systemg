@@ -2857,6 +2857,10 @@ impl Daemon {
         let mut healthy_services = HashSet::new();
         let mut completed_services = HashSet::new();
         let mut failed_services = HashSet::new();
+        // A skipped service is NOT a satisfied dependency — a service that
+        // depends on it must not start, or `skip` silently leaks the dependent
+        // into running against a dependency that never came up.
+        let mut skipped_services = HashSet::new();
         let mut first_error: Option<ProcessManagerError> = None;
 
         'service_loop: for service_name in order {
@@ -2879,8 +2883,7 @@ impl Daemon {
                 match skip_config {
                     SkipConfig::Flag(true) => {
                         info!("Skipping service '{service_name}' due to skip flag");
-                        healthy_services.insert(service_name.clone());
-                        completed_services.insert(service_name.clone());
+                        skipped_services.insert(service_name.clone());
                         continue 'service_loop;
                     }
                     SkipConfig::Flag(false) => {
@@ -2894,8 +2897,7 @@ impl Daemon {
                                 info!(
                                     "Skipping service '{service_name}' due to skip condition"
                                 );
-                                healthy_services.insert(service_name.clone());
-                                completed_services.insert(service_name.clone());
+                                skipped_services.insert(service_name.clone());
                                 continue 'service_loop;
                             }
                             Ok(false) => {
@@ -2921,6 +2923,17 @@ impl Daemon {
             if let Some(deps) = &service.depends_on {
                 for dep in deps {
                     let dep_name = dep.service();
+                    if skipped_services.contains(dep_name) {
+                        // A dependency that was skipped can never be satisfied, so
+                        // the dependent is skipped too — never run it against a
+                        // dependency that never came up.
+                        info!(
+                            "Skipping start of '{service_name}' because its dependency '{dep_name}' is skipped"
+                        );
+                        self.mark_skipped(&service_name)?;
+                        skipped_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
                     if failed_services.contains(dep_name) {
                         error!(
                             "Skipping start of '{service_name}' because dependency '{dep_name}' failed."
@@ -3059,7 +3072,24 @@ impl Daemon {
                 .and_then(|deployment| deployment.health_check.as_ref())
         {
             info!("Waiting for health check of '{service_name}' before marking it ready");
-            self.wait_for_health_check(service_name, health_check)?;
+            if let Err(err) = self.wait_for_health_check(service_name, health_check) {
+                // The unit came up as a process but never passed its health
+                // check — it is NOT healthy, and leaving it running would let
+                // status report a live-but-never-healthy process as `healthy`
+                // (e.g. a dev server that drifted to another port). Stop it so it
+                // is not a zombie on the wrong port; the monitor's restart_policy
+                // still retries the whole start, bounded by max_restarts.
+                warn!(
+                    "Service '{service_name}' failed its health check; stopping it (not leaving a never-healthy process)"
+                );
+                if let Err(stop_err) = self.stop_service_with_intent(service_name, false)
+                {
+                    warn!(
+                        "Failed to stop '{service_name}' after health-check failure: {stop_err}"
+                    );
+                }
+                return Err(err);
+            }
         }
 
         Ok(state)

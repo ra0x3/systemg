@@ -1,0 +1,10 @@
+version: "2"
+projects:
+  dev:
+    services:
+      skipped:
+        command: "sh -c 'while true; do echo SKIPPED_LINE; sleep 1; done'"
+        skip: true
+      normal:
+        command: "sh -c 'while true; do echo NORMAL_LINE; sleep 1; done'"
+        restart_policy: always

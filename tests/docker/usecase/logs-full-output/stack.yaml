@@ -1,0 +1,7 @@
+version: "2"
+projects:
+  dev:
+    services:
+      chatty:
+        command: "python3 /usecase/emit.py 200"
+        restart_policy: always

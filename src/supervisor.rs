@@ -1154,10 +1154,30 @@ impl Supervisor {
         let config = self.daemon.config();
         let service_order =
             Self::startup_service_order(&config, self.service_filter.as_deref())?;
+        // Track skipped services so a dependent of a skipped unit is itself
+        // skipped — a skipped dependency can never be satisfied, so running the
+        // dependent would leak it against a dependency that never came up.
+        let mut skipped: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for service_name in service_order {
             let Some(service_config) = config.services.get(&service_name) else {
                 continue;
             };
+
+            // A service depending on a skipped one is skipped too.
+            if let Some(deps) = &service_config.depends_on
+                && let Some(skipped_dep) = deps
+                    .iter()
+                    .map(|d| d.service())
+                    .find(|d| skipped.contains(*d))
+            {
+                info!(
+                    "Skipping service '{service_name}' because its dependency '{skipped_dep}' is skipped"
+                );
+                let _ = self.daemon.mark_service_skipped(&service_name);
+                skipped.insert(service_name.clone());
+                continue;
+            }
 
             if service_config.cron.is_none() {
                 if let Some(skip_config) = &service_config.skip {
@@ -1171,6 +1191,7 @@ impl Supervisor {
                                     "Failed to record skipped state for '{service_name}': {err}"
                                 );
                             }
+                            skipped.insert(service_name.clone());
                             continue;
                         }
                         SkipConfig::Flag(false) => {
@@ -1194,6 +1215,7 @@ impl Supervisor {
                                             "Failed to record skipped state for '{service_name}': {err}"
                                         );
                                     }
+                                    skipped.insert(service_name.clone());
                                     continue;
                                 }
                                 Ok(false) => {

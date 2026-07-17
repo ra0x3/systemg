@@ -1,0 +1,13 @@
+version: "2"
+projects:
+  dev:
+    services:
+      web:
+        command: "python3 -m http.server 28641"
+        deployment:
+          strategy: immediate
+          health_check:
+            url: "http://127.0.0.1:39187/"
+            attempt_timeout: "2s"
+            retries: 2
+            interval: "1s"

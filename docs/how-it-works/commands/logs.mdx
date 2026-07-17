@@ -27,7 +27,7 @@ $ sysg logs
 | `-s` | `--service` | The service whose logs to show. With no `-p`, resolves to the loose (`__loose__`) bundle only |
 | `-p` | `--project` | The project whose logs to show (all its services, or one with `-s`) |
 | `-` | `--supervisor` | Show the supervisor's own log instead of a service's. Cannot be combined with `-s`/`-p` |
-| `-l` | `--lines` | Number of lines to show (default: 50) |
+| `-l` | `--lines` | Trailing lines to show. Omit to show the **full** captured log; pass `-l N` for the last N |
 | `-k` | `--kind` | Kind of logs to show: `stdout` or `stderr`. Omit to show stdout+stderr together |
 | `-f` | `--follow` | Follow the log stream until interrupted (like `tail -F`) |
 | `-` | `--no-follow` | Force a one-shot snapshot even on an interactive terminal |
