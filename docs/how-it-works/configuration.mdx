@@ -403,7 +403,8 @@ services:
       health_check:
         command: "curl --fail http://localhost:8000/health"
         interval: "5s"
-        timeout: "30s"
+        attempt_timeout: "30s"
+        retries: 3
       grace_period: "5s"
       blue_green:
         env_var: "PORT"
@@ -486,9 +487,19 @@ Probe configuration used to determine readiness/health during deployment workflo
 |-------|------|-------------|
 | `command` | string | Check command |
 | `url` | string | HTTP endpoint (alternative to command) |
-| `interval` | string | Time between checks |
-| `timeout` | string | Check timeout |
-| `retries` | number | Attempts before marking unhealthy |
+| `interval` | string | Time between attempts (default `2s`) |
+| `attempt_timeout` | string | Maximum time for a **single** probe (default `30s`) |
+| `retries` | number | Maximum attempts before giving up (default `3`) |
+
+<Note>
+`attempt_timeout` bounds **one** probe, not the whole check — the total wait is
+derived: `retries × (attempt_timeout + interval)`. There is no separate
+total-timeout knob. A refused endpoint returns immediately, so a taken port
+fails fast rather than blocking for the full budget. The failure carries a code
+by cause: [`SG0022`](/how-it-works/dialog/codes#sg0022) (could not reach),
+[`SG0023`](/how-it-works/dialog/codes#sg0023) (a probe timed out), or
+[`SG0104`](/how-it-works/dialog/codes#sg0104) (ran but reported unhealthy).
+</Note>
 
 ### Deployment object
 

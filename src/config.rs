@@ -989,8 +989,9 @@ pub struct HealthCheckConfig {
     pub command: Option<String>,
     /// Time between health check attempts (e.g., "2s").
     pub interval: Option<String>,
-    /// Health check timeout duration (e.g., "30s").
-    pub timeout: Option<String>,
+    /// Per-probe timeout cap (e.g., "30s"). Bounds each individual attempt;
+    /// the absolute max wait is derived: retries x (attempt_timeout + interval).
+    pub attempt_timeout: Option<String>,
     /// Number of retries before giving up.
     pub retries: Option<u32>,
 }
@@ -1001,7 +1002,7 @@ struct RawHealthCheckConfig {
     url: Option<String>,
     command: Option<String>,
     interval: Option<String>,
-    timeout: Option<String>,
+    attempt_timeout: Option<String>,
     retries: Option<u32>,
 }
 
@@ -1021,7 +1022,7 @@ impl<'de> Deserialize<'de> for HealthCheckConfig {
             url: raw.url,
             command: raw.command,
             interval: raw.interval,
-            timeout: raw.timeout,
+            attempt_timeout: raw.attempt_timeout,
             retries: raw.retries,
         })
     }
@@ -2866,7 +2867,7 @@ services:
     deployment:
       strategy: "rolling"
       health_check:
-        timeout: "30s"
+        attempt_timeout: "30s"
 "#
         )
         .expect("write yaml");

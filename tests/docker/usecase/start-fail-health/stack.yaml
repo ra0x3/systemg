@@ -9,5 +9,5 @@ projects:
           health_check:
             command: "sh -c 'exit 1'"
             interval: "1s"
-            timeout: "5s"
+            attempt_timeout: "5s"
             retries: 3

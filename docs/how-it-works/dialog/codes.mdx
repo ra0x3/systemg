@@ -54,9 +54,22 @@ A service exited immediately at start, before it finished starting.
 
 A service's `pre_start` command failed, so the service was not started.
 
+### SG0022
+
+A service's health check could never reach it — every probe failed to connect
+(HTTP connection refused / DNS failure) or the health command could not run. The
+address may be wrong or nothing is listening on the port.
+
+### SG0023
+
+A service's health check timed out — a probe did not complete within its
+`attempt_timeout`. The endpoint accepted the probe but was too slow to answer
+within the per-attempt budget, across all `retries`.
+
 ### SG0104
 
-A service never passed its configured health check.
+A service's health check ran and reported the service is not healthy (an HTTP
+non-2xx response, or a health command that exited non-zero).
 
 ## Selectors, status &amp; stop
 

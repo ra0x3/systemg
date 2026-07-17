@@ -1337,6 +1337,18 @@ enum ServiceProbe {
     Exited(ExitStatus),
 }
 
+/// Classifies why a single health check probe failed, so the final failure can
+/// carry the right diagnostic code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HealthProbeOutcome {
+    /// The check ran and reported non-success (HTTP non-2xx or non-zero exit).
+    Unhealthy,
+    /// The probe never reached the check (connection refused, DNS fail, spawn error).
+    Unreachable,
+    /// The probe exceeded the per-attempt timeout.
+    Timeout,
+}
+
 /// Indicates when a service is considered ready for dependents or has already completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceReadyState {
@@ -3822,38 +3834,34 @@ impl Daemon {
         service_name: &str,
         health_check: &HealthCheckConfig,
     ) -> Result<(), ProcessManagerError> {
-        let timeout = if let Some(raw_timeout) = &health_check.timeout {
-            Self::parse_duration(raw_timeout)?
+        let attempt_timeout = if let Some(raw) = &health_check.attempt_timeout {
+            Self::parse_duration(raw)?
         } else {
             Duration::from_secs(30)
         };
 
         let retries = health_check.retries.unwrap_or(3).max(1);
-        let retry_interval = health_check
+        let interval = health_check
             .interval
             .as_deref()
             .map_or(Ok(Duration::from_secs(2)), Self::parse_duration)?;
-        // Honor the full declared retry budget: a health check with
-        // `retries: 15, interval: 2s` must get ~30s of RETRIES, not be truncated
-        // by a shorter overall deadline. The deadline is the larger of the
-        // per-request timeout and the time all the retries would actually take,
-        // so a slow-starting service isn't failed before its own budget elapses.
-        let retry_budget = retry_interval
-            .checked_mul(retries)
-            .unwrap_or(timeout)
-            .saturating_add(timeout);
-        let client = if health_check.url.is_some() {
-            Some(Client::builder().timeout(timeout).build().map_err(|err| {
-                ProcessManagerError::ServiceStartError {
-                    service: service_name.to_string(),
-                    source: std::io::Error::other(err.to_string()),
-                }
-            })?)
-        } else {
-            None
-        };
+        // `attempt_timeout` caps EACH probe. There is no separate total-timeout
+        // knob: the absolute max wait is derived as retries x (attempt_timeout +
+        // interval), so a hopeless check (a port that stays taken) fails fast on
+        // connection refusal instead of stranding a foreground start.
+        let client =
+            if health_check.url.is_some() {
+                Some(Client::builder().timeout(attempt_timeout).build().map_err(
+                    |err| ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source: std::io::Error::other(err.to_string()),
+                    },
+                )?)
+            } else {
+                None
+            };
 
-        let deadline = Instant::now() + retry_budget.max(timeout);
+        let mut last_outcome = HealthProbeOutcome::Unhealthy;
 
         for attempt in 1..=retries {
             self.op_slot.detail(format!(
@@ -3863,7 +3871,7 @@ impl Daemon {
                 service_name,
                 health_check,
                 client.as_ref(),
-                timeout,
+                attempt_timeout,
             ) {
                 Ok(true) => {
                     info!(
@@ -3872,41 +3880,52 @@ impl Daemon {
                     return Ok(());
                 }
                 Ok(false) => {
+                    last_outcome = HealthProbeOutcome::Unhealthy;
                     debug!(
-                        "Health check attempt {attempt} failed for '{service_name}', retrying in {:?}",
-                        retry_interval
+                        "Health check attempt {attempt} ran but reported unhealthy for '{service_name}'",
+                    );
+                }
+                Err(err) if err.kind() == ErrorKind::TimedOut => {
+                    last_outcome = HealthProbeOutcome::Timeout;
+                    debug!(
+                        "Health check attempt {attempt} timed out for '{service_name}': {err}",
                     );
                 }
                 Err(err) => {
+                    last_outcome = HealthProbeOutcome::Unreachable;
                     debug!(
-                        "Health check attempt {attempt} returned error for '{service_name}': {err}",
+                        "Health check attempt {attempt} could not reach '{service_name}': {err}",
                     );
                 }
             }
 
-            if Instant::now() >= deadline {
-                break;
-            }
-
             if attempt != retries {
-                thread::sleep(retry_interval);
+                thread::sleep(interval);
             }
         }
 
         Err(ProcessManagerError::Diag(Box::new(
-            self.health_check_failure_diag(service_name, health_check, timeout, retries),
+            self.health_check_failure_diag(
+                service_name,
+                health_check,
+                attempt_timeout,
+                retries,
+                last_outcome,
+            ),
         )))
     }
 
     /// Builds the diagnostic for a service that never became healthy: what was
     /// checked, whether the process is even alive, its last output, and the
-    /// exact commands to dig further.
+    /// exact commands to dig further. The code reflects *why* the last probe
+    /// failed — unhealthy, unreachable, or timed out.
     fn health_check_failure_diag(
         &self,
         service_name: &str,
         health_check: &HealthCheckConfig,
-        timeout: Duration,
+        attempt_timeout: Duration,
         retries: u32,
+        outcome: HealthProbeOutcome,
     ) -> crate::diag::Diagnostic {
         use crate::diag::{Diagnostic, SgCode};
 
@@ -3934,31 +3953,50 @@ impl Daemon {
                 }
             });
 
-        let mut diag = Diagnostic::error(
-            SgCode::HealthUnmet,
-            format!("service `{service_name}` failed to become healthy"),
-        )
-        .note(format!(
-            "{retries} health checks against {target} failed over {}s",
-            timeout.as_secs()
-        ));
-
-        diag = if alive {
-            diag.note(
-                "the process is running but never answered the health check \
-                 — it may be listening on a different address or still starting",
+        let mut diag = match outcome {
+            HealthProbeOutcome::Unhealthy => {
+                let mut d = Diagnostic::error(
+                    SgCode::HealthUnmet,
+                    format!("service `{service_name}` failed to become healthy"),
+                )
+                .note(format!(
+                    "the health check against {target} ran but reported the service is not healthy over {retries} attempts",
+                ));
+                d = if alive {
+                    d.note(
+                        "the process is running but never answered the health check \
+                         — it may be listening on a different address or still starting",
+                    )
+                } else {
+                    d.note(
+                        "the process is not running — it exited before it could become healthy",
+                    )
+                };
+                d
+            }
+            HealthProbeOutcome::Unreachable => Diagnostic::error(
+                SgCode::HealthCheckUnreachable,
+                format!("service `{service_name}`'s health check could not reach it"),
             )
-        } else {
-            diag.note(
-                "the process is not running — it exited before it could become healthy",
+            .note(format!(
+                "every probe against {target} failed to connect (the address may be wrong or a port is not listening) over {retries} attempts",
+            )),
+            HealthProbeOutcome::Timeout => Diagnostic::error(
+                SgCode::HealthCheckTimeout,
+                format!("service `{service_name}`'s health check timed out"),
             )
+            .note(format!(
+                "no probe against {target} completed within the {}s per-attempt budget over {retries} attempts",
+                attempt_timeout.as_secs()
+            )),
         };
 
-        diag.evidence(
+        diag = diag.evidence(
             format!("last output from `{service_name}`"),
             crate::logs::tail_service_log(&project, service_name, 8),
-        )
-        .help_cmd(
+        );
+
+        diag.help_cmd(
             "view logs",
             format!("sysg logs -s {service_name} -p {project}"),
         )
@@ -3994,10 +4032,14 @@ impl Daemon {
         client: &Client,
         url: &str,
     ) -> Result<bool, std::io::Error> {
-        let response = client
-            .get(url)
-            .send()
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let response = client.get(url).send().map_err(|err| {
+            let kind = if err.is_timeout() {
+                ErrorKind::TimedOut
+            } else {
+                ErrorKind::ConnectionRefused
+            };
+            std::io::Error::new(kind, err.to_string())
+        })?;
 
         Ok(response.status().is_success())
     }
@@ -4091,7 +4133,7 @@ impl Daemon {
             url: health_check.url.as_deref().map(render),
             command: health_check.command.as_deref().map(render),
             interval: health_check.interval.clone(),
-            timeout: health_check.timeout.clone(),
+            attempt_timeout: health_check.attempt_timeout.clone(),
             retries: health_check.retries,
         }
     }

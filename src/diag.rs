@@ -77,6 +77,11 @@ pub enum SgCode {
     /// SG0021 — `logs -s <service>` (with no `-p`) named a service that is not in
     /// the loose bundle.
     LooseServiceNotFound,
+    /// SG0022 — every health check probe failed to connect; the endpoint was
+    /// never reached (wrong address, or nothing listening).
+    HealthCheckUnreachable,
+    /// SG0023 — no health check probe completed within the per-attempt budget.
+    HealthCheckTimeout,
     /// SG0102 — a service exited immediately at start, before it came up.
     UnitImmediateExit,
     /// SG0103 — a service's `pre_start` failed, so it was not started.
@@ -141,6 +146,8 @@ impl SgCode {
             SgCode::LogsTargetRequired => "SG0019",
             SgCode::LogsSupervisorConflict => "SG0020",
             SgCode::LooseServiceNotFound => "SG0021",
+            SgCode::HealthCheckUnreachable => "SG0022",
+            SgCode::HealthCheckTimeout => "SG0023",
             SgCode::UnitImmediateExit => "SG0102",
             SgCode::PreStartFailed => "SG0103",
             SgCode::HealthUnmet => "SG0104",
@@ -165,7 +172,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 36] = [
+    pub const ALL: [SgCode; 38] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -187,6 +194,8 @@ impl SgCode {
         SgCode::LogsTargetRequired,
         SgCode::LogsSupervisorConflict,
         SgCode::LooseServiceNotFound,
+        SgCode::HealthCheckUnreachable,
+        SgCode::HealthCheckTimeout,
         SgCode::UnitImmediateExit,
         SgCode::PreStartFailed,
         SgCode::HealthUnmet,

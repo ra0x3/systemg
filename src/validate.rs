@@ -186,7 +186,7 @@ fn classify_yaml(err: &serde_yaml::Error) -> Diagnostic {
         (
             "invalid-health-check",
             "A health check must probe something: either an HTTP url or a command.",
-            "Give the health_check a `url:` or a `command:` (plus optional interval/timeout/retries).",
+            "Give the health_check a `url:` or a `command:` (plus optional interval/attempt_timeout/retries).",
             "/how-it-works/configuration",
         )
     } else if lower.contains("project.id") {

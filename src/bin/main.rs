@@ -3681,7 +3681,20 @@ fn wait_for_foreground_attachment(project_id: String) -> Result<(), Box<dyn Erro
     ctrlc::set_handler(move || {
         let _ = tx.send(());
     })?;
-    let _ = rx.recv();
+
+    // Wake on EITHER Ctrl-C OR the supervisor disappearing. Blocking only on
+    // Ctrl-C wedged the foreground forever when a `stop --supervisor` (or a
+    // crash) tore the supervisor down out from under it — the terminal never
+    // returned. If the supervisor is already gone, there is nothing to stop.
+    loop {
+        if rx.recv_timeout(Duration::from_millis(250)).is_ok() {
+            break;
+        }
+        if !supervisor_running() {
+            info!("Foreground supervisor is no longer running; detaching.");
+            return Ok(());
+        }
+    }
 
     let stop_result: Result<(), Box<dyn Error>> =
         match ipc::send_command(&ControlCommand::StopProject {

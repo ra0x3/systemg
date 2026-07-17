@@ -14,7 +14,7 @@ services:
       strategy: "immediate"
       health_check:
         url: "http://127.0.0.1:8100/health"
-        timeout: "10s"
+        attempt_timeout: "10s"
         retries: 5
         interval: "1s"
   anchor:
