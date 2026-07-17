@@ -1,0 +1,23 @@
+version: "2"
+projects:
+  shop:
+    name: Shop
+    services:
+      db:
+        command: "sleep 3000"
+        restart_policy: "always"
+      api:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on: ["db"]
+      report:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on: ["api"]
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on: ["db"]
+      lonely:
+        command: "sleep 3000"
+        restart_policy: "always"

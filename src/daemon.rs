@@ -5157,11 +5157,17 @@ impl Daemon {
                             .unwrap_or(false);
 
                         if should_restart {
-                            warn!("Service '{name}' crashed. Restarting...");
-                            if let Ok(mut guard) = ctx.lock_restart_in_flight() {
-                                guard.insert(name.clone());
+                            let already = ctx
+                                .lock_restart_in_flight()
+                                .map(|g| g.contains(&name))
+                                .unwrap_or(true);
+                            if !already {
+                                warn!("Service '{name}' crashed. Restarting...");
+                                if let Ok(mut guard) = ctx.lock_restart_in_flight() {
+                                    guard.insert(name.clone());
+                                }
+                                restarted_services.push((name.clone(), recorded_pgid));
                             }
-                            restarted_services.push((name.clone(), recorded_pgid));
                         } else {
                             warn!(
                                 "Service '{name}' crashed but restart_policy does not allow restart."
@@ -5219,7 +5225,16 @@ impl Daemon {
             restarted_services.append(&mut reconciled);
 
             for (name, recorded_pgid) in restarted_services {
-                Self::reap_orphaned_group_before_restart(&name, recorded_pgid);
+                let live_pgid = ctx.lock_pid_file().ok().and_then(|g| g.pgid_for(&name));
+                let is_current_live = recorded_pgid.is_some()
+                    && recorded_pgid == live_pgid
+                    && ctx
+                        .lock_processes()
+                        .map(|p| p.contains_key(&name))
+                        .unwrap_or(false);
+                if !is_current_live {
+                    Self::reap_orphaned_group_before_restart(&name, recorded_pgid);
+                }
                 if let Some(service) = ctx.config.services.get(&name) {
                     Self::handle_restart(&name, service, ctx.clone());
                 } else if let Ok(mut guard) = ctx.lock_restart_in_flight() {

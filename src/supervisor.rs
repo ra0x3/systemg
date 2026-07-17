@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     io,
     io::Write,
     path::{Path, PathBuf},
@@ -217,6 +217,31 @@ fn split_project_selector(selector: &str) -> Option<(&str, &str)> {
     } else {
         Some((project, service))
     }
+}
+
+/// Orders `root` and its transitive dependents so a dependency is always
+/// restarted before anything that depends on it. `restart -s A` must bounce A
+/// and everything that depends on A, because a dependent needs to re-handshake
+/// the freshly-restarted A; a stale dependent left pointing at the old A is the
+/// leaky state this cascade exists to prevent.
+fn cascade_restart_order(config: &Config, root: &str) -> Vec<String> {
+    let reverse = config.reverse_dependencies();
+    let mut order: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(root.to_string());
+    seen.insert(root.to_string());
+    while let Some(service) = queue.pop_front() {
+        order.push(service.clone());
+        if let Some(dependents) = reverse.get(&service) {
+            for dependent in dependents {
+                if seen.insert(dependent.clone()) {
+                    queue.push_back(dependent.clone());
+                }
+            }
+        }
+    }
+    order
 }
 
 /// Returns whether a status unit belongs to the requested project id.
@@ -677,22 +702,31 @@ impl Supervisor {
         }
 
         let requested_project = project.or(selector_project);
-        if let (Some(requested), Some(config_project)) =
-            (requested_project, config_project)
-            && requested != config_project
-        {
-            return Err(ProcessManagerError::Diag(Box::new(start::project_mismatch(
-                requested,
-                config_project,
-            )))
-            .into());
-        }
-
-        if let Some(target_project) = requested_project.or(config_project) {
-            return Ok(target_project.to_string());
-        }
-
         let matching_projects = self.projects_containing_service(service_name);
+
+        if let Some(requested) = requested_project {
+            // A requested project is valid as long as it actually declares the
+            // service. For a multi-project config the loaded config id is only
+            // ONE of several projects, so comparing against it would wrongly
+            // reject sibling projects — validate against the real membership.
+            if matching_projects.iter().any(|p| p == requested) {
+                return Ok(requested.to_string());
+            }
+            if let Some(config_project) = config_project
+                && requested != config_project
+            {
+                return Err(ProcessManagerError::Diag(Box::new(
+                    start::project_mismatch(requested, config_project),
+                ))
+                .into());
+            }
+            return Ok(requested.to_string());
+        }
+
+        if let Some(config_project) = config_project {
+            return Ok(config_project.to_string());
+        }
+
         match matching_projects.as_slice() {
             [project_id] => Ok(project_id.clone()),
             [] => Ok(self.daemon.config().project.id.clone()),
@@ -3159,6 +3193,36 @@ impl Supervisor {
     }
 
     /// Restarts one service in the selected project without reloading unrelated projects.
+    /// Restarts `root` and its transitive dependents in dependency order.
+    /// A dependent must re-handshake the freshly-restarted dependency, so
+    /// `restart -s A` bounces A then everything that depends on A. A dependent
+    /// carrying `skip: true` is honored — it is not launched by the cascade.
+    fn cascade_restart(
+        daemon: &Daemon,
+        config: &Config,
+        root: &str,
+        target_project: &str,
+    ) -> Result<(), SupervisorError> {
+        for name in cascade_restart_order(config, root) {
+            let Some(service_config) = config.services.get(&name) else {
+                continue;
+            };
+            if matches!(service_config.skip, Some(SkipConfig::Flag(true))) {
+                info!("Skipping dependent '{name}' during cascade restart (skip flag)");
+                continue;
+            }
+            reject_direct_cron_control(
+                service_config,
+                &name,
+                target_project,
+                "restarted",
+                "reschedule",
+            )?;
+            daemon.restart_service(&name, service_config)?;
+        }
+        Ok(())
+    }
+
     fn restart_single_service_target(
         &mut self,
         selector: &str,
@@ -3235,22 +3299,16 @@ impl Supervisor {
             }
 
             let config_handle = self.daemon.config();
-            let service_config = override_config
-                .as_ref()
-                .and_then(|config| config.services.get(service_name))
-                .or_else(|| config_handle.services.get(service_name))
-                .ok_or_else(|| ProcessManagerError::DependencyError {
-                    service: service_name.into(),
-                    dependency: "service not defined".into(),
-                })?;
-            reject_direct_cron_control(
-                service_config,
+            let resolved_config: &Config = match override_config.as_ref() {
+                Some(config) => config,
+                None => &config_handle,
+            };
+            Self::cascade_restart(
+                &self.daemon,
+                resolved_config,
                 service_name,
                 &target_project,
-                "restarted",
-                "reschedule",
             )?;
-            self.daemon.restart_service(service_name, service_config)?;
             return Ok(());
         }
 
@@ -3284,24 +3342,16 @@ impl Supervisor {
             }
         }
 
-        let service_config = override_config
-            .as_ref()
-            .and_then(|config| config.services.get(service_name))
-            .or_else(|| config_handle.services.get(service_name))
-            .ok_or_else(|| ProcessManagerError::DependencyError {
-                service: service_name.into(),
-                dependency: "service not defined".into(),
-            })?;
-        reject_direct_cron_control(
-            service_config,
+        let resolved_config: &Config = match override_config.as_ref() {
+            Some(config) => config,
+            None => &config_handle,
+        };
+        Self::cascade_restart(
+            &project_runtime.daemon,
+            resolved_config,
             service_name,
             &target_project,
-            "restarted",
-            "reschedule",
         )?;
-        project_runtime
-            .daemon
-            .restart_service(service_name, service_config)?;
         Ok(())
     }
 
