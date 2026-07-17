@@ -3867,7 +3867,10 @@ fn restart_plan_config(plan: &systemg::restart::RestartPlan) -> PathBuf {
 /// `systemg.yaml` that no one actually passed must not be sent (it may not
 /// exist), so it degrades to `None` and the supervisor uses what it has.
 fn restart_scoped_config(config: &Path) -> Option<String> {
-    if config.as_os_str() == DEFAULT_CONFIG_PATH && !config.exists() {
+    let is_default_name = config
+        .file_name()
+        .is_some_and(|name| name == DEFAULT_CONFIG_PATH);
+    if is_default_name && !config.exists() {
         return None;
     }
     Some(config.to_string_lossy().to_string())

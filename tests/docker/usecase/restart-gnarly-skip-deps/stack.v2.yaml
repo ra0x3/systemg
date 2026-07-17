@@ -1,0 +1,24 @@
+version: "2"
+projects:
+  shop:
+    name: Shop
+    services:
+      db:
+        command: "sh -c 'echo V2 > /tmp/db.marker; exec sleep 3000'"
+        restart_policy: "always"
+      migrate:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on: ["db"]
+        skip: false
+      api:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on: ["migrate"]
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on: ["db"]
+      lonely:
+        command: "sleep 3000"
+        restart_policy: "always"
