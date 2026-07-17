@@ -29,11 +29,16 @@ pub enum RestartPlan {
     },
     /// Restart one project.
     Project {
+        /// The resolved config path, so a `-c` reload reaches the supervisor.
+        config: PathBuf,
         /// The project id.
         project: String,
     },
     /// Restart one service, optionally qualified by its project.
     Service {
+        /// The resolved config path, so a `-c` reload reaches the supervisor and
+        /// the service's changed config is applied on the bounce.
+        config: PathBuf,
         /// The service name (never carries a `project/` prefix).
         service: String,
         /// The project the service belongs to, when known. `None` resolves from
@@ -60,8 +65,12 @@ pub fn resolve_plan(
 ) -> Result<RestartPlan, ProjectMismatch> {
     Ok(match resolve_target(service, project)? {
         Target::Everything => RestartPlan::Everything { config },
-        Target::Project { project } => RestartPlan::Project { project },
-        Target::Service { service, project } => RestartPlan::Service { service, project },
+        Target::Project { project } => RestartPlan::Project { config, project },
+        Target::Service { service, project } => RestartPlan::Service {
+            config,
+            service,
+            project,
+        },
     })
 }
 
@@ -204,12 +213,14 @@ mod tests {
         assert_eq!(
             resolve_plan(cfg(), None, Some("alpha")).unwrap(),
             RestartPlan::Project {
+                config: cfg(),
                 project: "alpha".into()
             }
         );
         assert_eq!(
             resolve_plan(cfg(), Some("alpha/worker"), None).unwrap(),
             RestartPlan::Service {
+                config: cfg(),
                 service: "worker".into(),
                 project: Some("alpha".into())
             }
@@ -256,6 +267,7 @@ mod tests {
         };
         match preflight(
             RestartPlan::Project {
+                config: cfg(),
                 project: "alpha".into(),
             },
             world,

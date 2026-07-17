@@ -3,7 +3,6 @@
 //! Service output is captured into one canonical per-service log, with each line
 //! tagged by capture timestamp and source stream.
 use std::{
-    collections::BTreeSet,
     env,
     fs::{self, File, OpenOptions},
     io::{BufWriter, IsTerminal, Read, Seek, SeekFrom, Write},
@@ -24,10 +23,7 @@ use std::{
 use terminal_size::Width;
 use tracing::debug;
 
-use crate::{
-    config::EffectiveLogsConfig, cron::CronStateFile, daemon::PidFile,
-    error::LogsManagerError, runtime,
-};
+use crate::{config::EffectiveLogsConfig, error::LogsManagerError, runtime};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// High-level bucket for all-services log rendering.
@@ -85,9 +81,9 @@ impl From<LogStream> for &'static str {
     }
 }
 
-/// Returns the path to the canonical service log file.
-pub fn get_service_log_path(service: &str) -> PathBuf {
-    resolve_combined_log_path(service)
+/// Returns the path to the canonical service log file for a project.
+pub fn get_service_log_path(project: &str, service: &str) -> PathBuf {
+    resolve_combined_log_path(project, service)
 }
 
 /// Returns the path to the supervisor's own log file.
@@ -98,10 +94,10 @@ pub fn supervisor_log_path() -> PathBuf {
 /// Returns the last `n` content lines of a service's log, ANSI-stripped and
 /// with the `<timestamp> <stream>` prefix removed, for use as diagnostic
 /// evidence. Returns an empty vec when the log is missing or unreadable.
-pub fn tail_service_log(service: &str, n: usize) -> Vec<String> {
+pub fn tail_service_log(project: &str, service: &str, n: usize) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
 
-    let path = get_service_log_path(service);
+    let path = get_service_log_path(project, service);
     let Ok(mut file) = fs::File::open(&path) else {
         return Vec::new();
     };
@@ -680,9 +676,9 @@ impl<W: Write> Write for LogWriter<W> {
     }
 }
 
-/// Returns the legacy path to the log file for a given service and kind.
-pub fn get_log_path(service: &str, kind: &str) -> PathBuf {
-    resolve_log_path(service, kind)
+/// Returns the legacy path to the log file for a given project, service and kind.
+pub fn get_log_path(project: &str, service: &str, kind: &str) -> PathBuf {
+    resolve_log_path(project, service, kind)
 }
 
 /// Rejects a service name that could escape the log directory.
@@ -720,7 +716,7 @@ fn assert_within_log_dir(path: &Path) -> Result<(), LogsManagerError> {
     let resolved = parent
         .canonicalize()
         .unwrap_or_else(|_| parent.to_path_buf());
-    if resolved == base {
+    if resolved == base || resolved.parent() == Some(base.as_path()) {
         Ok(())
     } else {
         Err(LogsManagerError::InvalidServiceName(
@@ -729,16 +725,21 @@ fn assert_within_log_dir(path: &Path) -> Result<(), LogsManagerError> {
     }
 }
 
+/// Returns the per-project directory captured logs live under.
+fn project_log_dir(project: &str) -> PathBuf {
+    runtime::log_dir().join(project)
+}
+
 /// Returns the canonical path for a service log without performing any existence checks.
-fn canonical_log_path(service: &str, kind: &str) -> PathBuf {
-    let mut path = runtime::log_dir();
+fn canonical_log_path(project: &str, service: &str, kind: &str) -> PathBuf {
+    let mut path = project_log_dir(project);
     path.push(format!("{service}_{kind}.log"));
     path
 }
 
 /// Returns the canonical stdout/stderr log path for a service.
-fn canonical_combined_log_path(service: &str) -> PathBuf {
-    let mut path = runtime::log_dir();
+fn canonical_combined_log_path(project: &str, service: &str) -> PathBuf {
+    let mut path = project_log_dir(project);
     path.push(format!("{service}.log"));
     path
 }
@@ -772,7 +773,7 @@ impl LiveLogEntry {
     }
 }
 
-type LiveLogKey = (String, String);
+type LiveLogKey = (String, String, String);
 
 /// Returns the global live log registry shared by supervisor-side log readers.
 fn live_log_registry()
@@ -783,39 +784,55 @@ fn live_log_registry()
     REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Appends new live log bytes for a service stream and notifies subscribers.
-fn append_live_log_chunk(service: &str, stream: LogStream, chunk: &[u8]) {
-    let key = (service.to_string(), stream.as_str().to_string());
+/// Appends new live log bytes for a project's service stream and notifies subscribers.
+fn append_live_log_chunk(project: &str, service: &str, stream: LogStream, chunk: &[u8]) {
+    let key = (
+        project.to_string(),
+        service.to_string(),
+        stream.as_str().to_string(),
+    );
     if let Ok(mut registry) = live_log_registry().lock() {
         let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
         entry.append(chunk);
     }
 }
 
-/// Drops the in-memory live-log buffer for every stream of a service.
+/// Drops the in-memory live-log buffer for every stream of a project's service.
 ///
 /// The supervisor serves `sysg logs` from this registry, not from disk, so
 /// truncating the files alone leaves the reader showing "purged" content. A
 /// purge that runs inside the supervisor must clear this too.
-pub fn clear_live_log(service: &str) {
+pub fn clear_live_log(project: &str, service: &str) {
     if let Ok(mut registry) = live_log_registry().lock() {
-        registry.retain(|(name, _), _| name != service);
+        registry.retain(|(proj, name, _), _| proj != project || name != service);
     }
 }
 
-/// Returns the buffered live log bytes for a service stream, if any.
-fn snapshot_live_log(service: &str, stream: LogStream) -> Option<Vec<u8>> {
-    let key = (service.to_string(), stream.as_str().to_string());
+/// Returns the buffered live log bytes for a project's service stream, if any.
+fn snapshot_live_log(project: &str, service: &str, stream: LogStream) -> Option<Vec<u8>> {
+    let key = (
+        project.to_string(),
+        service.to_string(),
+        stream.as_str().to_string(),
+    );
     live_log_registry()
         .lock()
         .ok()
         .and_then(|registry| registry.get(&key).map(|entry| entry.buffer.clone()))
 }
 
-/// Registers a subscriber for future live log chunks on a service stream.
-fn subscribe_live_log(service: &str, stream: LogStream) -> mpsc::Receiver<Vec<u8>> {
+/// Registers a subscriber for future live log chunks on a project's service stream.
+fn subscribe_live_log(
+    project: &str,
+    service: &str,
+    stream: LogStream,
+) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
-    let key = (service.to_string(), stream.as_str().to_string());
+    let key = (
+        project.to_string(),
+        service.to_string(),
+        stream.as_str().to_string(),
+    );
     if let Ok(mut registry) = live_log_registry().lock() {
         let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
         entry.subscribers.push(tx);
@@ -861,8 +878,8 @@ fn normalize(name: &str) -> String {
 }
 
 /// Locates existing log.
-fn locate_existing_log(service: &str, kind: &str) -> Option<PathBuf> {
-    let canonical = canonical_log_path(service, kind);
+fn locate_existing_log(project: &str, service: &str, kind: &str) -> Option<PathBuf> {
+    let canonical = canonical_log_path(project, service, kind);
     let directory = canonical.parent()?;
     let needle = normalize(service);
     let suffix = format!("_{kind}.log");
@@ -891,8 +908,8 @@ fn locate_existing_log(service: &str, kind: &str) -> Option<PathBuf> {
 }
 
 /// Locates an existing merged service log.
-fn locate_existing_combined_log(service: &str) -> Option<PathBuf> {
-    let canonical = canonical_combined_log_path(service);
+fn locate_existing_combined_log(project: &str, service: &str) -> Option<PathBuf> {
+    let canonical = canonical_combined_log_path(project, service);
     let directory = canonical.parent()?;
     let needle = normalize(service);
 
@@ -925,23 +942,23 @@ fn locate_existing_combined_log(service: &str) -> Option<PathBuf> {
 
 /// Attempts to resolve an on-disk log path for the given service and kind, falling back to the
 /// canonical location when no existing file can be found.
-pub fn resolve_log_path(service: &str, kind: &str) -> PathBuf {
-    let canonical = canonical_log_path(service, kind);
+pub fn resolve_log_path(project: &str, service: &str, kind: &str) -> PathBuf {
+    let canonical = canonical_log_path(project, service, kind);
     if canonical.exists() {
         return canonical;
     }
 
-    locate_existing_log(service, kind).unwrap_or(canonical)
+    locate_existing_log(project, service, kind).unwrap_or(canonical)
 }
 
 /// Attempts to resolve an on-disk merged log path for the given service.
-fn resolve_combined_log_path(service: &str) -> PathBuf {
-    let canonical = canonical_combined_log_path(service);
+fn resolve_combined_log_path(project: &str, service: &str) -> PathBuf {
+    let canonical = canonical_combined_log_path(project, service);
     if canonical.exists() {
         return canonical;
     }
 
-    locate_existing_combined_log(service).unwrap_or(canonical)
+    locate_existing_combined_log(project, service).unwrap_or(canonical)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1249,13 +1266,14 @@ fn process_fds_present(pid: u32) -> bool {
 
 /// Resolves tail targets.
 fn resolve_tail_targets(
+    project: &str,
     service_name: &str,
     pid: Option<u32>,
 ) -> Result<(PathBuf, PathBuf, PathBuf), LogsManagerError> {
     validate_service_name(service_name)?;
-    let stdout_path = resolve_log_path(service_name, "stdout");
-    let stderr_path = resolve_log_path(service_name, "stderr");
-    let combined_path = resolve_combined_log_path(service_name);
+    let stdout_path = resolve_log_path(project, service_name, "stdout");
+    let stderr_path = resolve_log_path(project, service_name, "stderr");
+    let combined_path = resolve_combined_log_path(project, service_name);
 
     let stdout_exists = stdout_path.exists();
     let stderr_exists = stderr_path.exists();
@@ -1771,6 +1789,7 @@ fn read_service_log_stream(
 
 /// Writes all service output streams into one canonical append-only service log.
 fn write_service_log(
+    project: &str,
     service_label: &str,
     path: PathBuf,
     receiver: mpsc::Receiver<ServiceLogLine>,
@@ -1781,7 +1800,7 @@ fn write_service_log(
     for message in receiver {
         let formatted = format_captured_log_line(message.stream.as_str(), &message.line);
         file.write_line(&formatted)?;
-        append_live_log_chunk(service_label, LogStream::Combined, &formatted);
+        append_live_log_chunk(project, service_label, LogStream::Combined, &formatted);
     }
 
     file.flush()
@@ -1847,12 +1866,24 @@ fn stream_dynamic_child_log(
 }
 
 /// Creates the log directory if it doesn't exist and spawns a thread to write logs to file.
-pub fn spawn_log_writer(service: &str, reader: impl Read + Send + 'static, kind: &str) {
-    spawn_log_writer_with_config(service, reader, kind, EffectiveLogsConfig::default());
+pub fn spawn_log_writer(
+    project: &str,
+    service: &str,
+    reader: impl Read + Send + 'static,
+    kind: &str,
+) {
+    spawn_log_writer_with_config(
+        project,
+        service,
+        reader,
+        kind,
+        EffectiveLogsConfig::default(),
+    );
 }
 
 /// Spawns a legacy single-stream writer through the canonical service log.
 pub fn spawn_log_writer_with_config(
+    project: &str,
     service: &str,
     reader: impl Read + Send + 'static,
     kind: &str,
@@ -1861,33 +1892,40 @@ pub fn spawn_log_writer_with_config(
     let reader = Box::new(reader) as Box<dyn Read + Send>;
     match LogStream::from_filter(kind) {
         Some(LogStream::Stdout) => {
-            spawn_service_log_writers(service, Some(reader), None, settings)
+            spawn_service_log_writers(project, service, Some(reader), None, settings)
         }
         Some(LogStream::Stderr) => {
-            spawn_service_log_writers(service, None, Some(reader), settings)
+            spawn_service_log_writers(project, service, None, Some(reader), settings)
         }
-        _ => spawn_service_log_writers(service, Some(reader), None, settings),
+        _ => spawn_service_log_writers(project, service, Some(reader), None, settings),
     }
 }
 
 /// Spawns one canonical writer for a service's stdout and stderr streams.
 pub fn spawn_service_log_writers(
+    project: &str,
     service: &str,
     stdout: Option<Box<dyn Read + Send>>,
     stderr: Option<Box<dyn Read + Send>>,
     settings: EffectiveLogsConfig,
 ) {
-    let path = get_service_log_path(service);
+    let path = get_service_log_path(project, service);
+    let project_label = project.to_string();
     let service_label = service.to_string();
     let (sender, receiver) = mpsc::channel();
 
     {
+        let project_label = project_label.clone();
         let service_label = service_label.clone();
         let path = path.clone();
         thread::spawn(move || {
-            if let Err(err) =
-                write_service_log(&service_label, path.clone(), receiver, settings)
-            {
+            if let Err(err) = write_service_log(
+                &project_label,
+                &service_label,
+                path.clone(),
+                receiver,
+                settings,
+            ) {
                 eprintln!(
                     "Warning: Unable to write service log file at {:?}: {}",
                     path, err
@@ -1980,29 +2018,28 @@ pub fn spawn_dynamic_child_log_writer(
 }
 
 /// Initializes logging for a service by spawning threads to write stdout and stderr to log files.
-pub struct LogManager {
-    /// The PID file containing service names and their respective PIDs.
-    pid_file: Arc<Mutex<PidFile>>,
-}
+#[derive(Default)]
+pub struct LogManager {}
 
 impl LogManager {
     /// Creates a new `LogManager` instance.
-    pub fn new(pid_file: Arc<Mutex<PidFile>>) -> Self {
-        Self { pid_file }
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Collects the filtered one-shot log bytes for a single service without
     /// printing, for callers that reformat the output themselves.
     pub fn collect_service_log(
         &self,
+        project: &str,
         service_name: &str,
         lines: usize,
         kind: Option<&str>,
         filter: &LogFilter,
     ) -> Result<Vec<u8>, LogsManagerError> {
-        let stdout_path = resolve_log_path(service_name, "stdout");
-        let stderr_path = resolve_log_path(service_name, "stderr");
-        let combined_path = resolve_combined_log_path(service_name);
+        let stdout_path = resolve_log_path(project, service_name, "stdout");
+        let stderr_path = resolve_log_path(project, service_name, "stderr");
+        let combined_path = resolve_combined_log_path(project, service_name);
         let mut bytes = Vec::new();
         for chunk in collect_log_tail(
             &stdout_path,
@@ -2020,6 +2057,7 @@ impl LogManager {
     /// Shows the logs for a specific service's stdout/stderr in real-time.
     pub fn show_log(
         &self,
+        project: &str,
         service_name: &str,
         pid: u32,
         lines: usize,
@@ -2027,6 +2065,7 @@ impl LogManager {
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
+            project,
             service_name,
             Some(pid),
             lines,
@@ -2039,6 +2078,7 @@ impl LogManager {
     /// Shows a one-shot snapshot of logs for a specific service.
     pub fn show_log_snapshot(
         &self,
+        project: &str,
         service_name: &str,
         pid: u32,
         lines: usize,
@@ -2046,6 +2086,7 @@ impl LogManager {
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
+            project,
             service_name,
             Some(pid),
             lines,
@@ -2058,12 +2099,14 @@ impl LogManager {
     /// Shows logs for a service that is not currently running.
     pub fn show_inactive_log(
         &self,
+        project: &str,
         service_name: &str,
         lines: usize,
         kind: Option<&str>,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
+            project,
             service_name,
             None,
             lines,
@@ -2076,12 +2119,14 @@ impl LogManager {
     /// Shows a one-shot snapshot of logs for a service that is not currently running.
     pub fn show_inactive_log_snapshot(
         &self,
+        project: &str,
         service_name: &str,
         lines: usize,
         kind: Option<&str>,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
+            project,
             service_name,
             None,
             lines,
@@ -2096,6 +2141,7 @@ impl LogManager {
     #[allow(clippy::too_many_arguments)]
     pub fn stream_log_to_socket(
         &self,
+        project: &str,
         service_name: &str,
         pid: Option<u32>,
         lines: usize,
@@ -2115,7 +2161,7 @@ impl LogManager {
         if !filter.all
             && let Some(snapshot) = (kind.is_none()
                 || kind.and_then(LogStream::from_filter).is_some())
-            .then(|| snapshot_live_log(service_name, LogStream::Combined))
+            .then(|| snapshot_live_log(project, service_name, LogStream::Combined))
             .flatten()
             && !snapshot.is_empty()
         {
@@ -2132,7 +2178,8 @@ impl LogManager {
                 socket.flush()?;
             }
             if matches!(mode, TailMode::Follow) {
-                let receiver = subscribe_live_log(service_name, LogStream::Combined);
+                let receiver =
+                    subscribe_live_log(project, service_name, LogStream::Combined);
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(250)) {
                         Ok(chunk) => {
@@ -2174,6 +2221,7 @@ impl LogManager {
             return Ok(());
         }
         self.stream_logs_platform_with_mode(
+            project,
             service_name,
             pid,
             lines,
@@ -2185,11 +2233,15 @@ impl LogManager {
     }
 
     /// Clears stdout and stderr logs for a specific service.
-    pub fn clear_service_logs(&self, service_name: &str) -> Result<(), LogsManagerError> {
+    pub fn clear_service_logs(
+        &self,
+        project: &str,
+        service_name: &str,
+    ) -> Result<(), LogsManagerError> {
         validate_service_name(service_name)?;
-        let stdout_path = resolve_log_path(service_name, "stdout");
-        let stderr_path = resolve_log_path(service_name, "stderr");
-        let combined_path = resolve_combined_log_path(service_name);
+        let stdout_path = resolve_log_path(project, service_name, "stdout");
+        let stderr_path = resolve_log_path(project, service_name, "stderr");
+        let combined_path = resolve_combined_log_path(project, service_name);
 
         truncate_log_file(&stdout_path)?;
         truncate_log_file(&stderr_path)?;
@@ -2239,8 +2291,10 @@ impl LogManager {
 
     /// Platform-specific implementation for showing logs.
     #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_arguments)]
     fn show_logs_platform_with_mode(
         &self,
+        project: &str,
         service_name: &str,
         pid: Option<u32>,
         lines: usize,
@@ -2258,7 +2312,7 @@ impl LogManager {
         );
 
         let (stdout_path, stderr_path, combined_path) =
-            resolve_tail_targets(service_name, pid)?;
+            resolve_tail_targets(project, service_name, pid)?;
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
@@ -2322,6 +2376,7 @@ impl LogManager {
     #[allow(clippy::too_many_arguments)]
     fn stream_logs_platform_with_mode(
         &self,
+        project: &str,
         service_name: &str,
         pid: Option<u32>,
         lines: usize,
@@ -2333,7 +2388,7 @@ impl LogManager {
         write_log_header(stream.try_clone()?, service_name, pid)?;
 
         let (stdout_path, stderr_path, combined_path) =
-            resolve_tail_targets(service_name, pid)?;
+            resolve_tail_targets(project, service_name, pid)?;
 
         debug!("Streaming logs via supervisor tail for '{}'", service_name);
 
@@ -2398,8 +2453,10 @@ impl LogManager {
 
     /// macOS implementation for showing logs using log files.
     #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
     fn show_logs_platform_with_mode(
         &self,
+        project: &str,
         service_name: &str,
         pid: Option<u32>,
         lines: usize,
@@ -2417,7 +2474,7 @@ impl LogManager {
         );
 
         let (stdout_path, stderr_path, combined_path) =
-            resolve_tail_targets(service_name, pid)?;
+            resolve_tail_targets(project, service_name, pid)?;
 
         debug!("Streaming logs via tail for '{}'", service_name);
 
@@ -2470,6 +2527,7 @@ impl LogManager {
     #[allow(clippy::too_many_arguments)]
     fn stream_logs_platform_with_mode(
         &self,
+        project: &str,
         service_name: &str,
         pid: Option<u32>,
         lines: usize,
@@ -2481,7 +2539,7 @@ impl LogManager {
         write_log_header(stream.try_clone()?, service_name, pid)?;
 
         let (stdout_path, stderr_path, combined_path) =
-            resolve_tail_targets(service_name, pid)?;
+            resolve_tail_targets(project, service_name, pid)?;
 
         debug!("Streaming logs via supervisor tail for '{}'", service_name);
 
@@ -2536,147 +2594,6 @@ impl LogManager {
         Ok(())
     }
 
-    /// Streams logs for all active services in real-time.
-    pub fn show_logs(
-        &self,
-        lines: usize,
-        kind: Option<&str>,
-        config_path: Option<&str>,
-    ) -> Result<(), LogsManagerError> {
-        self.show_logs_with_mode(lines, kind, config_path, TailMode::current())
-    }
-
-    /// Streams one-shot snapshots for all active services.
-    pub fn show_logs_snapshot(
-        &self,
-        lines: usize,
-        kind: Option<&str>,
-        config_path: Option<&str>,
-    ) -> Result<(), LogsManagerError> {
-        self.show_logs_with_mode(lines, kind, config_path, TailMode::OneShot)
-    }
-
-    /// Shows logs with mode.
-    fn show_logs_with_mode(
-        &self,
-        lines: usize,
-        kind: Option<&str>,
-        config_path: Option<&str>,
-        mode: TailMode,
-    ) -> Result<(), LogsManagerError> {
-        debug!("Fetching logs for all services...");
-
-        println!(
-            "\n\
-            ╭{}╮\n\
-            │ Warning  Showing latest logs per service (stdout & stderr)             │\n\
-            │                                                                   │\n\
-            │ For complete logs, run: sysg logs <service>                      │\n\
-            ╰{}╯\n",
-            "─".repeat(67),
-            "─".repeat(67)
-        );
-
-        if matches!(kind, Some("supervisor")) {
-            let _ = self.show_supervisor_log(lines).map_err(|err| {
-                eprintln!("Failed to show supervisor logs: {}", err);
-            });
-
-            return Ok(());
-        }
-
-        let (pid_snapshot, store) = {
-            let guard = self.pid_file.lock().unwrap();
-            (guard.services().clone(), guard.store())
-        };
-
-        let cron_state = CronStateFile::load(store).unwrap_or_default();
-
-        let hash_to_name: std::collections::HashMap<String, String> =
-            crate::config::load_config(config_path)
-                .ok()
-                .map(|config| {
-                    config
-                        .services
-                        .keys()
-                        .map(|name| (config.state_key(name), name.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-        let mut service_names: BTreeSet<String> = pid_snapshot.keys().cloned().collect();
-
-        for hash in cron_state.jobs().keys() {
-            if let Some(name) = hash_to_name.get(hash) {
-                service_names.insert(name.clone());
-            } else {
-                service_names.insert(hash.clone());
-            }
-        }
-
-        debug!("Services: {service_names:?}");
-
-        if service_names.is_empty() {
-            if kind.is_some() {
-                println!("No active services");
-            }
-            return Ok(());
-        }
-
-        for service_name in service_names {
-            if let Some(pid) = pid_snapshot.get(&service_name) {
-                debug!("Service: {service_name}, PID: {pid}");
-                let result = if matches!(mode, TailMode::OneShot) {
-                    self.show_log_snapshot(
-                        &service_name,
-                        *pid,
-                        lines,
-                        kind,
-                        &LogFilter::default(),
-                    )
-                } else {
-                    self.show_log(&service_name, *pid, lines, kind, &LogFilter::default())
-                };
-                if let Err(err) = result {
-                    eprintln!("Failed to stream logs for '{}': {}", service_name, err);
-                }
-                continue;
-            }
-
-            if let Ok(config) = crate::config::load_config(config_path)
-                && config.services.contains_key(&service_name)
-            {
-                let service_hash = config.state_key(&service_name);
-                if let Some(_cron_job) = cron_state.jobs().get(&service_hash) {
-                    debug!("Showing inactive logs for cron service '{}'", service_name);
-                    let result = if matches!(mode, TailMode::OneShot) {
-                        self.show_inactive_log_snapshot(
-                            &service_name,
-                            lines,
-                            kind,
-                            &LogFilter::default(),
-                        )
-                    } else {
-                        self.show_inactive_log(
-                            &service_name,
-                            lines,
-                            kind,
-                            &LogFilter::default(),
-                        )
-                    };
-                    if let Err(err) = result {
-                        eprintln!(
-                            "Failed to stream logs for '{}': {}",
-                            service_name, err
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     /// Formats log title.
     fn format_log_title(service_name: &str, pid: Option<u32>) -> String {
         match pid {
@@ -2686,7 +2603,7 @@ impl LogManager {
     }
 
     /// Shows the supervisor logs
-    fn show_supervisor_log(&self, lines: usize) -> Result<(), LogsManagerError> {
+    pub fn show_supervisor_log(&self, lines: usize) -> Result<(), LogsManagerError> {
         let supervisor_log = runtime::log_dir().join("supervisor.log");
 
         if !supervisor_log.exists() {
@@ -2792,7 +2709,7 @@ mod tests {
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
 
-        let log_dir = canonical_log_path("dummy", "stdout")
+        let log_dir = canonical_log_path("__loose__", "dummy", "stdout")
             .parent()
             .map(Path::to_path_buf)
             .unwrap();
@@ -2801,7 +2718,7 @@ mod tests {
         let target = log_dir.join("arb-rs_stdout.log");
         File::create(&target).unwrap();
 
-        let resolved = resolve_log_path("arb_rs", "stdout");
+        let resolved = resolve_log_path("__loose__", "arb_rs", "stdout");
         assert_eq!(resolved, target);
 
         unsafe {
@@ -2880,11 +2797,16 @@ mod tests {
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
 
-        super::spawn_log_writer("svc", Cursor::new(b"partial line".to_vec()), "stdout");
+        super::spawn_log_writer(
+            "__loose__",
+            "svc",
+            Cursor::new(b"partial line".to_vec()),
+            "stdout",
+        );
 
         thread::sleep(Duration::from_millis(100));
 
-        let log_path = get_service_log_path("svc");
+        let log_path = get_service_log_path("__loose__", "svc");
         let contents =
             fs::read_to_string(&log_path).expect("service log should be written");
         assert!(contents.contains(" stdout partial line\n"));
@@ -2917,11 +2839,16 @@ mod tests {
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
 
-        super::spawn_log_writer("svc", Cursor::new(vec![0xff, b'a', b'\n']), "stderr");
+        super::spawn_log_writer(
+            "__loose__",
+            "svc",
+            Cursor::new(vec![0xff, b'a', b'\n']),
+            "stderr",
+        );
 
         thread::sleep(Duration::from_millis(100));
 
-        let log_path = get_service_log_path("svc");
+        let log_path = get_service_log_path("__loose__", "svc");
         let contents =
             fs::read_to_string(&log_path).expect("service log should be written");
         assert!(contents.contains(" stderr "));
@@ -2960,10 +2887,11 @@ mod tests {
             max_bytes: 6,
             max_files: 1,
         };
-        let log_path = get_service_log_path("svc");
+        let log_path = get_service_log_path("__loose__", "svc");
         fs::create_dir_all(log_path.parent().expect("log parent")).unwrap();
         fs::write(&log_path, "first\n").unwrap();
         super::spawn_log_writer_with_config(
+            "__loose__",
             "svc",
             Cursor::new(b"second\n".to_vec()),
             "stdout",

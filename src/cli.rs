@@ -82,8 +82,6 @@ pub enum LogKind {
     Stdout,
     /// Standard error logs
     Stderr,
-    /// Supervisor logs
-    Supervisor,
 }
 
 impl LogKind {
@@ -92,7 +90,6 @@ impl LogKind {
         match self {
             LogKind::Stdout => "stdout",
             LogKind::Stderr => "stderr",
-            LogKind::Supervisor => "supervisor",
         }
     }
 }
@@ -112,9 +109,8 @@ impl FromStr for LogKind {
         match s.trim().to_lowercase().as_str() {
             "stdout" => Ok(LogKind::Stdout),
             "stderr" => Ok(LogKind::Stderr),
-            "supervisor" => Ok(LogKind::Supervisor),
             _ => Err(format!(
-                "invalid log kind '{}', must be one of: stdout, stderr, supervisor",
+                "invalid log kind '{}', must be one of: stdout, stderr",
                 s
             )),
         }
@@ -377,9 +373,13 @@ pub enum Commands {
         #[arg(short, long, default_value = "50")]
         lines: usize,
 
-        /// Kind of logs to show: stdout, stderr, or supervisor. Defaults to stdout+stderr.
+        /// Kind of logs to show: stdout or stderr. Defaults to stdout+stderr.
         #[arg(short = 'k', long)]
         kind: Option<LogKind>,
+
+        /// Show the supervisor's own log instead of any service's logs.
+        #[arg(long)]
+        supervisor: bool,
 
         /// Follow the log stream until interrupted (like `tail -F`).
         ///

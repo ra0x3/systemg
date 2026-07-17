@@ -1,0 +1,124 @@
+---
+title: Codes
+---
+
+# Error codes
+
+Every user-facing failure carries a stable `SGXXXX` code. Codes never change
+meaning, so a script can match on them and each has a permanent anchor on this
+page. A diagnostic's `docs` link points straight at its code here.
+
+## General
+
+### SG0001
+
+Catchall — a failure that has no more specific diagnosis yet.
+
+### SG0017
+
+`logs --prune` was run with no `--max-size` or `--max-age` bound, so there is
+nothing to prune against. Pass at least one bound.
+
+### SG0018
+
+The manifest on disk changed since it was last submitted, but the command ran
+without `-c`, so it would act on the supervisor's stale cached manifest. Re-run
+once with `-c <path>` so the supervisor loads the latest; after that, `-c` is
+optional again. See [config caching](/how-it-works/configuration#the-config-cache).
+
+### SG0019
+
+`sysg logs` ran with no `-s`, `-p`, or `--supervisor`, so there is no target to
+read. Logs are always scoped: pass `-p <project>` (a whole project), `-s <service>`
+(a loose service, or `-p <project> -s <service>`), or `--supervisor`.
+
+### SG0020
+
+`logs --supervisor` was combined with a `-s`/`-p` selector. The supervisor's own
+log is a single stream; drop the selector, or drop `--supervisor` to read a
+service's logs.
+
+### SG0021
+
+`logs -s <service>` (with no `-p`) named a service that is not in the loose
+bundle. A bare `-s` reads only `__loose__`; if the service belongs to a project,
+pass `-p <project> -s <service>`.
+
+## Start
+
+### SG0102
+
+A service exited immediately at start, before it finished starting.
+
+### SG0103
+
+A service's `pre_start` command failed, so the service was not started.
+
+### SG0104
+
+A service never passed its configured health check.
+
+## Selectors, status &amp; stop
+
+### SG0006
+
+A bare `-s <name>` selector matched a service in more than one loaded project, so
+the target is ambiguous. Pass `-p` to choose the project.
+
+### SG0201
+
+The `-p` project does not match the config sysg resolved.
+
+### SG0202
+
+The command names a service or project that does not exist.
+
+### SG0203
+
+A config file could not be found or read.
+
+### SG0204
+
+Mutually exclusive selectors were combined (e.g. `--supervisor` with `-s`/`-p`,
+or two `logs` modes).
+
+### SG0205
+
+The supervisor's process is alive but not answering its control socket, so the
+command was refused instead of routed into a dying daemon.
+
+### SG0206
+
+No supervisor is running, so `status` reports state read off disk; any processes
+still alive are unsupervised orphans.
+
+## Restart
+
+### SG0301
+
+A restart's new manifest is invalid, so the restart was refused and nothing
+changed.
+
+### SG0302
+
+A restart ran but left one or more units short of their target state.
+
+### SG0303
+
+A supervisor recycle stopped the old daemon but the new one did not come up.
+
+## Purge
+
+### SG0401
+
+A purge was refused because a live supervisor is still managing processes; stop
+it or pass `--force`.
+
+### SG0402
+
+A purge removed some state but hit an IO error before finishing, so the on-disk
+state may be partial.
+
+### SG0403
+
+A scoped purge named a project that has no state on disk; nothing was deleted.

@@ -31,6 +31,9 @@ git_repo_init() {
   git config user.name t
   git add -A
   git commit -qm base
+  # The stack.yaml runs `python3 /usecase/app/web.py`; point that fixed path at
+  # the repo's app dir so patches to web.py (applied in the repo) take effect.
+  ln -sfn "$REPO/app" /usecase/app
 }
 
 apply_patch() {

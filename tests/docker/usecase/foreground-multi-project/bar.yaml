@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  bar:
+    name: Bar
+    services:
+      barsvc:
+        command: "sleep 3000"
+        restart_policy: always

@@ -562,7 +562,15 @@ pub fn write_supervisor_pid(pid: libc::pid_t) -> Result<(), ControlError> {
     Ok(())
 }
 
-/// Persists the resolved config path to assist CLI fallbacks.
+/// Path holding the content hash of the last-submitted manifest, beside the
+/// config-path hint. Lets a bare command (no `-c`) detect that the on-disk file
+/// drifted from what the supervisor loaded.
+fn config_hint_hash_path() -> Result<PathBuf, ControlError> {
+    Ok(runtime_dir()?.join("config_hint_hash"))
+}
+
+/// Persists the resolved config path — and a hash of its current content — to
+/// assist CLI fallbacks and detect a dirtied manifest.
 pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
     let hint_path = config_hint_path()?;
     if let Some(parent) = hint_path.parent() {
@@ -570,7 +578,51 @@ pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
     }
     let config_str = config.to_string_lossy();
     runtime::write_private_file(&hint_path, config_str.as_bytes())?;
+
+    if let Some(hash) = manifest_content_hash(config) {
+        let hash_path = config_hint_hash_path()?;
+        runtime::write_private_file(&hash_path, hash.as_bytes())?;
+    }
     Ok(())
+}
+
+/// Hashes a manifest file by its parsed, canonicalized content so cosmetic edits
+/// (whitespace, comments, key order) don't read as a change, but any real
+/// manifest change does. Returns `None` if the file cannot be read or parsed.
+pub fn manifest_content_hash(config: &Path) -> Option<String> {
+    let content = fs::read_to_string(config).ok()?;
+    let configs = crate::config::parse_config_projects(&content).ok()?;
+    let mut fingerprints: Vec<String> = Vec::new();
+    for config in &configs {
+        let mut svc: Vec<String> = config
+            .services
+            .iter()
+            .map(|(name, service)| format!("{name}={}", service.compute_hash()))
+            .collect();
+        svc.sort();
+        fingerprints.push(format!("{}:{}", config.project.id, svc.join(",")));
+    }
+    fingerprints.sort();
+    Some(fingerprints.join("\n"))
+}
+
+/// Whether the on-disk manifest at the recorded hint path drifted from the hash
+/// the supervisor last loaded. `false` when there is no hint, no recorded hash,
+/// or the file is unreadable — the cache is used as-is in those cases.
+pub fn manifest_is_dirty() -> bool {
+    let Ok(Some(hint)) = read_config_hint() else {
+        return false;
+    };
+    let Ok(hash_path) = config_hint_hash_path() else {
+        return false;
+    };
+    let Ok(recorded) = fs::read_to_string(&hash_path) else {
+        return false;
+    };
+    match manifest_content_hash(&hint) {
+        Some(current) => current != recorded.trim(),
+        None => false,
+    }
 }
 
 /// Reads the supervisor PID if present.
@@ -621,6 +673,12 @@ pub fn cleanup_runtime() -> Result<(), ControlError> {
         && config_path.exists()
     {
         let _ = fs::remove_file(config_path);
+    }
+
+    if let Ok(hash_path) = config_hint_hash_path()
+        && hash_path.exists()
+    {
+        let _ = fs::remove_file(hash_path);
     }
 
     Ok(())

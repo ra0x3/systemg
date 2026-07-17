@@ -35,6 +35,48 @@ pub fn prune_bound_missing() -> Diagnostic {
     .help_docs()
 }
 
+/// Builds the SG0019 diagnostic for a bare `logs` with no target selector.
+pub fn target_required() -> Diagnostic {
+    Diagnostic::error(
+        SgCode::LogsTargetRequired,
+        "`sysg logs` needs a target: a service, a project, or --supervisor",
+    )
+    .note("bare `logs` is refused so it never dumps every project's output at once")
+    .help_cmd("one service", "sysg logs -s <service>")
+    .help_cmd("a whole project", "sysg logs -p <project>")
+    .help_cmd("the supervisor log", "sysg logs --supervisor")
+    .help_docs()
+}
+
+/// Builds the SG0020 diagnostic for `--supervisor` combined with a selector.
+pub fn supervisor_with_selector() -> Diagnostic {
+    Diagnostic::error(
+        SgCode::LogsSupervisorConflict,
+        "--supervisor cannot be combined with a service or project selector",
+    )
+    .note("the supervisor log is a single stream; it has no -s/-p scope")
+    .help_cmd("supervisor log", "sysg logs --supervisor")
+    .help_docs()
+}
+
+/// Builds the SG0021 diagnostic for `logs -s <service>` (no -p) where the
+/// service is not in the loose bundle.
+pub fn loose_service_not_found(service: &str) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::LooseServiceNotFound,
+        format!("no loose service named `{service}`"),
+    )
+    .note(
+        "a bare `-s` reads only project-less (loose) services; a service inside a \
+         project needs its project named",
+    )
+    .help_cmd(
+        "target its project",
+        format!("sysg logs -s {service} -p <project>"),
+    )
+    .help_docs()
+}
+
 /// Builds the SG0204 diagnostic for an unsupported `--format` value.
 pub fn unsupported_format(format: &str) -> Diagnostic {
     Diagnostic::error(

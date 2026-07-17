@@ -42,6 +42,8 @@ pub enum LogsPlan {
         /// Remove rotated backups older than this, e.g. "7d".
         max_age: Option<String>,
     },
+    /// Show the supervisor's own log.
+    Supervisor,
 }
 
 /// The mode flags a `logs` invocation set, before selector resolution.
@@ -55,6 +57,8 @@ pub struct Modes {
     pub prune: bool,
     /// `--follow`: stream rather than snapshot (only meaningful for show).
     pub follow: bool,
+    /// `--supervisor`: show the supervisor's own log.
+    pub supervisor: bool,
 }
 
 /// Why a `logs` invocation could not resolve to a single plan.
@@ -72,6 +76,10 @@ pub enum LogsPlanError {
     },
     /// `--prune` ran without a `--max-size` or `--max-age` bound.
     PruneBoundMissing,
+    /// `--supervisor` was combined with a `-s`/`-p` selector or a mode flag.
+    SupervisorWithSelector,
+    /// A show invocation named no service, no project, and not `--supervisor`.
+    TargetRequired,
     /// The `-p` flag disagreed with a `project/service` selector prefix.
     Mismatch(ProjectMismatch),
 }
@@ -89,6 +97,21 @@ pub fn resolve_plan(
     max_size: Option<String>,
     max_age: Option<String>,
 ) -> Result<LogsPlan, LogsPlanError> {
+    if modes.supervisor
+        && (service.is_some()
+            || project.is_some()
+            || modes.path
+            || modes.purge
+            || modes.prune
+            || modes.follow)
+    {
+        return Err(LogsPlanError::SupervisorWithSelector);
+    }
+
+    if modes.supervisor {
+        return Ok(LogsPlan::Supervisor);
+    }
+
     let mut set = Vec::new();
     if modes.path {
         set.push("--path");
@@ -124,6 +147,9 @@ pub fn resolve_plan(
     if modes.purge {
         return Ok(LogsPlan::Purge { target });
     }
+    if matches!(target, Target::Everything) {
+        return Err(LogsPlanError::TargetRequired);
+    }
     Ok(LogsPlan::Show {
         target,
         follow: modes.follow,
@@ -140,18 +166,59 @@ mod tests {
             purge,
             prune,
             follow,
+            supervisor: false,
         }
     }
 
     #[test]
-    fn no_flags_is_a_show() {
+    fn bare_logs_requires_a_target() {
         assert_eq!(
-            resolve_plan(modes(false, false, false, false), None, None, None, None)
-                .unwrap(),
+            resolve_plan(modes(false, false, false, false), None, None, None, None),
+            Err(LogsPlanError::TargetRequired)
+        );
+    }
+
+    #[test]
+    fn project_alone_is_a_show() {
+        assert_eq!(
+            resolve_plan(
+                modes(false, false, false, false),
+                None,
+                Some("alpha"),
+                None,
+                None
+            )
+            .unwrap(),
             LogsPlan::Show {
-                target: Target::Everything,
+                target: Target::Project {
+                    project: "alpha".into()
+                },
                 follow: false
             }
+        );
+    }
+
+    #[test]
+    fn supervisor_alone_resolves() {
+        let modes = Modes {
+            supervisor: true,
+            ..modes(false, false, false, false)
+        };
+        assert_eq!(
+            resolve_plan(modes, None, None, None, None).unwrap(),
+            LogsPlan::Supervisor
+        );
+    }
+
+    #[test]
+    fn supervisor_with_selector_is_rejected() {
+        let modes = Modes {
+            supervisor: true,
+            ..modes(false, false, false, false)
+        };
+        assert_eq!(
+            resolve_plan(modes, Some("web"), None, None, None),
+            Err(LogsPlanError::SupervisorWithSelector)
         );
     }
 

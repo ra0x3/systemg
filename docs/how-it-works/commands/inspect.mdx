@@ -72,10 +72,11 @@ one a multi-project config declares.
 
 <Note>
 Inspect refuses rather than guesses:
-- a service name that does not exist → `SG0202`,
-- a bare `-s <name>` that matches a service in more than one project → `SG0006`
-  (pass `-p` to choose),
-- a `-p` that disagrees with a `project/service` prefix → `SG0201`.
+- a service name that does not exist → [`SG0202`](/how-it-works/dialog/codes#sg0202),
+- a bare `-s <name>` that matches a service in more than one project →
+  [`SG0006`](/how-it-works/dialog/codes#sg0006) (pass `-p` to choose),
+- a `-p` that disagrees with a `project/service` prefix →
+  [`SG0201`](/how-it-works/dialog/codes#sg0201).
 </Note>
 
 Shows CPU and memory usage chart:

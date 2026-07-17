@@ -323,9 +323,15 @@ fn render_service_logs_from_snapshot(
         .find(|unit| status_unit_matches_selector(unit, Some(service_name), project));
 
     if let Some(unit) = unit {
+        let unit_project = unit
+            .project
+            .as_ref()
+            .map(|project| project.id.clone())
+            .unwrap_or_else(|| systemg::state_store::LOOSE_PROJECT_ID.to_string());
         if let Some(process_pid) = live_unit_pid(unit) {
             if snapshot_mode {
                 manager.show_log_snapshot(
+                    &unit_project,
                     service_name,
                     process_pid,
                     lines,
@@ -333,15 +339,28 @@ fn render_service_logs_from_snapshot(
                     filter,
                 )?;
             } else {
-                manager.show_log(service_name, process_pid, lines, kind, filter)?;
+                manager.show_log(
+                    &unit_project,
+                    service_name,
+                    process_pid,
+                    lines,
+                    kind,
+                    filter,
+                )?;
             }
             return Ok(());
         }
 
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, kind, filter)?;
+            manager.show_inactive_log_snapshot(
+                &unit_project,
+                service_name,
+                lines,
+                kind,
+                filter,
+            )?;
         } else {
-            manager.show_inactive_log(service_name, lines, kind, filter)?;
+            manager.show_inactive_log(&unit_project, service_name, lines, kind, filter)?;
         }
         return Ok(());
     }
@@ -351,10 +370,11 @@ fn render_service_logs_from_snapshot(
         return Ok(());
     }
 
+    let loose = systemg::state_store::LOOSE_PROJECT_ID;
     let cron_state = CronStateFile::load(StateStore::loose()).unwrap_or_default();
-    let combined_exists = get_service_log_path(service_name).exists();
-    let stdout_exists = resolve_log_path(service_name, "stdout").exists();
-    let stderr_exists = resolve_log_path(service_name, "stderr").exists();
+    let combined_exists = get_service_log_path(loose, service_name).exists();
+    let stdout_exists = resolve_log_path(loose, service_name, "stdout").exists();
+    let stderr_exists = resolve_log_path(loose, service_name, "stderr").exists();
 
     if cron_state.jobs().contains_key(service_name)
         || combined_exists
@@ -362,9 +382,9 @@ fn render_service_logs_from_snapshot(
         || stderr_exists
     {
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, kind, filter)?;
+            manager.show_inactive_log_snapshot(loose, service_name, lines, kind, filter)?;
         } else {
-            manager.show_inactive_log(service_name, lines, kind, filter)?;
+            manager.show_inactive_log(loose, service_name, lines, kind, filter)?;
         }
     } else {
         warn!("Service '{service_name}' is not currently running");

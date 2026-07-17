@@ -66,6 +66,17 @@ pub enum SgCode {
     /// SG0017 — `logs --prune` was run without a `--max-size` or `--max-age`
     /// bound, so there is nothing to prune against.
     PruneBoundMissing,
+    /// SG0018 — the manifest on disk changed since it was last submitted, but the
+    /// command ran without `-c`, so it would act on a stale cached manifest.
+    DirtyManifest,
+    /// SG0019 — `logs` ran with no `-s`/`-p`/`--supervisor` selector, so there is
+    /// no target to read.
+    LogsTargetRequired,
+    /// SG0020 — `logs --supervisor` was combined with a `-s`/`-p` selector.
+    LogsSupervisorConflict,
+    /// SG0021 — `logs -s <service>` (with no `-p`) named a service that is not in
+    /// the loose bundle.
+    LooseServiceNotFound,
     /// SG0102 — a service exited immediately at start, before it came up.
     UnitImmediateExit,
     /// SG0103 — a service's `pre_start` failed, so it was not started.
@@ -126,6 +137,10 @@ impl SgCode {
             SgCode::SupervisorStateDesynchronized => "SG0015",
             SgCode::RollingDeploymentFailed => "SG0016",
             SgCode::PruneBoundMissing => "SG0017",
+            SgCode::DirtyManifest => "SG0018",
+            SgCode::LogsTargetRequired => "SG0019",
+            SgCode::LogsSupervisorConflict => "SG0020",
+            SgCode::LooseServiceNotFound => "SG0021",
             SgCode::UnitImmediateExit => "SG0102",
             SgCode::PreStartFailed => "SG0103",
             SgCode::HealthUnmet => "SG0104",
@@ -150,7 +165,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 32] = [
+    pub const ALL: [SgCode; 36] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -168,6 +183,10 @@ impl SgCode {
         SgCode::SupervisorStateDesynchronized,
         SgCode::RollingDeploymentFailed,
         SgCode::PruneBoundMissing,
+        SgCode::DirtyManifest,
+        SgCode::LogsTargetRequired,
+        SgCode::LogsSupervisorConflict,
+        SgCode::LooseServiceNotFound,
         SgCode::UnitImmediateExit,
         SgCode::PreStartFailed,
         SgCode::HealthUnmet,

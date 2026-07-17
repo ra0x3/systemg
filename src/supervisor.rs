@@ -132,8 +132,6 @@ struct SpawnParams {
 struct SupervisorLogRequest<'a> {
     /// Latest status snapshot used to resolve service/project targets.
     snapshot: crate::status::StatusSnapshot,
-    /// Shared PID file handle used by the log manager.
-    pid_file: std::sync::Arc<std::sync::Mutex<crate::daemon::PidFile>>,
     /// Optional service name, hash, or `project/service` selector.
     service: Option<String>,
     /// Optional stable project id used to filter log targets.
@@ -166,7 +164,6 @@ struct CronCompletionOutcome {
 struct ReadContext {
     status_cache: StatusCache,
     op_slot: OpSlot,
-    pid_file: Arc<std::sync::Mutex<crate::daemon::PidFile>>,
     version: String,
     boot_journal: BootJournal,
 }
@@ -630,26 +627,33 @@ impl Supervisor {
         service: Option<&str>,
         _project: Option<&str>,
     ) -> Result<(), SupervisorError> {
-        let manager = LogManager::new(self.daemon.pid_file_handle());
-        let mut targets: Vec<String> = Vec::new();
+        let manager = LogManager::new();
+        let mut targets: Vec<(String, String)> = Vec::new();
         match service {
-            Some(name) => targets.push(name.to_string()),
+            Some(name) => {
+                let project = _project
+                    .map(str::to_string)
+                    .unwrap_or_else(|| self.daemon.config().project.id.clone());
+                targets.push((project, name.to_string()));
+            }
             None => {
-                for name in self.daemon.config().services.keys() {
-                    targets.push(name.clone());
+                let primary = self.daemon.config();
+                for name in primary.services.keys() {
+                    targets.push((primary.project.id.clone(), name.clone()));
                 }
                 for project in self.extra_projects.values() {
-                    for name in project.daemon.config().services.keys() {
-                        targets.push(name.clone());
+                    let config = project.daemon.config();
+                    for name in config.services.keys() {
+                        targets.push((config.project.id.clone(), name.clone()));
                     }
                 }
             }
         }
-        for name in targets {
+        for (project, name) in targets {
             manager
-                .clear_service_logs(&name)
+                .clear_service_logs(&project, &name)
                 .map_err(SupervisorError::from)?;
-            crate::logs::clear_live_log(&name);
+            crate::logs::clear_live_log(&project, &name);
         }
         Ok(())
     }
@@ -1597,7 +1601,6 @@ impl Supervisor {
 
         let request = SupervisorLogRequest {
             snapshot: read_ctx.status_cache.snapshot(),
-            pid_file: Arc::clone(&read_ctx.pid_file),
             service,
             project,
             lines,
@@ -1624,7 +1627,6 @@ impl Supervisor {
         let read_ctx = ReadContext {
             status_cache: self.status_cache.clone(),
             op_slot: self.op_slot.clone(),
-            pid_file: self.daemon.pid_file_handle(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             boot_journal: self.boot_journal.clone(),
         };
@@ -2157,7 +2159,7 @@ impl Supervisor {
     fn handle_logs_command(
         request: SupervisorLogRequest<'_>,
     ) -> Result<(), SupervisorError> {
-        let manager = LogManager::new(request.pid_file);
+        let manager = LogManager::new();
         let requested_kind = request.kind;
 
         if let Some(service_name) = request.service {
@@ -2199,8 +2201,14 @@ impl Supervisor {
                         None
                     }
                 });
+                let unit_project = unit
+                    .project
+                    .as_ref()
+                    .map(|project| project.id.clone())
+                    .unwrap_or_else(|| crate::state_store::LOOSE_PROJECT_ID.to_string());
                 return manager
                     .stream_log_to_socket(
+                        &unit_project,
                         &unit.name,
                         pid,
                         request.lines,
@@ -2220,12 +2228,14 @@ impl Supervisor {
                 .into());
             }
 
-            let combined_exists = get_service_log_path(&service_name).exists();
-            let stdout_exists = resolve_log_path(&service_name, "stdout").exists();
-            let stderr_exists = resolve_log_path(&service_name, "stderr").exists();
+            let loose = crate::state_store::LOOSE_PROJECT_ID;
+            let combined_exists = get_service_log_path(loose, &service_name).exists();
+            let stdout_exists = resolve_log_path(loose, &service_name, "stdout").exists();
+            let stderr_exists = resolve_log_path(loose, &service_name, "stderr").exists();
             if combined_exists || stdout_exists || stderr_exists {
                 return manager
                     .stream_log_to_socket(
+                        loose,
                         &service_name,
                         None,
                         request.lines,
@@ -2276,17 +2286,23 @@ impl Supervisor {
                     }
                 });
 
+                let unit_project = unit
+                    .project
+                    .as_ref()
+                    .map(|project| project.id.clone())
+                    .unwrap_or_else(|| crate::state_store::LOOSE_PROJECT_ID.to_string());
+
                 if pid.is_some() {
-                    running_units.push((unit.name.clone(), pid));
+                    running_units.push((unit_project, unit.name.clone(), pid));
                 } else {
-                    offline_units.push((unit.name.clone(), pid));
+                    offline_units.push((unit_project, unit.name.clone(), pid));
                 }
             }
 
-            running_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            running_units.dedup_by(|left, right| left.0 == right.0);
-            offline_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            offline_units.dedup_by(|left, right| left.0 == right.0);
+            running_units.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+            running_units.dedup_by(|left, right| left.1 == right.1);
+            offline_units.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+            offline_units.dedup_by(|left, right| left.1 == right.1);
 
             for (section, units) in [
                 (LogSection::Running, running_units),
@@ -2298,13 +2314,14 @@ impl Supervisor {
 
                 write_log_section_header(request.stream.try_clone()?, section)?;
 
-                for (service_name, pid) in units {
+                for (unit_project, service_name, pid) in units {
                     if request.structured {
                         request.stream.try_clone()?.write_all(
                             &crate::logs::service_marker_line(&service_name),
                         )?;
                     }
                     manager.stream_log_to_socket(
+                        &unit_project,
                         &service_name,
                         pid,
                         request.lines,
@@ -2880,6 +2897,9 @@ impl Supervisor {
 
         self.daemon.set_config(config.clone());
         self.config_path = resolved;
+        // Refresh the hint + content hash so a later bare command sees this
+        // freshly-submitted manifest as current, not dirty.
+        let _ = ipc::write_config_hint(&self.config_path);
 
         self.sync_cron_projects()?;
 
@@ -5199,10 +5219,8 @@ services:
         use std::io::Read as _;
 
         let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
-        let pid_file = Arc::new(std::sync::Mutex::new(crate::daemon::PidFile::default()));
         let request = SupervisorLogRequest {
             snapshot,
-            pid_file,
             service: None,
             project: Some("arb".into()),
             lines: 50,
@@ -5239,7 +5257,7 @@ services:
         runtime::init(runtime::RuntimeMode::User);
         runtime::set_drop_privileges(false);
 
-        let log_dir = runtime::log_dir();
+        let log_dir = runtime::log_dir().join("arb");
         fs::create_dir_all(&log_dir).expect("make log dir");
         fs::write(
             log_dir.join("arb_rs__server.log"),
@@ -5316,7 +5334,7 @@ services:
         runtime::init(runtime::RuntimeMode::User);
         runtime::set_drop_privileges(false);
 
-        let log_dir = runtime::log_dir();
+        let log_dir = runtime::log_dir().join("arb");
         fs::create_dir_all(&log_dir).expect("make log dir");
         fs::write(
             log_dir.join("arb_rs__server.log"),

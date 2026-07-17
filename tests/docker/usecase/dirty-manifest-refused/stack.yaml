@@ -1,0 +1,10 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "sh -c 'echo GREETING_IS_$GREETING; sleep 3000'"
+        env:
+          GREETING: "hello"
+        restart_policy: always

@@ -24,10 +24,11 @@ $ sysg logs
 | `-` | `--prune` | Delete rotated log backups instead of displaying logs (requires `--max-size` and/or `--max-age`) |
 | `-` | `--max-size` | When pruning, cap total rotated-backup size (e.g. `500MB`, `2g`) |
 | `-` | `--max-age` | When pruning, remove rotated backups older than this (e.g. `7d`, `12h`) |
-| `-s` | `--service` | The name of the service whose logs should be displayed (optional) |
-| `-p` | `--project` | Filter logs by stable project id |
+| `-s` | `--service` | The service whose logs to show. With no `-p`, resolves to the loose (`__loose__`) bundle only |
+| `-p` | `--project` | The project whose logs to show (all its services, or one with `-s`) |
+| `-` | `--supervisor` | Show the supervisor's own log instead of a service's. Cannot be combined with `-s`/`-p` |
 | `-l` | `--lines` | Number of lines to show (default: 50) |
-| `-k` | `--kind` | Kind of logs to show: stdout, stderr, or supervisor. Omit this flag to show stdout+stderr together |
+| `-k` | `--kind` | Kind of logs to show: `stdout` or `stderr`. Omit to show stdout+stderr together |
 | `-f` | `--follow` | Follow the log stream until interrupted (like `tail -F`) |
 | `-` | `--no-follow` | Force a one-shot snapshot even on an interactive terminal |
 | `-` | `--since` | Only show lines captured at or after this time (RFC3339, `YYYY-MM-DD`, or a relative age like `30m`/`2h`/`7d`) |
@@ -43,12 +44,35 @@ $ sysg logs
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
 
+## Scoping
+
+Logs are always scoped — a bare `sysg logs` is refused
+([`SG0019`](/how-it-works/dialog/codes#sg0019)) so you never get the wrong
+project's output. Each project's logs live in their own place
+(`{project}/{service}`), so two projects can share a service name without their
+logs colliding.
+
+| You run | You get |
+|---|---|
+| `logs -p <project>` | all of that project's services |
+| `logs -p <project> -s <service>` | that one service |
+| `logs -s <service>` (no `-p`) | the loose (`__loose__`) service of that name only |
+| `logs --supervisor` | the supervisor's own log |
+| `logs` (nothing) | refused — [`SG0019`](/how-it-works/dialog/codes#sg0019) |
+
+<Note>
+A bare `-s <service>` reads only the loose bundle. If the service is in a
+project, pass `-p`; naming a non-loose service without `-p` is refused with
+[`SG0021`](/how-it-works/dialog/codes#sg0021). Combining `--supervisor` with a
+selector is [`SG0020`](/how-it-works/dialog/codes#sg0020).
+</Note>
+
 ## Modes
 
 `logs` is really five modes: show (the default), follow (`--follow`), print-path
 (`--path`), purge (`--purge`), and prune (`--prune`). The mode flags are mutually
 exclusive, and none combines with `--follow` — an illegal combination is refused
-with `SG0204` rather than guessed at.
+with [`SG0204`](/how-it-works/dialog/codes#sg0204) rather than guessed at.
 
 <Note>
 `--purge` clears logs **through the running supervisor** when one is up, so both
@@ -59,7 +83,7 @@ showing the "purged" lines.
 
 <Warning>
 `--prune` needs a bound to prune against. Running it with neither `--max-size`
-nor `--max-age` is refused with `SG0017`.
+nor `--max-age` is refused with [`SG0017`](/how-it-works/dialog/codes#sg0017).
 </Warning>
 
 ## Examples

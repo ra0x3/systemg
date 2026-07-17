@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -33,7 +33,7 @@ use systemg::{
     cli::{Cli, Commands, OutputFormat, parse_args},
     config::{Config, EffectiveLogsConfig, load_config},
     cron::{CronExecutionStatus, CronStateFile},
-    daemon::{Daemon, PidFile, ServiceLifecycleStatus},
+    daemon::{Daemon, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
     logs::{
         LogFilter, LogFormat, LogManager, LogSection, LogWriter, RotatingLogWriter,
@@ -397,6 +397,66 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
 }
 
 /// Diagnostic for a failed local config read. The resident supervisor already
+/// The manifest path a command carries, for the dirty-manifest guard. Commands
+/// that do not act on a manifest (or own their own config model, like purge)
+/// return `None` and are never guarded.
+fn command_config_arg(command: &Commands) -> Option<&str> {
+    match command {
+        Commands::Start { config, .. }
+        | Commands::Stop { config, .. }
+        | Commands::Restart { config, .. }
+        | Commands::Inspect { config, .. }
+        | Commands::Logs { config, .. } => Some(config.as_str()),
+        Commands::Status { config, .. } => {
+            Some(config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH))
+        }
+        _ => None,
+    }
+}
+
+/// Refuses a command that ran without `-c` while the on-disk manifest at the
+/// recorded hint path has drifted from what the supervisor last loaded.
+///
+/// The manifest cache is a convenience — it lets you omit `-c` when nothing
+/// changed. But once you edit the manifest, the supervisor's cached copy is
+/// stale, and acting on it would apply the wrong thing (or silently ignore your
+/// change). Re-submit once with `-c <path>` so the supervisor loads the latest;
+/// after that, bare commands work again. A command that already passed an
+/// explicit config is never dirty — it just submitted the truth.
+fn guard_dirty_manifest(config_arg: &str) -> Result<(), Box<dyn Error>> {
+    if config_arg != DEFAULT_CONFIG_PATH {
+        return Ok(());
+    }
+    // An explicit `systemg.yaml` in cwd is a real config the command will load;
+    // only guard when we would fall back to the resident hint.
+    if PathBuf::from(DEFAULT_CONFIG_PATH).exists() {
+        return Ok(());
+    }
+    if ipc::manifest_is_dirty() {
+        let hint = ipc::read_config_hint()
+            .ok()
+            .flatten()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "<config>".to_string());
+        return Err(Box::new(DiagError(Box::new(dirty_manifest_diag(&hint)))));
+    }
+    Ok(())
+}
+
+/// Builds the SG0018 diagnostic for a stale cached manifest.
+fn dirty_manifest_diag(hint: &str) -> systemg::diag::Diagnostic {
+    systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::DirtyManifest,
+        "the manifest on disk changed since it was last submitted",
+    )
+    .note(
+        "this command ran without -c, so it would act on the supervisor's stale cached manifest",
+    )
+    .note("re-run once with -c so the supervisor loads the latest manifest; after that, -c is optional again")
+    .help_cmd("submit the latest manifest", format!("sysg <command> -c {hint}"))
+    .help_docs()
+}
+
 /// holds each project's manifest, so the real fix is to target the project by
 /// id rather than hunt for a file in the current directory.
 fn config_read_diag(message: &str) -> systemg::diag::Diagnostic {
@@ -491,6 +551,13 @@ fn run() -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
+    }
+
+    // Refuse a bare command (no -c) whose supervisor-cached manifest has been
+    // dirtied on disk, so the supervisor always reflects the latest manifest you
+    // pointed it at. Commands without a manifest are exempt.
+    if let Some(config_arg) = command_config_arg(&args.command) {
+        guard_dirty_manifest(config_arg)?;
     }
 
     let verbose = args.verbose;
@@ -902,6 +969,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             project,
             lines,
             kind,
+            supervisor,
             follow,
             no_follow,
             since,
@@ -920,51 +988,47 @@ fn run() -> Result<(), Box<dyn Error>> {
                 purge,
                 prune,
                 follow,
+                supervisor,
             };
-            if let Err(err) = systemg::logs_cmd::resolve_plan(
+            let logs_plan = match systemg::logs_cmd::resolve_plan(
                 logs_modes,
                 service.as_deref(),
                 project.as_deref(),
                 max_size.clone(),
                 max_age.clone(),
             ) {
-                use systemg::logs_cmd::LogsPlanError;
-                let diag = match err {
-                    LogsPlanError::ConflictingModes { modes } => {
-                        systemg::logs_cmd::conflicting_modes(&modes)
-                    }
-                    LogsPlanError::FollowWithMode { mode } => {
-                        systemg::logs_cmd::follow_with_mode(mode)
-                    }
-                    LogsPlanError::PruneBoundMissing => {
-                        systemg::logs_cmd::prune_bound_missing()
-                    }
-                    LogsPlanError::Mismatch(mismatch) => {
-                        systemg::start::project_mismatch(
-                            &mismatch.flag,
-                            &mismatch.selector,
-                        )
-                    }
-                };
-                return Err(Box::new(DiagError(Box::new(diag))));
-            }
-            if path {
-                match service.as_deref() {
-                    Some(service_name) => {
-                        let active = get_service_log_path(service_name);
-                        if all {
-                            for path in systemg::logs::rotated_history_paths(&active)
-                                .into_iter()
-                                .rev()
-                            {
-                                println!("{}", path.display());
-                            }
-                        } else {
-                            println!("{}", active.display());
+                Ok(plan) => plan,
+                Err(err) => {
+                    use systemg::logs_cmd::LogsPlanError;
+                    let diag = match err {
+                        LogsPlanError::ConflictingModes { modes } => {
+                            systemg::logs_cmd::conflicting_modes(&modes)
                         }
-                    }
-                    None => println!("{}", systemg::runtime::log_dir().display()),
+                        LogsPlanError::FollowWithMode { mode } => {
+                            systemg::logs_cmd::follow_with_mode(mode)
+                        }
+                        LogsPlanError::PruneBoundMissing => {
+                            systemg::logs_cmd::prune_bound_missing()
+                        }
+                        LogsPlanError::SupervisorWithSelector => {
+                            systemg::logs_cmd::supervisor_with_selector()
+                        }
+                        LogsPlanError::TargetRequired => {
+                            systemg::logs_cmd::target_required()
+                        }
+                        LogsPlanError::Mismatch(mismatch) => {
+                            systemg::start::project_mismatch(
+                                &mismatch.flag,
+                                &mismatch.selector,
+                            )
+                        }
+                    };
+                    return Err(Box::new(DiagError(Box::new(diag))));
                 }
+            };
+
+            if matches!(logs_plan, systemg::logs_cmd::LogsPlan::Supervisor) {
+                LogManager::new().show_supervisor_log(lines)?;
                 return Ok(());
             }
             if prune {
@@ -1001,12 +1065,75 @@ fn run() -> Result<(), Box<dyn Error>> {
                     .ok()
                     .map(|c| c.project.id)
             });
-            let log_store = match log_project {
-                Some(id) => StateStore::for_project(&id),
-                None => StateStore::loose(),
-            };
-            let pid = Arc::new(Mutex::new(PidFile::load(log_store).unwrap_or_default()));
-            let manager = LogManager::new(pid.clone());
+            // The project subdir captured logs live under. A bare `-s` with no
+            // resolvable project reads the loose bundle, mirroring the plan's
+            // __loose__-only rule.
+            let log_project_id = log_project
+                .clone()
+                .unwrap_or_else(|| systemg::state_store::LOOSE_PROJECT_ID.to_string());
+
+            // A bare `-s <service>` (no -p, no `project/` prefix, no resolvable
+            // project) reads the loose bundle only. If that service has no loose
+            // log at all, it is not a loose service — refuse with SG0021 rather
+            // than silently reading an unrelated project's logs.
+            if let Some(service_name) = service.as_deref()
+                && project.is_none()
+                && !service_name.contains('/')
+                && log_project_id == systemg::state_store::LOOSE_PROJECT_ID
+                && !purge
+                && !path
+            {
+                let loose = systemg::state_store::LOOSE_PROJECT_ID;
+                let has_loose_log = get_service_log_path(loose, service_name).exists()
+                    || resolve_log_path(loose, service_name, "stdout").exists()
+                    || resolve_log_path(loose, service_name, "stderr").exists();
+                if !has_loose_log {
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::logs_cmd::loose_service_not_found(service_name),
+                    ))));
+                }
+            }
+
+            // A project-scoped `-p <project> -s <service>` miss is a plain
+            // target-not-found (SG0202), reusing the shared stop diagnostic.
+            if let Some(service_name) = service.as_deref()
+                && log_project_id != systemg::state_store::LOOSE_PROJECT_ID
+                && !service_name.contains('/')
+                && !purge
+                && !path
+            {
+                let bare = service_selector_name(service_name);
+                let scoped_log = get_service_log_path(&log_project_id, bare).exists()
+                    || resolve_log_path(&log_project_id, bare, "stdout").exists()
+                    || resolve_log_path(&log_project_id, bare, "stderr").exists();
+                if !scoped_log {
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::stop::service_not_found(bare),
+                    ))));
+                }
+            }
+
+            let manager = LogManager::new();
+
+            if path {
+                match service.as_deref() {
+                    Some(service_name) => {
+                        let active = get_service_log_path(&log_project_id, service_name);
+                        if all {
+                            for path in systemg::logs::rotated_history_paths(&active)
+                                .into_iter()
+                                .rev()
+                            {
+                                println!("{}", path.display());
+                            }
+                        } else {
+                            println!("{}", active.display());
+                        }
+                    }
+                    None => println!("{}", systemg::runtime::log_dir().display()),
+                }
+                return Ok(());
+            }
 
             if purge {
                 // A serving supervisor owns the in-memory live-log buffer the
@@ -1039,7 +1166,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 match service.as_deref() {
                     Some(service_name) => {
                         info!("Purging logs for service: {service_name}");
-                        manager.clear_service_logs(service_name)?;
+                        manager.clear_service_logs(&log_project_id, service_name)?;
                     }
                     None => {
                         info!("Purging logs for all services");
@@ -1121,7 +1248,22 @@ fn run() -> Result<(), Box<dyn Error>> {
                 match service.as_ref() {
                     Some(service_name) if structured_output => {
                         info!("Fetching logs for service: {service_name}");
+                        let service_project = snapshot
+                            .units
+                            .iter()
+                            .find(|unit| {
+                                status_unit_matches_selector(
+                                    unit,
+                                    Some(service_name),
+                                    target_project.as_deref(),
+                                )
+                            })
+                            .and_then(|unit| {
+                                unit.project.as_ref().map(|project| project.id.clone())
+                            })
+                            .unwrap_or_else(|| log_project_id.clone());
                         let bytes = manager.collect_service_log(
+                            &service_project,
                             service_name,
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
@@ -3669,13 +3811,20 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             service: None,
             project: None,
         },
-        RestartPlan::Project { project } => ControlCommand::Restart {
-            config: None,
+        RestartPlan::Project { config, project } => ControlCommand::Restart {
+            config: restart_scoped_config(&config),
             service: None,
             project: Some(project),
         },
-        RestartPlan::Service { service, project } => ControlCommand::Restart {
-            config: None,
+        RestartPlan::Service {
+            config,
+            service,
+            project,
+        } => ControlCommand::Restart {
+            // Thread the resolved config through so a scoped `restart -c <file>
+            // -s svc` reloads the manifest and applies that service's changed
+            // config on the bounce — dropping it here silently ignored -c.
+            config: restart_scoped_config(&config),
             service: Some(service),
             project,
         },
@@ -3692,14 +3841,23 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
 fn restart_plan_config(plan: &systemg::restart::RestartPlan) -> PathBuf {
     use systemg::restart::RestartPlan;
     match plan {
-        RestartPlan::Everything { config } | RestartPlan::Recycle { config } => {
-            config.clone()
-        }
-        RestartPlan::Project { .. } | RestartPlan::Service { .. } => {
-            resolve_config_path(DEFAULT_CONFIG_PATH)
-                .unwrap_or_else(|_| PathBuf::from(DEFAULT_CONFIG_PATH))
-        }
+        RestartPlan::Everything { config }
+        | RestartPlan::Recycle { config }
+        | RestartPlan::Project { config, .. }
+        | RestartPlan::Service { config, .. } => config.clone(),
     }
+}
+
+/// The config path to hand a scoped restart, or `None` to fall back to the
+/// resident supervisor's loaded manifest. A scoped restart submits its `-c` file
+/// so the changed service is reloaded and applied; but the default
+/// `systemg.yaml` that no one actually passed must not be sent (it may not
+/// exist), so it degrades to `None` and the supervisor uses what it has.
+fn restart_scoped_config(config: &Path) -> Option<String> {
+    if config.as_os_str() == DEFAULT_CONFIG_PATH && !config.exists() {
+        return None;
+    }
+    Some(config.to_string_lossy().to_string())
 }
 
 /// Renders a stop-plan resolution failure as a typed diagnostic.

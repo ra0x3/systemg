@@ -11,6 +11,7 @@ pub mod diagnostics;
 pub mod plan;
 
 pub use diagnostics::{
-    conflicting_modes, follow_with_mode, prune_bound_missing, unsupported_format,
+    conflicting_modes, follow_with_mode, loose_service_not_found, prune_bound_missing,
+    supervisor_with_selector, target_required, unsupported_format,
 };
 pub use plan::{LogsPlan, LogsPlanError, Modes, resolve_plan};

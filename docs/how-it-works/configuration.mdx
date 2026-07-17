@@ -85,6 +85,36 @@ services:
       expression: "0 0 2 * * *"
 ```
 
+## The config cache
+
+When you run a command with `-c <file>`, sysg hands that manifest to the resident
+supervisor and remembers the path. That memory is a **convenience**: for later
+commands, you can omit `-c` and sysg reuses the last manifest you submitted —
+handy when nothing has changed.
+
+<Warning>
+The cache is a convenience, **not** a source of truth. If you edit the manifest
+on disk and then run a command **without** `-c`, sysg would be acting on a stale
+copy — so it refuses with [`SG0018`](/how-it-works/dialog/codes#sg0018) and asks
+you to re-submit once with `-c`. Passing `-c` is always accepted; it applies the
+change and refreshes the cache, after which bare commands work again.
+</Warning>
+
+```sh
+# submit the manifest once
+$ sysg start -c stack.yaml --daemonize
+
+# later, with no edits, -c is optional
+$ sysg status
+
+# you edit stack.yaml, then forget -c:
+$ sysg restart
+error[SG0018]: the manifest on disk changed since it was last submitted
+
+# re-submit to apply + refresh the cache
+$ sysg restart -c stack.yaml
+```
+
 ## Configuration sections
 
 ### `version`

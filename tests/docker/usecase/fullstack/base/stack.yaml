@@ -4,7 +4,7 @@ projects:
     name: Shop
     services:
       db:
-        command: "postgres -D /var/lib/pg -k /tmp -p 5433"
+        command: "/usr/lib/postgresql/14/bin/postgres -D /var/lib/pg -k /tmp -p 5433"
         user: pg
         restart_policy: always
         deployment:

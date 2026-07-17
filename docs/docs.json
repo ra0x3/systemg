@@ -102,7 +102,13 @@
               "how-it-works/commands/start-vs-spawn"
             ]
           },
-          "how-it-works/dialog"
+          {
+            "group": "Dialog",
+            "pages": [
+              "how-it-works/dialog/index",
+              "how-it-works/dialog/codes"
+            ]
+          }
         ]
       },
       "security",

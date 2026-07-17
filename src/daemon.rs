@@ -2375,7 +2375,9 @@ impl Daemon {
     ///
     /// # Returns
     /// The launched PID and resolved process-group ID if successful.
+    #[allow(clippy::too_many_arguments)]
     fn launch_attached_service(
+        project: &str,
         service_name: &str,
         service_config: &ServiceConfig,
         working_dir: PathBuf,
@@ -2521,6 +2523,7 @@ impl Daemon {
                     }
                 } else {
                     spawn_service_log_writers(
+                        project,
                         service_name,
                         stdout.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
                         stderr.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
@@ -2568,6 +2571,7 @@ impl Daemon {
         let working_dir = ctx.project_root.clone();
         let detach_children = ctx.detach_children;
         let pipe_stderr = ctx.pipe_stderr.load(Ordering::SeqCst);
+        let project_id = ctx.config.project.id.clone();
         let service_name_for_thread = service_name.clone();
         let service_name_for_cleanup = service_name.clone();
 
@@ -2576,6 +2580,7 @@ impl Daemon {
             debug!("Starting service thread for '{service_name_for_thread}'");
 
             let launch_result = Daemon::launch_attached_service(
+                &project_id,
                 &service_name_for_thread,
                 &service_config,
                 working_dir,
@@ -2684,6 +2689,7 @@ impl Daemon {
         log_settings: EffectiveLogsConfig,
     ) -> Result<u32, ProcessManagerError> {
         let (pid, pgid) = Self::launch_attached_service(
+            &ctx.config.project.id,
             &service_name,
             &service_config,
             ctx.project_root.clone(),
@@ -3097,7 +3103,7 @@ impl Daemon {
                     .note(format!("the process {how} before it finished starting"))
                     .evidence(
                         format!("last output from `{service_name}`"),
-                        crate::logs::tail_service_log(service_name, 8),
+                        crate::logs::tail_service_log(project, service_name, 8),
                     )
                     .help_cmd(
                         "view logs",
@@ -3398,7 +3404,9 @@ impl Daemon {
                     );
                 }
 
-                if previous.is_some() && Self::logs_indicate_port_conflict(name) {
+                if previous.is_some()
+                    && Self::logs_indicate_port_conflict(&self.cfg().project.id, name)
+                {
                     warn!(
                         "Detected port conflict while restarting '{name}'. Falling back to immediate restart semantics."
                     );
@@ -3667,8 +3675,9 @@ impl Daemon {
             })?;
 
         let service_name_owned = service_name.to_string();
+        let project_id = self.cfg().project.id.clone();
         let open_sink = |kind: &str| {
-            let path = resolve_log_path(service_name, kind);
+            let path = resolve_log_path(&project_id, service_name, kind);
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -3824,6 +3833,15 @@ impl Daemon {
             .interval
             .as_deref()
             .map_or(Ok(Duration::from_secs(2)), Self::parse_duration)?;
+        // Honor the full declared retry budget: a health check with
+        // `retries: 15, interval: 2s` must get ~30s of RETRIES, not be truncated
+        // by a shorter overall deadline. The deadline is the larger of the
+        // per-request timeout and the time all the retries would actually take,
+        // so a slow-starting service isn't failed before its own budget elapses.
+        let retry_budget = retry_interval
+            .checked_mul(retries)
+            .unwrap_or(timeout)
+            .saturating_add(timeout);
         let client = if health_check.url.is_some() {
             Some(Client::builder().timeout(timeout).build().map_err(|err| {
                 ProcessManagerError::ServiceStartError {
@@ -3835,7 +3853,7 @@ impl Daemon {
             None
         };
 
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + retry_budget.max(timeout);
 
         for attempt in 1..=retries {
             self.op_slot.detail(format!(
@@ -3938,7 +3956,7 @@ impl Daemon {
 
         diag.evidence(
             format!("last output from `{service_name}`"),
-            crate::logs::tail_service_log(service_name, 8),
+            crate::logs::tail_service_log(&project, service_name, 8),
         )
         .help_cmd(
             "view logs",
@@ -4190,8 +4208,8 @@ impl Daemon {
 
     /// Scans the last 50 lines of a service's stderr log for port conflict indicators. Returns
     /// true if common port conflict messages are detected (e.g., "address already in use", EADDRINUSE).
-    fn logs_indicate_port_conflict(service_name: &str) -> bool {
-        let path = resolve_log_path(service_name, "stderr");
+    fn logs_indicate_port_conflict(project: &str, service_name: &str) -> bool {
+        let path = resolve_log_path(project, service_name, "stderr");
         if !path.exists() {
             return false;
         }
@@ -4406,12 +4424,14 @@ impl Daemon {
         let working_dir = self.project_root.clone();
         let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
         let config = self.cfg();
+        let project_id = config.project.id.clone();
         let log_settings = service.effective_logs(&config.logs);
 
         let handle = thread::spawn(move || {
             debug!("Starting service thread for '{service_name}'");
 
             match Daemon::launch_attached_service(
+                &project_id,
                 &service_name,
                 &service_config,
                 working_dir.clone(),
@@ -5606,7 +5626,7 @@ mod tests {
     #[test]
     fn logs_indicate_port_conflict_detects_common_errors() {
         with_temp_home(|_| {
-            let log_path = resolve_log_path("web", "stderr");
+            let log_path = resolve_log_path("demo", "web", "stderr");
             if let Some(dir) = log_path.parent() {
                 fs::create_dir_all(dir).unwrap();
             }
@@ -5616,20 +5636,20 @@ mod tests {
             )
             .unwrap();
 
-            assert!(Daemon::logs_indicate_port_conflict("web"));
+            assert!(Daemon::logs_indicate_port_conflict("demo", "web"));
         });
     }
 
     #[test]
     fn logs_indicate_port_conflict_returns_false_when_not_present() {
         with_temp_home(|_| {
-            let log_path = resolve_log_path("api", "stderr");
+            let log_path = resolve_log_path("demo", "api", "stderr");
             if let Some(dir) = log_path.parent() {
                 fs::create_dir_all(dir).unwrap();
             }
             fs::write(&log_path, "Some other failure\n").unwrap();
 
-            assert!(!Daemon::logs_indicate_port_conflict("api"));
+            assert!(!Daemon::logs_indicate_port_conflict("demo", "api"));
         });
     }
 
