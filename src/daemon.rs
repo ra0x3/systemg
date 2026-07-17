@@ -1465,6 +1465,10 @@ struct DaemonContext {
     /// Services with a reconcile-triggered restart currently in flight, so the
     /// monitor does not spawn overlapping restart threads for the same unit.
     restart_in_flight: Arc<Mutex<HashSet<String>>>,
+    /// Dependents stopped as casualties of a crashed dependency, mapped to the
+    /// set of dependencies that felled them. A dependent is revived only once
+    /// every felling dependency has recovered.
+    stopped_for_dependency: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// Flag indicating whether the monitoring loop should remain active.
     running: Arc<AtomicBool>,
     /// Pipe stderr to stdout.
@@ -1525,6 +1529,17 @@ impl DaemonContext {
         acquire_lock(&self.restart_in_flight, DaemonLock::RestartInFlight)
     }
 
+    /// Acquires the stopped_for_dependency lock with ordering enforcement.
+    fn lock_stopped_for_dependency(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashMap<String, HashSet<String>>>, ProcessManagerError>
+    {
+        acquire_lock(
+            &self.stopped_for_dependency,
+            DaemonLock::StoppedForDependency,
+        )
+    }
+
     /// Creates a cancellation token for a Linux service thread.
     #[cfg(target_os = "linux")]
     fn create_cancellation_token(&self, service_name: &str) -> Arc<AtomicBool> {
@@ -1580,6 +1595,8 @@ pub struct Daemon {
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
     /// Reconcile-triggered restarts currently in flight.
     restart_in_flight: Arc<Mutex<HashSet<String>>>,
+    /// Dependents stopped as casualties of a crashed dependency.
+    stopped_for_dependency: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// Linux thread cancellation.
     #[cfg(target_os = "linux")]
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -1612,6 +1629,7 @@ impl Daemon {
             manual_stop_flags: Arc::clone(&self.manual_stop_flags),
             restart_suppressed: Arc::clone(&self.restart_suppressed),
             restart_in_flight: Arc::clone(&self.restart_in_flight),
+            stopped_for_dependency: Arc::clone(&self.stopped_for_dependency),
             running: Arc::clone(&self.running),
             pipe_stderr: Arc::clone(&self.pipe_stderr),
             #[cfg(target_os = "linux")]
@@ -2218,6 +2236,7 @@ impl Daemon {
             manual_stop_flags: Arc::new(Mutex::new(HashSet::new())),
             restart_suppressed: Arc::new(Mutex::new(HashSet::new())),
             restart_in_flight: Arc::new(Mutex::new(HashSet::new())),
+            stopped_for_dependency: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             pipe_stderr: Arc::new(AtomicBool::new(false)),
@@ -4904,6 +4923,12 @@ impl Daemon {
             if let Ok(mut guard) = ctx.lock_restart_suppressed() {
                 guard.insert(service.clone());
             }
+            if let Ok(mut guard) = ctx.lock_stopped_for_dependency() {
+                guard
+                    .entry(service.clone())
+                    .or_default()
+                    .insert(root.to_string());
+            }
 
             if let Err(err) = Self::stop_service_with_handles(
                 &service,
@@ -4920,6 +4945,14 @@ impl Daemon {
                 }
                 if let Ok(mut guard) = ctx.lock_restart_suppressed() {
                     guard.remove(&service);
+                }
+                if let Ok(mut guard) = ctx.lock_stopped_for_dependency()
+                    && let Some(roots) = guard.get_mut(&service)
+                {
+                    roots.remove(root);
+                    if roots.is_empty() {
+                        guard.remove(&service);
+                    }
                 }
             }
 
@@ -4943,6 +4976,63 @@ impl Daemon {
                         stack.push(child.clone());
                     }
                 }
+            }
+        }
+    }
+
+    /// Revives dependents that were stopped as casualties of a crashed
+    /// dependency, once every dependency that felled them is healthy again. A
+    /// candidate is revived only when ALL of its `depends_on` are currently
+    /// tracked (up) and it is not skipped; reviving clears its casualty flags
+    /// and drains its record so the normal reconcile pass restarts it. Runs each
+    /// monitor tick, so a multi-level stack heals bottom-up over successive ticks.
+    fn revive_ready_dependents(ctx: &DaemonContext) {
+        let casualties: Vec<String> = match ctx.lock_stopped_for_dependency() {
+            Ok(guard) => guard.keys().cloned().collect(),
+            Err(_) => return,
+        };
+        if casualties.is_empty() {
+            return;
+        }
+
+        let tracked: HashSet<String> = match ctx.lock_processes() {
+            Ok(guard) => guard.keys().cloned().collect(),
+            Err(_) => return,
+        };
+
+        for name in casualties {
+            let Some(service) = ctx.config.services.get(&name) else {
+                if let Ok(mut guard) = ctx.lock_stopped_for_dependency() {
+                    guard.remove(&name);
+                }
+                continue;
+            };
+
+            if matches!(service.skip, Some(SkipConfig::Flag(true))) {
+                if let Ok(mut guard) = ctx.lock_stopped_for_dependency() {
+                    guard.remove(&name);
+                }
+                continue;
+            }
+
+            let deps_ready = service.depends_on.as_ref().is_none_or(|deps| {
+                deps.iter().all(|dep| tracked.contains(dep.service()))
+            });
+            if !deps_ready {
+                continue;
+            }
+
+            info!(
+                "Dependency of '{name}' recovered; reviving the dependent stopped as a casualty."
+            );
+            if let Ok(mut guard) = ctx.lock_manual_stop_flags() {
+                guard.remove(&name);
+            }
+            if let Ok(mut guard) = ctx.lock_restart_suppressed() {
+                guard.remove(&name);
+            }
+            if let Ok(mut guard) = ctx.lock_stopped_for_dependency() {
+                guard.remove(&name);
             }
         }
     }
@@ -5220,6 +5310,8 @@ impl Daemon {
             if active_services == 0 {
                 debug!("No active services detected in monitor loop.");
             }
+
+            Self::revive_ready_dependents(&ctx);
 
             let mut reconciled = Self::reconcile_lost_services(&ctx);
             restarted_services.append(&mut reconciled);
