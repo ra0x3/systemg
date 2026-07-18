@@ -2437,6 +2437,55 @@ impl Supervisor {
                 ]
             };
 
+            // A project-wide FOLLOW must tail every running unit CONCURRENTLY.
+            // Streaming them one at a time only ever produced a banner plus a
+            // backlog block per unit and then ended — so `sysg start` in the
+            // foreground, which follows the whole project, never actually
+            // followed: the terminal showed sections of history instead of live
+            // interleaved output. Each unit gets its own tail writing into the
+            // same socket; the request ends when the caller disconnects.
+            if request.follow {
+                let follow_units: Vec<LogUnitTarget> =
+                    sections.into_iter().flat_map(|(_, units)| units).collect();
+                if follow_units.is_empty() {
+                    return Ok(());
+                }
+                let mut handles = Vec::with_capacity(follow_units.len());
+                for (unit_project, service_name, pid) in follow_units {
+                    let stream = request.stream.try_clone()?;
+                    let filter = request.filter.clone();
+                    let kind = requested_kind.map(str::to_string);
+                    let lines = request.lines;
+                    let structured = request.structured;
+                    handles.push(thread::spawn(move || {
+                        let manager = LogManager::new();
+                        if structured {
+                            let mut marker = match stream.try_clone() {
+                                Ok(stream) => stream,
+                                Err(_) => return,
+                            };
+                            let _ = marker.write_all(&crate::logs::service_marker_line(
+                                &service_name,
+                            ));
+                        }
+                        let _ = manager.stream_log_to_socket(
+                            &unit_project,
+                            &service_name,
+                            pid,
+                            lines,
+                            kind.as_deref(),
+                            true,
+                            &filter,
+                            &stream,
+                        );
+                    }));
+                }
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                return Ok(());
+            }
+
             for (section, units) in sections {
                 if units.is_empty() {
                     continue;
