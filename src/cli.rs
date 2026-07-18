@@ -451,7 +451,7 @@ pub enum Commands {
     /// Validate a configuration file and report errors with fixes.
     Validate {
         /// Path to the configuration file (defaults to `systemg.yaml`).
-        #[arg(default_value = "systemg.yaml")]
+        #[arg(short, long, default_value = "systemg.yaml")]
         config: String,
 
         /// Emit machine-readable output in the requested format.
@@ -520,6 +520,10 @@ pub enum Commands {
         /// Verbose boot reporting.
         #[arg(long)]
         verbose: bool,
+
+        /// Record the primary project as terminal-attached rather than daemonized.
+        #[arg(long)]
+        foreground: bool,
     },
 
     /// DEPRECATED: Spawn a dynamic child process from a parent service.

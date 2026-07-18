@@ -167,6 +167,11 @@ pub const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// Applied during service initialization and health checks.
 pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Minimum continuous survival time required before a process without a health
+/// check is reported ready. This prevents immediate bind and startup failures
+/// from being mistaken for a successful launch between process probes.
+pub const SERVICE_START_STABILITY: Duration = Duration::from_millis(250);
+
 /// Maximum time a `pre_start` command may run before it is killed and the start
 /// fails. Pre-starts run inside the supervisor's single-writer owner thread, so
 /// an UNBOUNDED pre-start that hangs (e.g. a network/proxy call that never

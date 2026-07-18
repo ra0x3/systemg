@@ -3,11 +3,17 @@
 //! Service output is captured into one canonical per-service log, with each line
 //! tagged by capture timestamp and source stream.
 use std::{
+    collections::HashSet,
     env,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, mpsc, mpsc::RecvTimeoutError},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+        mpsc::RecvTimeoutError,
+    },
     thread,
     time::Duration,
 };
@@ -24,6 +30,15 @@ use terminal_size::Width;
 use tracing::debug;
 
 use crate::{config::EffectiveLogsConfig, error::LogsManagerError, runtime};
+
+/// Thread name for canonical service log writers.
+const SERVICE_LOG_THREAD: &str = "sysg-service-log";
+/// Thread name for service stdout readers.
+const SERVICE_STDOUT_THREAD: &str = "sysg-service-stdout";
+/// Thread name for service stderr readers.
+const SERVICE_STDERR_THREAD: &str = "sysg-service-stderr";
+/// Thread name for dynamic child log readers.
+const CHILD_LOG_THREAD: &str = "sysg-child-log";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// High-level bucket for all-services log rendering.
@@ -745,6 +760,10 @@ fn canonical_combined_log_path(project: &str, service: &str) -> PathBuf {
 }
 
 const LIVE_LOG_BUFFER_LIMIT: usize = 256 * 1024;
+/// Maximum queued project log chunks before a slow subscriber is disconnected.
+const PROJECT_LOG_CHANNEL_CAPACITY: usize = 4096;
+/// Interval used to detect disconnected clients while no log data is arriving.
+const LOG_FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Holds recent log bytes and active subscribers for a single service stream.
 struct LiveLogEntry {
@@ -773,7 +792,47 @@ impl LiveLogEntry {
     }
 }
 
+/// Project, service, and stream identity for a buffered live log.
 type LiveLogKey = (String, String, String);
+
+/// One attributed chunk delivered to a project-wide log subscriber.
+#[derive(Clone)]
+struct ProjectLogChunk {
+    project: String,
+    service: String,
+    bytes: Vec<u8>,
+}
+
+/// Project-wide log subscription removed from the registry when dropped.
+struct ProjectLogSub {
+    id: u64,
+    projects: Vec<String>,
+    receiver: mpsc::Receiver<ProjectLogChunk>,
+}
+
+/// Subscriber identity and bounded channel for one project log stream.
+type ProjectLogSender = (u64, mpsc::SyncSender<ProjectLogChunk>);
+/// Project-wide subscriber registry keyed by project identifier.
+type ProjectLogSubscribers = std::collections::HashMap<String, Vec<ProjectLogSender>>;
+
+impl Drop for ProjectLogSub {
+    fn drop(&mut self) {
+        let mut subscribers = project_log_subscribers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for project in &self.projects {
+            let empty = if let Some(project_subscribers) = subscribers.get_mut(project) {
+                project_subscribers.retain(|(id, _)| *id != self.id);
+                project_subscribers.is_empty()
+            } else {
+                false
+            };
+            if empty {
+                subscribers.remove(project);
+            }
+        }
+    }
+}
 
 /// Returns the global live log registry shared by supervisor-side log readers.
 fn live_log_registry()
@@ -784,6 +843,12 @@ fn live_log_registry()
     REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Returns the registry of project-wide log subscribers.
+fn project_log_subscribers() -> &'static Mutex<ProjectLogSubscribers> {
+    static SUBSCRIBERS: OnceLock<Mutex<ProjectLogSubscribers>> = OnceLock::new();
+    SUBSCRIBERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 /// Appends new live log bytes for a project's service stream and notifies subscribers.
 fn append_live_log_chunk(project: &str, service: &str, stream: LogStream, chunk: &[u8]) {
     let key = (
@@ -791,10 +856,81 @@ fn append_live_log_chunk(project: &str, service: &str, stream: LogStream, chunk:
         service.to_string(),
         stream.as_str().to_string(),
     );
-    if let Ok(mut registry) = live_log_registry().lock() {
-        let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
-        entry.append(chunk);
+    let mut registry = live_log_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
+    entry.append(chunk);
+    if stream == LogStream::Combined {
+        let mut subscribers = project_log_subscribers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut failed = HashSet::new();
+        if let Some(project_subscribers) = subscribers.get_mut(project) {
+            let event = ProjectLogChunk {
+                project: project.to_string(),
+                service: service.to_string(),
+                bytes: chunk.to_vec(),
+            };
+            project_subscribers.retain(|(id, subscriber)| {
+                if subscriber.try_send(event.clone()).is_ok() {
+                    true
+                } else {
+                    failed.insert(*id);
+                    false
+                }
+            });
+        }
+        if !failed.is_empty() {
+            for project_subscribers in subscribers.values_mut() {
+                project_subscribers.retain(|(id, _)| !failed.contains(id));
+            }
+            subscribers.retain(|_, project_subscribers| !project_subscribers.is_empty());
+        }
     }
+}
+
+/// Captures current project buffers and subscribes to subsequent chunks.
+fn subscribe_project_logs(projects: &[String]) -> (Vec<ProjectLogChunk>, ProjectLogSub) {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let (tx, receiver) = mpsc::sync_channel(PROJECT_LOG_CHANNEL_CAPACITY);
+    let mut snapshot = Vec::new();
+    let registry = live_log_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut subscribers = project_log_subscribers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for ((project, service, stream), entry) in registry.iter() {
+        if stream == LogStream::Combined.as_str()
+            && projects.iter().any(|candidate| candidate == project)
+            && !entry.buffer.is_empty()
+        {
+            snapshot.push(ProjectLogChunk {
+                project: project.clone(),
+                service: service.clone(),
+                bytes: entry.buffer.clone(),
+            });
+        }
+    }
+    for project in projects {
+        subscribers
+            .entry(project.clone())
+            .or_default()
+            .push((id, tx.clone()));
+    }
+    snapshot.sort_unstable_by(|left, right| {
+        (&left.project, &left.service).cmp(&(&right.project, &right.service))
+    });
+    (
+        snapshot,
+        ProjectLogSub {
+            id,
+            projects: projects.to_vec(),
+            receiver,
+        },
+    )
 }
 
 /// Drops the in-memory live-log buffer for every stream of a project's service.
@@ -1343,6 +1479,39 @@ pub fn prefix_lines_with_service(chunk: &[u8], service_name: &str) -> Vec<u8> {
         at_line_start = byte == b'\n';
     }
     out
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_project_log_event(
+    socket: &mut UnixStream,
+    event: &ProjectLogChunk,
+    lines: usize,
+    kind: Option<&str>,
+    filter: &LogFilter,
+    structured: bool,
+    backlog: bool,
+) -> Result<(), LogsManagerError> {
+    let bytes = match kind {
+        Some(kind_name) => filter_captured_log_bytes(&event.bytes, kind_name),
+        None => event.bytes.clone(),
+    };
+    let bytes = filter.apply(&bytes);
+    let bytes = if backlog {
+        tail_log_bytes(&bytes, lines).to_vec()
+    } else {
+        bytes
+    };
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if structured {
+        socket.write_all(&service_marker_line(&event.service))?;
+        socket.write_all(&bytes)?;
+    } else {
+        socket.write_all(&prefix_lines_with_service(&bytes, &event.service))?;
+    }
+    socket.flush()?;
+    Ok(())
 }
 
 /// Writes a section header used by the all-services log view.
@@ -1897,30 +2066,40 @@ fn stream_dynamic_child_log(
     file.flush()
 }
 
-/// Creates the log directory if it doesn't exist and spawns a thread to write logs to file.
+/// Starts a canonical single-stream service log pipeline.
+///
+/// # Errors
+///
+/// Returns an operating-system error when a required log worker cannot be
+/// created.
 pub fn spawn_log_writer(
     project: &str,
     service: &str,
     reader: impl Read + Send + 'static,
     kind: &str,
-) {
+) -> io::Result<()> {
     spawn_log_writer_with_config(
         project,
         service,
         reader,
         kind,
         EffectiveLogsConfig::default(),
-    );
+    )
 }
 
-/// Spawns a legacy single-stream writer through the canonical service log.
+/// Starts a single-stream writer with explicit rotation settings.
+///
+/// # Errors
+///
+/// Returns an operating-system error when a required log worker cannot be
+/// created.
 pub fn spawn_log_writer_with_config(
     project: &str,
     service: &str,
     reader: impl Read + Send + 'static,
     kind: &str,
     settings: EffectiveLogsConfig,
-) {
+) -> io::Result<()> {
     let reader = Box::new(reader) as Box<dyn Read + Send>;
     match LogStream::from_filter(kind) {
         Some(LogStream::Stdout) => {
@@ -1933,14 +2112,20 @@ pub fn spawn_log_writer_with_config(
     }
 }
 
-/// Spawns one canonical writer for a service's stdout and stderr streams.
+/// Starts the canonical writer and available stream readers for a service.
+///
+/// # Errors
+///
+/// Returns an operating-system error when any required worker cannot be
+/// created. Workers already created for this pipeline will stop when their
+/// channels or input streams close.
 pub fn spawn_service_log_writers(
     project: &str,
     service: &str,
     stdout: Option<Box<dyn Read + Send>>,
     stderr: Option<Box<dyn Read + Send>>,
     settings: EffectiveLogsConfig,
-) {
+) -> io::Result<()> {
     let path = get_service_log_path(project, service);
     let project_label = project.to_string();
     let service_label = service.to_string();
@@ -1950,50 +2135,63 @@ pub fn spawn_service_log_writers(
         let project_label = project_label.clone();
         let service_label = service_label.clone();
         let path = path.clone();
-        thread::spawn(move || {
-            if let Err(err) = write_service_log(
-                &project_label,
-                &service_label,
-                path.clone(),
-                receiver,
-                settings,
-            ) {
-                eprintln!(
-                    "Warning: Unable to write service log file at {:?}: {}",
-                    path, err
-                );
-            }
-        });
+        thread::Builder::new()
+            .name(SERVICE_LOG_THREAD.into())
+            .spawn(move || {
+                if let Err(err) = write_service_log(
+                    &project_label,
+                    &service_label,
+                    path.clone(),
+                    receiver,
+                    settings,
+                ) {
+                    eprintln!(
+                        "Warning: Unable to write service log file at {:?}: {}",
+                        path, err
+                    );
+                }
+            })?;
     }
 
     if let Some(stdout) = stdout {
         let service_label = service_label.clone();
         let sender = sender.clone();
-        thread::spawn(move || {
-            if let Err(err) =
-                read_service_log_stream(&service_label, LogStream::Stdout, stdout, sender)
-            {
-                eprintln!(
-                    "Warning: Unable to read stdout for [{}]: {}",
-                    service_label, err
-                );
-            }
-        });
+        thread::Builder::new()
+            .name(SERVICE_STDOUT_THREAD.into())
+            .spawn(move || {
+                if let Err(err) = read_service_log_stream(
+                    &service_label,
+                    LogStream::Stdout,
+                    stdout,
+                    sender,
+                ) {
+                    eprintln!(
+                        "Warning: Unable to read stdout for [{}]: {}",
+                        service_label, err
+                    );
+                }
+            })?;
     }
 
     if let Some(stderr) = stderr {
         let service_label = service_label.clone();
-        thread::spawn(move || {
-            if let Err(err) =
-                read_service_log_stream(&service_label, LogStream::Stderr, stderr, sender)
-            {
-                eprintln!(
-                    "Warning: Unable to read stderr for [{}]: {}",
-                    service_label, err
-                );
-            }
-        });
+        thread::Builder::new()
+            .name(SERVICE_STDERR_THREAD.into())
+            .spawn(move || {
+                if let Err(err) = read_service_log_stream(
+                    &service_label,
+                    LogStream::Stderr,
+                    stderr,
+                    sender,
+                ) {
+                    eprintln!(
+                        "Warning: Unable to read stderr for [{}]: {}",
+                        service_label, err
+                    );
+                }
+            })?;
     }
+    Ok(())
 }
 
 /// Spawns a thread to capture and log output from dynamically spawned child processes.
@@ -2006,6 +2204,10 @@ pub fn spawn_service_log_writers(
 /// * `reader` - Reader for the child's output stream
 /// * `kind` - Type of stream (e.g., "stdout" or "stderr")
 /// * `echo_to_console` - Whether to echo output to console in addition to file
+///
+/// # Errors
+///
+/// Returns an operating-system error when the log worker cannot be created.
 pub fn spawn_dynamic_child_log_writer(
     root_service: Option<&str>,
     child_name: &str,
@@ -2013,7 +2215,7 @@ pub fn spawn_dynamic_child_log_writer(
     reader: impl Read + Send + 'static,
     kind: &str,
     echo_to_console: bool,
-) {
+) -> io::Result<()> {
     let owner_component = root_service
         .map(normalize)
         .filter(|s| !s.is_empty())
@@ -2036,17 +2238,20 @@ pub fn spawn_dynamic_child_log_writer(
     let owner_label = root_service.map(str::to_string);
     let child_label = child_name.to_string();
 
-    thread::spawn(move || {
-        if let Err(err) = stream_dynamic_child_log(
-            &path,
-            owner_label.as_deref(),
-            &child_label,
-            reader,
-            echo_to_console,
-        ) {
-            eprintln!("Warning: Unable to write spawn log {:?}: {}", path, err);
-        }
-    });
+    thread::Builder::new()
+        .name(CHILD_LOG_THREAD.into())
+        .spawn(move || {
+            if let Err(err) = stream_dynamic_child_log(
+                &path,
+                owner_label.as_deref(),
+                &child_label,
+                reader,
+                echo_to_console,
+            ) {
+                eprintln!("Warning: Unable to write spawn log {:?}: {}", path, err);
+            }
+        })?;
+    Ok(())
 }
 
 /// Initializes logging for a service by spawning threads to write stdout and stderr to log files.
@@ -2249,7 +2454,7 @@ impl LogManager {
                 let receiver =
                     subscribe_live_log(project, service_name, LogStream::Combined);
                 loop {
-                    match receiver.recv_timeout(Duration::from_millis(250)) {
+                    match receiver.recv_timeout(LOG_FOLLOW_POLL_INTERVAL) {
                         Ok(chunk) => {
                             let chunk = match kind {
                                 Some(kind_name) => {
@@ -2303,6 +2508,71 @@ impl LogManager {
             filter,
             stream,
         )
+    }
+
+    /// Streams every current and future service in the selected projects through one socket.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn stream_project_logs_to_socket(
+        &self,
+        projects: &[String],
+        backlog_services: &std::collections::HashSet<(String, String)>,
+        lines: usize,
+        kind: Option<&str>,
+        follow: bool,
+        filter: &LogFilter,
+        stream: &UnixStream,
+        structured: bool,
+    ) -> Result<(), LogsManagerError> {
+        let mode = resolve_tail_mode(
+            if follow {
+                TailMode::Follow
+            } else {
+                TailMode::OneShot
+            },
+            filter,
+        );
+        let (snapshot, subscription) = subscribe_project_logs(projects);
+        let mut socket = stream.try_clone()?;
+
+        for event in &snapshot {
+            if backlog_services.contains(&(event.project.clone(), event.service.clone()))
+            {
+                write_project_log_event(
+                    &mut socket,
+                    event,
+                    lines,
+                    kind,
+                    filter,
+                    structured,
+                    true,
+                )?;
+            }
+        }
+        if mode == TailMode::OneShot {
+            return Ok(());
+        }
+
+        loop {
+            match subscription.receiver.recv_timeout(LOG_FOLLOW_POLL_INTERVAL) {
+                Ok(event) => write_project_log_event(
+                    &mut socket,
+                    &event,
+                    lines,
+                    kind,
+                    filter,
+                    structured,
+                    false,
+                )?,
+                Err(RecvTimeoutError::Timeout) => {
+                    if socket_peer_disconnected(&socket) {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Ok(())
     }
 
     /// Clears stdout and stderr logs for a specific service.
@@ -2830,7 +3100,8 @@ mod tests {
             reader,
             "stdout",
             false,
-        );
+        )
+        .expect("spawn child log writer");
 
         thread::sleep(Duration::from_millis(100));
 
@@ -2875,7 +3146,8 @@ mod tests {
             "svc",
             Cursor::new(b"partial line".to_vec()),
             "stdout",
-        );
+        )
+        .expect("spawn service log writer");
 
         thread::sleep(Duration::from_millis(100));
 
@@ -2917,7 +3189,8 @@ mod tests {
             "svc",
             Cursor::new(vec![0xff, b'a', b'\n']),
             "stderr",
-        );
+        )
+        .expect("spawn service log writer");
 
         thread::sleep(Duration::from_millis(100));
 
@@ -2969,7 +3242,8 @@ mod tests {
             Cursor::new(b"second\n".to_vec()),
             "stdout",
             settings,
-        );
+        )
+        .expect("spawn rotating service log writer");
 
         thread::sleep(Duration::from_millis(100));
 

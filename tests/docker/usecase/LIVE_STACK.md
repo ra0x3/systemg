@@ -176,7 +176,7 @@ Use `scripts/fgpty.py`, which runs the start under a PTY and writes `0x03` into
 the pty master when you touch its control file:
 
 ```sh
-python3 scripts/fgpty.py ~/dev/repos/gamecast/sysg.dev.yaml /tmp/fg.out /tmp/fg.pid 300 &
+python3 scripts/fgpty.py "$(command -v sysg)" ~/dev/repos/gamecast/sysg.dev.yaml /tmp/fg.out /tmp/fg.pid 300 &
 sleep 50
 wc -c /tmp/fg.out                 # streaming?  (6 bytes == broken, ~1.6 MB == healthy)
 : > /tmp/fg.pid.ctl               # a REAL terminal Ctrl-C

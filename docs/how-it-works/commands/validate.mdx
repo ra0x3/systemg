@@ -8,11 +8,8 @@ Check a configuration file before you run it. `validate` parses the manifest,
 resolves the dependency graph, and — when something is wrong — tells you the
 exact line, why it's an error, and how to fix it.
 
-The config path is a positional argument (defaults to `systemg.yaml`), matching
-[`migrate`](/how-it-works/commands/migrate):
-
 ```sh
-$ sysg validate sysg.yaml
+$ sysg validate -c sysg.yaml
 ```
 
 ```text
@@ -36,16 +33,11 @@ A clean file reports success and exits `0`:
   This manifest parses and resolves cleanly.
 ```
 
-## Arguments
-
-| Argument | Description |
-|----------|-------------|
-| `[CONFIG]` | Path to the configuration file (positional; defaults to `systemg.yaml`) |
-
 ## Options
 
 | Short | Long | Description |
 |-------|------|-------------|
+| `-c` | `--config` | Path to the configuration file (defaults to `systemg.yaml`) |
 | `-` | `--format` | Emit machine-readable output (`json`) |
 | `-` | `--no-color` | Disable ANSI colors |
 | `-` | `--plain` | Agent-friendly output (also disables color) |
@@ -72,7 +64,7 @@ Use `--format json` for CI gates and tooling. Each diagnostic carries its
 location, category, message, and remediation:
 
 ```sh
-$ sysg validate sysg.yaml --format json
+$ sysg validate -c sysg.yaml --format json
 ```
 
 ```json
@@ -98,7 +90,7 @@ $ sysg validate sysg.yaml --format json
 Gate a deploy on a valid manifest:
 
 ```sh
-$ sysg validate production.yaml --plain || exit 1
+$ sysg validate -c production.yaml --plain || exit 1
 $ sysg start -c production.yaml --daemonize
 ```
 

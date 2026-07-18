@@ -9,6 +9,7 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SYSG_BIN="$(command -v sysg)"
 GC_CFG=~/dev/repos/gamecast/sysg.dev.yaml
 ARB_CFG=~/dev/repos/arbitration/sysg.dev.yaml
 PASS=0; FAIL=0
@@ -39,7 +40,7 @@ nuke() {
 }
 
 # fg_start <config> <outfile> <pidfile> — foreground start under a PTY
-fg_start() { python3 "$REPO/scripts/fgpty.py" "$1" "$2" "$3" 600 & }
+fg_start() { python3 "$REPO/scripts/fgpty.py" "$SYSG_BIN" "$1" "$2" "$3" 600 & }
 # real_ctrl_c <pidfile> — deliver a genuine terminal Ctrl-C (SIGINT to the group)
 real_ctrl_c() { : > "$1.ctl"; }
 

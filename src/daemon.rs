@@ -11,7 +11,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime},
@@ -19,10 +19,11 @@ use std::{
 
 use fs2::FileExt;
 use quick_xml::{de::from_str as xml_from_str, se::to_string as xml_to_string};
+use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::Error as _};
 use serde_yaml;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{ProcessesToUpdate, System};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
@@ -35,8 +36,8 @@ use crate::{
         DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
         MAX_STATUS_LOG_LINES, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
         PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
-        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
-        SHELL_COMMAND_FLAG, STOP_VERIFY_TIMEOUT,
+        SERVICE_POLL_INTERVAL, SERVICE_START_STABILITY, SERVICE_START_TIMEOUT,
+        SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG, STOP_VERIFY_TIMEOUT,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_service_log_writers},
@@ -45,6 +46,45 @@ use crate::{
     spawn::SpawnedExit,
     state_store::StateStore,
 };
+
+/// Capacity of the one-result health-check worker channel.
+const HEALTH_RESULT_CAPACITY: usize = 1;
+/// Delay before retrying monitor state after a lock failure.
+const MONITOR_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// Thread name for service launch workers.
+const SERVICE_LAUNCH_THREAD: &str = "sysg-service-launch";
+/// Thread name for foreground stderr forwarding.
+const SERVICE_STDERR_THREAD: &str = "sysg-service-stderr";
+/// Thread name for captured stdout readers.
+const OUTPUT_STDOUT_THREAD: &str = "sysg-output-stdout";
+/// Thread name for captured stderr readers.
+const OUTPUT_STDERR_THREAD: &str = "sysg-output-stderr";
+/// Maximum pre-start output lines retained for failure diagnostics.
+const PRE_START_TAIL_LINES: usize = 12;
+/// Poll interval while waiting for bounded helper commands to exit.
+const COMMAND_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Maximum bytes retained from each helper-command output stream.
+const COMMAND_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+/// Read buffer size used while draining helper-command output streams.
+const COMMAND_OUTPUT_READ_CHUNK_BYTES: usize = 8 * 1024;
+/// Zero-based field containing process start time after the executable name in
+/// `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+const LINUX_PROC_START_TIME_INDEX: usize = 19;
+/// Canonical operating-system text for a port collision.
+const PORT_IN_USE_TEXT: &str = "address already in use";
+/// Compact errno name used by some runtimes for a port collision.
+const ADDR_IN_USE_TEXT: &str = "addrinuse";
+/// macOS/BSD errno text for a port collision.
+const MACOS_PORT_IN_USE_TEXT: &str = "os error 48";
+/// Linux errno text for a port collision.
+const LINUX_PORT_IN_USE_TEXT: &str = "os error 98";
+/// Output token that introduces an explicit port number.
+const PORT_TOKEN: &str = "port";
+/// Output token used when binding a listening socket.
+const BIND_TOKEN: &str = "bind";
+/// Output token used when opening a listening socket.
+const LISTEN_TOKEN: &str = "listen";
 
 /// Provides systemtime serde support.
 mod systemtime_serde {
@@ -141,6 +181,12 @@ struct GroupEntry {
     pgid: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct StartEntry {
+    name: String,
+    started: u64,
+}
+
 /// Wrapper for parent map entries
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct ParentMapEntry {
@@ -186,6 +232,13 @@ pub struct PidFile {
         deserialize_with = "deserialize_groups"
     )]
     service_groups: HashMap<String, i32>,
+    /// Service name -> process start time.
+    #[serde(default, rename = "service_starts")]
+    #[serde(
+        serialize_with = "serialize_starts",
+        deserialize_with = "deserialize_starts"
+    )]
+    service_starts: HashMap<String, u64>,
     /// Child PID -> Parent PID mapping for spawned processes.
     #[serde(default, rename = "parent_map")]
     #[serde(
@@ -290,6 +343,65 @@ where
 {
     let entries: Vec<GroupEntry> = Vec::deserialize(d)?;
     Ok(entries.into_iter().map(|e| (e.name, e.pgid)).collect())
+}
+
+fn serialize_starts<S>(map: &HashMap<String, u64>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = s.serialize_seq(Some(map.len()))?;
+    for (name, started) in map {
+        seq.serialize_element(&StartEntry {
+            name: name.clone(),
+            started: *started,
+        })?;
+    }
+    seq.end()
+}
+
+fn deserialize_starts<'de, D>(d: D) -> Result<HashMap<String, u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries: Vec<StartEntry> = Vec::deserialize(d)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| (entry.name, entry.started))
+        .collect())
+}
+
+/// Returns the kernel start-time identity for a Linux process.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    stat[close + 1..]
+        .split_whitespace()
+        .nth(LINUX_PROC_START_TIME_INDEX)?
+        .parse()
+        .ok()
+}
+
+/// Returns the kernel start-time identity for a macOS process.
+#[cfg(target_os = "macos")]
+pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut libc::proc_bsdinfo as *mut libc::c_void,
+            size,
+        )
+    };
+    (read == size).then(|| {
+        info.pbi_start_tvsec
+            .saturating_mul(1_000_000)
+            .saturating_add(info.pbi_start_tvusec)
+    })
 }
 
 /// Serializes parent map.
@@ -494,6 +606,10 @@ impl PidFile {
         self.service_groups.get(service).copied()
     }
 
+    fn start_for(&self, service: &str) -> Option<u64> {
+        self.service_starts.get(service).copied()
+    }
+
     /// Returns the service-name to process-group map for all recorded services.
     pub fn service_pgids(&self) -> &HashMap<String, i32> {
         &self.service_groups
@@ -559,6 +675,7 @@ impl PidFile {
         pid: u32,
         pgid: Option<i32>,
     ) -> Result<(), PidFileError> {
+        let started = process_start_time(pid);
         let _lock = self.acquire_lock()?;
 
         let path = self.path();
@@ -568,11 +685,16 @@ impl PidFile {
         if let Some(group) = pgid {
             self.service_groups.insert(service.to_string(), group);
         }
+        if let Some(started) = started {
+            self.service_starts.insert(service.to_string(), started);
+        } else {
+            self.service_starts.remove(service);
+        }
 
         self.write_at(&path)
     }
 
-    /// Atomically clears a service PID while preserving the last known process-group metadata.
+    /// Atomically clears a service PID while preserving group ownership metadata.
     pub fn clear_pid(&mut self, service: &str) -> Result<(), PidFileError> {
         let _lock = self.acquire_lock()?;
 
@@ -583,15 +705,24 @@ impl PidFile {
             return Err(PidFileError::ServiceNotFound);
         }
 
-        // Drop the process-GROUP entry too. Leaving it behind orphaned the group
-        // for every exit path that clears a pid (`probe_service_state` reaping a
-        // finished one-shot, for one), and status reports a group with no pid AS
-        // the unit's pid — so a build that had completed successfully showed up
-        // as `lost`/`warn` forever and dragged the project to WARN. `remove()`
-        // already clears both; this path must match it.
-        let _ = self.service_groups.remove(service);
-
         self.write_at(&path)
+    }
+
+    /// Clears a service PID only when it still names the supplied process.
+    pub(crate) fn clear_pid_if_matches(
+        &mut self,
+        service: &str,
+        pid: u32,
+    ) -> Result<bool, PidFileError> {
+        let _lock = self.acquire_lock()?;
+        let path = self.path();
+        self.reload_into(&path)?;
+        if self.services.get(service).copied() != Some(pid) {
+            return Ok(false);
+        }
+        self.services.remove(service);
+        self.write_at(&path)?;
+        Ok(true)
     }
 
     /// Atomically removes service.
@@ -601,42 +732,53 @@ impl PidFile {
         let path = self.path();
         self.reload_into(&path)?;
 
-        let removed_pid = match self.services.remove(service) {
-            Some(pid) => pid,
-            None => return Err(PidFileError::ServiceNotFound),
-        };
-
-        if self.parent_map.contains_key(&removed_pid)
-            || self.children_map.contains_key(&removed_pid)
-            || self.spawn_metadata.contains_key(&removed_pid)
-        {
-            self.remove_spawn_subtree_in_memory(removed_pid);
+        let removed_pid = self.services.remove(service);
+        let removed_group = self.service_groups.get(service).copied();
+        let known = removed_pid.is_some()
+            || removed_group.is_some()
+            || self.service_starts.contains_key(service);
+        if !known {
+            return Err(PidFileError::ServiceNotFound);
         }
 
-        if let Some(children) = self.children_map.remove(&removed_pid) {
-            for child in children {
-                self.remove_spawn_subtree_in_memory(child);
+        if let Some(root_pid) = removed_pid.or_else(|| {
+            removed_group
+                .filter(|pgid| *pgid > 0)
+                .map(|pgid| pgid as u32)
+        }) {
+            if self.parent_map.contains_key(&root_pid)
+                || self.children_map.contains_key(&root_pid)
+                || self.spawn_metadata.contains_key(&root_pid)
+            {
+                self.remove_spawn_subtree_in_memory(root_pid);
+            }
+
+            if let Some(children) = self.children_map.remove(&root_pid) {
+                for child in children {
+                    self.remove_spawn_subtree_in_memory(child);
+                }
+            }
+
+            let stale_roots: Vec<u32> = self
+                .spawn_metadata
+                .values()
+                .filter(|meta| meta.parent_pid == root_pid)
+                .map(|meta| meta.pid)
+                .collect();
+            for stale_pid in stale_roots {
+                self.remove_spawn_subtree_in_memory(stale_pid);
             }
         }
 
-        let stale_roots: Vec<u32> = self
-            .spawn_metadata
-            .values()
-            .filter(|meta| meta.parent_pid == removed_pid)
-            .map(|meta| meta.pid)
-            .collect();
-        for stale_pid in stale_roots {
-            self.remove_spawn_subtree_in_memory(stale_pid);
-        }
+        let _ = self.service_groups.remove(service);
+        let _ = self.service_starts.remove(service);
 
-        if self.services.is_empty() {
+        if self.services.is_empty() && self.service_groups.is_empty() {
             self.parent_map.clear();
             self.children_map.clear();
             self.spawn_depth.clear();
             self.spawn_metadata.clear();
         }
-
-        let _ = self.service_groups.remove(service);
 
         self.write_at(&path)
     }
@@ -854,6 +996,7 @@ mod pidfile_tests {
         let mut pid_file = PidFile {
             services: HashMap::new(),
             service_groups: HashMap::new(),
+            service_starts: HashMap::new(),
             parent_map: HashMap::from([(2, 1), (3, 2)]),
             children_map: HashMap::from([(1, vec![2]), (2, vec![3])]),
             spawn_depth: HashMap::from([(1, 0), (2, 1), (3, 2)]),
@@ -934,6 +1077,7 @@ mod pidfile_tests {
             store: store.clone(),
             services: HashMap::from([("svc".to_string(), 10)]),
             service_groups: HashMap::from([("svc".to_string(), 10)]),
+            service_starts: HashMap::new(),
             parent_map: HashMap::from([(11, 10), (12, 11)]),
             children_map: HashMap::from([(10, vec![11]), (11, vec![12])]),
             spawn_depth: HashMap::from([(11, 1), (12, 2)]),
@@ -1232,6 +1376,7 @@ fn run_hook(
     outcome: HookOutcome,
     service_name: &str,
     project_root: &Path,
+    cancel: Option<(&AtomicU64, &AtomicBool)>,
 ) {
     let hook_label = format!("{}.{}", stage.as_ref(), outcome.as_ref());
     debug!(
@@ -1241,6 +1386,7 @@ fn run_hook(
 
     let mut cmd = Command::new(DEFAULT_SHELL);
     cmd.arg(SHELL_COMMAND_FLAG).arg(&action.command);
+    cmd.current_dir(project_root);
 
     for (key, value) in collect_service_env(env, project_root, service_name) {
         cmd.env(key, value);
@@ -1248,24 +1394,28 @@ fn run_hook(
 
     let timeout = match action.timeout.as_deref() {
         Some(raw_timeout) => match Daemon::parse_duration(raw_timeout) {
-            Ok(duration) => Some(duration),
+            Ok(duration) => duration,
             Err(err) => {
                 error!(
                     "Invalid timeout '{}' for hook {} on '{}': {}",
                     raw_timeout, hook_label, service_name, err
                 );
-                None
+                command_timeout()
             }
         },
-        None => None,
+        None => command_timeout(),
     };
 
-    match cmd.spawn() {
+    if cancel.is_some_and(|(_, cancelled)| cancelled.load(Ordering::SeqCst)) {
+        return;
+    }
+
+    match spawn_session(&mut cmd) {
         Ok(mut child) => {
-            let wait_result = match timeout {
-                Some(duration) => wait_with_timeout(&mut child, duration),
-                None => child.wait().map(Some),
-            };
+            let epoch = cancel.map(|(current, cancelled)| {
+                (current, current.load(Ordering::SeqCst), cancelled)
+            });
+            let wait_result = wait_with_epoch(&mut child, timeout, epoch);
 
             match wait_result {
                 Ok(Some(status)) => {
@@ -1282,26 +1432,26 @@ fn run_hook(
                     }
                 }
                 Ok(None) => {
-                    if let Some(duration) = timeout {
-                        warn!(
-                            "{} hook for '{}' timed out after {:?}. Terminating hook process.",
-                            hook_label, service_name, duration
-                        );
-                    } else {
-                        warn!(
-                            "{} hook for '{}' did not complete but no timeout was configured.",
-                            hook_label, service_name
-                        );
-                    }
-                    if let Err(err) = child.kill() {
-                        error!(
-                            "Failed to terminate timed-out hook {} for '{}': {}",
-                            hook_label, service_name, err
-                        );
-                    }
+                    warn!(
+                        "{} hook for '{}' was cancelled or timed out after {:?}. Terminating hook process.",
+                        hook_label, service_name, timeout
+                    );
+                    let pid = child.id();
+                    let _ = Daemon::terminate_process_tree(
+                        service_name,
+                        pid,
+                        Some(pid as libc::pid_t),
+                    );
                     let _ = child.wait();
                 }
                 Err(err) => {
+                    let pid = child.id();
+                    let _ = Daemon::terminate_process_tree(
+                        service_name,
+                        pid,
+                        Some(pid as libc::pid_t),
+                    );
+                    let _ = child.wait();
                     error!(
                         "Failed while waiting for hook {} on '{}': {}",
                         hook_label, service_name, err
@@ -1322,64 +1472,190 @@ fn run_hook(
 /// Whether captured service output shows a port-bind collision. Matches the OS
 /// message plus the errno spellings that differ by platform (48 on macOS/BSD,
 /// 98 on Linux), so the classification holds wherever sysg runs.
-fn port_in_use_output(lines: &[String]) -> bool {
+pub fn output_indicates_port_conflict(lines: &[String]) -> bool {
     let lower = lines.join("\n").to_ascii_lowercase();
-    lower.contains("address already in use")
-        || lower.contains("addrinuse")
-        || lower.contains("os error 48")
-        || lower.contains("os error 98")
+    lower.contains(PORT_IN_USE_TEXT)
+        || lower.contains(ADDR_IN_USE_TEXT)
+        || lower.contains(MACOS_PORT_IN_USE_TEXT)
+        || lower.contains(LINUX_PORT_IN_USE_TEXT)
+}
+
+/// Parses a nonzero TCP/UDP port while rejecting values outside `u16`.
+fn parse_port(value: &str) -> Option<u16> {
+    let port = value.parse::<u16>().ok()?;
+    (port != 0).then_some(port)
 }
 
 /// Best-effort port number from captured output, so the diagnostic can name the
 /// contested port. Returns `None` when nothing port-shaped is present — the
 /// diagnostic still stands without it.
 fn port_from_output(lines: &[String]) -> Option<u16> {
-    let output = lines.join("\n");
-    let output = output.as_str();
-    // Common shapes: "127.0.0.1:8080", ":8080", "port 8080", "port=8080".
-    let bytes = output.as_bytes();
-    let mut best: Option<u16> = None;
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        let byte = bytes[idx];
-        let preceded_by_marker =
-            idx > 0 && (bytes[idx - 1] == b':' || bytes[idx - 1] == b'=');
-        let preceded_by_word = output[..idx].to_ascii_lowercase().ends_with("port ");
-        if byte.is_ascii_digit() && (preceded_by_marker || preceded_by_word) {
-            let start = idx;
-            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
-                idx += 1;
-            }
-            if let Ok(port) = output[start..idx].parse::<u32>()
-                && (1..=65535).contains(&port)
-            {
-                best = Some(port as u16);
-                break;
-            }
+    let pattern = Regex::new(
+        r#"(?i)(?:\bport(?:\s+|=)|(?:^|[\s("'])(?:(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]))?:)([0-9]{1,5})\b"#,
+    )
+    .expect("valid port pattern");
+    for line in lines.iter().rev() {
+        let lower = line.to_ascii_lowercase();
+        let mentions_port = lower
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|word| word == PORT_TOKEN);
+        if !lower.contains(BIND_TOKEN) && !lower.contains(LISTEN_TOKEN) && !mentions_port
+        {
             continue;
         }
-        idx += 1;
+        let Some(captures) = pattern.captures(line) else {
+            continue;
+        };
+        if let Some(port) = parse_port(&captures[1]) {
+            return Some(port);
+        }
     }
-    best
+    None
 }
 
-fn wait_with_timeout(
+fn port_from_command(command: Option<&str>) -> Option<u16> {
+    let command = command?;
+    let pattern = Regex::new(
+        r#"(?ix)(?:--?port(?:\s+|=)|\bhttp\.server\s+|(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]):)([0-9]{1,5})\b"#,
+    )
+    .expect("valid command port pattern");
+    let captures = pattern.captures(command)?;
+    parse_port(&captures[1])
+}
+
+fn wait_with_epoch(
     child: &mut Child,
     timeout: Duration,
+    epoch: Option<(&AtomicU64, u64, &AtomicBool)>,
 ) -> std::io::Result<Option<ExitStatus>> {
     let deadline = Instant::now() + timeout;
 
     loop {
+        if epoch.is_some_and(|(current, expected, cancelled)| {
+            cancelled.load(Ordering::SeqCst) || current.load(Ordering::SeqCst) != expected
+        }) {
+            return Ok(None);
+        }
         match child.try_wait()? {
             Some(status) => return Ok(Some(status)),
             None => {
                 if Instant::now() >= deadline {
                     return Ok(None);
                 }
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(COMMAND_WAIT_POLL_INTERVAL);
             }
         }
     }
+}
+
+fn spawn_session(command: &mut Command) -> std::io::Result<Child> {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    command.spawn()
+}
+
+fn command_timeout() -> Duration {
+    std::env::var("SYSG_PRE_START_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(PRE_START_TIMEOUT)
+}
+
+/// Drains an output stream while retaining only its most recent bounded tail.
+fn read_bounded_output(reader: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut reader = BufReader::new(reader);
+    let mut output = VecDeque::with_capacity(COMMAND_OUTPUT_LIMIT_BYTES);
+    let mut chunk = [0_u8; COMMAND_OUTPUT_READ_CHUNK_BYTES];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        output.extend(&chunk[..read]);
+        let overflow = output.len().saturating_sub(COMMAND_OUTPUT_LIMIT_BYTES);
+        output.drain(..overflow);
+    }
+    Ok(output.into_iter().collect())
+}
+
+fn output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+    label: &str,
+    epoch: Option<(&AtomicU64, u64, &AtomicBool)>,
+) -> std::io::Result<std::process::Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = spawn_session(command)?;
+    let pid = child.id();
+    let stdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::other(format!("failed to capture stdout for {label}"))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        std::io::Error::other(format!("failed to capture stderr for {label}"))
+    })?;
+    let stdout_thread = match thread::Builder::new()
+        .name(OUTPUT_STDOUT_THREAD.into())
+        .spawn(move || read_bounded_output(stdout))
+    {
+        Ok(handle) => handle,
+        Err(err) => {
+            let _ = Daemon::terminate_process_tree(label, pid, Some(pid as libc::pid_t));
+            let _ = child.wait();
+            return Err(err);
+        }
+    };
+    let stderr_thread = match thread::Builder::new()
+        .name(OUTPUT_STDERR_THREAD.into())
+        .spawn(move || read_bounded_output(stderr))
+    {
+        Ok(handle) => handle,
+        Err(err) => {
+            let _ = Daemon::terminate_process_tree(label, pid, Some(pid as libc::pid_t));
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            return Err(err);
+        }
+    };
+
+    let status = match wait_with_epoch(&mut child, timeout, epoch) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            let _ = Daemon::terminate_process_tree(label, pid, Some(pid as libc::pid_t));
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                format!("{label} timed out after {}s", timeout.as_secs()),
+            ));
+        }
+        Err(err) => {
+            let _ = Daemon::terminate_process_tree(label, pid, Some(pid as libc::pid_t));
+            let _ = child.wait();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(err);
+        }
+    };
+    let stdout = stdout_thread.join().map_err(|_| {
+        std::io::Error::other(format!("stdout reader failed for {label}"))
+    })??;
+    let stderr = stderr_thread.join().map_err(|_| {
+        std::io::Error::other(format!("stderr reader failed for {label}"))
+    })??;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Snapshot of the currently observed state for a managed service during readiness probing.
@@ -1417,6 +1693,20 @@ struct DetachedService {
     child: Child,
     pid: u32,
     pgid: Option<libc::pid_t>,
+}
+
+struct ReplacementGuard {
+    services: Arc<Mutex<HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for ReplacementGuard {
+    fn drop(&mut self) {
+        self.services
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.name);
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1466,21 +1756,24 @@ fn acquire_lock<'a, T>(
     mutex: &'a Arc<Mutex<T>>,
     lock_type: DaemonLock,
 ) -> Result<OrderedLockGuard<'a, T>, ProcessManagerError> {
-    HELD_LOCKS.with(|held| {
+    let violation = HELD_LOCKS.with(|held| {
         let held_locks = held.borrow();
-        for existing_lock in held_locks.iter() {
-            if lock_type <= *existing_lock {
-                panic!(
-                    "Lock ordering violation! Attempting to acquire {:?} (priority {}) \
-                     while holding {:?} (priority {}). Locks must be acquired in ascending order.",
-                    lock_type, lock_type.priority(),
-                    existing_lock, existing_lock.priority()
-                );
-            }
-        }
+        held_locks
+            .iter()
+            .find(|existing| lock_type <= **existing)
+            .copied()
     });
+    if let Some(existing) = violation {
+        return Err(ProcessManagerError::MutexPoisonError(format!(
+            "lock order violation: {lock_type:?} ({}) after {existing:?} ({})",
+            lock_type.priority(),
+            existing.priority()
+        )));
+    }
 
-    let guard = mutex.lock()?;
+    let guard = mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     HELD_LOCKS.with(|held| {
         held.borrow_mut().insert(lock_type);
@@ -1526,6 +1819,8 @@ struct DaemonContext {
     running: Arc<AtomicBool>,
     /// Pipe stderr to stdout.
     pipe_stderr: Arc<AtomicBool>,
+    boot_epoch: Arc<AtomicU64>,
+    boot_cancelled: Arc<AtomicBool>,
     /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
     #[cfg(target_os = "linux")]
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -1597,7 +1892,10 @@ impl DaemonContext {
     #[cfg(target_os = "linux")]
     fn create_cancellation_token(&self, service_name: &str) -> Arc<AtomicBool> {
         let token = Arc::new(AtomicBool::new(false));
-        let mut tokens = self.thread_cancellation_tokens.lock().unwrap();
+        let mut tokens = self
+            .thread_cancellation_tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tokens.insert(service_name.to_string(), Arc::clone(&token));
         token
     }
@@ -1605,7 +1903,10 @@ impl DaemonContext {
     /// Signals a Linux service thread to stop.
     #[cfg(target_os = "linux")]
     fn cancel_service_thread(&self, service_name: &str) {
-        let mut tokens = self.thread_cancellation_tokens.lock().unwrap();
+        let mut tokens = self
+            .thread_cancellation_tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(token) = tokens.remove(service_name) {
             token.store(true, Ordering::SeqCst);
         }
@@ -1614,7 +1915,10 @@ impl DaemonContext {
     /// Cleans up all Linux service thread cancellation tokens.
     #[cfg(target_os = "linux")]
     fn cancel_all_service_threads(&self) {
-        let mut tokens = self.thread_cancellation_tokens.lock().unwrap();
+        let mut tokens = self
+            .thread_cancellation_tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_, token) in tokens.drain() {
             token.store(true, Ordering::SeqCst);
         }
@@ -1661,12 +1965,41 @@ pub struct Daemon {
     liveness: Arc<()>,
     /// Reports what a blocking boot step is currently waiting on.
     op_slot: OpSlot,
+    boot_epoch: Arc<AtomicU64>,
+    boot_cancelled: Arc<AtomicBool>,
+    replacements: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Daemon {
     /// Returns the current config snapshot.
     fn cfg(&self) -> Arc<Config> {
-        Arc::clone(&self.config.lock().expect("daemon config poisoned"))
+        Arc::clone(
+            &self
+                .config
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn set_service_env(&self, command: &mut Command, service_name: &str) {
+        let config = self.cfg();
+        let service = config.services.get(service_name);
+        let env = service.and_then(|service| service.env.as_ref());
+        for (key, value) in
+            collect_service_env(&env.cloned(), &self.project_root, service_name)
+        {
+            command.env(key, value);
+        }
+        let strip = env.map(EnvConfig::vars_to_strip).unwrap_or_else(|| {
+            SESSION_SCOPED_ENV_VARS
+                .iter()
+                .map(|v| v.to_string())
+                .collect()
+        });
+        for key in strip {
+            command.env_remove(key);
+        }
+        command.env("SYSG_SERVICE_NAME", service_name);
     }
 
     /// Creates context snapshot.
@@ -1685,6 +2018,8 @@ impl Daemon {
             stopped_for_dependency: Arc::clone(&self.stopped_for_dependency),
             running: Arc::clone(&self.running),
             pipe_stderr: Arc::clone(&self.pipe_stderr),
+            boot_epoch: Arc::clone(&self.boot_epoch),
+            boot_cancelled: Arc::clone(&self.boot_cancelled),
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::clone(&self.thread_cancellation_tokens),
         }
@@ -1917,168 +2252,6 @@ impl Daemon {
         Ok(survivors)
     }
 
-    fn process_command_line(process: &sysinfo::Process) -> String {
-        process
-            .cmd()
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    fn process_outside_project_root(
-        process: &sysinfo::Process,
-        project_root: &Path,
-    ) -> bool {
-        let Some(cwd) = process.cwd() else {
-            return false;
-        };
-
-        cwd != project_root
-            && cwd
-                .canonicalize()
-                .ok()
-                .as_deref()
-                .is_none_or(|canonical| canonical != project_root)
-    }
-
-    fn process_matches_service_command(
-        process: &sysinfo::Process,
-        service: &ServiceConfig,
-    ) -> bool {
-        let command_line = Self::process_command_line(process);
-        if command_line == service.command {
-            return true;
-        }
-
-        let args = process.cmd();
-        if args.len() >= 3
-            && args[1].to_string_lossy() == SHELL_COMMAND_FLAG
-            && args[2].to_string_lossy() == service.command
-        {
-            let shell = Path::new(&args[0])
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            return shell == DEFAULT_SHELL;
-        }
-
-        false
-    }
-
-    /// Finds service processes that match the configured command and project root, including
-    /// stale instances whose PID file entries were overwritten by a later start.
-    fn collect_config_owned_service_roots(
-        service_name: &str,
-        service: &ServiceConfig,
-        project_root: &Path,
-        owned_by_others: &HashSet<u32>,
-    ) -> HashSet<u32> {
-        let canonical_root = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf());
-        let mut system = System::new();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::everything(),
-        );
-
-        system
-            .processes()
-            .iter()
-            .filter_map(|(pid, process)| {
-                let raw_pid = pid.as_u32();
-                if raw_pid == std::process::id() {
-                    return None;
-                }
-                // A process that belongs to another tracked service (its pid or
-                // any member of its process group) is that service's, not an
-                // orphan of this one — never reap it here. This is what keeps a
-                // same-command sibling from being caught by the command match.
-                if owned_by_others.contains(&raw_pid) {
-                    return None;
-                }
-                if Self::process_group_for_pid(raw_pid)
-                    .is_some_and(|pgid| owned_by_others.contains(&(pgid as u32)))
-                {
-                    return None;
-                }
-                if Self::process_outside_project_root(process, &canonical_root) {
-                    return None;
-                }
-                if !Self::process_matches_service_command(process, service) {
-                    return None;
-                }
-
-                debug!(
-                    "Found config-owned stale process for '{service_name}': pid={} command={:?}",
-                    raw_pid,
-                    process.cmd()
-                );
-                Some(raw_pid)
-            })
-            .collect()
-    }
-
-    /// The pids and process-group ids the pid file tracks for every service
-    /// *other* than `exclude`. Used to protect a same-command sibling's
-    /// processes from a command-matching cleanup.
-    fn pids_owned_by_other_services(&self, exclude: &str) -> HashSet<u32> {
-        let mut owned = HashSet::new();
-        if let Ok(pid_file) = self.pid_file.lock() {
-            for (name, &pid) in pid_file.services() {
-                if name != exclude {
-                    owned.insert(pid);
-                }
-            }
-            for (name, &pgid) in pid_file.service_pgids() {
-                if name != exclude {
-                    owned.insert(pgid as u32);
-                }
-            }
-        }
-        owned
-    }
-
-    fn cleanup_config_owned_service_processes(
-        service_name: &str,
-        service: &ServiceConfig,
-        project_root: &Path,
-        owned_by_others: &HashSet<u32>,
-    ) -> Result<(), ProcessManagerError> {
-        let roots = Self::collect_config_owned_service_roots(
-            service_name,
-            service,
-            project_root,
-            owned_by_others,
-        );
-
-        for pid in roots {
-            if !Self::signal_pid(service_name, pid, None)? {
-                continue;
-            }
-
-            let group = Self::process_group_for_pid(pid);
-            info!(
-                "Stopping stale config-owned process for '{service_name}' with pid {pid}"
-            );
-            match Self::terminate_process_tree(service_name, pid, group) {
-                Ok(()) => {}
-                Err(ProcessManagerError::ServiceStopError { source, .. })
-                    if source.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    warn!(
-                        "Timed out terminating stale process for '{service_name}' (pid {pid})"
-                    );
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        Ok(())
-    }
-
     /// Terminates a process and all its descendants using escalating signals. First sends SIGTERM
     /// to the entire process tree and waits for graceful shutdown. If processes don't exit within
     /// the timeout, escalates to SIGKILL. Returns an error if any processes survive after SIGKILL.
@@ -2106,7 +2279,7 @@ impl Daemon {
 
         let signal_group = |signal: libc::c_int| {
             if let Some(target_pgid) = group_target
-                && target_pgid >= 0
+                && target_pgid > 0
                 && target_pgid != supervisor_pgid
             {
                 let result = unsafe { libc::killpg(target_pgid, signal) };
@@ -2132,7 +2305,7 @@ impl Daemon {
 
         let merge_group_members = |pending: &mut HashSet<u32>| {
             if let Some(target_pgid) = group_target
-                && target_pgid >= 0
+                && target_pgid > 0
                 && target_pgid != supervisor_pgid
             {
                 pending.extend(Self::collect_process_group_members(target_pgid));
@@ -2199,7 +2372,7 @@ impl Daemon {
         let Some(pgid) = recorded_pgid else {
             return;
         };
-        if pgid < 0 || pgid == supervisor_pgid {
+        if pgid <= 0 || pgid == supervisor_pgid {
             return;
         }
 
@@ -2295,6 +2468,9 @@ impl Daemon {
             pipe_stderr: Arc::new(AtomicBool::new(false)),
             op_slot: OpSlot::new(),
             liveness: Arc::new(()),
+            boot_epoch: Arc::new(AtomicU64::new(0)),
+            boot_cancelled: Arc::new(AtomicBool::new(false)),
+            replacements: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -2302,6 +2478,49 @@ impl Daemon {
     /// boot steps report what they are waiting on.
     pub fn set_op_slot(&mut self, op_slot: OpSlot) {
         self.op_slot = op_slot;
+    }
+
+    /// Starts a new project boot epoch and returns its cancellation token.
+    pub(crate) fn begin_boot(&self) -> u64 {
+        self.boot_cancelled.store(false, Ordering::SeqCst);
+        self.boot_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Cancels the current boot epoch and wakes cancellation-aware waits.
+    pub(crate) fn cancel_boot(&self) {
+        self.boot_cancelled.store(true, Ordering::SeqCst);
+        self.boot_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Returns whether `epoch` still owns the active project boot.
+    pub(crate) fn boot_active(&self, epoch: u64) -> bool {
+        self.boot_epoch.load(Ordering::SeqCst) == epoch
+    }
+
+    /// Returns whether the current project boot was explicitly cancelled.
+    pub(crate) fn boot_cancelled(&self) -> bool {
+        self.boot_cancelled.load(Ordering::SeqCst)
+    }
+
+    fn interrupted(service: &str) -> ProcessManagerError {
+        ProcessManagerError::ServiceStartError {
+            service: service.to_string(),
+            source: std::io::Error::new(
+                ErrorKind::Interrupted,
+                "project start was cancelled",
+            ),
+        }
+    }
+
+    fn replacement(&self, name: &str) -> ReplacementGuard {
+        self.replacements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.to_string());
+        ReplacementGuard {
+            services: Arc::clone(&self.replacements),
+            name: name.to_string(),
+        }
     }
 
     /// Convenience constructor that loads the PID file automatically.
@@ -2325,9 +2544,50 @@ impl Daemon {
         self.cfg()
     }
 
+    /// Returns whether any configured non-cron service still needs to start.
+    pub(crate) fn needs_start(&self) -> bool {
+        let config = self.cfg();
+        let pids = match self.pid_file.lock() {
+            Ok(pids) => pids,
+            Err(_) => return true,
+        };
+        let states = match self.state_file.lock() {
+            Ok(states) => states,
+            Err(_) => return true,
+        };
+        config.services.iter().any(|(name, service)| {
+            if service.cron.is_some() {
+                return false;
+            }
+            let running = pids.get(name).is_some_and(|pid| {
+                pids.start_for(name).is_some_and(|started| {
+                    Self::pid_is_alive(pid) && process_start_time(pid) == Some(started)
+                })
+            });
+            if running {
+                return false;
+            }
+            let status = states
+                .get(&config.state_key(name))
+                .map(|entry| entry.status);
+            match status {
+                Some(ServiceLifecycleStatus::Skipped) => {
+                    matches!(service.skip, Some(SkipConfig::Command(_)))
+                }
+                Some(ServiceLifecycleStatus::ExitedSuccessfully) => {
+                    service.restarts_after_success()
+                }
+                _ => true,
+            }
+        })
+    }
+
     /// Swaps the daemon's live config for a live reconcile.
     pub fn set_config(&self, config: Config) {
-        *self.config.lock().expect("daemon config poisoned") = Arc::new(config);
+        *self
+            .config
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(config);
     }
 
     /// Returns a handle to the shared PID file so callers can inspect process IDs.
@@ -2584,26 +2844,28 @@ impl Daemon {
                 let stdout = child.stdout.take();
                 let stderr = child.stderr.take();
 
-                if pipe_stderr {
+                let log_result = if pipe_stderr {
                     if let Some(err) = stderr {
-                        use std::{
-                            io::{self, BufRead, BufReader, Write},
-                            thread,
-                        };
+                        use std::io::{self, BufRead, BufReader, Write};
 
                         let service_name_clone = service_name.to_string();
-                        thread::spawn(move || {
-                            let reader = BufReader::new(err);
-                            let mut stdout = io::stdout();
-                            for line in reader.lines().map_while(Result::ok) {
-                                let _ = writeln!(
-                                    stdout,
-                                    "[{}:stderr] {}",
-                                    service_name_clone, line
-                                );
-                                let _ = stdout.flush();
-                            }
-                        });
+                        thread::Builder::new()
+                            .name(SERVICE_STDERR_THREAD.into())
+                            .spawn(move || {
+                                let reader = BufReader::new(err);
+                                let mut stdout = io::stdout();
+                                for line in reader.lines().map_while(Result::ok) {
+                                    let _ = writeln!(
+                                        stdout,
+                                        "[{}:stderr] {}",
+                                        service_name_clone, line
+                                    );
+                                    let _ = stdout.flush();
+                                }
+                            })
+                            .map(|_| ())
+                    } else {
+                        Ok(())
                     }
                 } else {
                     spawn_service_log_writers(
@@ -2612,7 +2874,19 @@ impl Daemon {
                         stdout.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
                         stderr.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
                         log_settings,
+                    )
+                };
+                if let Err(source) = log_result {
+                    let _ = Self::terminate_process_tree(
+                        service_name,
+                        pid,
+                        Some(pid as libc::pid_t),
                     );
+                    let _ = child.wait();
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source,
+                    });
                 }
 
                 processes.lock()?.insert(service_name.to_string(), child);
@@ -2660,7 +2934,9 @@ impl Daemon {
         let service_name_for_cleanup = service_name.clone();
 
         let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
+        thread::Builder::new()
+            .name(SERVICE_LAUNCH_THREAD.into())
+            .spawn(move || {
             debug!("Starting service thread for '{service_name_for_thread}'");
 
             let launch_result = Daemon::launch_attached_service(
@@ -2727,7 +3003,11 @@ impl Daemon {
                     let _ = tx.send(Err(err));
                 }
             }
-        });
+            })
+            .map_err(|source| ProcessManagerError::ServiceStartError {
+                service: service_name_for_cleanup.clone(),
+                source,
+            })?;
 
         match rx.recv() {
             Ok(Ok(pid)) => Ok(pid),
@@ -2823,11 +3103,96 @@ impl Daemon {
         name: &str,
         service: &ServiceConfig,
     ) -> Result<Option<ServiceReadyState>, ProcessManagerError> {
+        if self.boot_cancelled() {
+            return Err(Self::interrupted(name));
+        }
+        let config = self.cfg();
+        match Self::probe_service_state_recording(
+            name,
+            &self.processes,
+            &self.pid_file,
+            Some((&self.state_file, &config)),
+        )? {
+            ServiceProbe::Running => {
+                let pid = self.processes.lock()?.get(name).map(Child::id);
+                if let Some(pid) = pid {
+                    let pgid = Self::process_group_for_pid(pid);
+                    self.pid_file.lock()?.insert_with_group(name, pid, pgid)?;
+                    self.mark_running(name, pid)?;
+                }
+                return Ok(Some(ServiceReadyState::Running));
+            }
+            ServiceProbe::Exited(_) | ServiceProbe::NotStarted => {}
+        }
+
+        let replacing = self
+            .replacements
+            .lock()
+            .map(|services| services.contains(name))
+            .unwrap_or(false);
+        if !replacing {
+            let (pid, pgid, started) = {
+                let pids = self.pid_file.lock()?;
+                (pids.get(name), pids.pgid_for(name), pids.start_for(name))
+            };
+            if let Some(pid) = pid
+                && Self::pid_is_alive(pid)
+            {
+                if started
+                    .is_some_and(|expected| process_start_time(pid) == Some(expected))
+                {
+                    self.mark_running(name, pid)?;
+                    return Ok(Some(ServiceReadyState::Running));
+                }
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: name.to_string(),
+                    source: std::io::Error::other(format!(
+                        "refusing to replace unverified live pid {pid}"
+                    )),
+                });
+            }
+            if pgid.is_some_and(Self::process_group_is_alive) {
+                let Some(expected) = started else {
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: name.to_string(),
+                        source: std::io::Error::other(
+                            "refusing to replace an unverified live process group",
+                        ),
+                    });
+                };
+                let root = pid.unwrap_or(pgid.unwrap_or_default() as u32);
+                if process_start_time(root).is_some_and(|actual| actual != expected) {
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: name.to_string(),
+                        source: std::io::Error::other(
+                            "refusing to replace a process group with reused ownership",
+                        ),
+                    });
+                }
+                Self::terminate_process_tree(
+                    name,
+                    root,
+                    pgid.map(|value| value as libc::pid_t),
+                )?;
+            }
+            if pid.is_some() || pgid.is_some() {
+                let mut pids = self.pid_file.lock()?;
+                if let Err(err) = pids.remove(name)
+                    && !matches!(err, PidFileError::ServiceNotFound)
+                {
+                    return Err(err.into());
+                }
+            }
+        }
         info!("Starting service: {name}");
 
         {
             let mut suppressed = self.restart_suppressed.lock()?;
             suppressed.remove(name);
+        }
+        {
+            let mut stopped = self.manual_stop_flags.lock()?;
+            stopped.remove(name);
         }
 
         if let Some(skip_config) = &service.skip {
@@ -2957,6 +3322,7 @@ impl Daemon {
                 match skip_config {
                     SkipConfig::Flag(true) => {
                         info!("Skipping service '{service_name}' due to skip flag");
+                        self.mark_skipped(&service_name)?;
                         skipped_services.insert(service_name.clone());
                         continue 'service_loop;
                     }
@@ -2971,6 +3337,7 @@ impl Daemon {
                                 info!(
                                     "Skipping service '{service_name}' due to skip condition"
                                 );
+                                self.mark_skipped(&service_name)?;
                                 skipped_services.insert(service_name.clone());
                                 continue 'service_loop;
                             }
@@ -3056,7 +3423,9 @@ impl Daemon {
                 }
             }
 
-            match self.start_service(&service_name, service) {
+            let mut service_to_start = service.clone();
+            service_to_start.skip = None;
+            match self.start_service(&service_name, &service_to_start) {
                 Ok(ServiceReadyState::Running) => {
                     healthy_services.insert(service_name.clone());
                 }
@@ -3094,15 +3463,32 @@ impl Daemon {
         service_name: &str,
         skip_command: &str,
     ) -> Result<bool, ProcessManagerError> {
+        if self.boot_cancelled() {
+            return Err(Self::interrupted(service_name));
+        }
         debug!("Evaluating skip condition for '{service_name}': `{skip_command}`");
 
         let mut cmd = Command::new(DEFAULT_SHELL);
         cmd.arg(SHELL_COMMAND_FLAG).arg(skip_command);
         cmd.current_dir(&self.project_root);
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        self.set_service_env(&mut cmd, service_name);
 
-        match cmd.status() {
-            Ok(status) => {
+        let mut child = spawn_session(&mut cmd).map_err(|source| {
+            ProcessManagerError::ServiceStartError {
+                service: service_name.to_string(),
+                source,
+            }
+        })?;
+        let child_pid = child.id();
+        let timeout = command_timeout();
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
+        match wait_with_epoch(
+            &mut child,
+            timeout,
+            Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
+        ) {
+            Ok(Some(status)) => {
                 let should_skip = status.success();
                 debug!(
                     "Skip condition for '{service_name}' evaluated to: {should_skip} (exit code: {:?})",
@@ -3110,11 +3496,39 @@ impl Daemon {
                 );
                 Ok(should_skip)
             }
-            Err(e) => {
-                error!("Failed to execute skip condition for '{service_name}': {e}");
+            Ok(None) => {
+                let _ = Self::terminate_process_tree(
+                    service_name,
+                    child_pid,
+                    Some(child_pid as libc::pid_t),
+                );
+                let _ = child.wait();
                 Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),
-                    source: e,
+                    source: std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "skip condition for '{service_name}' {}",
+                            if self.boot_active(epoch) {
+                                format!("exceeded {}s", timeout.as_secs())
+                            } else {
+                                "was cancelled".to_string()
+                            }
+                        ),
+                    ),
+                })
+            }
+            Err(source) => {
+                let _ = Self::terminate_process_tree(
+                    service_name,
+                    child_pid,
+                    Some(child_pid as libc::pid_t),
+                );
+                let _ = child.wait();
+                error!("Failed to execute skip condition for '{service_name}': {source}");
+                Err(ProcessManagerError::ServiceStartError {
+                    service: service_name.to_string(),
+                    source,
                 })
             }
         }
@@ -3131,11 +3545,19 @@ impl Daemon {
         service_name: &str,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let config = self.cfg();
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
+        let command = config
+            .services
+            .get(service_name)
+            .map(|service| service.command.as_str());
         let state = Self::wait_for_ready(
             service_name,
             &config.project.id,
             &self.processes,
             &self.pid_file,
+            Some((&self.state_file, &config)),
+            command,
+            Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
         )?;
 
         if let ServiceReadyState::Running = state
@@ -3176,18 +3598,32 @@ impl Daemon {
         project: &str,
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
+        state: Option<(&Arc<Mutex<ServiceStateFile>>, &Arc<Config>)>,
+        command: Option<&str>,
+        epoch: Option<(&AtomicU64, u64, &AtomicBool)>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let mut waited = Duration::ZERO;
-        let mut seen_running_once = false;
+        let mut running_since = None;
 
         while waited <= SERVICE_START_TIMEOUT {
-            match Self::probe_service_state(service_name, processes, pid_file)? {
+            if epoch.is_some_and(|(current, expected, cancelled)| {
+                cancelled.load(Ordering::SeqCst)
+                    || current.load(Ordering::SeqCst) != expected
+            }) {
+                return Err(Self::interrupted(service_name));
+            }
+            match Self::probe_service_state_recording(
+                service_name,
+                processes,
+                pid_file,
+                state,
+            )? {
                 ServiceProbe::Running => {
-                    if seen_running_once {
+                    let started = running_since.get_or_insert_with(Instant::now);
+                    if started.elapsed() >= SERVICE_START_STABILITY {
                         return Ok(ServiceReadyState::Running);
                     }
 
-                    seen_running_once = true;
                     thread::sleep(SERVICE_POLL_INTERVAL);
                     waited += SERVICE_POLL_INTERVAL;
                     continue;
@@ -3218,8 +3654,9 @@ impl Daemon {
                     // cause, and a bare "Address already in use (os error 48)" in
                     // the tail tells the user nothing actionable. Classify it as
                     // its own code so the failure names the real problem.
-                    let diag = if port_in_use_output(&tail) {
-                        let port = port_from_output(&tail);
+                    let diag = if output_indicates_port_conflict(&tail) {
+                        let port = port_from_output(&tail)
+                            .or_else(|| port_from_command(command));
                         let subject = match port {
                             Some(port) => format!(
                                 "service `{service_name}` could not bind port {port}: already in use"
@@ -3288,11 +3725,12 @@ impl Daemon {
     /// Polls the dependency's process without a timeout — builds and migrations can
     /// legitimately run for minutes. Returns [`ProcessManagerError::DependencyFailed`]
     /// if the dependency exits with a non-zero status or was stopped.
-    fn wait_for_dependency_completion(
+    pub(crate) fn wait_for_dependency_completion(
         &self,
         service_name: &str,
         dep: &str,
     ) -> Result<(), ProcessManagerError> {
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
         info!("Waiting for dependency '{dep}' of '{service_name}' to complete");
         self.op_slot.detail_for(
             &self.cfg().project.id.clone(),
@@ -3300,6 +3738,9 @@ impl Daemon {
         );
 
         loop {
+            if self.boot_cancelled() || !self.boot_active(epoch) {
+                return Err(Self::interrupted(service_name));
+            }
             match Self::probe_service_state(dep, &self.processes, &self.pid_file)? {
                 ServiceProbe::Running => thread::sleep(SERVICE_POLL_INTERVAL),
                 ServiceProbe::Exited(status) => {
@@ -3410,11 +3851,7 @@ impl Daemon {
             return;
         }
 
-        // A ONE-SHOT whose process is gone ran to completion — recording it as
-        // `stopped` would resurrect the stopped+warn regression (a finished
-        // build reading as a failed dependency). Long-running services that
-        // vanished are genuinely stopped.
-        let corrected = Self::stopped_or_completed(ctx, name, true);
+        let corrected = ServiceLifecycleStatus::Stopped;
         warn!(
             "Service '{name}' was recorded running with pid {stale_pid}, which is gone; correcting to {corrected:?}."
         );
@@ -3491,6 +3928,19 @@ impl Daemon {
         !Self::pid_is_zombie(target)
     }
 
+    fn process_group_is_alive(pgid: libc::pid_t) -> bool {
+        if pgid <= 0 {
+            return false;
+        }
+        if unsafe { libc::killpg(pgid, 0) } == 0 {
+            return true;
+        }
+        matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM)
+        )
+    }
+
     /// Reports whether a pid is a reaped-pending zombie rather than a live
     /// process, so a stop is not held open waiting on a corpse.
     fn pid_is_zombie(pid: libc::pid_t) -> bool {
@@ -3523,9 +3973,11 @@ impl Daemon {
         // should be treated as a stop worth restarting; everything else that
         // exits 0 ran to completion. Probe-style units (`redis-cli ping`) declare
         // no policy at all, so keying off `never` alone would miss them.
-        let wants_restart = ctx.config.services.get(name).is_some_and(|service| {
-            matches!(service.restart_policy.as_deref(), Some("always"))
-        });
+        let wants_restart = ctx
+            .config
+            .services
+            .get(name)
+            .is_some_and(|service| service.restarts_after_success());
         if exit_success && !wants_restart {
             ServiceLifecycleStatus::ExitedSuccessfully
         } else {
@@ -3592,6 +4044,13 @@ impl Daemon {
                     processes_guard.insert(service_name.to_string(), child);
                     return Ok(ServiceProbe::Running);
                 }
+                Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {
+                    let child_pid = child.id();
+                    drop(processes_guard);
+                    let mut pid_guard = pid_file.lock()?;
+                    pid_guard.clear_pid_if_matches(service_name, child_pid)?;
+                    return Ok(ServiceProbe::NotStarted);
+                }
                 Err(e) => {
                     processes_guard.insert(service_name.to_string(), child);
                     return Err(ProcessManagerError::ServiceStartError {
@@ -3608,14 +4067,31 @@ impl Daemon {
     /// Restarts all services by stopping and then starting them again, reusing the existing
     /// monitor thread if available.
     pub fn restart_services(&self) -> Result<(), ProcessManagerError> {
+        let services: HashSet<String> = self.cfg().services.keys().cloned().collect();
+        self.restart_services_subset(&services)
+    }
+
+    /// Restarts selected services in dependency order while preserving monitoring.
+    pub(crate) fn restart_services_subset(
+        &self,
+        services: &HashSet<String>,
+    ) -> Result<(), ProcessManagerError> {
         info!("Restarting all services...");
 
         let config = self.cfg();
         let order = config.service_start_order()?;
+        self.shutdown_monitor();
         let mut restarted_services = Vec::new();
+        let mut healthy_services = HashSet::new();
         let mut completed_services = HashSet::new();
+        let mut failed_services = HashSet::new();
+        let mut skipped_services = HashSet::new();
+        let mut first_error = None;
 
-        for service_name in order {
+        'services: for service_name in order {
+            if !services.contains(&service_name) {
+                continue;
+            }
             let service = match config.services.get(&service_name) {
                 Some(service) => service,
                 None => continue,
@@ -3630,19 +4106,111 @@ impl Daemon {
                 continue;
             }
 
+            let should_skip = match &service.skip {
+                Some(SkipConfig::Flag(value)) => Ok(*value),
+                Some(SkipConfig::Command(command)) => {
+                    self.evaluate_skip_condition(&service_name, command)
+                }
+                None => Ok(false),
+            };
+            match should_skip {
+                Ok(true) => {
+                    if let Err(err) = self.stop_service(&service_name) {
+                        first_error.get_or_insert(err);
+                        failed_services.insert(service_name.clone());
+                        continue;
+                    }
+                    if let Err(err) = self.mark_skipped(&service_name) {
+                        first_error.get_or_insert(err);
+                        failed_services.insert(service_name.clone());
+                        continue;
+                    }
+                    skipped_services.insert(service_name.clone());
+                    continue;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    first_error.get_or_insert(err);
+                    failed_services.insert(service_name.clone());
+                    continue;
+                }
+            }
+
             if let Some(deps) = &service.depends_on {
                 for dep in deps {
                     let dep_name = dep.service();
+                    let dep_skipped = skipped_services.contains(dep_name)
+                        || matches!(
+                            self.recorded_status(dep_name),
+                            Some(ServiceLifecycleStatus::Skipped)
+                        );
+                    if dep_skipped {
+                        if let Err(err) = self.stop_service(&service_name) {
+                            first_error.get_or_insert(err);
+                            failed_services.insert(service_name.clone());
+                        } else if let Err(err) = self.mark_skipped(&service_name) {
+                            first_error.get_or_insert(err);
+                            failed_services.insert(service_name.clone());
+                        } else {
+                            skipped_services.insert(service_name.clone());
+                        }
+                        continue 'services;
+                    }
+                    if failed_services.contains(dep_name)
+                        || (services.contains(dep_name)
+                            && !healthy_services.contains(dep_name))
+                    {
+                        let err = ProcessManagerError::DependencyFailed {
+                            service: service_name.clone(),
+                            dependency: dep_name.to_string(),
+                        };
+                        first_error.get_or_insert(err);
+                        failed_services.insert(service_name.clone());
+                        continue 'services;
+                    }
+                    if dep.condition() != DependsOnCondition::Completed
+                        && !services.contains(dep_name)
+                    {
+                        let dep_running = self
+                            .pid_file
+                            .lock()
+                            .ok()
+                            .and_then(|guard| {
+                                let pid = guard.get(dep_name)?;
+                                let identity_ok =
+                                    guard.start_for(dep_name).is_some_and(|started| {
+                                        process_start_time(pid) == Some(started)
+                                    });
+                                (identity_ok && Self::pid_is_alive(pid)).then_some(())
+                            })
+                            .is_some();
+                        if !dep_running {
+                            let err = ProcessManagerError::DependencyFailed {
+                                service: service_name.clone(),
+                                dependency: dep_name.to_string(),
+                            };
+                            first_error.get_or_insert(err);
+                            failed_services.insert(service_name.clone());
+                            continue 'services;
+                        }
+                    }
                     if dep.condition() == DependsOnCondition::Completed
                         && !completed_services.contains(dep_name)
                     {
-                        self.wait_for_dependency_completion(&service_name, dep_name)?;
+                        if let Err(err) =
+                            self.wait_for_dependency_completion(&service_name, dep_name)
+                        {
+                            error!(
+                                "Failed to restart '{service_name}' because dependency '{dep_name}' did not complete: {err}"
+                            );
+                            first_error.get_or_insert(err);
+                            failed_services.insert(service_name.clone());
+                            continue 'services;
+                        }
                         completed_services.insert(dep_name.to_string());
                     }
                 }
             }
-
-            restarted_services.push(service_name.clone());
 
             let strategy_str = service
                 .deployment
@@ -3653,30 +4221,49 @@ impl Daemon {
                 .and_then(|s| DeploymentStrategy::from_str(s).ok())
                 .unwrap_or_default();
 
-            match strategy {
+            let mut service_to_start = service.clone();
+            service_to_start.skip = None;
+            let result = match strategy {
                 DeploymentStrategy::Rolling => {
-                    if matches!(
-                        self.rolling_restart_service(&service_name, service)?,
-                        ServiceReadyState::CompletedSuccess
-                    ) {
-                        completed_services.insert(service_name.clone());
-                    }
+                    self.rolling_restart_service(&service_name, &service_to_start)
                 }
                 DeploymentStrategy::Immediate => {
-                    if matches!(
-                        self.immediate_restart_service(&service_name, service)?,
-                        ServiceReadyState::CompletedSuccess
-                    ) {
-                        completed_services.insert(service_name.clone());
-                    }
+                    self.immediate_restart_service(&service_name, &service_to_start)
+                }
+            };
+            match result {
+                Ok(ServiceReadyState::CompletedSuccess) => {
+                    healthy_services.insert(service_name.clone());
+                    completed_services.insert(service_name.clone());
+                    restarted_services.push(service_name);
+                }
+                Ok(ServiceReadyState::Running) => {
+                    healthy_services.insert(service_name.clone());
+                    restarted_services.push(service_name);
+                }
+                Err(err) => {
+                    error!("Failed to restart '{service_name}': {err}");
+                    first_error.get_or_insert(err);
+                    failed_services.insert(service_name);
                 }
             }
         }
 
-        self.spawn_monitor_thread()?;
-        self.verify_services_running(&restarted_services, &completed_services)?;
-        info!("All services restarted successfully.");
-        Ok(())
+        if let Err(err) = self.spawn_monitor_thread() {
+            first_error.get_or_insert(err);
+        }
+        if let Err(err) =
+            self.verify_services_running(&restarted_services, &completed_services)
+        {
+            first_error.get_or_insert(err);
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => {
+                info!("All services restarted successfully.");
+                Ok(())
+            }
+        }
     }
 
     /// Restarts a single service, honoring its deployment strategy.
@@ -3728,6 +4315,7 @@ impl Daemon {
         }
 
         info!("Performing rolling restart for service: {name}");
+        let _replacement = self.replacement(name);
 
         let mut previous = self.detach_service_handle(name)?;
 
@@ -3851,6 +4439,7 @@ impl Daemon {
                 "blue_green.slots for '{name}' must contain exactly two entries"
             )));
         }
+        let _replacement = self.replacement(name);
 
         let env_var = blue_green
             .env_var
@@ -4010,19 +4599,25 @@ impl Daemon {
             thread,
         };
 
+        if self.boot_cancelled() {
+            return Err(Self::interrupted(service_name));
+        }
         let started = Instant::now();
 
-        let mut child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(command)
             .current_dir(&self.project_root)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| ProcessManagerError::ServiceStartError {
+            .stderr(Stdio::piped());
+        self.set_service_env(&mut cmd, service_name);
+        let mut child = spawn_session(&mut cmd).map_err(|source| {
+            ProcessManagerError::ServiceStartError {
                 service: service_name.to_string(),
                 source,
-            })?;
+            }
+        })?;
+        let child_pid = child.id();
 
         let service_name_owned = service_name.to_string();
         let project_id = self.cfg().project.id.clone();
@@ -4058,69 +4653,123 @@ impl Daemon {
         let push_tail = |tail: &Arc<Mutex<std::collections::VecDeque<String>>>,
                          line: &str| {
             if let Ok(mut guard) = tail.lock() {
-                if guard.len() >= 12 {
+                if guard.len() >= PRE_START_TAIL_LINES {
                     guard.pop_front();
                 }
                 guard.push_back(line.to_string());
             }
         };
 
-        let stdout_handle = child.stdout.take().map(|stdout| {
-            let service_name = service_name_owned.clone();
+        let stdout_handle = if let Some(stdout) = child.stdout.take() {
+            let service_label = service_name_owned.clone();
             let stdout_sink = Arc::clone(&stdout_sink);
             let stderr_sink = Arc::clone(&stderr_sink);
             let tail = Arc::clone(&tail);
-            thread::spawn(move || {
-                let reader = BufReader::new(stdout);
-                for line in reader.lines().map_while(Result::ok) {
-                    info!("[{service_name} pre-start] {line}");
-                    push_tail(&tail, &line);
-                    for sink in [&stdout_sink, &stderr_sink] {
-                        if let Ok(mut guard) = sink.lock()
-                            && let Some(file) = guard.as_mut()
-                        {
-                            let _ = writeln!(file, "[pre_start] {line}");
+            match thread::Builder::new()
+                .name(OUTPUT_STDOUT_THREAD.into())
+                .spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines().map_while(Result::ok) {
+                        info!("[{service_label} pre-start] {line}");
+                        push_tail(&tail, &line);
+                        for sink in [&stdout_sink, &stderr_sink] {
+                            if let Ok(mut guard) = sink.lock()
+                                && let Some(file) = guard.as_mut()
+                            {
+                                let _ = writeln!(file, "[pre_start] {line}");
+                            }
                         }
                     }
+                }) {
+                Ok(handle) => Some(handle),
+                Err(source) => {
+                    let _ = Self::terminate_process_tree(
+                        service_name,
+                        child_pid,
+                        Some(child_pid as libc::pid_t),
+                    );
+                    let _ = child.wait();
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source,
+                    });
                 }
-            })
-        });
+            }
+        } else {
+            None
+        };
 
-        let stderr_handle = child.stderr.take().map(|stderr| {
-            let service_name = service_name_owned.clone();
+        let stderr_handle = if let Some(stderr) = child.stderr.take() {
+            let service_label = service_name_owned.clone();
             let stdout_sink = Arc::clone(&stdout_sink);
             let stderr_sink = Arc::clone(&stderr_sink);
             let tail = Arc::clone(&tail);
-            thread::spawn(move || {
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().map_while(Result::ok) {
-                    warn!("[{service_name} pre-start] {line}");
-                    push_tail(&tail, &line);
-                    for sink in [&stdout_sink, &stderr_sink] {
-                        if let Ok(mut guard) = sink.lock()
-                            && let Some(file) = guard.as_mut()
-                        {
-                            let _ = writeln!(file, "[pre_start] {line}");
+            match thread::Builder::new()
+                .name(OUTPUT_STDERR_THREAD.into())
+                .spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        warn!("[{service_label} pre-start] {line}");
+                        push_tail(&tail, &line);
+                        for sink in [&stdout_sink, &stderr_sink] {
+                            if let Ok(mut guard) = sink.lock()
+                                && let Some(file) = guard.as_mut()
+                            {
+                                let _ = writeln!(file, "[pre_start] {line}");
+                            }
                         }
                     }
+                }) {
+                Ok(handle) => Some(handle),
+                Err(source) => {
+                    let _ = Self::terminate_process_tree(
+                        service_name,
+                        child_pid,
+                        Some(child_pid as libc::pid_t),
+                    );
+                    let _ = child.wait();
+                    if let Some(handle) = stdout_handle {
+                        let _ = handle.join();
+                    }
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source,
+                    });
                 }
-            })
-        });
+            }
+        } else {
+            None
+        };
 
-        // Bound the pre-start: it runs in the single-writer owner thread, so an
-        // unbounded wait on a hung command (e.g. a network call that never
-        // returns) freezes every later mutation across ALL projects. On timeout,
-        // kill it and fail the start so the owner thread is released. The bound is
-        // PRE_START_TIMEOUT; SYSG_PRE_START_TIMEOUT_SECS overrides it (for tests).
-        let pre_start_timeout = std::env::var("SYSG_PRE_START_TIMEOUT_SECS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(PRE_START_TIMEOUT);
-        let status = match wait_with_timeout(&mut child, pre_start_timeout) {
+        let pre_start_timeout = command_timeout();
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
+        if self.boot_cancelled() {
+            let _ = Self::terminate_process_tree(
+                service_name,
+                child_pid,
+                Some(child_pid as libc::pid_t),
+            );
+            let _ = child.wait();
+            if let Some(handle) = stdout_handle {
+                let _ = handle.join();
+            }
+            if let Some(handle) = stderr_handle {
+                let _ = handle.join();
+            }
+            return Err(Self::interrupted(service_name));
+        }
+        let status = match wait_with_epoch(
+            &mut child,
+            pre_start_timeout,
+            Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
+        ) {
             Ok(Some(status)) => status,
             Ok(None) => {
-                let _ = child.kill();
+                let _ = Self::terminate_process_tree(
+                    service_name,
+                    child_pid,
+                    Some(child_pid as libc::pid_t),
+                );
                 let _ = child.wait();
                 if let Some(handle) = stdout_handle {
                     let _ = handle.join();
@@ -4128,22 +4777,40 @@ impl Daemon {
                 if let Some(handle) = stderr_handle {
                     let _ = handle.join();
                 }
-                let secs = PRE_START_TIMEOUT.as_secs();
-                write_marker(&format!(
-                    "\u{2716} pre-start timed out after {secs}s; killed"
-                ));
+                let active = self.boot_active(epoch);
+                let secs = pre_start_timeout.as_secs();
+                let reason = if active {
+                    format!("timed out after {secs}s")
+                } else {
+                    "was cancelled".to_string()
+                };
+                write_marker(&format!("\u{2716} pre-start {reason}; killed"));
                 self.record_start_failure(service_name, None, None);
                 return Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),
                     source: std::io::Error::new(
-                        ErrorKind::TimedOut,
-                        format!(
-                            "pre-start for '{service_name}' exceeded {secs}s and was killed"
-                        ),
+                        if active {
+                            ErrorKind::TimedOut
+                        } else {
+                            ErrorKind::Interrupted
+                        },
+                        format!("pre-start for '{service_name}' {reason} and was killed"),
                     ),
                 });
             }
             Err(source) => {
+                let _ = Self::terminate_process_tree(
+                    service_name,
+                    child_pid,
+                    Some(child_pid as libc::pid_t),
+                );
+                let _ = child.wait();
+                if let Some(handle) = stdout_handle {
+                    let _ = handle.join();
+                }
+                if let Some(handle) = stderr_handle {
+                    let _ = handle.join();
+                }
                 return Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),
                     source,
@@ -4208,6 +4875,7 @@ impl Daemon {
         service_name: &str,
         health_check: &HealthCheckConfig,
     ) -> Result<(), ProcessManagerError> {
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
         let attempt_timeout = if let Some(raw) = &health_check.attempt_timeout {
             Self::parse_duration(raw)?
         } else {
@@ -4246,6 +4914,9 @@ impl Daemon {
         let mut last_outcome = HealthProbeOutcome::Unhealthy;
 
         for attempt in 1..=retries {
+            if self.boot_cancelled() || !self.boot_active(epoch) {
+                return Err(Self::interrupted(service_name));
+            }
             self.op_slot.detail_for(
                 &self.cfg().project.id.clone(),
                 format!(
@@ -4284,8 +4955,12 @@ impl Daemon {
                 }
             }
 
-            if attempt != retries {
-                thread::sleep(interval);
+            if self.boot_cancelled() || !self.boot_active(epoch) {
+                return Err(Self::interrupted(service_name));
+            }
+
+            if attempt != retries && !self.wait_boot_delay(epoch, interval) {
+                return Err(Self::interrupted(service_name));
             }
         }
 
@@ -4403,7 +5078,7 @@ impl Daemon {
             let client = client.ok_or_else(|| {
                 std::io::Error::other("HTTP health check client was not initialized")
             })?;
-            self.perform_health_check(client, url)
+            self.perform_http_health_check(service_name, client, url)
         } else {
             Err(std::io::Error::other(
                 "health check requires either a command or a url",
@@ -4412,11 +5087,7 @@ impl Daemon {
     }
 
     /// Performs a single health check request and evaluates the response.
-    fn perform_health_check(
-        &self,
-        client: &Client,
-        url: &str,
-    ) -> Result<bool, std::io::Error> {
+    fn perform_health_check(client: &Client, url: &str) -> Result<bool, std::io::Error> {
         let response = client.get(url).send().map_err(|err| {
             let kind = if err.is_timeout() {
                 ErrorKind::TimedOut
@@ -4429,6 +5100,56 @@ impl Daemon {
         Ok(response.status().is_success())
     }
 
+    fn perform_http_health_check(
+        &self,
+        service_name: &str,
+        client: &Client,
+        url: &str,
+    ) -> Result<bool, std::io::Error> {
+        use std::sync::mpsc;
+
+        let client = client.clone();
+        let url = url.to_string();
+        let (tx, rx) = mpsc::sync_channel(HEALTH_RESULT_CAPACITY);
+        thread::Builder::new()
+            .name(format!("health-{service_name}"))
+            .spawn(move || {
+                let _ = tx.send(Self::perform_health_check(&client, &url));
+            })
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
+        loop {
+            if self.boot_cancelled() || !self.boot_active(epoch) {
+                return Err(std::io::Error::new(
+                    ErrorKind::Interrupted,
+                    format!("health check for '{service_name}' was cancelled"),
+                ));
+            }
+            match rx.recv_timeout(SERVICE_POLL_INTERVAL) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(std::io::Error::other(format!(
+                        "health check worker for '{service_name}' stopped"
+                    )));
+                }
+            }
+        }
+    }
+
+    fn wait_boot_delay(&self, epoch: u64, duration: Duration) -> bool {
+        let deadline = Instant::now() + duration;
+        while Instant::now() < deadline {
+            if self.boot_cancelled() || !self.boot_active(epoch) {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            thread::sleep(remaining.min(SERVICE_POLL_INTERVAL));
+        }
+        !self.boot_cancelled() && self.boot_active(epoch)
+    }
+
     /// Executes a single command-based health check and evaluates the exit status.
     fn perform_command_health_check(
         &self,
@@ -4439,22 +5160,38 @@ impl Daemon {
         let mut child = Command::new(DEFAULT_SHELL);
         child.arg(SHELL_COMMAND_FLAG).arg(command);
         child.current_dir(&self.project_root);
-        child.env("SYSG_SERVICE_NAME", service_name);
+        self.set_service_env(&mut child, service_name);
         child.stdout(Stdio::null());
         child.stderr(Stdio::null());
-
-        let mut child = child.spawn()?;
-        match wait_with_timeout(&mut child, timeout)? {
+        let mut child = spawn_session(&mut child)?;
+        let child_pid = child.id();
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
+        match wait_with_epoch(
+            &mut child,
+            timeout,
+            Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
+        )? {
             Some(status) => Ok(status.success()),
             None => {
-                let _ = child.kill();
+                let _ = Self::terminate_process_tree(
+                    service_name,
+                    child_pid,
+                    Some(child_pid as libc::pid_t),
+                );
                 let _ = child.wait();
                 Err(std::io::Error::new(
-                    ErrorKind::TimedOut,
-                    format!(
-                        "health check command timed out after {:?}: {}",
-                        timeout, command
-                    ),
+                    if self.boot_active(epoch) {
+                        ErrorKind::TimedOut
+                    } else {
+                        ErrorKind::Interrupted
+                    },
+                    if self.boot_active(epoch) {
+                        format!(
+                            "health check command timed out after {timeout:?}: {command}"
+                        )
+                    } else {
+                        format!("health check command was cancelled: {command}")
+                    },
                 ))
             }
         }
@@ -4618,8 +5355,15 @@ impl Daemon {
         cmd.env("SYSG_ACTIVE_SLOT", active_slot);
         cmd.env("SYSG_CANDIDATE_SLOT", candidate_slot);
         cmd.env("SYSG_SERVICE_NAME", service_name);
+        self.set_service_env(&mut cmd, service_name);
 
-        let output = cmd.output()?;
+        let epoch = self.boot_epoch.load(Ordering::SeqCst);
+        let output = output_with_timeout(
+            &mut cmd,
+            command_timeout(),
+            &format!("blue/green switch for {service_name}"),
+            Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
+        )?;
         if output.status.success() {
             Ok(())
         } else {
@@ -4675,7 +5419,7 @@ impl Daemon {
     /// Determines if a service should be verified as running after a restart. Returns false for
     /// one-shot services (restart_policy=never) and cron jobs, true for long-running services.
     fn should_verify_service(service: &ServiceConfig) -> bool {
-        if matches!(service.restart_policy.as_deref(), Some("never")) {
+        if service.restart_is_disabled() {
             return false;
         }
 
@@ -4831,7 +5575,9 @@ impl Daemon {
         let pid = detached.pid;
         Self::terminate_process_tree(service_name, pid, detached.pgid)?;
 
-        if let Err(err) = detached.child.wait() {
+        if let Err(err) = detached.child.wait()
+            && err.raw_os_error() != Some(libc::ECHILD)
+        {
             warn!(
                 "Failed to wait on previous instance of '{service_name}' after termination: {err}"
             );
@@ -4868,30 +5614,36 @@ impl Daemon {
         let project_id = config.project.id.clone();
         let log_settings = service.effective_logs(&config.logs);
 
-        let handle = thread::spawn(move || {
-            debug!("Starting service thread for '{service_name}'");
+        let handle = thread::Builder::new()
+            .name(SERVICE_LAUNCH_THREAD.into())
+            .spawn(move || {
+                debug!("Starting service thread for '{service_name}'");
 
-            match Daemon::launch_attached_service(
-                &project_id,
-                &service_name,
-                &service_config,
-                working_dir.clone(),
-                processes.clone(),
-                detach_children,
-                pipe_stderr,
-                log_settings,
-            ) {
-                Ok((pid, pgid)) => {
-                    let mut pid_guard = pid_file.lock()?;
-                    pid_guard.insert_with_group(&service_name, pid, pgid)?;
-                    Ok(pid)
+                match Daemon::launch_attached_service(
+                    &project_id,
+                    &service_name,
+                    &service_config,
+                    working_dir.clone(),
+                    processes.clone(),
+                    detach_children,
+                    pipe_stderr,
+                    log_settings,
+                ) {
+                    Ok((pid, pgid)) => {
+                        let mut pid_guard = pid_file.lock()?;
+                        pid_guard.insert_with_group(&service_name, pid, pgid)?;
+                        Ok(pid)
+                    }
+                    Err(e) => {
+                        error!("Failed to start service '{service_name}': {e}");
+                        Err(e)
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to start service '{service_name}': {e}");
-                    Err(e)
-                }
-            }
-        });
+            })
+            .map_err(|source| ProcessManagerError::ServiceStartError {
+                service: name.to_string(),
+                source,
+            })?;
 
         let launch_result = handle.join().map_err(|e| {
             error!("Failed to join service thread for '{name}': {e:?}");
@@ -4923,6 +5675,7 @@ impl Daemon {
                         HookOutcome::Error,
                         name,
                         &self.project_root,
+                        Some((&self.boot_epoch, &self.boot_cancelled)),
                     );
                 }
                 return Err(err);
@@ -4954,6 +5707,7 @@ impl Daemon {
                         HookOutcome::Success,
                         name,
                         &self.project_root,
+                        Some((&self.boot_epoch, &self.boot_cancelled)),
                     );
                 }
                 Ok(state)
@@ -4971,6 +5725,7 @@ impl Daemon {
                         HookOutcome::Error,
                         name,
                         &self.project_root,
+                        Some((&self.boot_epoch, &self.boot_cancelled)),
                     );
                 }
                 Err(err)
@@ -5018,6 +5773,7 @@ impl Daemon {
                         HookOutcome::Error,
                         name,
                         &self.project_root,
+                        Some((&self.boot_epoch, &self.boot_cancelled)),
                     );
                 }
                 return Err(err);
@@ -5050,6 +5806,7 @@ impl Daemon {
                         HookOutcome::Success,
                         name,
                         &self.project_root,
+                        Some((&self.boot_epoch, &self.boot_cancelled)),
                     );
                 }
                 Ok(state)
@@ -5068,6 +5825,7 @@ impl Daemon {
                         HookOutcome::Error,
                         name,
                         &self.project_root,
+                        Some((&self.boot_epoch, &self.boot_cancelled)),
                     );
                 }
                 Err(err)
@@ -5087,19 +5845,23 @@ impl Daemon {
         state_file: &Arc<Mutex<ServiceStateFile>>,
         config: &Arc<Config>,
     ) -> Result<(), ProcessManagerError> {
-        let (pid, service_group_id) = {
+        let (pid, service_group_id, has_child, started) = {
             let mut processes_guard = processes.lock()?;
-            let persisted_group = pid_file
+            let (persisted_group, persisted_start) = pid_file
                 .lock()
-                .ok()
-                .and_then(|guard| guard.pgid_for(service_name))
-                .map(|id| id as libc::pid_t);
+                .map(|guard| {
+                    (
+                        guard.pgid_for(service_name).map(|id| id as libc::pid_t),
+                        guard.start_for(service_name),
+                    )
+                })
+                .unwrap_or((None, None));
 
             if let Some(child) = processes_guard.get_mut(service_name) {
                 let process_id = child.id();
                 let group_id =
-                    persisted_group.or_else(|| Self::process_group_for_pid(process_id));
-                (Some(process_id), group_id)
+                    Self::process_group_for_pid(process_id).or(persisted_group);
+                (Some(process_id), group_id, true, persisted_start)
             } else {
                 let guard = pid_file.lock()?;
                 let stored_pid = guard.get(service_name);
@@ -5109,9 +5871,46 @@ impl Daemon {
                     group_id = stored_pid.and_then(Self::process_group_for_pid);
                 }
 
-                (stored_pid, group_id)
+                (stored_pid, group_id, false, persisted_start)
             }
         };
+
+        if !has_child
+            && let Some(process_id) = pid
+            && Self::pid_is_alive(process_id)
+            && (started.is_none() || process_start_time(process_id) != started)
+        {
+            return Err(ProcessManagerError::ServiceStopError {
+                service: service_name.to_string(),
+                source: std::io::Error::other(format!(
+                    "refusing to stop pid {process_id}: its recorded process identity does not match"
+                )),
+            });
+        }
+        if !has_child
+            && pid.is_none_or(|process_id| !Self::pid_is_alive(process_id))
+            && let Some(group_id) = service_group_id
+            && Self::process_group_is_alive(group_id)
+        {
+            let Some(expected) = started else {
+                return Err(ProcessManagerError::ServiceStopError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::other(
+                        "refusing to stop a live process group whose recorded leader is gone",
+                    ),
+                });
+            };
+            if process_start_time(group_id as u32)
+                .is_some_and(|actual| actual != expected)
+            {
+                return Err(ProcessManagerError::ServiceStopError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::other(
+                        "refusing to stop a reused process group",
+                    ),
+                });
+            }
+        }
 
         if let Some(process_id) = pid {
             match Self::terminate_process_tree(service_name, process_id, service_group_id)
@@ -5133,25 +5932,16 @@ impl Daemon {
                 },
             }
         } else if let Some(group_id) = service_group_id {
-            let result = unsafe { libc::killpg(group_id, libc::SIGTERM) };
-            if result < 0 {
-                let err = std::io::Error::last_os_error();
-                if !matches!(err.raw_os_error(), Some(libc::ESRCH)) {
-                    warn!(
-                        "Failed to signal process group {group_id} for '{service_name}': {err}"
-                    );
-                }
+            let supervisor_group = unsafe { libc::getpgid(0) };
+            if group_id <= 0 || group_id == supervisor_group {
+                return Err(ProcessManagerError::ServiceStopError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::other(
+                        "refusing to stop an invalid service process group",
+                    ),
+                });
             }
-            thread::sleep(PROCESS_CHECK_INTERVAL);
-            let result = unsafe { libc::killpg(group_id, libc::SIGKILL) };
-            if result < 0 {
-                let err = std::io::Error::last_os_error();
-                if !matches!(err.raw_os_error(), Some(libc::ESRCH)) {
-                    warn!(
-                        "Failed to force-kill process group {group_id} for '{service_name}': {err}"
-                    );
-                }
-            }
+            Self::terminate_process_tree(service_name, group_id as u32, Some(group_id))?;
         }
 
         let child_handle = {
@@ -5161,6 +5951,7 @@ impl Daemon {
 
         if let Some(mut child) = child_handle
             && let Err(err) = child.wait()
+            && err.raw_os_error() != Some(libc::ECHILD)
         {
             warn!("Failed to wait on '{service_name}' after termination: {err}");
         }
@@ -5279,6 +6070,7 @@ impl Daemon {
                 HookOutcome::Success,
                 service_name,
                 &self.project_root,
+                None,
             );
         }
 
@@ -5436,41 +6228,143 @@ impl Daemon {
     ///
     /// Iterates over all active processes and terminates them.
     pub fn stop_services(&self) -> Result<(), ProcessManagerError> {
-        let services: Vec<String> =
-            self.pid_file.lock()?.services.keys().cloned().collect();
-        let mut cleaned_services = HashSet::new();
+        let mut services: HashSet<String> = {
+            let guard = self.pid_file.lock()?;
+            guard
+                .services
+                .keys()
+                .chain(guard.service_groups.keys())
+                .cloned()
+                .collect()
+        };
+        services.extend(self.processes.lock()?.keys().cloned());
+        let mut services: Vec<String> = services.into_iter().collect();
+        services.sort_unstable();
+        let mut first_error = None;
 
         for service in services {
-            if let Err(e) = self.stop_service(&service) {
-                error!("Failed to stop service '{service}': {e}");
+            if let Err(err) = self.stop_service(&service) {
+                error!("Failed to stop service '{service}': {err}");
+                first_error.get_or_insert(err);
             }
-            cleaned_services.insert(service);
         }
 
-        let config = self.cfg();
-        for (service_name, service) in &config.services {
-            if cleaned_services.contains(service_name) {
+        if let Some(err) = first_error {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Stops every process whose identity is recorded in one project store.
+    pub fn stop_tracked(store: StateStore) -> Result<(), ProcessManagerError> {
+        let mut pid_file = PidFile::load(store.clone())?;
+        let mut state_file = ServiceStateFile::load(store)?;
+        let mut services: HashSet<String> = pid_file
+            .services
+            .keys()
+            .chain(pid_file.service_groups.keys())
+            .cloned()
+            .collect();
+        let mut services: Vec<String> = services.drain().collect();
+        services.sort_unstable();
+        let mut first_error = None;
+
+        for service in services {
+            let pid = pid_file.get(&service);
+            let pgid = pid_file
+                .pgid_for(&service)
+                .map(|value| value as libc::pid_t);
+            let started = pid_file.start_for(&service);
+            let pid_live = pid.is_some_and(Self::pid_is_alive);
+
+            if pid_live
+                && (started.is_none() || pid.and_then(process_start_time) != started)
+            {
+                first_error.get_or_insert_with(|| {
+                    ProcessManagerError::ServiceStopError {
+                        service: service.clone(),
+                        source: std::io::Error::other(
+                            "recorded process identity does not match",
+                        ),
+                    }
+                });
                 continue;
             }
-            let owned_by_others = self.pids_owned_by_other_services(service_name);
-            if let Err(err) = Self::cleanup_config_owned_service_processes(
-                service_name,
-                service,
-                &self.project_root,
-                &owned_by_others,
-            ) {
-                error!(
-                    "Failed to clean up stale config-owned process for '{service_name}': {err}"
-                );
+            if !pid_live
+                && let Some(group_id) = pgid
+                && Self::process_group_is_alive(group_id)
+            {
+                let valid = started.is_some_and(|expected| {
+                    process_start_time(group_id as u32)
+                        .is_none_or(|actual| actual == expected)
+                });
+                let supervisor_group = unsafe { libc::getpgid(0) };
+                if !valid || group_id <= 0 || group_id == supervisor_group {
+                    first_error.get_or_insert_with(|| {
+                        ProcessManagerError::ServiceStopError {
+                            service: service.clone(),
+                            source: std::io::Error::other(
+                                "recorded process group identity does not match",
+                            ),
+                        }
+                    });
+                    continue;
+                }
+            }
+
+            if pid_live || pgid.is_some_and(Self::process_group_is_alive) {
+                let root = pid.or_else(|| {
+                    pgid.filter(|value| *value > 0).map(|value| value as u32)
+                });
+                if let Some(root) = root
+                    && let Err(err) = Self::terminate_process_tree(&service, root, pgid)
+                {
+                    first_error.get_or_insert(err);
+                    continue;
+                }
+            }
+
+            if let Err(err) = pid_file.remove(&service)
+                && !matches!(err, PidFileError::ServiceNotFound)
+            {
+                first_error.get_or_insert(err.into());
+                continue;
+            }
+
+            let keys: Vec<String> = state_file
+                .services
+                .iter()
+                .filter(|(key, entry)| {
+                    entry.status == ServiceLifecycleStatus::Running
+                        && key.rsplit(':').next() == Some(service.as_str())
+                })
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in keys {
+                if let Err(err) = state_file.set(
+                    &key,
+                    ServiceLifecycleStatus::Stopped,
+                    None,
+                    None,
+                    None,
+                ) {
+                    first_error.get_or_insert(err.into());
+                }
             }
         }
 
-        Ok(())
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Ensures that the monitor thread is running, spawning it if necessary.
     fn spawn_monitor_thread(&self) -> Result<(), ProcessManagerError> {
-        let mut handle_slot = self.monitor_handle.lock().unwrap();
+        let mut handle_slot = self
+            .monitor_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let should_spawn = match handle_slot.as_ref() {
             Some(handle) => handle.is_finished(),
             None => true,
@@ -5482,9 +6376,16 @@ impl Daemon {
 
             let ctx = self.context();
 
-            let handle = thread::spawn(move || {
-                Self::monitor_loop(ctx);
-            });
+            let handle = thread::Builder::new()
+                .name("sysg-monitor".to_string())
+                .spawn(move || Self::monitor_loop(ctx))
+                .map_err(|source| {
+                    self.running.store(false, Ordering::SeqCst);
+                    ProcessManagerError::ServiceStartError {
+                        service: "monitor".to_string(),
+                        source,
+                    }
+                })?;
 
             *handle_slot = Some(handle);
         }
@@ -5494,7 +6395,12 @@ impl Daemon {
 
     /// Blocks on the monitoring thread if it is running.
     fn wait_for_monitor(&self) {
-        if let Some(handle) = self.monitor_handle.lock().unwrap().take() {
+        if let Some(handle) = self
+            .monitor_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             let _ = handle.join();
         }
     }
@@ -5514,7 +6420,14 @@ impl Daemon {
             let mut active_services = 0;
 
             {
-                let mut locked_processes = ctx.lock_processes().unwrap();
+                let mut locked_processes = match ctx.lock_processes() {
+                    Ok(processes) => processes,
+                    Err(err) => {
+                        error!("Failed to inspect managed processes: {err}");
+                        thread::sleep(MONITOR_RETRY_DELAY);
+                        continue;
+                    }
+                };
                 let mut vanished: Vec<String> = Vec::new();
                 for (name, child) in locked_processes.iter_mut() {
                     match child.try_wait() {
@@ -5524,7 +6437,7 @@ impl Daemon {
                             } else {
                                 warn!("Service '{name}' was terminated with {status:?}.");
                             }
-                            exited_services.push((name.clone(), status));
+                            exited_services.push((name.clone(), status, child.id()));
                         }
                         Ok(None) => {
                             trace!("Service '{name}' is still running.");
@@ -5549,24 +6462,40 @@ impl Daemon {
             }
 
             if !exited_services.is_empty() {
-                let mut pid_file_guard = ctx.lock_pid_file().unwrap();
+                for (name, exit_status, exited_pid) in exited_services {
+                    let (owns_record, recorded_pgid) = match ctx.lock_pid_file() {
+                        Ok(guard) => {
+                            (guard.get(&name) == Some(exited_pid), guard.pgid_for(&name))
+                        }
+                        Err(err) => {
+                            error!("Failed to inspect PID entry for '{name}': {err}");
+                            continue;
+                        }
+                    };
+                    if !owns_record {
+                        if let Ok(mut processes) = ctx.lock_processes()
+                            && processes
+                                .get(&name)
+                                .is_some_and(|child| child.id() == exited_pid)
+                        {
+                            processes.remove(&name);
+                        }
+                        continue;
+                    }
 
-                for (name, exit_status) in exited_services {
                     #[cfg(target_os = "linux")]
                     ctx.cancel_service_thread(&name);
 
-                    let recorded_pgid = pid_file_guard.pgid_for(&name);
+                    Self::reap_orphaned_group_before_restart(&name, recorded_pgid);
 
-                    let manually_stopped = {
-                        let mut manual_guard = ctx.lock_manual_stop_flags().unwrap();
-                        if manual_guard.remove(&name) {
-                            true
-                        } else {
-                            pid_file_guard.get(&name).is_none()
-                        }
-                    };
-                    let restart_suppressed_for_service =
-                        ctx.lock_restart_suppressed().unwrap().contains(&name);
+                    let manually_stopped = ctx
+                        .lock_manual_stop_flags()
+                        .map(|mut guard| guard.remove(&name))
+                        .unwrap_or(false);
+                    let restart_suppressed_for_service = ctx
+                        .lock_restart_suppressed()
+                        .map(|guard| guard.contains(&name))
+                        .unwrap_or(true);
                     let exit_success = exit_status.success();
                     let exit_code = exit_status.code();
                     #[cfg(unix)]
@@ -5594,13 +6523,15 @@ impl Daemon {
                                 hook_outcome,
                                 &name,
                                 &ctx.project_root,
+                                None,
                             );
                         }
                     }
 
                     if manually_stopped {
                         info!("Service '{name}' was manually stopped. Skipping restart.");
-                        if let Err(err) = pid_file_guard.remove(&name)
+                        if let Ok(mut guard) = ctx.lock_pid_file()
+                            && let Err(err) = guard.remove(&name)
                             && !matches!(err, PidFileError::ServiceNotFound)
                         {
                             warn!(
@@ -5649,11 +6580,7 @@ impl Daemon {
                             .config
                             .services
                             .get(&name)
-                            .map(|s| s.restart_policy.as_deref())
-                            .map(|policy| {
-                                policy == Some("always") || policy == Some("on-failure")
-                            })
-                            .unwrap_or(false);
+                            .is_some_and(|service| service.restarts_after_failure());
 
                         if should_restart {
                             let already = ctx
@@ -5687,9 +6614,6 @@ impl Daemon {
                         debug!(
                             "Service '{name}' exited cleanly. Removing from PID file."
                         );
-                        if let Err(e) = pid_file_guard.clear_pid(&name) {
-                            error!("Failed to remove '{name}' from PID file: {e}");
-                        }
                         if let Err(err) = Self::persist_service_state(
                             &ctx.config,
                             &ctx.state_file,
@@ -5705,7 +6629,20 @@ impl Daemon {
                         }
                     }
 
-                    ctx.processes.lock().unwrap().remove(&name);
+                    if let Ok(mut guard) = ctx.lock_pid_file()
+                        && let Err(err) = guard.clear_pid(&name)
+                        && !matches!(err, PidFileError::ServiceNotFound)
+                    {
+                        warn!("Failed to clear PID entry for '{name}': {err}");
+                    }
+
+                    if let Ok(mut processes) = ctx.lock_processes()
+                        && processes
+                            .get(&name)
+                            .is_some_and(|child| child.id() == exited_pid)
+                    {
+                        processes.remove(&name);
+                    }
                 }
             }
 
@@ -5785,12 +6722,22 @@ impl Daemon {
             if tracked.contains(name) {
                 continue;
             }
+            let recovered = ctx.lock_pid_file().ok().is_some_and(|pids| {
+                pids.get(name).is_some_and(|pid| {
+                    pids.start_for(name).is_some_and(|started| {
+                        Self::pid_is_alive(pid)
+                            && process_start_time(pid) == Some(started)
+                    })
+                })
+            });
+            if recovered {
+                continue;
+            }
             if !Self::should_verify_service(service) {
                 continue;
             }
 
-            let policy = service.restart_policy.as_deref();
-            if policy != Some("always") && policy != Some("on-failure") {
+            if !service.restarts_after_failure() {
                 continue;
             }
 
@@ -5834,46 +6781,58 @@ impl Daemon {
         to_restart
     }
 
-    /// Drops a pid entry whose process is gone, so a unit that will not be
-    /// restarted cannot sit at `lost` forever.
-    ///
-    /// Only clears when the recorded pid is genuinely dead — a live process must
-    /// keep its entry, or status would lose track of something still running.
+    /// Reconciles stale process ownership without signaling a reused PID.
     fn clear_stale_pid_entry(ctx: &DaemonContext, name: &str) {
-        let Ok(guard) = ctx.lock_pid_file() else {
-            return;
+        let (pid, pgid, started) = match ctx.lock_pid_file() {
+            Ok(guard) => (guard.get(name), guard.pgid_for(name), guard.start_for(name)),
+            Err(_) => return,
         };
-        let Some(pid) = guard.get(name).or_else(|| {
-            // A service can be left with a process-GROUP entry and no pid entry
-            // when a concurrent restart records the group and the start then
-            // fails. That orphan keeps the unit looking alive to anything that
-            // consults the group, so it must be swept on the same terms.
-            guard
-                .pgid_for(name)
-                .map(|pgid| pgid as u32)
-                .filter(|_| guard.get(name).is_none())
-        }) else {
-            return;
-        };
-        if Self::pid_is_alive(pid) {
+        if pid.is_none() && pgid.is_none() {
             return;
         }
-        drop(guard);
+
+        let reused;
+        if let Some(pid) = pid
+            && Self::pid_is_alive(pid)
+        {
+            match started {
+                Some(expected) if process_start_time(pid) == Some(expected) => return,
+                None => {
+                    warn!(
+                        "Refusing to reconcile live PID {pid} for '{name}' without a process identity"
+                    );
+                    return;
+                }
+                Some(_) => reused = true,
+            }
+        } else {
+            reused = false;
+        }
+
+        if !reused
+            && let Some(pgid) = pgid.map(|value| value as libc::pid_t)
+            && Self::process_group_is_alive(pgid)
+        {
+            let Some(expected) = started else {
+                warn!(
+                    "Refusing to reconcile live process group {pgid} for '{name}' without a process identity"
+                );
+                return;
+            };
+            if process_start_time(pgid as u32).is_none_or(|actual| actual == expected) {
+                Self::reap_orphaned_group_before_restart(name, Some(pgid));
+                if Self::process_group_is_alive(pgid) {
+                    warn!("Process group {pgid} for '{name}' survived reconciliation");
+                    return;
+                }
+            }
+        }
 
         if let Ok(mut guard) = ctx.lock_pid_file() {
             match guard.remove(name) {
-                Ok(_) | Err(PidFileError::ServiceNotFound) => {
-                    if let Err(err) = guard.save() {
-                        warn!("Failed to save pid file after clearing '{name}': {err}");
-                    } else {
-                        debug!(
-                            "Cleared stale pid entry for '{name}' (pid {pid} is gone)"
-                        );
-                    }
-                }
-                Err(err) => {
-                    warn!("Failed to clear stale pid entry for '{name}': {err}");
-                }
+                Ok(_) => debug!("Cleared stale process ownership for '{name}'"),
+                Err(PidFileError::ServiceNotFound) => {}
+                Err(err) => warn!("Failed to clear stale PID entry for '{name}': {err}"),
             }
         }
     }
@@ -5885,7 +6844,10 @@ impl Daemon {
         let hooks = service.hooks.clone();
         let max_restarts = service.max_restarts;
         {
-            let mut counts = ctx.restart_counts.lock().unwrap();
+            let mut counts = ctx
+                .restart_counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let count = counts.entry(name.clone()).or_insert(0);
             *count += 1;
 
@@ -5895,9 +6857,10 @@ impl Daemon {
                 error!(
                     "Service '{name}' has reached maximum restart attempts ({max}). Giving up."
                 );
-                if let Ok(mut guard) = ctx.lock_restart_in_flight() {
-                    guard.remove(&name);
-                }
+                ctx.restart_in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&name);
                 return;
             }
         }
@@ -5910,36 +6873,42 @@ impl Daemon {
             .parse::<u64>()
             .unwrap_or(5);
 
-        let _ = thread::spawn(move || {
+        let in_flight = Arc::clone(&ctx.restart_in_flight);
+        let in_flight_name = name.clone();
+        if let Err(err) = thread::Builder::new()
+            .name(format!("sysg-restart-{name}"))
+            .spawn(move || {
             let _in_flight = InFlightGuard::new(&ctx.restart_in_flight, name.clone());
             warn!("Restarting '{name}' after {backoff} seconds...");
             thread::sleep(Duration::from_secs(backoff));
 
+            if !ctx.running.load(Ordering::SeqCst) {
+                return;
+            }
+
             if ctx
-                .restart_suppressed
-                .lock()
+                .lock_restart_suppressed()
                 .map(|guard| guard.contains(&name))
-                .unwrap_or(false)
+                .unwrap_or(true)
             {
                 info!(
                     "Skipping automatic restart of '{name}' because it is currently suppressed."
                 );
-                if let Ok(mut counts) = ctx.restart_counts.lock() {
+                if let Ok(mut counts) = ctx.lock_restart_counts() {
                     counts.remove(&name);
                 }
                 return;
             }
 
             if ctx
-                .manual_stop_flags
-                .lock()
+                .lock_manual_stop_flags()
                 .map(|mut guard| guard.remove(&name))
-                .unwrap_or(false)
+                .unwrap_or(true)
             {
                 info!(
                     "Skipping automatic restart of '{name}' due to concurrent manual stop."
                 );
-                if let Ok(mut counts) = ctx.restart_counts.lock() {
+                if let Ok(mut counts) = ctx.lock_restart_counts() {
                     counts.remove(&name);
                 }
                 return;
@@ -5954,12 +6923,40 @@ impl Daemon {
 
             match restart_result {
                 Ok(pid) => {
-                    match Self::wait_for_ready(
+                    if !ctx.running.load(Ordering::SeqCst) {
+                        #[cfg(target_os = "linux")]
+                        ctx.cancel_service_thread(&name);
+                        let _ = Self::stop_service_with_handles(
+                            &name,
+                            &ctx.processes,
+                            &ctx.pid_file,
+                            &ctx.state_file,
+                            &ctx.config,
+                        );
+                        return;
+                    }
+                    let ready = Self::wait_for_ready(
                         &name,
                         &ctx.config.project.id,
                         &ctx.processes,
                         &ctx.pid_file,
-                    ) {
+                        Some((&ctx.state_file, &ctx.config)),
+                        Some(&service_clone.command),
+                        None,
+                    );
+                    if !ctx.running.load(Ordering::SeqCst) {
+                        #[cfg(target_os = "linux")]
+                        ctx.cancel_service_thread(&name);
+                        let _ = Self::stop_service_with_handles(
+                            &name,
+                            &ctx.processes,
+                            &ctx.pid_file,
+                            &ctx.state_file,
+                            &ctx.config,
+                        );
+                        return;
+                    }
+                    match ready {
                         Ok(ServiceReadyState::Running) => {
                             if let Ok(mut counts) = ctx.lock_restart_counts() {
                                 counts.insert(name.clone(), 0);
@@ -5990,6 +6987,7 @@ impl Daemon {
                                     HookOutcome::Success,
                                     &name,
                                     &ctx.project_root,
+                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                                 );
                             }
 
@@ -6004,6 +7002,7 @@ impl Daemon {
                                     HookOutcome::Success,
                                     &name,
                                     &ctx.project_root,
+                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                                 );
                             }
 
@@ -6047,6 +7046,7 @@ impl Daemon {
                                     HookOutcome::Success,
                                     &name,
                                     &ctx.project_root,
+                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                                 );
                             }
 
@@ -6061,6 +7061,7 @@ impl Daemon {
                                     HookOutcome::Success,
                                     &name,
                                     &ctx.project_root,
+                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                                 );
                             }
                         }
@@ -6083,6 +7084,7 @@ impl Daemon {
                                     HookOutcome::Error,
                                     &name,
                                     &ctx.project_root,
+                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                                 );
                             }
 
@@ -6097,6 +7099,7 @@ impl Daemon {
                                     HookOutcome::Error,
                                     &name,
                                     &ctx.project_root,
+                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                                 );
                             }
                         }
@@ -6116,6 +7119,7 @@ impl Daemon {
                             HookOutcome::Error,
                             &name,
                             &ctx.project_root,
+                            Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                         );
                     }
 
@@ -6130,11 +7134,19 @@ impl Daemon {
                             HookOutcome::Error,
                             &name,
                             &ctx.project_root,
+                            Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
                         );
                     }
                 }
             }
-        });
+            })
+        {
+            in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&in_flight_name);
+            error!("Failed to spawn restart worker for '{in_flight_name}': {err}");
+        }
     }
 }
 
@@ -6156,9 +7168,10 @@ impl InFlightGuard {
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.set.lock() {
-            guard.remove(&self.name);
-        }
+        self.set
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.name);
     }
 }
 
@@ -6178,7 +7191,7 @@ impl Drop for Daemon {
 
 #[cfg(test)]
 mod port_in_use_tests {
-    use super::{port_from_output, port_in_use_output};
+    use super::{output_indicates_port_conflict, port_from_output};
 
     fn lines(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|line| line.to_string()).collect()
@@ -6186,13 +7199,15 @@ mod port_in_use_tests {
 
     #[test]
     fn detects_the_macos_and_linux_spellings() {
-        assert!(port_in_use_output(&lines(&[
+        assert!(output_indicates_port_conflict(&lines(&[
             "Error: Address already in use (os error 48)"
         ])));
-        assert!(port_in_use_output(&lines(&[
+        assert!(output_indicates_port_conflict(&lines(&[
             "thread panicked: Address already in use (os error 98)"
         ])));
-        assert!(!port_in_use_output(&lines(&["Error: permission denied"])));
+        assert!(!output_indicates_port_conflict(&lines(&[
+            "Error: permission denied"
+        ])));
     }
 
     #[test]
@@ -6204,6 +7219,13 @@ mod port_in_use_tests {
         assert_eq!(
             port_from_output(&lines(&["could not listen on port 9101"])),
             Some(9101)
+        );
+        assert_eq!(
+            port_from_output(&lines(&[
+                "2026-07-18T17:35:04.790530Z INFO fetching provider=espn",
+                "Error: Address already in use (os error 48)",
+            ])),
+            None
         );
         assert_eq!(port_from_output(&lines(&["Address already in use"])), None);
     }

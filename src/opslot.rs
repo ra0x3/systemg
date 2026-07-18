@@ -1,7 +1,10 @@
 //! Tracks the supervisor's current in-flight operation so reads can report what
 //! a busy mutation is waiting on instead of leaving the caller in the dark.
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -32,6 +35,7 @@ impl OpReport {
 }
 
 struct Op {
+    id: u64,
     label: String,
     detail: Option<String>,
     started_at: SystemTime,
@@ -47,6 +51,19 @@ struct Op {
 #[derive(Clone, Default)]
 pub struct OpSlot {
     inner: Arc<Mutex<Option<Op>>>,
+    next: Arc<AtomicU64>,
+}
+
+/// Clears an operation slot when its owning scope ends.
+pub struct OpGuard {
+    slot: OpSlot,
+    id: u64,
+}
+
+impl Drop for OpGuard {
+    fn drop(&mut self) {
+        self.slot.clear_if(self.id);
+    }
 }
 
 impl OpSlot {
@@ -56,14 +73,28 @@ impl OpSlot {
     }
 
     /// Records the start of an operation, clearing any previous detail.
-    pub fn begin(&self, label: impl Into<String>) {
-        if let Ok(mut guard) = self.inner.lock() {
+    pub fn begin(&self, label: impl Into<String>) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Ok(mut guard) = self.inner.lock()
+            && guard.as_ref().is_none_or(|op| op.id < id)
+        {
             *guard = Some(Op {
+                id,
                 label: label.into(),
                 detail: None,
                 started_at: SystemTime::now(),
                 owner: None,
             });
+        }
+        id
+    }
+
+    /// Records an operation and clears it when the returned guard is dropped.
+    pub fn guard(&self, label: impl Into<String>) -> OpGuard {
+        let id = self.begin(label);
+        OpGuard {
+            slot: self.clone(),
+            id,
         }
     }
 
@@ -93,6 +124,15 @@ impl OpSlot {
     /// Clears the slot once the operation finishes.
     pub fn clear(&self) {
         if let Ok(mut guard) = self.inner.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Clears the slot only when `id` still owns the current operation.
+    pub fn clear_if(&self, id: u64) {
+        if let Ok(mut guard) = self.inner.lock()
+            && guard.as_ref().is_some_and(|op| op.id == id)
+        {
             *guard = None;
         }
     }

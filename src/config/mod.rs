@@ -17,6 +17,13 @@ use sha2::{Digest, Sha256};
 use strum_macros::AsRefStr;
 use tracing::warn;
 
+/// Restart policy that relaunches a service after every exit.
+const RESTART_ALWAYS: &str = "always";
+/// Restart policy that relaunches a service only after an unsuccessful exit.
+const RESTART_ON_FAILURE: &str = "on-failure";
+/// Restart policy that never relaunches a service.
+const RESTART_NEVER: &str = "never";
+
 use crate::{
     error::ProcessManagerError,
     metrics::{MetricsSettings, SpilloverSettings},
@@ -942,6 +949,24 @@ pub struct IsolationConfig {
 }
 
 impl ServiceConfig {
+    /// Returns whether this service should restart after an unsuccessful exit.
+    pub(crate) fn restarts_after_failure(&self) -> bool {
+        matches!(
+            self.restart_policy.as_deref(),
+            Some(RESTART_ALWAYS | RESTART_ON_FAILURE)
+        )
+    }
+
+    /// Returns whether this service should restart after a successful exit.
+    pub(crate) fn restarts_after_success(&self) -> bool {
+        self.restart_policy.as_deref() == Some(RESTART_ALWAYS)
+    }
+
+    /// Returns whether this service explicitly disables automatic restarts.
+    pub(crate) fn restart_is_disabled(&self) -> bool {
+        self.restart_policy.as_deref() == Some(RESTART_NEVER)
+    }
+
     /// Resolves effective logging settings for this service.
     pub fn effective_logs(&self, global: &LogsConfig) -> EffectiveLogsConfig {
         LogsConfig::merge(Some(global), self.logs.as_ref())
@@ -1342,12 +1367,12 @@ impl Config {
                     };
 
                     if dep.condition() == DependsOnCondition::Completed
-                        && let Some(policy @ "always") = dep_cfg.restart_policy.as_deref()
+                        && dep_cfg.restarts_after_success()
                     {
                         return Err(ProcessManagerError::DependencyNeverCompletes {
                             service: service.clone(),
                             dependency: dep_name.to_string(),
-                            policy: policy.to_string(),
+                            policy: dep_cfg.restart_policy.clone().unwrap_or_default(),
                         });
                     }
 

@@ -13,7 +13,7 @@ $ sysg restart                   # Restart services
 $ sysg status                    # Check supervisor health
 $ sysg logs                      # View output
 $ sysg inspect -s api             # View metrics
-$ sysg validate sysg.yaml     # Check a config before running it
+$ sysg validate -c sysg.yaml             # Check a config before running it
 $ sysg start --parent-pid 123 --name w1 -- cmd   # Create child
 $ sysg purge                     # Clear all state
 ```

@@ -4,13 +4,14 @@ use std::{
     fs,
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, Mutex},
-    time::SystemTime,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::{Local, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
+use fs2::FileExt;
 use serde::{
     Deserialize, Serialize,
     de::{EnumAccess, IgnoredAny, MapAccess, VariantAccess, Visitor},
@@ -25,6 +26,10 @@ use crate::{
 
 /// Maximum number of execution history entries to keep per cron job.
 const MAX_EXECUTION_HISTORY: usize = 10;
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Returns whether a process appears to still exist.
 #[cfg(unix)]
@@ -49,9 +54,25 @@ fn cron_record_is_incomplete(record: &CronExecutionRecord) -> bool {
     record.completed_at.is_none() && record.status.is_none() && record.exit_code.is_none()
 }
 
+fn same_run(left: SystemTime, right: SystemTime) -> bool {
+    left.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|value| value.as_secs())
+        == right
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|value| value.as_secs())
+}
+
 /// Returns whether a previously persisted in-progress execution is still live.
 fn incomplete_execution_is_live(record: &CronExecutionRecord) -> bool {
-    cron_record_is_incomplete(record) && record.pid.is_some_and(process_is_running)
+    cron_record_is_incomplete(record)
+        && record.pid.is_some_and(|pid| {
+            process_is_running(pid)
+                && record.process_start.is_none_or(|started| {
+                    crate::daemon::process_start_time(pid) == Some(started)
+                })
+        })
 }
 
 /// Provides systemtime serde support.
@@ -121,7 +142,7 @@ mod systemtime_serde_opt {
 }
 
 /// Status of a cron job execution.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub enum CronExecutionStatus {
     /// Cron job completed successfully.
     Success,
@@ -129,6 +150,19 @@ pub enum CronExecutionStatus {
     Failed(String),
     /// Cron job was scheduled to run but previous execution was still running.
     OverlapError,
+}
+
+impl Serialize for CronExecutionStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Success => serializer.serialize_str("Success"),
+            Self::Failed(_) => serializer.serialize_str("Failed"),
+            Self::OverlapError => serializer.serialize_str("OverlapError"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -177,6 +211,9 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
             where
                 E: serde::de::Error,
             {
+                if let Some(reason) = value.strip_prefix("Failed:") {
+                    return Ok(CronExecutionStatus::Failed(reason.trim().to_string()));
+                }
                 match value {
                     "Success" => Ok(CronExecutionStatus::Success),
                     "OverlapError" => Ok(CronExecutionStatus::OverlapError),
@@ -202,6 +239,10 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 A: EnumAccess<'de>,
             {
                 let (variant, access) = data.variant::<String>()?;
+                if let Some(reason) = variant.strip_prefix("Failed:") {
+                    access.unit_variant()?;
+                    return Ok(CronExecutionStatus::Failed(reason.trim().to_string()));
+                }
                 match variant.as_str() {
                     "Success" => {
                         access.unit_variant()?;
@@ -305,6 +346,9 @@ pub struct CronExecutionRecord {
     /// PID of the spawned cron process when one was observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Kernel process start identity used to reject PID reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start: Option<u64>,
     /// User that executed the cron process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
@@ -348,6 +392,8 @@ pub struct CronDueJob {
     pub service_name: String,
     /// Configuration hash of the service, used to resolve project ownership.
     pub service_hash: String,
+    /// Start identity for the execution record created by the scheduler.
+    pub started_at: SystemTime,
 }
 
 impl CronJobState {
@@ -383,9 +429,11 @@ impl CronJobState {
                 state.execution_history.pop_front();
             }
             state.currently_running = state
-                .execution_history
-                .back()
+                .active_record()
                 .is_some_and(incomplete_execution_is_live);
+            if !state.currently_running {
+                state.close_stale_running_execution(SystemTime::now());
+            }
         }
 
         state
@@ -394,9 +442,28 @@ impl CronJobState {
     /// Adds an execution record to the history, evicting the oldest if at capacity.
     pub fn add_execution_record(&mut self, record: CronExecutionRecord) {
         if self.execution_history.len() >= MAX_EXECUTION_HISTORY {
-            self.execution_history.pop_front();
+            let remove = self
+                .execution_history
+                .iter()
+                .position(|record| !cron_record_is_incomplete(record))
+                .unwrap_or(0);
+            self.execution_history.remove(remove);
         }
         self.execution_history.push_back(record);
+    }
+
+    fn active_record(&self) -> Option<&CronExecutionRecord> {
+        self.execution_history
+            .iter()
+            .rev()
+            .find(|record| cron_record_is_incomplete(record))
+    }
+
+    fn active_record_mut(&mut self) -> Option<&mut CronExecutionRecord> {
+        self.execution_history
+            .iter_mut()
+            .rev()
+            .find(|record| cron_record_is_incomplete(record))
     }
 
     /// Recalculates the next execution time based on the cron schedule and timezone.
@@ -406,9 +473,7 @@ impl CronJobState {
 
     /// Marks a stale unfinished execution as failed so the next due run can start.
     fn close_stale_running_execution(&mut self, now: SystemTime) {
-        if let Some(record) = self.execution_history.back_mut()
-            && cron_record_is_incomplete(record)
-        {
+        if let Some(record) = self.active_record_mut() {
             record.completed_at = Some(now);
             record.status = Some(CronExecutionStatus::Failed(
                 "Previous cron execution no longer has a live process".to_string(),
@@ -485,18 +550,15 @@ impl CronManager {
     /// Registers a project's state store so its cron jobs persist to their own
     /// directory. Idempotent.
     pub fn register_store(&self, project_id: &str, store: StateStore) {
-        if let Ok(mut stores) = self.stores.lock() {
-            stores.insert(project_id.to_string(), store);
-        }
+        lock_recover(&self.stores).insert(project_id.to_string(), store);
     }
 
     /// The state store for a project, falling back to a project-derived store
     /// if one was never registered.
     fn store_for(&self, project_id: &str) -> StateStore {
-        self.stores
-            .lock()
-            .ok()
-            .and_then(|stores| stores.get(project_id).cloned())
+        lock_recover(&self.stores)
+            .get(project_id)
+            .cloned()
             .unwrap_or_else(|| StateStore::for_project(project_id))
     }
 
@@ -551,7 +613,7 @@ impl CronManager {
         let (job_state, normalized, normalized_expression) =
             self.build_job_state(project_id, service_name, service_hash, cron_config)?;
         let timezone_label = job_state.timezone_label.clone();
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = lock_recover(&self.jobs);
         self.persist_job_state(&job_state);
         jobs.push(job_state.clone());
 
@@ -637,7 +699,7 @@ impl CronManager {
         }
 
         {
-            let mut jobs_guard = self.jobs.lock().unwrap();
+            let mut jobs_guard = lock_recover(&self.jobs);
             *jobs_guard = active_jobs;
         }
 
@@ -654,7 +716,7 @@ impl CronManager {
 
     /// Check if any cron jobs are due to run and return their stable identities.
     pub fn get_due_job_refs(&self) -> Vec<CronDueJob> {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = lock_recover(&self.jobs);
         let now = SystemTime::now();
         let mut due_jobs = Vec::new();
 
@@ -670,43 +732,32 @@ impl CronManager {
                 );
 
                 if job.currently_running {
-                    let previous_execution_live = job
-                        .execution_history
-                        .back()
-                        .is_some_and(incomplete_execution_is_live);
-
-                    if previous_execution_live {
-                        warn!(
-                            "Cron job '{}' is scheduled to run but previous execution is still running",
-                            job.service_name
-                        );
-                        let record = CronExecutionRecord {
-                            started_at: now,
-                            completed_at: Some(now),
-                            status: Some(CronExecutionStatus::OverlapError),
-                            exit_code: None,
-                            pid: None,
-                            user: None,
-                            command: None,
-                            metrics: vec![],
-                        };
-                        job.add_execution_record(record);
-                        job.update_next_execution();
-                        self.persist_job_state(job);
-                        continue;
-                    }
-
                     warn!(
-                        "Cron job '{}' had a stale running execution record; closing it before scheduling the next run",
+                        "Cron job '{}' is scheduled to run but previous execution is still running",
                         job.service_name
                     );
-                    job.close_stale_running_execution(now);
+                    let record = CronExecutionRecord {
+                        started_at: now,
+                        completed_at: Some(now),
+                        status: Some(CronExecutionStatus::OverlapError),
+                        exit_code: None,
+                        pid: None,
+                        process_start: None,
+                        user: None,
+                        command: None,
+                        metrics: vec![],
+                    };
+                    job.add_execution_record(record);
+                    job.update_next_execution();
+                    self.persist_job_state(job);
+                    continue;
                 }
 
                 {
                     due_jobs.push(CronDueJob {
                         service_name: job.service_name.clone(),
                         service_hash: job.service_hash.clone(),
+                        started_at: now,
                     });
                     job.currently_running = true;
                     job.last_execution = Some(now);
@@ -717,6 +768,7 @@ impl CronManager {
                         status: None,
                         exit_code: None,
                         pid: None,
+                        process_start: None,
                         user: None,
                         command: None,
                         metrics: vec![],
@@ -731,6 +783,18 @@ impl CronManager {
         due_jobs
     }
 
+    /// Removes all scheduled jobs owned by one project.
+    pub fn remove_project_jobs(&self, project_id: &str) {
+        lock_recover(&self.jobs).retain(|job| job.project_id != project_id);
+    }
+
+    /// Returns whether a scheduled job still owns the supplied stable hash.
+    pub fn contains_job_hash(&self, service_hash: &str) -> bool {
+        lock_recover(&self.jobs)
+            .iter()
+            .any(|job| job.service_hash == service_hash)
+    }
+
     /// Mark a cron job as completed.
     pub fn mark_job_completed(
         &self,
@@ -741,6 +805,7 @@ impl CronManager {
     ) {
         self.mark_job_completed_by(
             |job| job.service_name == service_name,
+            None,
             status,
             exit_code,
             metrics,
@@ -757,6 +822,25 @@ impl CronManager {
     ) {
         self.mark_job_completed_by(
             |job| job.service_hash == service_hash,
+            None,
+            status,
+            exit_code,
+            metrics,
+        );
+    }
+
+    /// Completes the execution created at `started_at` without mutating a newer run.
+    pub fn complete_job_run(
+        &self,
+        service_hash: &str,
+        started_at: SystemTime,
+        status: CronExecutionStatus,
+        exit_code: Option<i32>,
+        metrics: Vec<crate::metrics::MetricSample>,
+    ) {
+        self.mark_job_completed_by(
+            |job| job.service_hash == service_hash,
+            Some(started_at),
             status,
             exit_code,
             metrics,
@@ -767,21 +851,41 @@ impl CronManager {
     fn mark_job_completed_by<F>(
         &self,
         matches_job: F,
+        started_at: Option<SystemTime>,
         status: CronExecutionStatus,
         exit_code: Option<i32>,
         metrics: Vec<crate::metrics::MetricSample>,
     ) where
         F: Fn(&CronJobState) -> bool,
     {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = lock_recover(&self.jobs);
         if let Some(job) = jobs.iter_mut().find(|job| matches_job(job)) {
-            job.currently_running = false;
-
-            if let Some(record) = job.execution_history.back_mut() {
+            let active = job.active_record().map(|record| record.started_at);
+            let target = started_at.map_or_else(
+                || {
+                    job.execution_history
+                        .iter()
+                        .rposition(cron_record_is_incomplete)
+                },
+                |started| {
+                    job.execution_history
+                        .iter()
+                        .rposition(|record| same_run(record.started_at, started))
+                },
+            );
+            if let Some(index) = target
+                && let Some(mut record) = job.execution_history.remove(index)
+            {
+                let completed_active =
+                    active.is_some_and(|active| same_run(active, record.started_at));
                 record.completed_at = Some(SystemTime::now());
                 record.status = Some(status);
                 record.exit_code = exit_code;
                 record.metrics = metrics;
+                job.execution_history.push_back(record);
+                if completed_active {
+                    job.currently_running = false;
+                }
             }
 
             debug!("Cron job '{}' completed", job.service_name);
@@ -799,6 +903,7 @@ impl CronManager {
     ) {
         self.annotate_job_execution_by(
             |job| job.service_name == service_name,
+            None,
             pid,
             user,
             command,
@@ -815,6 +920,25 @@ impl CronManager {
     ) {
         self.annotate_job_execution_by(
             |job| job.service_hash == service_hash,
+            None,
+            pid,
+            user,
+            command,
+        );
+    }
+
+    /// Annotates the execution created at `started_at` without mutating a newer run.
+    pub fn annotate_job_run(
+        &self,
+        service_hash: &str,
+        started_at: SystemTime,
+        pid: Option<u32>,
+        user: Option<String>,
+        command: Option<String>,
+    ) {
+        self.annotate_job_execution_by(
+            |job| job.service_hash == service_hash,
+            Some(started_at),
             pid,
             user,
             command,
@@ -825,18 +949,29 @@ impl CronManager {
     fn annotate_job_execution_by<F>(
         &self,
         matches_job: F,
+        started_at: Option<SystemTime>,
         pid: Option<u32>,
         user: Option<String>,
         command: Option<String>,
     ) where
         F: Fn(&CronJobState) -> bool,
     {
-        let mut jobs = self.jobs.lock().unwrap();
-        if let Some(job) = jobs.iter_mut().find(|job| matches_job(job))
-            && let Some(record) = job.execution_history.back_mut()
-        {
+        let mut jobs = lock_recover(&self.jobs);
+        if let Some(job) = jobs.iter_mut().find(|job| matches_job(job)) {
+            let record = match started_at {
+                Some(started) => job
+                    .execution_history
+                    .iter_mut()
+                    .rev()
+                    .find(|record| same_run(record.started_at, started)),
+                None => job.active_record_mut(),
+            };
+            let Some(record) = record else {
+                return;
+            };
             if pid.is_some() {
                 record.pid = pid;
+                record.process_start = pid.and_then(crate::daemon::process_start_time);
             }
             if user.is_some() {
                 record.user = user;
@@ -850,26 +985,12 @@ impl CronManager {
 
     /// Get the state of all cron jobs (for status display).
     pub fn get_all_jobs(&self) -> Vec<CronJobState> {
-        let jobs = self.jobs.lock().unwrap();
-        jobs.iter()
-            .map(|job| CronJobState {
-                project_id: job.project_id.clone(),
-                service_name: job.service_name.clone(),
-                service_hash: job.service_hash.clone(),
-                schedule: Schedule::from_str(&job.schedule.to_string()).unwrap(),
-                last_execution: job.last_execution,
-                next_execution: job.next_execution,
-                currently_running: job.currently_running,
-                execution_history: job.execution_history.clone(),
-                timezone: job.timezone,
-                timezone_label: job.timezone_label.clone(),
-            })
-            .collect()
+        lock_recover(&self.jobs).clone()
     }
 
     /// Clear all registered cron jobs.
     pub fn clear_all_jobs(&self) {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = lock_recover(&self.jobs);
         jobs.clear();
     }
 
@@ -878,7 +999,7 @@ impl CronManager {
         &self,
         service_name: &str,
     ) -> Option<CronExecutionStatus> {
-        let jobs = self.jobs.lock().unwrap();
+        let jobs = lock_recover(&self.jobs);
         if let Some(job) = jobs.iter().find(|j| j.service_name == service_name) {
             job.execution_history
                 .back()
@@ -895,35 +1016,22 @@ impl CronManager {
     /// other project's file is touched.
     fn persist_job_state(&self, job: &CronJobState) {
         let store = self.store_for(&job.project_id);
-        let mut state = match CronStateFile::load(store.clone()) {
-            Ok(state) => state,
-            Err(_) => CronStateFile {
-                store,
-                ..CronStateFile::default()
+        let state = PersistedCronJobState {
+            service_name: Some(job.service_name.clone()),
+            last_execution: job.last_execution,
+            execution_history: job.execution_history.clone(),
+            timezone_label: job.timezone_label.clone(),
+            timezone: match job.timezone {
+                EffectiveTimezone::Local => None,
+                EffectiveTimezone::Utc => Some("UTC".to_string()),
+                EffectiveTimezone::Named(tz) => Some(tz.name().to_string()),
             },
         };
-        {
-            state.jobs.insert(
-                job.service_hash.clone(),
-                PersistedCronJobState {
-                    service_name: Some(job.service_name.clone()),
-                    last_execution: job.last_execution,
-                    execution_history: job.execution_history.clone(),
-                    timezone_label: job.timezone_label.clone(),
-                    timezone: match job.timezone {
-                        EffectiveTimezone::Local => None,
-                        EffectiveTimezone::Utc => Some("UTC".to_string()),
-                        EffectiveTimezone::Named(tz) => Some(tz.name().to_string()),
-                    },
-                },
+        if let Err(err) = CronStateFile::upsert(store, &job.service_hash, state) {
+            warn!(
+                "Failed to persist cron state for '{}': {}",
+                job.service_name, err
             );
-
-            if let Err(err) = state.save() {
-                warn!(
-                    "Failed to persist cron state for '{}': {}",
-                    job.service_name, err
-                );
-            }
         }
     }
 }
@@ -985,19 +1093,26 @@ impl CronStateFile {
         self.store.cron_path()
     }
 
-    /// Saves the cron state to disk.
-    pub(crate) fn save(&self) -> Result<(), std::io::Error> {
+    fn lock(store: &StateStore) -> Result<fs::File, std::io::Error> {
+        let path = store.cron_lock_path();
+        if let Some(parent) = path.parent() {
+            crate::runtime::create_private_dir(parent)?;
+        }
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+    }
+
+    fn write(&self) -> Result<(), std::io::Error> {
         let path = self.path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            crate::runtime::create_private_dir(parent)?;
         }
         let data = quick_xml::se::to_string(self).map_err(std::io::Error::other)?;
-
-        use std::io::Write;
-        let mut file = fs::File::create(&path)?;
-        file.write_all(data.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
+        crate::runtime::write_private_file(&path, data)
     }
 
     /// The project store this file is bound to.
@@ -1007,6 +1122,12 @@ impl CronStateFile {
 
     /// Loads the cron state file from disk, creating an empty one if it doesn't exist.
     pub fn load(store: StateStore) -> Result<Self, std::io::Error> {
+        let lock = Self::lock(&store)?;
+        FileExt::lock_shared(&lock)?;
+        Self::read(store)
+    }
+
+    fn read(store: StateStore) -> Result<Self, std::io::Error> {
         let empty = || Self {
             store: store.clone(),
             ..Self::default()
@@ -1022,19 +1143,26 @@ impl CronStateFile {
             return Ok(empty());
         }
 
-        match quick_xml::de::from_str::<Self>(&raw) {
-            Ok(mut state) => {
-                state.store = store;
-                Ok(state)
-            }
-            Err(err) => {
-                eprintln!(
-                    "Warning: Failed to deserialize cron state file at {:?}: {}. Using default state.",
-                    path, err
-                );
-                Ok(empty())
-            }
-        }
+        let mut state = quick_xml::de::from_str::<Self>(&raw).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to deserialize {}: {err}", path.display()),
+            )
+        })?;
+        state.store = store;
+        Ok(state)
+    }
+
+    fn upsert(
+        store: StateStore,
+        hash: &str,
+        job: PersistedCronJobState,
+    ) -> Result<(), std::io::Error> {
+        let lock = Self::lock(&store)?;
+        FileExt::lock_exclusive(&lock)?;
+        let mut state = Self::read(store)?;
+        state.jobs.insert(hash.to_string(), job);
+        state.write()
     }
 
     /// Returns a reference to the map of persisted cron job states.
@@ -1230,6 +1358,7 @@ mod tests {
             status: None,
             exit_code: None,
             pid: Some(current_pid),
+            process_start: crate::daemon::process_start_time(current_pid),
             user: Some("rashad".to_string()),
             command: Some("/bin/true".to_string()),
             metrics: vec![],
@@ -1258,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn due_job_closes_stale_running_record_before_rescheduling() {
+    fn due_job_keeps_inflight_record_until_worker_completion() {
         let _guard = crate::test_utils::env_lock();
 
         let base = std::env::current_dir()
@@ -1283,6 +1412,7 @@ mod tests {
             status: None,
             exit_code: None,
             pid: Some(i32::MAX as u32),
+            process_start: None,
             user: Some("rashad".to_string()),
             command: Some("/bin/true".to_string()),
             metrics: vec![],
@@ -1307,27 +1437,19 @@ mod tests {
 
         let due = manager.get_due_job_refs();
 
-        assert_eq!(
-            due,
-            vec![CronDueJob {
-                service_name: "stale_service".to_string(),
-                service_hash: "stale-hash".to_string(),
-            }]
-        );
+        assert!(due.is_empty());
 
         let jobs = manager.jobs.lock().unwrap();
         let job = jobs.first().expect("job present");
         assert!(job.currently_running);
         assert_eq!(job.execution_history.len(), 2);
-        let stale_record = job.execution_history.front().expect("stale record");
-        assert!(stale_record.completed_at.is_some());
+        let inflight = job.execution_history.front().expect("inflight record");
+        assert!(cron_record_is_incomplete(inflight));
+        let overlap = job.execution_history.back().expect("overlap record");
         assert!(matches!(
-            stale_record.status,
-            Some(CronExecutionStatus::Failed(_))
+            overlap.status,
+            Some(CronExecutionStatus::OverlapError)
         ));
-        let new_record = job.execution_history.back().expect("new record");
-        assert!(cron_record_is_incomplete(new_record));
-        assert_eq!(new_record.pid, None);
 
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },
@@ -1536,6 +1658,7 @@ mod tests {
             status: Some(CronExecutionStatus::Success),
             exit_code: Some(0),
             pid: None,
+            process_start: None,
             user: None,
             command: None,
             metrics: vec![],
@@ -1573,6 +1696,7 @@ mod tests {
             status: None,
             exit_code: None,
             pid: Some(1234),
+            process_start: None,
             user: Some("ubuntu".to_string()),
             command: Some("/bin/true".to_string()),
             metrics: vec![],

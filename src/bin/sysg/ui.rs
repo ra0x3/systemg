@@ -148,13 +148,19 @@ fn fetch_status_reading(
     config_path: Option<&str>,
     live: bool,
 ) -> Result<StatusReading, Box<dyn Error>> {
-    if supervisor_health() == SupervisorHealth::Serving
-        && let Some(reading) = try_live_status(live)
-    {
-        return Ok(reading);
+    let health = supervisor_health();
+    if health == SupervisorHealth::Serving {
+        if let Some(reading) = try_live_status(live) {
+            return Ok(reading);
+        }
+        if live
+            && let Some(reading) = try_live_status(false)
+        {
+            return Ok(reading);
+        }
     }
 
-    let presence = match supervisor_health() {
+    let presence = match health {
         SupervisorHealth::Dying => SupervisorPresence::NotResponding,
         _ => SupervisorPresence::Offline,
     };

@@ -2,7 +2,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     fs,
-    io::Write,
+    io::{self, Write},
     mem,
     path::PathBuf,
     sync::{
@@ -21,6 +21,7 @@ use tracing::error;
 
 use crate::{
     config::Config,
+    constants::PROCESS_CHECK_INTERVAL,
     daemon::{PidFile, ServiceStateFile},
 };
 
@@ -508,13 +509,16 @@ pub struct MetricsCollector {
 
 impl MetricsCollector {
     #[allow(clippy::too_many_arguments)]
-    /// Handles spawn.
+    /// Starts the metrics collector and returns its shutdown handle.
+    ///
+    /// Thread creation errors are returned to the supervisor so it can fail the
+    /// worker startup transaction instead of running without metric collection.
     pub fn spawn(
         store: MetricsHandle,
         config: Arc<Config>,
         pid_file: Arc<Mutex<PidFile>>,
         service_state: Arc<Mutex<ServiceStateFile>>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop);
         let store_clone = Arc::clone(&store);
@@ -526,56 +530,60 @@ impl MetricsCollector {
                 .unwrap_or_else(|_| Duration::from_secs(DEFAULT_SAMPLE_INTERVAL_SECS))
         };
 
-        let handle = thread::spawn(move || {
-            let mut system = System::new();
+        let handle = thread::Builder::new()
+            .name("sysg-metrics".to_string())
+            .spawn(move || {
+                let mut system = System::new();
 
-            while !stop_clone.load(Ordering::SeqCst) {
-                let targets =
-                    gather_unit_targets(config.as_ref(), &pid_file, &service_state);
+                while !stop_clone.load(Ordering::SeqCst) {
+                    let targets =
+                        gather_unit_targets(config.as_ref(), &pid_file, &service_state);
 
-                let mut collected = Vec::with_capacity(targets.len());
-                for target in targets {
-                    let sample = if let Some(pid) = target.pid {
-                        sample_process(&mut system, pid)
-                    } else {
-                        missing_process_sample()
-                    };
-                    collected.push(CollectedSample {
-                        hash: target.hash,
-                        sample,
-                    });
-                }
+                    let mut collected = Vec::with_capacity(targets.len());
+                    for target in targets {
+                        let sample = if let Some(pid) = target.pid {
+                            sample_process(&mut system, pid)
+                        } else {
+                            missing_process_sample()
+                        };
+                        collected.push(CollectedSample {
+                            hash: target.hash,
+                            sample,
+                        });
+                    }
 
-                if let Ok(mut guard) = store_clone.write() {
-                    for entry in collected {
-                        guard.register_unit(&entry.hash);
-                        if let Err(err) = guard.record_sample(&entry.hash, entry.sample) {
-                            error!("failed to record metrics sample: {err}");
+                    if let Ok(mut guard) = store_clone.write() {
+                        for entry in collected {
+                            guard.register_unit(&entry.hash);
+                            if let Err(err) =
+                                guard.record_sample(&entry.hash, entry.sample)
+                            {
+                                error!("failed to record metrics sample: {err}");
+                            }
                         }
                     }
-                }
 
-                let mut slept = Duration::ZERO;
-                while slept < interval {
-                    if stop_clone.load(Ordering::SeqCst) {
-                        return;
+                    let mut slept = Duration::ZERO;
+                    while slept < interval {
+                        if stop_clone.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let remaining = interval.saturating_sub(slept);
+                        let step = if remaining > PROCESS_CHECK_INTERVAL {
+                            PROCESS_CHECK_INTERVAL
+                        } else {
+                            remaining
+                        };
+                        thread::sleep(step);
+                        slept += step;
                     }
-                    let remaining = interval.saturating_sub(slept);
-                    let step = if remaining > Duration::from_millis(100) {
-                        Duration::from_millis(100)
-                    } else {
-                        remaining
-                    };
-                    thread::sleep(step);
-                    slept += step;
                 }
-            }
-        });
+            })?;
 
-        Self {
+        Ok(Self {
             stop,
             handle: Some(handle),
-        }
+        })
     }
 
     /// Stops this item.
@@ -603,8 +611,12 @@ fn gather_unit_targets(
     pid_file: &Arc<Mutex<PidFile>>,
     service_state: &Arc<Mutex<ServiceStateFile>>,
 ) -> Vec<UnitTarget> {
-    let pid_guard = pid_file.lock().unwrap();
-    let state_guard = service_state.lock().unwrap();
+    let pid_guard = pid_file
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state_guard = service_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let mut targets = Vec::new();
     let mut seen_hashes = Vec::new();

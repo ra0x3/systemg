@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -12,6 +12,17 @@ use crate::{
     config::{SpawnLimitsConfig, TerminationPolicy},
     error::ProcessManagerError,
 };
+
+/// Maximum number of spawn requests accepted from one parent per rate window.
+const MAX_SPAWNS_PER_WINDOW: usize = 10;
+/// Window used to enforce the per-parent spawn rate limit.
+const SPAWN_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Tracks the spawn tree for a dynamically spawning parent service.
 #[derive(Debug, Clone)]
@@ -201,7 +212,7 @@ impl DynamicSpawnManager {
         service_name: String,
         config: &SpawnLimitsConfig,
     ) -> Result<(), ProcessManagerError> {
-        let mut trees = self.spawn_trees.lock().unwrap();
+        let mut trees = lock_recover(&self.spawn_trees);
         trees.insert(
             service_name.clone(),
             SpawnTree::from_config(service_name, config),
@@ -211,7 +222,7 @@ impl DynamicSpawnManager {
 
     /// Associates a service PID with its service name.
     pub fn register_service_pid(&self, service_name: String, pid: u32) {
-        let mut service_pids = self.service_pids.lock().unwrap();
+        let mut service_pids = lock_recover(&self.service_pids);
         service_pids.insert(pid, service_name);
     }
 
@@ -223,8 +234,8 @@ impl DynamicSpawnManager {
     ) -> Result<SpawnAuthorization, ProcessManagerError> {
         self.check_rate_limit(parent_pid)?;
 
-        let trees = self.spawn_trees.lock().unwrap();
-        let children = self.children_by_pid.lock().unwrap();
+        let trees = lock_recover(&self.spawn_trees);
+        let children = lock_recover(&self.children_by_pid);
 
         let depth = if let Some(parent_info) = children.get(&parent_pid) {
             parent_info.depth + 1
@@ -236,7 +247,7 @@ impl DynamicSpawnManager {
 
         tree.can_spawn(depth)?;
 
-        let parent_children = self.children_by_parent.lock().unwrap();
+        let parent_children = lock_recover(&self.children_by_parent);
         if let Some(siblings) = parent_children.get(&parent_pid)
             && siblings.len() >= tree.max_children
         {
@@ -259,7 +270,7 @@ impl DynamicSpawnManager {
         root_hint: Option<String>,
     ) -> Result<Option<String>, ProcessManagerError> {
         {
-            let mut children_by_parent = self.children_by_parent.lock().unwrap();
+            let mut children_by_parent = lock_recover(&self.children_by_parent);
             children_by_parent
                 .entry(parent_pid)
                 .or_default()
@@ -267,7 +278,7 @@ impl DynamicSpawnManager {
         }
 
         {
-            let mut children_by_pid = self.children_by_pid.lock().unwrap();
+            let mut children_by_pid = lock_recover(&self.children_by_pid);
             children_by_pid.insert(child.pid, child.clone());
         }
 
@@ -278,7 +289,7 @@ impl DynamicSpawnManager {
         }
 
         {
-            let mut trees = self.spawn_trees.lock().unwrap();
+            let mut trees = lock_recover(&self.spawn_trees);
 
             if let Some(name) = service_name.as_ref()
                 && let Some(tree) = trees.get_mut(name)
@@ -292,7 +303,7 @@ impl DynamicSpawnManager {
         }
 
         {
-            let mut timestamps = self.spawn_timestamps.lock().unwrap();
+            let mut timestamps = lock_recover(&self.spawn_timestamps);
             timestamps
                 .entry(parent_pid)
                 .or_default()
@@ -308,14 +319,14 @@ impl DynamicSpawnManager {
         child_pid: u32,
         exit: SpawnedExit,
     ) -> Option<SpawnedChild> {
-        let mut children_by_pid = self.children_by_pid.lock().unwrap();
+        let mut children_by_pid = lock_recover(&self.children_by_pid);
         let updated = children_by_pid.get_mut(&child_pid).map(|child| {
             child.last_exit = Some(exit.clone());
             child.clone()
         });
 
         if updated.is_some() {
-            let mut children_by_parent = self.children_by_parent.lock().unwrap();
+            let mut children_by_parent = lock_recover(&self.children_by_parent);
             for siblings in children_by_parent.values_mut() {
                 if let Some(node) =
                     siblings.iter_mut().find(|sibling| sibling.pid == child_pid)
@@ -337,14 +348,14 @@ impl DynamicSpawnManager {
         rss_bytes: Option<u64>,
     ) {
         {
-            let mut children_by_pid = self.children_by_pid.lock().unwrap();
+            let mut children_by_pid = lock_recover(&self.children_by_pid);
             if let Some(child) = children_by_pid.get_mut(&child_pid) {
                 child.cpu_percent = cpu_percent;
                 child.rss_bytes = rss_bytes;
             }
         }
 
-        let mut children_by_parent = self.children_by_parent.lock().unwrap();
+        let mut children_by_parent = lock_recover(&self.children_by_parent);
         for siblings in children_by_parent.values_mut() {
             if let Some(node) =
                 siblings.iter_mut().find(|sibling| sibling.pid == child_pid)
@@ -358,14 +369,14 @@ impl DynamicSpawnManager {
 
     /// Gets all children of a parent process.
     pub fn get_children(&self, parent_pid: u32) -> Vec<SpawnedChild> {
-        let children = self.children_by_parent.lock().unwrap();
+        let children = lock_recover(&self.children_by_parent);
         children.get(&parent_pid).cloned().unwrap_or_default()
     }
 
     /// Gets the spawn tree for a process.
     pub fn get_spawn_tree(&self, pid: u32) -> Option<SpawnTree> {
-        let trees = self.spawn_trees.lock().unwrap();
-        let children = self.children_by_pid.lock().unwrap();
+        let trees = lock_recover(&self.spawn_trees);
+        let children = lock_recover(&self.children_by_pid);
         self.find_spawn_tree(pid, &trees, &children)
             .map(|(_, tree)| tree.clone())
             .ok()
@@ -373,8 +384,8 @@ impl DynamicSpawnManager {
 
     /// Resolves the termination policy associated with the tree that owns `pid`.
     pub fn termination_policy_for(&self, pid: u32) -> Option<TerminationPolicy> {
-        let trees = self.spawn_trees.lock().unwrap();
-        let children = self.children_by_pid.lock().unwrap();
+        let trees = lock_recover(&self.spawn_trees);
+        let children = lock_recover(&self.children_by_pid);
         self.find_spawn_tree(pid, &trees, &children)
             .map(|(_, tree)| tree.termination_policy.clone())
             .ok()
@@ -384,8 +395,8 @@ impl DynamicSpawnManager {
     pub fn remove_subtree(&self, root_pid: u32) -> Vec<SpawnedChild> {
         let mut removed = Vec::new();
 
-        let mut pid_guard = self.children_by_pid.lock().unwrap();
-        let mut parent_guard = self.children_by_parent.lock().unwrap();
+        let mut pid_guard = lock_recover(&self.children_by_pid);
+        let mut parent_guard = lock_recover(&self.children_by_parent);
 
         let Some(root_child) = pid_guard.get(&root_pid).cloned() else {
             return removed;
@@ -419,7 +430,7 @@ impl DynamicSpawnManager {
         drop(pid_guard);
 
         if !removed.is_empty() {
-            let mut timestamps = self.spawn_timestamps.lock().unwrap();
+            let mut timestamps = lock_recover(&self.spawn_timestamps);
             for child in &removed {
                 timestamps.remove(&child.pid);
             }
@@ -430,16 +441,16 @@ impl DynamicSpawnManager {
 
     /// Checks rate limiting for spawn requests.
     fn check_rate_limit(&self, parent_pid: u32) -> Result<(), ProcessManagerError> {
-        let mut timestamps = self.spawn_timestamps.lock().unwrap();
+        let mut timestamps = lock_recover(&self.spawn_timestamps);
         let now = Instant::now();
 
         if let Some(recent_spawns) = timestamps.get_mut(&parent_pid) {
-            recent_spawns.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
+            recent_spawns.retain(|t| now.duration_since(*t) < SPAWN_RATE_WINDOW);
 
-            if recent_spawns.len() >= 10 {
-                return Err(ProcessManagerError::SpawnLimitExceeded(
-                    "Spawn rate limit exceeded (max 10/sec)".into(),
-                ));
+            if recent_spawns.len() >= MAX_SPAWNS_PER_WINDOW {
+                return Err(ProcessManagerError::SpawnLimitExceeded(format!(
+                    "Spawn rate limit exceeded (max {MAX_SPAWNS_PER_WINDOW}/sec)"
+                )));
             }
         }
 
@@ -453,7 +464,7 @@ impl DynamicSpawnManager {
         trees: &'a HashMap<String, SpawnTree>,
         children: &HashMap<u32, SpawnedChild>,
     ) -> Result<(String, &'a SpawnTree), ProcessManagerError> {
-        let service_pids = self.service_pids.lock().unwrap();
+        let service_pids = lock_recover(&self.service_pids);
 
         if let Some(service_name) = service_pids.get(&pid)
             && let Some(tree) = trees.get(service_name)
@@ -499,12 +510,12 @@ impl DynamicSpawnManager {
     /// Removes a terminated child from tracking.
     pub fn remove_child(&self, child_pid: u32) -> Option<SpawnedChild> {
         let child = {
-            let mut children_by_pid = self.children_by_pid.lock().unwrap();
+            let mut children_by_pid = lock_recover(&self.children_by_pid);
             children_by_pid.remove(&child_pid)
         };
 
         if let Some(child) = child {
-            let mut children_by_parent = self.children_by_parent.lock().unwrap();
+            let mut children_by_parent = lock_recover(&self.children_by_parent);
             if let Some(siblings) = children_by_parent.get_mut(&child.parent_pid) {
                 siblings.retain(|c| c.pid != child_pid);
                 if siblings.is_empty() {
@@ -521,14 +532,14 @@ impl DynamicSpawnManager {
     fn resolve_root_service_name(&self, mut pid: u32) -> Option<String> {
         loop {
             {
-                let service_pids = self.service_pids.lock().unwrap();
+                let service_pids = lock_recover(&self.service_pids);
                 if let Some(service_name) = service_pids.get(&pid) {
                     return Some(service_name.clone());
                 }
             }
 
             let next_pid = {
-                let children_by_pid = self.children_by_pid.lock().unwrap();
+                let children_by_pid = lock_recover(&self.children_by_pid);
                 children_by_pid.get(&pid).map(|child| child.parent_pid)
             };
 

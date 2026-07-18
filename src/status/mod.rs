@@ -1,13 +1,16 @@
 #![allow(missing_docs)]
 //! Status management for services in the daemon.
 
+/// Diagnostic rendering for service status failures.
 pub mod diagnostics;
+/// Resolution of status requests into explicit query plans.
 pub mod plan;
 
 #[cfg(target_os = "linux")]
 use std::time::UNIX_EPOCH;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    io,
     process::Command,
     sync::{
         Arc, Mutex, RwLock,
@@ -32,6 +35,7 @@ use tracing::{debug, error};
 
 use crate::{
     config::{Config, ProjectConfig, ServiceConfig, StatusSnapshotMode},
+    constants::PROCESS_CHECK_INTERVAL,
     cron::{
         CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
     },
@@ -788,15 +792,16 @@ impl StatusCache {
     pub fn snapshot(&self) -> StatusSnapshot {
         self.inner
             .read()
-            .expect("status snapshot lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
     /// Replaces the cached snapshot. Intended to be called by the refresher thread.
     pub fn replace(&self, snapshot: StatusSnapshot) {
-        if let Ok(mut guard) = self.inner.write() {
-            *guard = snapshot;
-        }
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
     }
 }
 
@@ -807,42 +812,51 @@ pub struct StatusRefresher {
 }
 
 impl StatusRefresher {
-    /// Handles spawn.
-    pub fn spawn<F>(cache: StatusCache, interval: Duration, mut builder: F) -> Self
+    /// Starts a named refresher worker and returns its shutdown handle.
+    ///
+    /// Thread creation errors are returned to the supervisor so startup cannot
+    /// silently continue with a permanently stale status cache.
+    pub fn spawn<F>(
+        cache: StatusCache,
+        interval: Duration,
+        mut builder: F,
+    ) -> io::Result<Self>
     where
         F: FnMut() -> Result<StatusSnapshot, StatusError> + Send + 'static,
     {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop);
-        let handle = thread::spawn(move || {
-            while !stop_clone.load(Ordering::SeqCst) {
-                match builder() {
-                    Ok(snapshot) => cache.replace(snapshot),
-                    Err(err) => error!("failed to refresh status snapshot: {err}"),
-                }
-
-                let mut slept = Duration::ZERO;
-                while slept < interval {
-                    if stop_clone.load(Ordering::SeqCst) {
-                        return;
+        let handle = thread::Builder::new()
+            .name("sysg-status".to_string())
+            .spawn(move || {
+                while !stop_clone.load(Ordering::SeqCst) {
+                    match builder() {
+                        Ok(snapshot) => cache.replace(snapshot),
+                        Err(err) => error!("failed to refresh status snapshot: {err}"),
                     }
 
-                    let remaining = interval.saturating_sub(slept);
-                    let step = if remaining > Duration::from_millis(100) {
-                        Duration::from_millis(100)
-                    } else {
-                        remaining
-                    };
-                    thread::sleep(step);
-                    slept += step;
-                }
-            }
-        });
+                    let mut slept = Duration::ZERO;
+                    while slept < interval {
+                        if stop_clone.load(Ordering::SeqCst) {
+                            return;
+                        }
 
-        Self {
+                        let remaining = interval.saturating_sub(slept);
+                        let step = if remaining > PROCESS_CHECK_INTERVAL {
+                            PROCESS_CHECK_INTERVAL
+                        } else {
+                            remaining
+                        };
+                        thread::sleep(step);
+                        slept += step;
+                    }
+                }
+            })?;
+
+        Ok(Self {
             stop,
             handle: Some(handle),
-        }
+        })
     }
 
     /// Stops this item.
@@ -1459,7 +1473,7 @@ fn derive_unit_intent(
                 return UnitIntent::Skip;
             }
 
-            if matches!(service_config.restart_policy.as_deref(), Some("never")) {
+            if service_config.restart_is_disabled() {
                 return UnitIntent::Once;
             }
 
@@ -2311,7 +2325,7 @@ impl StatusManager {
             let guard = self
                 .state_file
                 .lock()
-                .expect("Failed to lock service state file");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.get(service_hash).cloned()
         };
 
@@ -2388,7 +2402,7 @@ impl StatusManager {
             let guard = self
                 .state_file
                 .lock()
-                .expect("Failed to lock service state file");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.get(service_hash).cloned()
         };
 
@@ -2513,7 +2527,7 @@ impl StatusManager {
             let state_guard = self
                 .state_file
                 .lock()
-                .expect("Failed to lock service state file");
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             service_hashes.extend(state_guard.services().keys().cloned());
         }
 
@@ -2817,6 +2831,7 @@ mod tests {
             status: Some(CronExecutionStatus::Success),
             exit_code: Some(0),
             pid: None,
+            process_start: None,
             user: None,
             command: None,
             metrics: vec![],
@@ -2835,6 +2850,7 @@ mod tests {
             status: Some(CronExecutionStatus::Failed("boom".into())),
             exit_code: Some(2),
             pid: None,
+            process_start: None,
             user: None,
             command: None,
             metrics: vec![],

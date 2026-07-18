@@ -19,6 +19,7 @@
 #                       --version to override the label it installs under.
 #   scripts/test-local.sh --revert            restore the pre-install version
 #   scripts/test-local.sh --revert --clean    ...and delete the tested version dir
+#   scripts/test-local.sh --activate VER      activate an existing verified slot
 #
 # By DEFAULT this rebuilds (cargo build --release) first, so it always installs
 # the latest code — pass --no-build to skip and use the existing binary as-is.
@@ -32,6 +33,9 @@ ACTIVE_FILE="${SYSG_HOME}/active-version"
 LINK="${HOME}/.local/bin/sysg"
 PREV_MARKER="${SYSG_HOME}/.test-local-prev"
 BUILT_BIN="${REPO_ROOT}/target/release/sysg"
+RUNTIME_DIR="${HOME}/.local/share/systemg"
+SUPERVISOR_PID_FILE="${RUNTIME_DIR}/sysg.pid"
+CONTROL_SOCKET="${RUNTIME_DIR}/control.sock"
 
 err()  { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
 info() { printf '\033[0;36m%s\033[0m\n' "$*"; }
@@ -40,11 +44,20 @@ ok()   { printf '\033[0;32m%s\033[0m\n' "$*"; }
 # Refuse to swap the binary while a supervisor is resident — a version mismatch
 # between the CLI and a live daemon triggers a recycle of the running stack.
 guard_no_supervisor() {
-  if pgrep -f 'sysg supervise' >/dev/null 2>&1; then
-    err "A sysg supervisor is currently running."
-    err "Stop it first (sysg stop / sysg purge --force), then retry."
+  local pid=""
+  if [ -r "${SUPERVISOR_PID_FILE}" ]; then
+    pid="$(tr -d '[:space:]' < "${SUPERVISOR_PID_FILE}")"
+  fi
+  if { [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; } \
+     || [ -S "${CONTROL_SOCKET}" ]; then
+    err "A sysg supervisor is currently running${pid:+ (PID ${pid})}."
+    err "Stop it first with 'sysg stop --supervisor', then retry."
     exit 1
   fi
+}
+
+binary_version() {
+  "$1" --version 2>/dev/null | awk '{print $NF}'
 }
 
 repoint() {
@@ -53,6 +66,13 @@ repoint() {
   local target="${VERSIONS_DIR}/${version}/sysg"
   if [ ! -x "${target}" ]; then
     err "Version '${version}' is not installed at ${target}"
+    exit 1
+  fi
+  local actual
+  actual="$(binary_version "${target}")"
+  if [ "${actual}" != "${version}" ]; then
+    err "Version slot '${version}' contains binary '${actual:-unknown}'."
+    err "Refusing to activate a mislabeled or corrupted slot."
     exit 1
   fi
   ln -sfn "${target}" "${LINK}"
@@ -93,6 +113,8 @@ do_install() {
       || { err "cargo build --release failed"; exit 1; }
   fi
 
+  guard_no_supervisor
+
   if [ ! -f "${BUILT_BIN}" ]; then
     err "No built binary at ${BUILT_BIN}. Run: cargo build --release (or drop --no-build)."
     exit 1
@@ -101,11 +123,12 @@ do_install() {
   # Determine the version to install under: --version override, else what the
   # freshly built binary reports.
   local binary_version version
-  binary_version="$("${BUILT_BIN}" --version 2>/dev/null | awk '{print $NF}')"
+  binary_version="$(binary_version "${BUILT_BIN}")"
   if [ -n "${want_version}" ]; then
     version="${want_version}"
-    if [ -n "${binary_version}" ] && [ "${binary_version}" != "${version}" ]; then
-      err "warning: installing under label '${version}' but the binary reports '${binary_version}' — the version dir and 'sysg --version' will disagree."
+    if [ "${binary_version}" != "${version}" ]; then
+      err "Refusing to install binary '${binary_version:-unknown}' as version '${version}'."
+      exit 1
     fi
   else
     version="${binary_version}"
@@ -115,27 +138,31 @@ do_install() {
     exit 1
   fi
 
-  # Record the currently-active version so --revert can restore it — but never
-  # overwrite an existing marker (so repeated installs still revert to the
-  # ORIGINAL baseline, not a previous test).
   local current="unknown"
   [ -f "${ACTIVE_FILE}" ] && current="$(cat "${ACTIVE_FILE}")"
+
+  info "Installing local ${BUILT_BIN} as version '${version}' (was '${current}')..."
+  local dest_dir="${VERSIONS_DIR}/${version}"
+  local staged="${dest_dir}/.sysg.$$"
+  mkdir -p "${dest_dir}"
+  install -m 755 "${BUILT_BIN}" "${staged}"
+
+  # Re-sign adhoc so macOS Gatekeeper doesn't SIGKILL the freshly written Mach-O.
+  if command -v codesign >/dev/null 2>&1; then
+    if codesign --force --sign - "${staged}" >/dev/null 2>&1; then
+      info "adhoc-signed ${dest_dir}/sysg"
+    else
+      rm -f "${staged}"
+      err "codesign failed; the existing version slot was left untouched"
+      exit 1
+    fi
+  fi
+
   if [ ! -f "${PREV_MARKER}" ]; then
     printf '%s\n%s\n' "${current}" "${version}" > "${PREV_MARKER}"
   fi
 
-  info "Installing local ${BUILT_BIN} as version '${version}' (was '${current}')..."
-  local dest_dir="${VERSIONS_DIR}/${version}"
-  mkdir -p "${dest_dir}"
-  install -m 755 "${BUILT_BIN}" "${dest_dir}/sysg"
-
-  # Re-sign adhoc so macOS Gatekeeper doesn't SIGKILL the freshly written Mach-O.
-  if command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "${dest_dir}/sysg" >/dev/null 2>&1 \
-      && info "adhoc-signed ${dest_dir}/sysg" \
-      || err "codesign failed (binary may be SIGKILL'd on run)"
-  fi
-
+  mv -f "${staged}" "${dest_dir}/sysg"
   repoint "${version}"
   ok "Installed. Active: $(cat "${ACTIVE_FILE}") -> $("${LINK}" --version)"
   info "Revert any time: $0 --revert   (add --clean to also remove the dir)"
@@ -145,6 +172,7 @@ WANT_VERSION=""
 DO_BUILD="yes"
 REVERT=""
 CLEAN=""
+ACTIVATE=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -156,6 +184,12 @@ while [ "$#" -gt 0 ]; do
     --version=*) WANT_VERSION="${1#*=}" ;;
     --no-build)  DO_BUILD="no" ;;
     --revert)    REVERT="yes" ;;
+    --activate)
+      shift
+      [ "$#" -gt 0 ] || { err "--activate needs a version"; exit 1; }
+      ACTIVATE="$1"
+      ;;
+    --activate=*) ACTIVATE="${1#*=}" ;;
     --clean)     CLEAN="--clean" ;;
     --help|-h)
       sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
@@ -166,8 +200,15 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if [ -n "${REVERT}" ]; then
+if [ -n "${REVERT}" ] && [ -n "${ACTIVATE}" ]; then
+  err "--revert and --activate cannot be combined"
+  exit 1
+elif [ -n "${REVERT}" ]; then
   do_revert "${CLEAN}"
+elif [ -n "${ACTIVATE}" ]; then
+  guard_no_supervisor
+  repoint "${ACTIVATE}"
+  ok "Activated. Active: $(cat "${ACTIVE_FILE}") -> $("${LINK}" --version)"
 else
   do_install "${WANT_VERSION}" "${DO_BUILD}"
 fi

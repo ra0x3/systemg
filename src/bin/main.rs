@@ -27,11 +27,14 @@ use nix::{
     unistd::{Pid, Uid},
 };
 use sha2::{Digest, Sha256};
-use sysinfo::{Pid as SysPid, ProcessRefreshKind, ProcessesToUpdate, System, Users};
+use sysinfo::{
+    Pid as SysPid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, Users,
+};
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
     cli::{Cli, Commands, OutputFormat, parse_args},
     config::{Config, EffectiveLogsConfig, load_config},
+    constants::{PROCESS_CHECK_INTERVAL, SERVICE_POLL_INTERVAL},
     cron::{CronExecutionStatus, CronStateFile},
     daemon::{Daemon, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
@@ -50,7 +53,7 @@ use systemg::{
         UnitMetricsSummary, UnitState, UnitStatus, UptimeInfo, collect_disk_snapshot,
         compute_overall_health, explain_unit_health, format_elapsed,
     },
-    supervisor::Supervisor,
+    supervisor::{Supervisor, SupervisorError},
     validate::{self, ValidationReport},
 };
 use tracing::{error, info, warn};
@@ -66,6 +69,38 @@ const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 const BUSY_PROBE_EVERY_TICKS: usize = 12;
 const RESTART_DAEMON_ACK_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_CONFIG_PATH: &str = "systemg.yaml";
+/// Maximum time allowed for the supervisor to acknowledge a shutdown request.
+const SUPERVISOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum time allowed for a requested supervisor shutdown to finish cleanly.
+const SUPERVISOR_GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Maximum wait after each forced supervisor signal.
+const SUPERVISOR_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum time allowed for supervisor runtime files to disappear.
+const SUPERVISOR_RUNTIME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time allowed for a new supervisor control socket to become usable.
+const SUPERVISOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Interval between foreground attachment and reconnect checks.
+const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Interval between visible boot progress probes.
+const BOOT_PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
+/// Number of initial follow retries per foreground backoff.
+const FOREGROUND_START_RETRIES: usize = 2;
+/// Number of reconnect retries per foreground backoff.
+const FOREGROUND_RECONNECT_RETRIES: usize = 4;
+/// Number of historical lines included by the first foreground attachment.
+const FOREGROUND_BACKLOG_LINES: usize = 20;
+/// Capacity of the single-result foreground boot channel.
+const FOREGROUND_BOOT_RESULT_CAPACITY: usize = 1;
+/// Number of service log lines inspected for a foreground port collision.
+const PORT_DIAGNOSTIC_TAIL_LINES: usize = 12;
+/// Thread name for terminal progress rendering.
+const SPINNER_THREAD: &str = "sysg-spinner";
+/// Thread name for interactive log streaming.
+const LOG_STREAM_THREAD: &str = "sysg-log-stream";
+/// Thread name for attached foreground project boots.
+const FOREGROUND_BOOT_THREAD: &str = "sysg-foreground-boot";
+/// Thread name for bounded supervisor health probes.
+const SUPERVISOR_PROBE_THREAD: &str = "sysg-supervisor-probe";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectStreamAction {
@@ -173,7 +208,7 @@ fn wait_for_inspect_stream_action(
             return Ok(InspectStreamAction::Refresh);
         }
 
-        let poll_timeout = remaining.min(Duration::from_millis(50));
+        let poll_timeout = remaining.min(SERVICE_POLL_INTERVAL);
         if event::poll(poll_timeout)?
             && let Some(action) = inspect_stream_event_action(event::read()?)
         {
@@ -193,7 +228,7 @@ fn wait_for_logs_stream_action(
             return Ok(LogsStreamAction::Refresh);
         }
 
-        let poll_timeout = remaining.min(Duration::from_millis(50));
+        let poll_timeout = remaining.min(SERVICE_POLL_INTERVAL);
         if event::poll(poll_timeout)?
             && let Some(action) = logs_stream_event_action(event::read()?)
         {
@@ -377,39 +412,50 @@ where
 
     let stop = Arc::new(AtomicBool::new(false));
     let spinner_stop = Arc::clone(&stop);
-    let spinner = thread::spawn(move || {
-        thread::sleep(FETCH_SPINNER_DELAY);
-        if spinner_stop.load(Ordering::Relaxed) {
-            return;
-        }
+    let spinner =
+        match thread::Builder::new()
+            .name(SPINNER_THREAD.into())
+            .spawn(move || {
+                thread::sleep(FETCH_SPINNER_DELAY);
+                if spinner_stop.load(Ordering::Relaxed) {
+                    return;
+                }
 
-        let mut stderr = io::stderr().lock();
-        let mut frame_idx = 0usize;
-        let mut op_label: Option<String> = None;
-        let mut ticks_since_probe = 0usize;
-        loop {
-            if spinner_stop.load(Ordering::Relaxed) {
-                let _ = write!(stderr, "{}", clear_progress_spinner_line());
-                let _ = stderr.flush();
-                return;
-            }
+                let mut stderr = io::stderr().lock();
+                let mut frame_idx = 0usize;
+                let mut op_label: Option<String> = None;
+                let mut ticks_since_probe = 0usize;
+                loop {
+                    if spinner_stop.load(Ordering::Relaxed) {
+                        let _ = write!(stderr, "{}", clear_progress_spinner_line());
+                        let _ = stderr.flush();
+                        return;
+                    }
 
-            if ticks_since_probe == 0 {
-                op_label = ipc::current_op().map(|op| op.describe());
-            }
-            ticks_since_probe = (ticks_since_probe + 1) % BUSY_PROBE_EVERY_TICKS;
+                    if ticks_since_probe == 0 {
+                        op_label = ipc::current_op().map(|op| op.describe());
+                    }
+                    ticks_since_probe = (ticks_since_probe + 1) % BUSY_PROBE_EVERY_TICKS;
 
-            let shown = match &op_label {
-                Some(detail) => format!("{label}: {detail}"),
-                None => label.to_string(),
-            };
-            let frame = FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
-            let _ = write!(stderr, "{}", format_progress_spinner_frame(frame, &shown));
-            let _ = stderr.flush();
-            frame_idx += 1;
-            thread::sleep(FETCH_SPINNER_TICK);
-        }
-    });
+                    let shown = match &op_label {
+                        Some(detail) => format!("{label}: {detail}"),
+                        None => label.to_string(),
+                    };
+                    let frame =
+                        FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
+                    let _ = write!(
+                        stderr,
+                        "{}",
+                        format_progress_spinner_frame(frame, &shown)
+                    );
+                    let _ = stderr.flush();
+                    frame_idx += 1;
+                    thread::sleep(FETCH_SPINNER_TICK);
+                }
+            }) {
+            Ok(handle) => handle,
+            Err(_) => return operation(),
+        };
 
     let result = operation();
     stop.store(true, Ordering::Relaxed);
@@ -575,36 +621,7 @@ Target the project by id with -p instead.",
 }
 
 /// Runs the `sysg` command-line entrypoint.
-/// Restores cooked terminal mode when the process is killed.
-///
-/// The interactive views (status, logs --follow) put the terminal in raw mode.
-/// A SIGTERM/SIGHUP/SIGINT unwinds nothing, so without this the terminal is left
-/// raw after the process dies: `\n` then moves down WITHOUT returning to column
-/// 0, and every subsequent line — from any command, not just sysg — stair-steps
-/// across the screen until the user runs `reset`. Restoring here costs nothing
-/// when the terminal was never raw.
-extern "C" fn restore_terminal_on_signal(sig: libc::c_int) {
-    let _ = crossterm::terminal::disable_raw_mode();
-    unsafe {
-        libc::signal(sig, libc::SIG_DFL);
-        libc::raise(sig);
-    }
-}
-
-/// Installs the terminal-restoring handler for the signals that kill a CLI.
-fn install_terminal_restore_handlers() {
-    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
-        unsafe {
-            libc::signal(
-                sig,
-                restore_terminal_on_signal as *const () as libc::sighandler_t,
-            );
-        }
-    }
-}
-
 fn main() -> process::ExitCode {
-    install_terminal_restore_handlers();
     let outcome = match run() {
         Ok(()) => process::ExitCode::SUCCESS,
         Err(err) => {
@@ -1558,18 +1575,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                     let log_format_owned = log_format;
                     let strip_ansi_owned = strip_ansi_output;
                     let service_owned = service.clone();
-                    let stream_thread = thread::spawn(move || {
-                        let mut writer = LogWriter::new(
-                            io::stdout(),
-                            log_format_owned,
-                            strip_ansi_owned,
-                            service_owned,
-                        );
-                        let outcome =
-                            ipc::stream_command_output(&stream_cmd, &mut writer);
-                        let _ = writer.flush();
-                        outcome
-                    });
+                    let stream_thread = thread::Builder::new()
+                        .name(LOG_STREAM_THREAD.into())
+                        .spawn(move || {
+                            let mut writer = LogWriter::new(
+                                io::stdout(),
+                                log_format_owned,
+                                strip_ansi_owned,
+                                service_owned,
+                            );
+                            let outcome =
+                                ipc::stream_command_output(&stream_cmd, &mut writer);
+                            let _ = writer.flush();
+                            outcome
+                        })?;
 
                     terminal::enable_raw_mode()?;
                     let key_result = (|| -> Result<(), Box<dyn Error>> {
@@ -1577,7 +1596,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             if stream_thread.is_finished() {
                                 return Ok(());
                             }
-                            if event::poll(Duration::from_millis(100))?
+                            if event::poll(PROCESS_CHECK_INTERVAL)?
                                 && matches!(
                                     logs_stream_event_action(event::read()?),
                                     Some(LogsStreamAction::Exit)
@@ -1665,8 +1684,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             service,
             pipe_stderr,
             verbose: _,
+            foreground,
         } => {
-            run_supervisor_in_process(PathBuf::from(config), service, pipe_stderr);
+            let mode = if foreground {
+                ProjectRunMode::Foreground
+            } else {
+                ProjectRunMode::Daemon
+            };
+            run_supervisor_in_process(PathBuf::from(config), service, pipe_stderr, mode);
         }
         Commands::Spawn {
             name,
@@ -3453,8 +3478,8 @@ fn dispatch_purge(
     };
 
     if force {
-        stop_supervisors();
-        wait_for_runtime_cleared(Duration::from_secs(5));
+        stop_supervisors()?;
+        wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
     }
 
     execute_purge(plan)
@@ -3480,12 +3505,44 @@ fn purge_world(force: bool) -> systemg::purge::World {
                 force,
             }
         }
-        SupervisorHealth::Dying | SupervisorHealth::Down => systemg::purge::World {
-            supervisor_serving: false,
-            managed_units: 0,
+        SupervisorHealth::Dying => systemg::purge::World {
+            supervisor_serving: true,
+            managed_units: 1,
             force,
         },
+        SupervisorHealth::Down => {
+            let managed_units = tracked_unit_count();
+            systemg::purge::World {
+                supervisor_serving: managed_units > 0,
+                managed_units,
+                force,
+            }
+        }
     }
+}
+
+fn tracked_unit_count() -> usize {
+    let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            let store = StateStore::at(entry.path());
+            match systemg::daemon::PidFile::load(store.clone()) {
+                Ok(pid_file) => pid_file
+                    .services()
+                    .keys()
+                    .chain(pid_file.service_pgids().keys())
+                    .collect::<HashSet<_>>()
+                    .len(),
+                Err(_) if store.pid_path().exists() => 1,
+                Err(_) => 0,
+            }
+        })
+        .sum()
 }
 
 /// Reads a config and returns the project ids it declares (or `__loose__`).
@@ -3555,7 +3612,7 @@ fn purge_projects(projects: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// Removes the supervisor-level runtime files (socket, pid, config hint).
 fn purge_runtime_files() {
-    let _ = ipc::cleanup_runtime();
+    cleanup_stopped_runtime();
 }
 
 /// Removes a directory tree, mapping any IO error to the partial-purge SG0402.
@@ -3569,35 +3626,37 @@ fn remove_tree(dir: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// Stops supervisors.
-fn stop_supervisors() {
+fn stop_supervisors() -> Result<(), Box<dyn Error>> {
     let candidates = gather_supervisor_pids();
 
     if candidates.is_empty() {
-        return;
+        stop_tracked_projects()?;
+        cleanup_stopped_runtime();
+        return Ok(());
     }
 
     let mut survivors = HashSet::new();
     let mut fallback_targets = HashSet::new();
 
     if supervisor_running() {
-        match send_control_command(ControlCommand::Shutdown) {
-            Ok(_) => {
+        match ipc::send_command_with_timeout(
+            &ControlCommand::Shutdown,
+            SUPERVISOR_REQUEST_TIMEOUT,
+        ) {
+            Ok(ipc::CommandAck::Response(_)) => {
                 for pid in &candidates {
-                    if !wait_for_supervisor_exit(*pid, Duration::from_secs(3)) {
+                    if !wait_for_supervisor_exit(*pid, SUPERVISOR_GRACEFUL_EXIT_TIMEOUT) {
                         fallback_targets.insert(*pid);
                     }
                 }
             }
+            Ok(ipc::CommandAck::Pending) => fallback_targets.extend(&candidates),
             Err(err) => {
-                if let Some(control_err) = err.downcast_ref::<ControlError>() {
-                    match control_err {
-                        ControlError::NotAvailable => warn!(
-                            "Supervisor IPC unavailable during purge; falling back to signal-based shutdown"
-                        ),
-                        other => warn!("Failed to request supervisor shutdown: {other}"),
-                    }
-                } else {
-                    warn!("Failed to request supervisor shutdown: {err}");
+                match err {
+                    ControlError::NotAvailable => warn!(
+                        "Supervisor IPC unavailable during shutdown; falling back to its recorded identity"
+                    ),
+                    other => warn!("Failed to request supervisor shutdown: {other}"),
                 }
                 fallback_targets.extend(&candidates);
             }
@@ -3609,49 +3668,89 @@ fn stop_supervisors() {
     survivors.extend(fallback_targets);
 
     if survivors.is_empty() {
-        return;
+        stop_tracked_projects()?;
+        cleanup_stopped_runtime();
+        return Ok(());
     }
 
     for pid in gather_supervisor_pids() {
         survivors.insert(pid);
     }
 
+    let mut first_error: Option<Box<dyn Error>> = None;
     for pid in survivors {
-        force_kill(pid);
+        if let Err(err) = force_kill(pid) {
+            first_error.get_or_insert_with(|| Box::new(err));
+        }
+    }
+    if let Err(err) = stop_tracked_projects() {
+        first_error.get_or_insert_with(|| Box::new(err));
+    }
+    cleanup_stopped_runtime();
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
 
-/// Gathers supervisor pids.
-fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything(),
-    );
-
-    let mut set = HashSet::new();
-
-    if let Ok(Some(pid)) = ipc::read_supervisor_pid() {
-        set.insert(pid);
+fn cleanup_stopped_runtime() {
+    if let Ok(_lock) = ipc::lock_supervisor_runtime() {
+        let _ = ipc::cleanup_runtime();
     }
+}
 
-    let current_pid = process::id();
-
-    for (pid, process) in system.processes() {
-        if pid.as_u32() == current_pid {
+fn stop_tracked_projects() -> Result<(), systemg::error::ProcessManagerError> {
+    let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(());
+    };
+    let mut first_error = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
-
-        if is_supervisor(process) {
-            set.insert(pid.as_u32() as libc::pid_t);
+        if let Err(err) = Daemon::stop_tracked(StateStore::at(path.clone())) {
+            warn!(
+                "Failed to stop every tracked process in {}: {err}",
+                path.display()
+            );
+            first_error.get_or_insert(err);
         }
     }
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
 
+/// Returns the verified PID of the supervisor that owns the current runtime.
+///
+/// The control-socket peer is authoritative. A recorded PID is accepted only
+/// when it still names a session-leading `sysg` supervisor process.
+fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
+    let mut system = System::new();
+    let mut set = HashSet::new();
+    if let Some(pid) = verified_supervisor_pid() {
+        set.insert(pid);
+        return set;
+    }
+    if let Ok(Some(pid)) = ipc::read_supervisor_pid() {
+        let target = SysPid::from_u32(pid as u32);
+        system.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+        let session_leader = unsafe { libc::getsid(pid) } == pid;
+        if session_leader && system.process(target).is_some_and(is_supervisor) {
+            set.insert(pid);
+        } else {
+            warn!(
+                "Refusing to signal recorded supervisor PID {pid}: it is not a sysg supervisor"
+            );
+        }
+    }
     set
 }
 
-/// Returns whether supervisor.
+/// Returns whether a process command line identifies a `sysg` supervisor.
 fn is_supervisor(process: &sysinfo::Process) -> bool {
     let cmd = process.cmd();
     if cmd.is_empty() {
@@ -3668,7 +3767,6 @@ fn is_supervisor(process: &sysinfo::Process) -> bool {
     }
 
     let mut has_supervisor_command = false;
-    let mut has_daemonize = false;
     let mut is_reexec_supervise = false;
 
     for arg in cmd {
@@ -3677,15 +3775,13 @@ fn is_supervisor(process: &sysinfo::Process) -> bool {
             has_supervisor_command = true;
         } else if value == "supervise" {
             is_reexec_supervise = true;
-        } else if value == "--daemonize" {
-            has_daemonize = true;
         }
     }
 
-    is_reexec_supervise || (has_supervisor_command && has_daemonize)
+    is_reexec_supervise || has_supervisor_command
 }
 
-/// Waits for for supervisor exit.
+/// Waits up to `timeout` for `pid` to disappear or become a zombie.
 fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let target = Pid::from_raw(pid);
@@ -3696,7 +3792,7 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
                 if process_exited(pid) {
                     return true;
                 }
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(PROCESS_CHECK_INTERVAL);
             }
             Err(err) => {
                 if err == nix::Error::from(nix::errno::Errno::ESRCH) {
@@ -3705,7 +3801,7 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
                 if process_exited(pid) {
                     return true;
                 }
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(PROCESS_CHECK_INTERVAL);
             }
         }
     }
@@ -3731,14 +3827,31 @@ fn wait_for_runtime_cleared(timeout: Duration) {
         if socket_gone && pid_gone {
             return;
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(SERVICE_POLL_INTERVAL);
     }
 }
 
-/// Forcefully terminates kill.
-fn force_kill(pid: libc::pid_t) {
-    if wait_for_supervisor_exit(pid, Duration::from_millis(100)) {
-        return;
+/// Terminates a verified supervisor and confirms that the process exited.
+fn force_kill(pid: libc::pid_t) -> io::Result<()> {
+    if wait_for_supervisor_exit(pid, PROCESS_CHECK_INTERVAL) {
+        return Ok(());
+    }
+
+    let verified_peer = verified_supervisor_pid() == Some(pid);
+    let verified_process = if verified_peer {
+        true
+    } else {
+        let target = SysPid::from_u32(pid as u32);
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+        (unsafe { libc::getsid(pid) }) == pid
+            && system.process(target).is_some_and(is_supervisor)
+    };
+    if !verified_process {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing to force-kill unverified supervisor PID {pid}"),
+        ));
     }
 
     let pgid = unsafe { libc::getpgid(pid) };
@@ -3749,8 +3862,8 @@ fn force_kill(pid: libc::pid_t) {
         unsafe { libc::kill(pid, SIGTERM) };
     }
 
-    if wait_for_supervisor_exit(pid, Duration::from_secs(2)) {
-        return;
+    if wait_for_supervisor_exit(pid, SUPERVISOR_FORCE_EXIT_TIMEOUT) {
+        return Ok(());
     }
 
     if pgid >= 0 && pgid == pid {
@@ -3759,40 +3872,27 @@ fn force_kill(pid: libc::pid_t) {
         unsafe { libc::kill(pid, SIGKILL) };
     }
 
-    let _ = wait_for_supervisor_exit(pid, Duration::from_secs(2));
+    if wait_for_supervisor_exit(pid, SUPERVISOR_FORCE_EXIT_TIMEOUT) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("supervisor PID {pid} survived SIGKILL"),
+        ))
+    }
 }
 
-/// Handles process exited.
+/// Returns whether a process is absent, dead, or waiting to be reaped.
 fn process_exited(pid: libc::pid_t) -> bool {
-    let proc_root = PathBuf::from(format!("/proc/{pid}"));
-    if !proc_root.exists() {
-        return true;
-    }
-
-    match read_proc_state(pid) {
-        Some('Z') | Some('X') => true,
-        Some(_) => false,
-        None => false,
-    }
-}
-
-/// Reads proc state.
-fn read_proc_state(pid: libc::pid_t) -> Option<char> {
-    let stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
-    let contents = fs::read_to_string(stat_path).ok()?;
-    let mut parts = contents.split_whitespace();
-    parts.next()?;
-    let mut name_part = parts.next()?;
-    if !name_part.ends_with(')') {
-        for part in parts.by_ref() {
-            name_part = part;
-            if name_part.ends_with(')') {
-                break;
-            }
-        }
-    }
-
-    parts.next()?.chars().next()
+    let target = SysPid::from_u32(pid as u32);
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+    system.process(target).is_none_or(|process| {
+        matches!(
+            process.status(),
+            ProcessStatus::Dead | ProcessStatus::Zombie
+        )
+    })
 }
 
 /// Initializes logging.
@@ -3846,6 +3946,8 @@ fn start_foreground(
 ) -> Result<(), Box<dyn Error>> {
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
     let project_id = config.project.id.clone();
+    let attach_config = config_path.clone();
+    let attach_service = service.clone();
 
     let child_pid = unsafe { libc::fork() };
     if child_pid < 0 {
@@ -3856,22 +3958,45 @@ fn start_foreground(
         unsafe {
             libc::setsid();
         }
-
-        let mut supervisor = Supervisor::new_with_mode(
-            config_path,
+        silence_stdio()?;
+        reexec_supervisor(
+            &config_path,
+            service.as_deref(),
+            pipe_stderr,
             false,
-            service,
             ProjectRunMode::Foreground,
-        )?;
-        supervisor.set_pipe_stderr(pipe_stderr);
-        if let Err(err) = supervisor.run() {
-            error!("Supervisor exited with error: {err}");
-            process::exit(1);
-        }
-        process::exit(0);
+        );
+        run_supervisor_in_process(
+            config_path,
+            service,
+            pipe_stderr,
+            ProjectRunMode::Foreground,
+        );
     }
 
-    with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid))?;
+    if let Err(err) =
+        with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid))
+    {
+        unsafe {
+            libc::waitpid(child_pid, std::ptr::null_mut(), libc::WNOHANG);
+        }
+        if supervisor_running() {
+            return start_foreground_attached(attach_config, attach_service);
+        }
+        return Err(err);
+    }
+
+    println!("Starting project '{project_id}' in the foreground…");
+    println!("Streaming its services' output; press Ctrl-C to stop the project.");
+    let boot_progress = match spawn_boot_progress_reporter(project_id.clone()) {
+        Ok(progress) => progress,
+        Err(err) => {
+            let _ = ipc::send_command(&ControlCommand::StopProject {
+                project: project_id,
+            });
+            return Err(err.into());
+        }
+    };
 
     // Stream ONLY this project's service logs to the terminal via a scoped follow
     // (the supervisor's own tracing goes to the log file, and service log writers
@@ -3879,18 +4004,47 @@ fn start_foreground(
     // output cleanly instead of every managed service + supervisor internals.
     let streaming = Arc::new(AtomicBool::new(true));
     let shutdown = Arc::new(std::sync::Mutex::new(None));
-    let follow_handle = spawn_foreground_log_follow(
+    let follow_handle = match spawn_foreground_log_follow(
         project_id.clone(),
         streaming.clone(),
         shutdown.clone(),
-    );
+    ) {
+        Ok(handle) => handle,
+        Err(err) => {
+            boot_progress.stop();
+            let _ = ipc::send_command(&ControlCommand::StopProject {
+                project: project_id,
+            });
+            return Err(err.into());
+        }
+    };
+
+    let boot_report = collect_boot_report(false);
+    boot_progress.stop();
+    let boot_report = match boot_report {
+        Ok(report) => report,
+        Err(err) => {
+            stop_foreground_follow(&streaming, &shutdown);
+            let _ = ipc::send_command(&ControlCommand::StopProject {
+                project: project_id,
+            });
+            let _ = follow_handle.join();
+            return Err(err);
+        }
+    };
+    if let Some(diag) = boot_report.failures.into_iter().next() {
+        stop_foreground_follow(&streaming, &shutdown);
+        let _ = ipc::send_command(&ControlCommand::StopProject {
+            project: project_id,
+        });
+        let _ = follow_handle.join();
+        return Err(Box::new(DiagError(Box::new(diag))));
+    }
 
     let result =
         wait_for_foreground_attachment(project_id, streaming.clone(), shutdown.clone());
     streaming.store(false, Ordering::SeqCst);
-    if let Some(handle) = follow_handle {
-        let _ = handle.join();
-    }
+    let _ = follow_handle.join();
     result
 }
 
@@ -3906,6 +4060,7 @@ fn start_foreground_attached(
         service,
         mode: ProjectRunMode::Foreground,
     };
+    let ctrlc = foreground_ctrlc()?;
     // NO spinner here. A foreground start's whole purpose is to show the
     // project's output, and the fork path (`start_foreground`) prints its header
     // and streams straight away. Wrapping the attach in a spinner made the two
@@ -3918,31 +4073,74 @@ fn start_foreground_attached(
     // line, and a bare spinner left the user unable to tell working from wedged.
     println!("Starting project '{project_id}' in the foreground…");
     println!("Streaming its services' output; press Ctrl-C to stop the project.");
-    let boot_progress = spawn_boot_progress_reporter(project_id.clone());
-    send_control_command(command)?;
-    boot_progress.stop();
 
-    // The become-supervisor foreground path streams its services' output to the
-    // terminal; the attach-to-existing path must do the same. Stream IN-PROCESS
-    // (not via a spawned child, which fought for the terminal, took SIGTTOU, and
-    // died silently mid-stream) on a supervised follow loop that reconnects
-    // VISIBLY on any drop and only stops when this process asks it to.
     let streaming = Arc::new(AtomicBool::new(true));
     let shutdown = Arc::new(std::sync::Mutex::new(None));
     let follow_handle = spawn_foreground_log_follow(
         project_id.clone(),
         streaming.clone(),
         shutdown.clone(),
-    );
+    )?;
 
-    let result =
-        wait_for_foreground_attachment(project_id, streaming.clone(), shutdown.clone());
+    let boot_progress = match spawn_boot_progress_reporter(project_id.clone()) {
+        Ok(progress) => progress,
+        Err(err) => {
+            stop_foreground_follow(&streaming, &shutdown);
+            let _ = follow_handle.join();
+            return Err(err.into());
+        }
+    };
+    let (boot_tx, boot_rx) = mpsc::sync_channel(FOREGROUND_BOOT_RESULT_CAPACITY);
+    let boot_handle = match thread::Builder::new()
+        .name(FOREGROUND_BOOT_THREAD.into())
+        .spawn(move || {
+            let result =
+                send_control_command_inner(command, false).map_err(|err| err.to_string());
+            let _ = boot_tx.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(err) => {
+            boot_progress.stop();
+            stop_foreground_follow(&streaming, &shutdown);
+            let _ = follow_handle.join();
+            return Err(err.into());
+        }
+    };
+    let boot_result = loop {
+        match boot_rx.recv_timeout(PROCESS_CHECK_INTERVAL) {
+            Ok(result) => break result,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Err("foreground boot worker stopped".to_string());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if ctrlc.try_recv().is_ok() {
+            stop_foreground_follow(&streaming, &shutdown);
+            let stop_result = stop_foreground_project(&project_id);
+            let _ = boot_handle.join();
+            boot_progress.stop();
+            let _ = follow_handle.join();
+            return stop_result;
+        }
+    };
+    let _ = boot_handle.join();
+    boot_progress.stop();
+    if let Err(err) = boot_result {
+        stop_foreground_follow(&streaming, &shutdown);
+        let _ = follow_handle.join();
+        return Err(io::Error::other(err).into());
+    }
+
+    let result = wait_for_foreground_attachment_with_ctrlc(
+        project_id,
+        streaming.clone(),
+        shutdown.clone(),
+        ctrlc,
+    );
     // The wait already cleared the flag and force-closed the stream on its exit
     // path; join the (now unblocked) follow thread.
     streaming.store(false, Ordering::SeqCst);
-    if let Some(handle) = follow_handle {
-        let _ = handle.join();
-    }
+    let _ = follow_handle.join();
     result
 }
 
@@ -3972,7 +4170,7 @@ impl BootProgressReporter {
 /// its live operation (dependency waits, health-check attempts) through the op
 /// slot; this surfaces it, printing only when the message CHANGES so a slow step
 /// does not scroll the terminal.
-fn spawn_boot_progress_reporter(project_id: String) -> BootProgressReporter {
+fn spawn_boot_progress_reporter(project_id: String) -> io::Result<BootProgressReporter> {
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = Arc::clone(&running);
     let handle = thread::Builder::new()
@@ -3989,11 +4187,13 @@ fn spawn_boot_progress_reporter(project_id: String) -> BootProgressReporter {
                         last = line;
                     }
                 }
-                thread::sleep(Duration::from_millis(400));
+                thread::sleep(BOOT_PROGRESS_INTERVAL);
             }
-        })
-        .ok();
-    BootProgressReporter { running, handle }
+        })?;
+    Ok(BootProgressReporter {
+        running,
+        handle: Some(handle),
+    })
 }
 
 /// Streams a foreground project's logs in-process on a supervised loop. Connects
@@ -4005,7 +4205,7 @@ fn spawn_foreground_log_follow(
     project_id: String,
     streaming: Arc<AtomicBool>,
     shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
-) -> Option<thread::JoinHandle<()>> {
+) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("fg-logs-{project_id}"))
         .spawn(move || {
@@ -4016,7 +4216,7 @@ fn spawn_foreground_log_follow(
             // every completed one-shot — dumped into a live terminal. Measured
             // on a real project: 32 reconnects replayed the build/probe history
             // 32 times. After the first attach a follow must TAIL ONLY.
-            let mut backlog_lines = 20usize;
+            let mut backlog_lines = FOREGROUND_BACKLOG_LINES;
             // A project that has not registered its first unit yet is BOOTING,
             // not gone. `supervisor_running()` goes true when the control socket
             // appears — well before any service is spawned — so without this
@@ -4048,7 +4248,10 @@ fn spawn_foreground_log_follow(
                 );
                 let _ = writer.flush();
                 // Subsequent attempts tail only: no backlog replay.
-                backlog_lines = 20;
+                let loaded_now = project_loaded_in_supervisor(&project_id);
+                if outcome.is_ok() || project_ever_seen || loaded_now {
+                    backlog_lines = 0;
+                }
                 // Drop the connection handle now that this attempt ended, so a
                 // stale shutdown target isn't left dangling between reconnects.
                 if let Ok(mut guard) = shutdown.lock() {
@@ -4062,7 +4265,7 @@ fn spawn_foreground_log_follow(
                 // The project is genuinely gone — nothing left to follow. During
                 // the startup grace an unseen project is still booting, so keep
                 // retrying instead of retiring the stream.
-                if project_loaded_in_supervisor(&project_id) {
+                if loaded_now {
                     project_ever_seen = true;
                 } else if project_ever_seen || Instant::now() >= startup_grace {
                     if announced_interrupt {
@@ -4070,11 +4273,11 @@ fn spawn_foreground_log_follow(
                     }
                     return;
                 } else {
-                    for _ in 0..2 {
+                    for _ in 0..FOREGROUND_START_RETRIES {
                         if !streaming.load(Ordering::SeqCst) {
                             return;
                         }
-                        thread::sleep(Duration::from_millis(250));
+                        thread::sleep(FOREGROUND_POLL_INTERVAL);
                     }
                     continue;
                 }
@@ -4088,15 +4291,14 @@ fn spawn_foreground_log_follow(
                     ),
                 }
                 announced_interrupt = true;
-                for _ in 0..4 {
+                for _ in 0..FOREGROUND_RECONNECT_RETRIES {
                     if !streaming.load(Ordering::SeqCst) {
                         return;
                     }
-                    thread::sleep(Duration::from_millis(250));
+                    thread::sleep(FOREGROUND_POLL_INTERVAL);
                 }
             }
         })
-        .ok()
 }
 
 /// Stops the log-follow: clears the streaming flag and force-closes the live
@@ -4121,11 +4323,25 @@ fn wait_for_foreground_attachment(
     streaming: Arc<AtomicBool>,
     shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
 ) -> Result<(), Box<dyn Error>> {
+    let ctrlc = foreground_ctrlc()?;
+    wait_for_foreground_attachment_with_ctrlc(project_id, streaming, shutdown, ctrlc)
+}
+
+/// Installs the foreground Ctrl-C handler and returns its notification channel.
+fn foreground_ctrlc() -> Result<mpsc::Receiver<()>, ctrlc::Error> {
     let (tx, rx) = mpsc::channel();
     ctrlc::set_handler(move || {
         let _ = tx.send(());
     })?;
+    Ok(rx)
+}
 
+fn wait_for_foreground_attachment_with_ctrlc(
+    project_id: String,
+    streaming: Arc<AtomicBool>,
+    shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+    ctrlc: mpsc::Receiver<()>,
+) -> Result<(), Box<dyn Error>> {
     // Wake on Ctrl-C, the supervisor disappearing, OR this project being stopped
     // out from under us. Blocking only on Ctrl-C wedged the foreground forever
     // when a `stop --supervisor`/crash tore the supervisor down, OR when a
@@ -4141,7 +4357,7 @@ fn wait_for_foreground_attachment(
     let mut project_ever_seen = false;
     let startup_grace = Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
     loop {
-        if rx.recv_timeout(Duration::from_millis(250)).is_ok() {
+        if ctrlc.recv_timeout(FOREGROUND_POLL_INTERVAL).is_ok() {
             break;
         }
         if !supervisor_running() {
@@ -4161,26 +4377,7 @@ fn wait_for_foreground_attachment(
     // Ctrl-C: stop the console stream at once, then tear down the project.
     stop_foreground_follow(&streaming, &shutdown);
 
-    let stop_result: Result<(), Box<dyn Error>> =
-        match ipc::send_command(&ControlCommand::StopProject {
-            project: project_id.clone(),
-        }) {
-            Ok(ControlResponse::Message(message)) => {
-                println!("{message}");
-                Ok(())
-            }
-            Ok(ControlResponse::Ok) => Ok(()),
-            Ok(ControlResponse::Error(message)) => {
-                Err(ControlError::Server(message).into())
-            }
-            Ok(other) => Err(io::Error::other(format!(
-                "unexpected supervisor response: {:?}",
-                other
-            ))
-            .into()),
-            Err(err) => Err(err.into()),
-        };
-    stop_result?;
+    stop_foreground_project(&project_id)?;
 
     // The supervisor is impartial, warm-persistent infrastructure: it does NOT
     // shut down just because its last project left. Ctrl-C on a foreground
@@ -4191,24 +4388,49 @@ fn wait_for_foreground_attachment(
     Ok(())
 }
 
+fn stop_foreground_project(project_id: &str) -> Result<(), Box<dyn Error>> {
+    match ipc::send_command(&ControlCommand::StopProject {
+        project: project_id.to_string(),
+    }) {
+        Ok(ControlResponse::Message(message)) => {
+            println!("{message}");
+            Ok(())
+        }
+        Ok(ControlResponse::Ok) => Ok(()),
+        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
+        Ok(other) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {:?}",
+            other
+        ))
+        .into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Waits for a newly forked supervisor child to publish its control socket.
 fn wait_for_supervisor_ready(child_pid: libc::pid_t) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + SUPERVISOR_CONNECT_TIMEOUT;
     while Instant::now() < deadline {
-        if supervisor_running() {
-            return Ok(());
+        if let Some(peer) = verified_supervisor_pid() {
+            if peer == child_pid {
+                return Ok(());
+            }
+            if process_exited(child_pid) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("supervisor PID {peer} acquired the runtime first"),
+                )
+                .into());
+            }
         }
 
-        let target = Pid::from_raw(child_pid);
-        if let Err(err) = signal::kill(target, None)
-            && err == nix::Error::from(nix::errno::Errno::ESRCH)
-        {
+        if process_exited(child_pid) {
             return Err(
                 io::Error::other("foreground supervisor exited during startup").into(),
             );
         }
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(SERVICE_POLL_INTERVAL);
     }
 
     Err(io::Error::new(
@@ -4333,17 +4555,13 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
     let health = supervisor_health();
 
     if let StopPlan::Supervisor = plan {
-        // A dying supervisor is already on its way out — a Shutdown that can't be
-        // delivered would error spuriously. Clear the wedged runtime and report
-        // it down.
-        if health == SupervisorHealth::Dying {
-            warn!(
-                "Supervisor is not answering its control socket; clearing the stale runtime instead of messaging it"
-            );
-            let _ = ipc::cleanup_runtime();
-            return Ok(());
+        stop_supervisors()?;
+        wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
+        if supervisor_running() {
+            return Err(Box::new(DiagError(Box::new(
+                supervisor_not_responding_diag(),
+            ))));
         }
-        send_control_command(ControlCommand::Shutdown)?;
         return Ok(());
     }
 
@@ -4464,29 +4682,18 @@ fn dispatch_start_daemonize(
             match dispatch_start_resident(plan.clone()) {
                 Ok(()) => return Ok(()),
                 Err(err) if error_is_supervisor_shutting_down(err.as_ref()) => {
-                    // Healthy at probe, gone at command: a concurrent
-                    // `stop --supervisor` tore the resident daemon down between
-                    // the health check and the command landing, so its owner
-                    // thread dropped our request. Clear the dead runtime and
-                    // fork fresh instead of surfacing a race as a failure.
-                    warn!(
-                        "Resident supervisor shut down while starting; clearing the runtime and forking a fresh supervisor"
-                    );
-                    let _ = ipc::cleanup_runtime();
-                    wait_for_runtime_cleared(Duration::from_secs(5));
+                    wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
+                    if supervisor_running() {
+                        return Err(err);
+                    }
                 }
                 Err(err) => return Err(err),
             }
         }
         SupervisorHealth::Dying => {
-            // A supervisor whose pid is alive but not serving would swallow a
-            // resident start. Clear the wedged runtime and fork fresh rather
-            // than route into it — this is the "had to sysg purge" prod pain,
-            // recovered automatically.
-            warn!(
-                "Resident supervisor is not answering its control socket; clearing the stale runtime and forking a fresh supervisor"
-            );
-            let _ = ipc::cleanup_runtime();
+            return Err(Box::new(DiagError(Box::new(
+                supervisor_not_responding_diag(),
+            ))));
         }
         SupervisorHealth::Down => {}
     }
@@ -4641,7 +4848,7 @@ fn await_queued_boot(project: &str) -> Vec<String> {
     // any verdict.
     let mut boot_began = false;
     while Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(400));
+        thread::sleep(BOOT_PROGRESS_INTERVAL);
         let Some(units) = project_service_units(project) else {
             continue;
         };
@@ -4652,15 +4859,26 @@ fn await_queued_boot(project: &str) -> Vec<String> {
         // reached a state worth reporting.
         let pending = units
             .iter()
-            .any(|(_, state)| matches!(state.as_str(), "starting" | "unknown"));
+            .any(|(_, state)| matches!(state, UnitState::Unknown));
         if pending {
             boot_began = true;
             continue;
         }
+        let bind_failed = units.iter().any(|(service, state)| {
+            *state == UnitState::Failed
+                && systemg::daemon::output_indicates_port_conflict(
+                    &systemg::logs::tail_service_log(
+                        project,
+                        service,
+                        PORT_DIAGNOSTIC_TAIL_LINES,
+                    ),
+                )
+        });
         if !boot_began {
             if units
                 .iter()
-                .any(|(_, state)| matches!(state.as_str(), "running" | "done"))
+                .any(|(_, state)| matches!(state, UnitState::Running | UnitState::Done))
+                || bind_failed
             {
                 boot_began = true;
             } else {
@@ -4670,7 +4888,12 @@ fn await_queued_boot(project: &str) -> Vec<String> {
         }
         let down: Vec<String> = units
             .iter()
-            .filter(|(_, state)| matches!(state.as_str(), "stopped" | "failed" | "lost"))
+            .filter(|(_, state)| {
+                matches!(
+                    state,
+                    UnitState::Stopped | UnitState::Failed | UnitState::Lost
+                )
+            })
             .map(|(name, _)| name.clone())
             .collect();
 
@@ -4678,6 +4901,10 @@ fn await_queued_boot(project: &str) -> Vec<String> {
         // slow pre-start room to finish, so a healthy project must never pay it.
         if down.is_empty() {
             return Vec::new();
+        }
+
+        if bind_failed {
+            return down;
         }
 
         // Something is down. It may still be retrying — a service whose
@@ -4690,7 +4917,15 @@ fn await_queued_boot(project: &str) -> Vec<String> {
     project_service_units(project)
         .unwrap_or_default()
         .into_iter()
-        .filter(|(_, state)| matches!(state.as_str(), "stopped" | "failed" | "lost"))
+        .filter(|(_, state)| {
+            matches!(
+                state,
+                UnitState::Unknown
+                    | UnitState::Stopped
+                    | UnitState::Failed
+                    | UnitState::Lost
+            )
+        })
         .map(|(name, _)| name)
         .collect()
 }
@@ -4699,7 +4934,7 @@ fn await_queued_boot(project: &str) -> Vec<String> {
 /// when no snapshot is available. Cron units are excluded: they register
 /// synchronously and are `queued` by design, so they never indicate whether the
 /// project's services actually booted.
-fn project_service_units(project: &str) -> Option<Vec<(String, String)>> {
+fn project_service_units(project: &str) -> Option<Vec<(String, UnitState)>> {
     let ControlResponse::Status(snapshot) =
         ipc::send_command(&ControlCommand::Status { live: false }).ok()?
     else {
@@ -4716,12 +4951,7 @@ fn project_service_units(project: &str) -> Option<Vec<(String, String)>> {
                         .as_ref()
                         .is_some_and(|owner| owner.id == project)
             })
-            .map(|unit| {
-                (
-                    unit.name.clone(),
-                    format!("{:?}", unit.state).to_lowercase(),
-                )
-            })
+            .map(|unit| (unit.name.clone(), unit.state))
             .collect(),
     )
 }
@@ -4784,23 +5014,42 @@ fn start_supervisor_daemon(
 
     if child_pid == 0 {
         detach_daemon()?;
-        reexec_supervisor(&config_path, service.as_deref(), pipe_stderr, verbose);
-        run_supervisor_in_process(config_path, service, pipe_stderr);
+        reexec_supervisor(
+            &config_path,
+            service.as_deref(),
+            pipe_stderr,
+            verbose,
+            ProjectRunMode::Daemon,
+        );
+        run_supervisor_in_process(
+            config_path,
+            service,
+            pipe_stderr,
+            ProjectRunMode::Daemon,
+        );
     }
 
     // Wait for the child to publish its socket, then follow the boot stream so
     // the parent reports the truth of what came up — not just "socket is live".
-    wait_for_supervisor_ready(child_pid).map_err(|err| -> Box<dyn Error> {
+    if let Err(err) = wait_for_supervisor_ready(child_pid) {
+        unsafe {
+            libc::waitpid(child_pid, std::ptr::null_mut(), libc::WNOHANG);
+        }
+        if supervisor_running() {
+            return send_control_command(ControlCommand::AddProject {
+                config: config_path.to_string_lossy().to_string(),
+                service,
+                mode: ProjectRunMode::Daemon,
+            });
+        }
         use systemg::diag::{Diagnostic, SgCode};
-        // Point the user at `sysg logs --supervisor`, never a raw file path or an
-        // external tool — sysg owns its logs and its help must route through it.
-        Box::new(DiagError(Box::new(
+        return Err(Box::new(DiagError(Box::new(
             Diagnostic::error(SgCode::Catchall, "the supervisor did not come up in time")
                 .note(err.to_string())
                 .help_cmd("read the supervisor log", "sysg logs --supervisor")
                 .help_docs(),
-        )))
-    })?;
+        ))));
+    }
 
     let report = follow_boot(verbose)?;
     if let Some(diag) = report.failures.into_iter().next() {
@@ -4809,8 +5058,8 @@ fn start_supervisor_daemon(
     Ok(())
 }
 
-/// Re-execs this binary into the internal `supervise` subcommand so the daemon
-/// starts from a clean, single-threaded process image.
+/// Re-execs this binary into the internal `supervise` subcommand so a new
+/// supervisor starts from a clean, single-threaded process image.
 ///
 /// `fork()` in a multithreaded process is a trap: only the forking thread
 /// survives in the child, and any mutex a vanished thread held stays locked
@@ -4826,6 +5075,7 @@ fn reexec_supervisor(
     service: Option<&str>,
     pipe_stderr: bool,
     verbose: bool,
+    mode: ProjectRunMode,
 ) {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -4850,30 +5100,51 @@ fn reexec_supervisor(
     if verbose {
         push(&mut args, "--verbose");
     }
+    if mode == ProjectRunMode::Foreground {
+        push(&mut args, "--foreground");
+    }
     let _ = nix::unistd::execv(&args[0], &args);
 }
 
-/// Boots the supervisor in the current process and exits — the daemon's actual
-/// run body. Reached post-`execv` via the `supervise` subcommand, or as the
-/// fallback when the re-exec itself fails.
+/// Boots the supervisor in the current process and exits. Reached post-`execv`
+/// via the `supervise` subcommand, or as the fallback when re-exec fails.
 fn run_supervisor_in_process(
     config_path: PathBuf,
     service: Option<String>,
     pipe_stderr: bool,
+    mode: ProjectRunMode,
 ) -> ! {
-    let mut supervisor = match Supervisor::new(config_path, false, service) {
-        Ok(supervisor) => supervisor,
+    install_supervisor_panic_hook();
+    let mut supervisor =
+        match Supervisor::new_with_mode(config_path, false, service, mode) {
+            Ok(supervisor) => supervisor,
+            Err(err) => {
+                error!("Supervisor failed to initialize: {err}");
+                process::exit(1);
+            }
+        };
+    supervisor.set_pipe_stderr(pipe_stderr);
+    exit_supervisor(supervisor.run());
+}
+
+fn exit_supervisor(result: Result<(), SupervisorError>) -> ! {
+    match result {
+        Ok(()) => process::exit(0),
+        Err(SupervisorError::Control(ControlError::RuntimeBusy)) => {
+            info!("Another supervisor acquired the runtime first");
+            process::exit(0);
+        }
         Err(err) => {
-            error!("Supervisor failed to initialize: {err}");
+            error!("Supervisor exited with error: {err}");
             process::exit(1);
         }
-    };
-    supervisor.set_pipe_stderr(pipe_stderr);
-    if let Err(err) = supervisor.run() {
-        error!("Supervisor exited with error: {err}");
-        process::exit(1);
     }
-    process::exit(0);
+}
+
+fn install_supervisor_panic_hook() {
+    std::panic::set_hook(Box::new(|panic| {
+        error!("Supervisor panicked: {panic}");
+    }));
 }
 
 /// Subscribes to the supervisor's boot stream and renders it, returning the
@@ -4881,38 +5152,34 @@ fn run_supervisor_in_process(
 /// prints a line to stderr as it comes up.
 ///
 /// A freshly forked supervisor may not be answering the control socket the
-/// instant its PID appears, so the subscription is retried briefly. If the
-/// stream never becomes available the boot is treated as reported-nothing
-/// rather than failing the command — the services still boot in the daemon.
+/// instant its PID appears, so the subscription is retried briefly.
 fn follow_boot(verbose: bool) -> Result<systemg::start::BootReport, Box<dyn Error>> {
-    let collect = |verbose: bool| -> systemg::start::BootReport {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let mut frames = Vec::new();
-            match ipc::stream_boot_frames(|frame| frames.push(frame)) {
-                Ok(()) => {
-                    return systemg::start::render_boot(frames, verbose, io::stderr());
-                }
-                Err(_) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Err(_) => {
-                    return systemg::start::render_boot(
-                        Vec::new(),
-                        verbose,
-                        io::stderr(),
-                    );
-                }
-            }
-        }
-    };
-
     let report = if verbose {
-        collect(true)
+        collect_boot_report(true)?
     } else {
-        with_progress_spinner("Starting", || Ok::<_, Box<dyn Error>>(collect(false)))?
+        with_progress_spinner("Starting", || collect_boot_report(false))?
     };
     Ok(report)
+}
+
+/// Reads the supervisor's complete boot journal and converts it into the CLI
+/// report used to decide startup success.
+fn collect_boot_report(
+    verbose: bool,
+) -> Result<systemg::start::BootReport, Box<dyn Error>> {
+    let deadline = Instant::now() + SUPERVISOR_CONNECT_TIMEOUT;
+    loop {
+        let mut frames = Vec::new();
+        match ipc::stream_boot_frames(|frame| frames.push(frame)) {
+            Ok(()) => {
+                return Ok(systemg::start::render_boot(frames, verbose, io::stderr()));
+            }
+            Err(_) if Instant::now() < deadline => {
+                thread::sleep(SERVICE_POLL_INTERVAL);
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
 }
 
 /// Builds daemon.
@@ -5402,45 +5669,18 @@ fn resolve_config_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
 
 /// Handles supervisor running.
 fn supervisor_running() -> bool {
-    match ipc::read_supervisor_pid() {
-        Ok(Some(pid)) => {
-            let target = Pid::from_raw(pid);
-            match signal::kill(target, None) {
-                Ok(_) => true,
-                Err(err) => {
-                    if err == nix::Error::from(nix::errno::Errno::ESRCH) {
-                        let _ = ipc::cleanup_runtime();
-                        false
-                    } else {
-                        warn!("Failed to query supervisor pid {pid}: {err}");
-                        false
-                    }
-                }
-            }
-        }
-        Ok(None) | Err(_) => {
-            if let Ok(path) = ipc::socket_path()
-                && path.exists()
-            {
-                match ipc::send_command(&ControlCommand::Status { live: false }) {
-                    Ok(_) => {
-                        warn!("Found running systemg supervisor socket without PID file");
-                        return true;
-                    }
-                    Err(ControlError::NotAvailable) => {
-                        warn!("Found stale socket without PID file, cleaning up");
-                        let _ = ipc::cleanup_runtime();
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Failed to query supervisor socket without PID file: {err}"
-                        );
-                    }
-                }
-            }
-            false
+    verified_supervisor_pid().is_some()
+}
+
+fn verified_supervisor_pid() -> Option<libc::pid_t> {
+    let peer = ipc::supervisor_peer_pid().ok()? as libc::pid_t;
+    if ipc::read_supervisor_pid().ok().flatten() != Some(peer) {
+        warn!("Repairing supervisor PID file from control-socket peer {peer}");
+        if let Err(err) = ipc::write_supervisor_pid(peer) {
+            warn!("Failed to repair supervisor PID file: {err}");
         }
     }
+    Some(peer)
 }
 
 /// How much of a running supervisor is actually usable, distinguishing a healthy
@@ -5465,28 +5705,12 @@ const SUPERVISOR_PROBE_ATTEMPTS: usize = 3;
 /// shutdown — a frozen or mid-teardown daemon keeps its pid but stops serving —
 /// so a live pid is confirmed with a bounded `Status` ping over the socket.
 fn supervisor_health() -> SupervisorHealth {
-    match ipc::read_supervisor_pid() {
-        Ok(Some(pid)) => {
-            let target = Pid::from_raw(pid);
-            match signal::kill(target, None) {
-                Ok(_) => probe_serving_supervisor(),
-                Err(err) => {
-                    if err == nix::Error::from(nix::errno::Errno::ESRCH) {
-                        let _ = ipc::cleanup_runtime();
-                    } else {
-                        warn!("Failed to query supervisor pid {pid}: {err}");
-                    }
-                    SupervisorHealth::Down
-                }
-            }
-        }
-        Ok(None) | Err(_) => {
-            if supervisor_running() {
-                SupervisorHealth::Serving
-            } else {
-                SupervisorHealth::Down
-            }
-        }
+    if verified_supervisor_pid().is_some() {
+        probe_serving_supervisor()
+    } else if !gather_supervisor_pids().is_empty() {
+        SupervisorHealth::Dying
+    } else {
+        SupervisorHealth::Down
     }
 }
 
@@ -5500,13 +5724,19 @@ fn supervisor_health() -> SupervisorHealth {
 fn probe_serving_supervisor() -> SupervisorHealth {
     for _ in 0..SUPERVISOR_PROBE_ATTEMPTS {
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let ack = ipc::send_command_with_timeout(
-                &ControlCommand::Status { live: false },
-                SUPERVISOR_PROBE_TIMEOUT,
-            );
-            let _ = tx.send(matches!(ack, Ok(ipc::CommandAck::Response(_))));
-        });
+        if thread::Builder::new()
+            .name(SUPERVISOR_PROBE_THREAD.into())
+            .spawn(move || {
+                let ack = ipc::send_command_with_timeout(
+                    &ControlCommand::Status { live: false },
+                    SUPERVISOR_PROBE_TIMEOUT,
+                );
+                let _ = tx.send(matches!(ack, Ok(ipc::CommandAck::Response(_))));
+            })
+            .is_err()
+        {
+            continue;
+        }
         match rx.recv_timeout(SUPERVISOR_PROBE_DEADLINE) {
             Ok(true) => return SupervisorHealth::Serving,
             Ok(false) | Err(_) => continue,
@@ -5530,9 +5760,18 @@ fn supervisor_not_responding_diag() -> systemg::diag::Diagnostic {
 
 /// Sends control command.
 fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
+    send_control_command_inner(command, true)
+}
+
+fn send_control_command_inner(
+    command: ControlCommand,
+    announce: bool,
+) -> Result<(), Box<dyn Error>> {
     match ipc::send_command(&command) {
         Ok(ControlResponse::Message(message)) => {
-            println!("{message}");
+            if announce {
+                println!("{message}");
+            }
             Ok(())
         }
         Ok(ControlResponse::Ok) => Ok(()),
@@ -5549,11 +5788,7 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
         Ok(ControlResponse::CurrentOp(_)) => Ok(()),
-        Err(ControlError::NotAvailable) => {
-            warn!("No running systemg supervisor found; skipping command");
-            let _ = ipc::cleanup_runtime();
-            Ok(())
-        }
+        Err(ControlError::NotAvailable) => Err(ControlError::NotAvailable.into()),
         Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
         Err(err) => Err(err.into()),
     }
@@ -5693,9 +5928,9 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
         ))));
     }
 
-    stop_supervisors();
-    wait_for_runtime_cleared(Duration::from_secs(5));
-    let _ = ipc::cleanup_runtime();
+    stop_supervisors()?;
+    wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
+    cleanup_stopped_runtime();
     let recovery_path = config_path.clone();
     start_supervisor_daemon(config_path, None, false, false).map_err(|err| {
         Box::new(DiagError(Box::new(systemg::restart::recycle_failed(
@@ -5711,7 +5946,8 @@ fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {
         ControlError::Server(message) => supervisor_error_is_protocol_mismatch(message),
         ControlError::MissingHome
         | ControlError::Unauthorized(_)
-        | ControlError::Timeout => false,
+        | ControlError::Timeout
+        | ControlError::RuntimeBusy => false,
         ControlError::Io(err) => matches!(
             err.kind(),
             io::ErrorKind::UnexpectedEof
@@ -5747,7 +5983,15 @@ fn detach_daemon() -> std::io::Result<()> {
     }
 
     std::env::set_current_dir("/")?;
-    let devnull = std::fs::File::open("/dev/null")?;
+    silence_stdio()
+}
+
+/// Redirects inherited terminal descriptors away from a resident supervisor.
+fn silence_stdio() -> std::io::Result<()> {
+    let devnull = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?;
     let fd = devnull.into_raw_fd();
     unsafe {
         let _ = libc::dup2(fd, libc::STDIN_FILENO);

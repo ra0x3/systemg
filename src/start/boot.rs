@@ -81,7 +81,9 @@ impl BootJournal {
     /// [`BootFrame::Done`] is ignored so the terminal frame stays terminal.
     pub fn push(&self, frame: BootFrame) {
         let (lock, cvar) = &*self.inner;
-        let mut guard = lock.lock().expect("boot journal poisoned");
+        let mut guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.done {
             return;
         }
@@ -103,7 +105,11 @@ impl BootJournal {
 
     /// Whether boot has finished (a `Done` frame was recorded).
     pub fn is_done(&self) -> bool {
-        self.inner.0.lock().expect("boot journal poisoned").done
+        self.inner
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .done
     }
 
     /// Every frame in the order recorded, done-or-not. For replay to a new
@@ -112,7 +118,7 @@ impl BootJournal {
         self.inner
             .0
             .lock()
-            .expect("boot journal poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .frames
             .clone()
     }
@@ -122,9 +128,13 @@ impl BootJournal {
     /// `let next = j.wait_from(seen); seen += next.len();` until it sees `Done`.
     pub fn wait_from(&self, from: usize) -> Vec<BootFrame> {
         let (lock, cvar) = &*self.inner;
-        let mut guard = lock.lock().expect("boot journal poisoned");
+        let mut guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         while guard.frames.len() <= from && !guard.done {
-            guard = cvar.wait(guard).expect("boot journal poisoned");
+            guard = cvar
+                .wait(guard)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         guard.frames.get(from..).unwrap_or(&[]).to_vec()
     }

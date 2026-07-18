@@ -86,6 +86,12 @@ impl StateStore {
     pub fn cron_path(&self) -> PathBuf {
         self.dir.join(CRON_FILE_NAME)
     }
+
+    /// Path to the project's cron-state file lock.
+    pub fn cron_lock_path(&self) -> PathBuf {
+        self.dir
+            .join(format!("{}{}", CRON_FILE_NAME, PID_LOCK_SUFFIX))
+    }
 }
 
 #[cfg(test)]

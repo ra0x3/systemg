@@ -96,6 +96,12 @@ esac
 
 NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
+if FILE_MODE=$(stat -f '%Lp' "$CARGO_TOML" 2>/dev/null); then
+  :
+else
+  FILE_MODE=$(stat -c '%a' "$CARGO_TOML")
+fi
+
 TMP_FILE=$(mktemp "${TMPDIR:-/tmp}/version-bump.XXXXXX")
 trap 'rm -f "$TMP_FILE"' EXIT INT TERM
 
@@ -114,10 +120,11 @@ awk -v new_version="$NEW_VERSION" '
   }
 ' "$CARGO_TOML" > "$TMP_FILE" || die "failed to update package.version"
 
+chmod "$FILE_MODE" "$TMP_FILE"
 mv "$TMP_FILE" "$CARGO_TOML"
 trap - EXIT INT TERM
 
 printf 'Bumped systemg version: %s -> %s\n' "$CURRENT_VERSION" "$NEW_VERSION"
 
 cd "$REPO_ROOT"
-cargo check
+cargo build --release

@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -58,6 +59,33 @@ pub fn bind_control_socket() -> Result<std::os::unix::net::UnixListener, Control
     }
 
     Ok(listener)
+}
+
+/// Acquires exclusive ownership of the supervisor runtime for this process lifetime.
+pub fn lock_supervisor_runtime() -> Result<fs::File, ControlError> {
+    let path = runtime_dir()?.join("supervisor.lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+            return Err(ControlError::RuntimeBusy);
+        }
+        Err(err) => return Err(ControlError::Io(err)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(crate::constants::PRIVATE_FILE_MODE),
+        )?;
+    }
+    Ok(file)
 }
 
 /// Returns the path where the supervisor PID is recorded.
@@ -275,6 +303,9 @@ pub enum ControlError {
     /// The supervisor accepted the command but did not reply in time.
     #[error("supervisor did not respond in time")]
     Timeout,
+    /// Another supervisor owns the runtime.
+    #[error("another supervisor owns the runtime")]
+    RuntimeBusy,
     /// The connecting peer is not authorized to use the control socket.
     #[error("unauthorized control socket peer (uid {0})")]
     Unauthorized(u32),
@@ -304,6 +335,54 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         return Err(io::Error::last_os_error());
     }
     Ok(ucred.uid)
+}
+
+/// Returns the PID of the peer connected on `stream`.
+#[cfg(target_os = "linux")]
+pub fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut ucred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let res = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ucred.pid as u32)
+}
+
+/// Returns the PID of the peer connected on `stream`.
+#[cfg(target_os = "macos")]
+pub fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut pid: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let res = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            0,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut libc::c_int as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(pid as u32)
 }
 
 /// Returns the UID of the peer connected on `stream`.
@@ -438,6 +517,13 @@ fn connect_stream() -> Result<UnixStream, ControlError> {
     }
 }
 
+/// Returns the PID that owns the live supervisor socket.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn supervisor_peer_pid() -> Result<u32, ControlError> {
+    let stream = connect_stream()?;
+    peer_pid(&stream).map_err(ControlError::Io)
+}
+
 fn write_command(
     stream: &mut UnixStream,
     command: &ControlCommand,
@@ -493,18 +579,8 @@ pub fn stream_command_output_interruptible(
     }
 
     let mut reader = BufReader::new(stream);
-    // A shutdown mid-copy surfaces as an error; treat it as a clean end.
-    match io::copy(&mut reader, &mut writer) {
-        Ok(_) => {}
-        Err(_) => {
-            if let Some(slot) = shutdown_slot
-                && slot.lock().map(|g| g.is_none()).unwrap_or(false)
-            {
-                // caller cleared the slot after shutting down: intended stop.
-            }
-        }
-    }
-    let _ = writer.flush();
+    io::copy(&mut reader, &mut writer)?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -529,6 +605,7 @@ pub fn stream_boot_frames(
     write_command(&mut stream, &ControlCommand::BootStream)?;
 
     let reader = BufReader::new(stream);
+    let mut completed = false;
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -538,10 +615,19 @@ pub fn stream_boot_frames(
         let done = frame.is_done();
         on_frame(frame);
         if done {
+            completed = true;
             break;
         }
     }
-    Ok(())
+    if completed {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "boot stream ended before its terminal frame",
+        )
+        .into())
+    }
 }
 
 /// Utility to read a command from a `UnixStream`. Used by the supervisor event loop.
