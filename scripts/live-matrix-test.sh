@@ -21,6 +21,11 @@ sec() { printf '\n\033[1;36m== %s ==\033[0m\n' "$1"; }
 gc_procs()  { pgrep -f '/target/release/gamecast ' | wc -l | tr -d ' '; }
 arb_procs() { pgrep -f 'cargo watch -C arb-rs' | wc -l | tr -d ' '; }
 
+# DESTRUCTIVE, and only for this harness: it kills the HOST's supervisor and the
+# real gamecast/arbitration processes. Never lift this into another script — a
+# docker usecase run needs no host cleanup at all (containers are isolated), and
+# prefixing a suite run with `pkill -x sysg` kills the supervisor the user is
+# actively watching.
 nuke() {
   sysg stop --supervisor >/dev/null 2>&1
   sleep 2
