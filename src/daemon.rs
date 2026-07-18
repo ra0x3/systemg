@@ -3366,6 +3366,105 @@ impl Daemon {
         }
     }
 
+    /// Corrects a state entry that claims `Running` with a pid that is gone.
+    ///
+    /// The last line of defence for the `lost`-forever bug. Whatever raced —
+    /// concurrent restarts, a reap whose caller discarded the result, a crash
+    /// between clearing the pid file and writing the state — the invariant is
+    /// simple: a service recorded as running whose pid is dead is NOT running,
+    /// and status must not keep reporting it as `lost` with nothing able to
+    /// clear it. Runs every monitor tick, so recovery is automatic.
+    ///
+    /// Only touches entries whose recorded pid is verifiably dead; a live
+    /// process keeps its record untouched.
+    fn clear_stale_running_state(ctx: &DaemonContext, name: &str) {
+        if !ctx.config.services.contains_key(name) {
+            return;
+        }
+        let key = ctx.config.state_key(name);
+
+        let stale_pid = {
+            let Ok(guard) = ctx.state_file.lock() else {
+                return;
+            };
+            match guard.get(&key) {
+                Some(entry)
+                    if matches!(entry.status, ServiceLifecycleStatus::Running) =>
+                {
+                    match entry.pid {
+                        Some(pid) if !Self::pid_is_alive(pid) => pid,
+                        _ => return,
+                    }
+                }
+                _ => return,
+            }
+        };
+
+        // A live child handle means a fresh instance is starting under this
+        // name; leave the record for the start path to stamp.
+        if ctx
+            .lock_processes()
+            .map(|guard| guard.contains_key(name))
+            .unwrap_or(true)
+        {
+            return;
+        }
+
+        // A ONE-SHOT whose process is gone ran to completion — recording it as
+        // `stopped` would resurrect the stopped+warn regression (a finished
+        // build reading as a failed dependency). Long-running services that
+        // vanished are genuinely stopped.
+        let corrected = Self::stopped_or_completed(ctx, name, true);
+        warn!(
+            "Service '{name}' was recorded running with pid {stale_pid}, which is gone; correcting to {corrected:?}."
+        );
+        if let Ok(mut guard) = ctx.state_file.lock()
+            && let Err(err) = guard.set(&key, corrected, None, None, None)
+        {
+            warn!("Failed to correct stale running state for '{name}': {err}");
+        }
+    }
+
+    /// Records an exit the probe just witnessed, so the state file can never be
+    /// left claiming `running` with a pid that is gone.
+    ///
+    /// Only rewrites an entry still marked `Running`: a concurrent restart may
+    /// already have recorded a NEWER outcome (or launched a fresh instance), and
+    /// stamping this exit over that would resurrect a stale verdict.
+    fn record_observed_exit(
+        service_name: &str,
+        status: &ExitStatus,
+        state_file: &Arc<Mutex<ServiceStateFile>>,
+        config: &Arc<Config>,
+    ) {
+        if !config.services.contains_key(service_name) {
+            return;
+        }
+        let key = config.state_key(service_name);
+        let Ok(mut guard) = state_file.lock() else {
+            return;
+        };
+        if !matches!(
+            guard.get(&key).map(|entry| entry.status),
+            Some(ServiceLifecycleStatus::Running)
+        ) {
+            return;
+        }
+
+        let lifecycle = if status.success() {
+            ServiceLifecycleStatus::ExitedSuccessfully
+        } else {
+            ServiceLifecycleStatus::ExitedWithError
+        };
+        #[cfg(unix)]
+        let signal = status.signal();
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None;
+        if let Err(err) = guard.set(&key, lifecycle, None, status.code(), signal) {
+            warn!("Failed to record observed exit for '{service_name}': {err}");
+        }
+    }
+
     /// Reads a service's recorded lifecycle status from the state file.
     ///
     /// This is the state SHARED across concurrent operations, so it is the only
@@ -3444,6 +3543,25 @@ impl Daemon {
         processes: &Arc<Mutex<HashMap<String, Child>>>,
         pid_file: &Arc<Mutex<PidFile>>,
     ) -> Result<ServiceProbe, ProcessManagerError> {
+        Self::probe_service_state_recording(service_name, processes, pid_file, None)
+    }
+
+    /// Probes a service, optionally RECORDING the exit it observes.
+    ///
+    /// The probe is the only place that witnesses the exit — it reaps the child
+    /// and clears the pid. Leaving the lifecycle write to the caller meant that
+    /// when a caller discarded the result (a racing concurrent restart), the
+    /// state file kept `running` with a pid that no longer existed. Status
+    /// prefers the state file's pid over the pid file's, so those units reported
+    /// `lost` FOREVER with nothing able to correct them: pid.xml was clean,
+    /// state.xml was not. Passing the state handle makes the observation and the
+    /// record atomic.
+    fn probe_service_state_recording(
+        service_name: &str,
+        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        pid_file: &Arc<Mutex<PidFile>>,
+        state: Option<(&Arc<Mutex<ServiceStateFile>>, &Arc<Config>)>,
+    ) -> Result<ServiceProbe, ProcessManagerError> {
         let mut processes_guard = processes.lock()?;
 
         if let Some(mut child) = processes_guard.remove(service_name) {
@@ -3456,6 +3574,16 @@ impl Daemon {
                         && !matches!(err, PidFileError::ServiceNotFound)
                     {
                         return Err(err.into());
+                    }
+                    drop(pid_guard);
+
+                    if let Some((state_file, config)) = state {
+                        Self::record_observed_exit(
+                            service_name,
+                            &status,
+                            state_file,
+                            config,
+                        );
                     }
 
                     return Ok(ServiceProbe::Exited(status));
@@ -4602,10 +4730,11 @@ impl Daemon {
                     thread::sleep(POST_RESTART_VERIFY_DELAY);
                 }
 
-                match Self::probe_service_state(
+                match Self::probe_service_state_recording(
                     service_name,
                     &self.processes,
                     &self.pid_file,
+                    Some((&self.state_file, &self.cfg())),
                 )? {
                     ServiceProbe::Running => continue,
                     ServiceProbe::NotStarted => {
@@ -5649,6 +5778,7 @@ impl Daemon {
         // the whole project to WARN with nothing that could ever clear it.
         for name in ctx.config.services.keys() {
             Self::clear_stale_pid_entry(ctx, name);
+            Self::clear_stale_running_state(ctx, name);
         }
 
         for (name, service) in &ctx.config.services {
