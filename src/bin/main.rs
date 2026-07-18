@@ -4442,8 +4442,128 @@ fn dispatch_start_resident(
             project,
         },
     };
-    with_progress_spinner("Starting", || send_control_command(command))?;
+    // An `AddProject` returns as soon as the supervisor QUEUES the boot onto a
+    // background thread — deliberately, so a slow project cannot block its
+    // single-writer owner thread. But returning "loaded" at that point reports
+    // success for work that has not happened: health checks, dependency waits
+    // and startup failures all land after the user is back at the prompt.
+    // Attach must behave like the fork path — show the boot's progress and
+    // report its real outcome.
+    let awaited_project = match &command {
+        ControlCommand::AddProject { config, .. } => {
+            load_config(Some(config)).ok().map(|c| c.project.id)
+        }
+        _ => None,
+    };
+    let failed = with_progress_spinner("Starting", || {
+        send_control_command(command)?;
+        Ok(match &awaited_project {
+            Some(project) => await_queued_boot(project),
+            None => Vec::new(),
+        })
+    })?;
+
+    // The supervisor logged the real cause (SG0103 pre-start failure, a health
+    // check that never passed, ...). Without this the CLI printed "loaded" and
+    // exited 0 while the project had comprehensively failed to start — a script
+    // or CI job would read that as a clean start.
+    if !failed.is_empty() {
+        use systemg::diag::{Diagnostic, SgCode};
+        let project = awaited_project.as_deref().unwrap_or("<project>");
+        let mut diag = Diagnostic::error(
+            SgCode::ProjectServicesNotUp,
+            format!("{} service(s) did not come up", failed.len()),
+        )
+        .note(format!("did not start: {}", failed.join(", ")));
+        for service in failed.iter().take(3) {
+            diag = diag.help_cmd(
+                format!("why '{service}' failed"),
+                format!("sysg logs -p {project} -s {service}"),
+            );
+        }
+        return Err(Box::new(DiagError(Box::new(
+            diag.help_cmd("supervisor detail", "sysg logs --supervisor")
+                .help_docs(),
+        ))));
+    }
     Ok(())
+}
+
+/// Blocks until the supervisor's background boot for `project` has settled, then
+/// reports which of its services failed to come up.
+///
+/// `AddProject` deliberately does NOT own the op slot (the supervisor keeps its
+/// owner thread free for a slow boot), so polling the op slot sees nothing —
+/// what the caller must actually track is the project's own units settling.
+///
+/// Bounded, so a genuinely slow or wedged boot cannot hang the CLI: on timeout
+/// the caller is told what is still pending rather than being left to believe
+/// the start succeeded.
+fn await_queued_boot(project: &str) -> Vec<String> {
+    let deadline = Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
+    let mut settled_ticks = 0usize;
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(400));
+        let Some(units) = project_service_units(project) else {
+            continue;
+        };
+        if units.is_empty() {
+            continue;
+        }
+        // A unit is still working while it is starting; anything else has
+        // reached a state worth reporting.
+        let pending = units
+            .iter()
+            .any(|(_, state)| matches!(state.as_str(), "starting" | "unknown"));
+        if pending {
+            settled_ticks = 0;
+            continue;
+        }
+        // Require consecutive settled polls: a service that exits and is
+        // restarted by policy can look settled for a single tick.
+        settled_ticks += 1;
+        if settled_ticks >= 3 {
+            return units
+                .into_iter()
+                .filter(|(_, state)| {
+                    matches!(state.as_str(), "stopped" | "failed" | "lost")
+                })
+                .map(|(name, _)| name)
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+/// Returns `(unit name, state)` for every SERVICE unit in `project`, or `None`
+/// when no snapshot is available. Cron units are excluded: they register
+/// synchronously and are `queued` by design, so they never indicate whether the
+/// project's services actually booted.
+fn project_service_units(project: &str) -> Option<Vec<(String, String)>> {
+    let ControlResponse::Status(snapshot) =
+        ipc::send_command(&ControlCommand::Status { live: false }).ok()?
+    else {
+        return None;
+    };
+    Some(
+        snapshot
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.kind == UnitKind::Service
+                    && unit
+                        .project
+                        .as_ref()
+                        .is_some_and(|owner| owner.id == project)
+            })
+            .map(|unit| {
+                (
+                    unit.name.clone(),
+                    format!("{:?}", unit.state).to_lowercase(),
+                )
+            })
+            .collect(),
+    )
 }
 
 /// Whether an error means the resident supervisor was tearing down as the

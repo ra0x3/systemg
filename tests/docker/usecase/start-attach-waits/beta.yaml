@@ -1,0 +1,14 @@
+version: "2"
+projects:
+  beta:
+    name: Beta
+    services:
+      slowdep:
+        command: "sh -c 'sleep 8; echo SLOWDEP_DONE'"
+        restart_policy: never
+      bsvc:
+        command: "sh -c 'while true; do echo B; sleep 1; done'"
+        depends_on:
+          - service: slowdep
+            condition: completed
+        restart_policy: always

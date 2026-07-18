@@ -78,6 +78,19 @@ already listening on it. The diagnostic names the port when the service's output
 reveals it. Stop whatever holds the port, or change the port in the service's
 command.
 
+### SG0106
+
+A project was registered with a running supervisor, but one or more of its
+services never came up.
+
+When a supervisor is already resident, `sysg start` hands it the project and the
+supervisor boots it on a background thread — which keeps a slow boot from
+blocking every other command. The start waits for that boot to settle and
+reports this code when services are left stopped or failed, so a start that did
+not work cannot exit `0`. The diagnostic names each service and gives you the
+`sysg logs` command for it; the underlying cause (SG0103 pre-start failure,
+SG0104 health check, SG0105 port in use) is in that service's log.
+
 ## Selectors, status &amp; stop
 
 ### SG0006
