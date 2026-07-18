@@ -1,6 +1,6 @@
 [package]
 name = "systemg"
-version = "0.55.7"
+version = "0.55.8"
 edition = "2024"
 license = "MIT"
 description = "An agent-friendly general process composer."
