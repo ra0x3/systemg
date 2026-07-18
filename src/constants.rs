@@ -182,6 +182,17 @@ pub const PRE_START_TIMEOUT: Duration = Duration::from_secs(300);
 /// registration, including `pre_start` work such as builds and DB waits.
 pub const FOREGROUND_ATTACH_GRACE: Duration = Duration::from_secs(120);
 
+/// How long an attaching `start` waits for a queued project boot to settle
+/// before reporting which services never came up.
+///
+/// Must exceed a realistic pre-start budget: a service whose `pre_start` waits
+/// on a DB/tunnel can legitimately take minutes, and cutting across that window
+/// reports a FALSE failure for a service that was still coming up. Observed
+/// live: a 60s `wait-for-db.sh` plus a 5s restart backoff made a 120s grace
+/// straddle the retry cycle, blaming a service that then ran healthily. Sized
+/// against [`PRE_START_TIMEOUT`] plus room for one retry.
+pub const START_SETTLE_GRACE: Duration = Duration::from_secs(360);
+
 /// How long a synchronous project attach waits for the freshly-booted project
 /// to record its first PID before seeding the status cache. Bounded so a project
 /// whose services exit immediately cannot wedge the attaching caller.

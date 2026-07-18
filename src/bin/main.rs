@@ -4500,8 +4500,7 @@ fn dispatch_start_resident(
 /// the caller is told what is still pending rather than being left to believe
 /// the start succeeded.
 fn await_queued_boot(project: &str) -> Vec<String> {
-    let deadline = Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
-    let mut settled_ticks = 0usize;
+    let deadline = Instant::now() + systemg::constants::START_SETTLE_GRACE;
     // Units left behind by a previous stop are ALREADY `stopped` — not
     // `starting` — so judging the snapshot immediately reads stale state from
     // before this boot and reports failure in ~1s, before a single service has
@@ -4525,7 +4524,6 @@ fn await_queued_boot(project: &str) -> Vec<String> {
             .any(|(_, state)| matches!(state.as_str(), "starting" | "unknown"));
         if pending {
             boot_began = true;
-            settled_ticks = 0;
             continue;
         }
         if !boot_began {
@@ -4539,20 +4537,31 @@ fn await_queued_boot(project: &str) -> Vec<String> {
                 continue;
             }
         }
-        // Require consecutive settled polls: a service that exits and is
-        // restarted by policy can look settled for a single tick.
-        settled_ticks += 1;
-        if settled_ticks >= 3 {
-            return units
-                .into_iter()
-                .filter(|(_, state)| {
-                    matches!(state.as_str(), "stopped" | "failed" | "lost")
-                })
-                .map(|(name, _)| name)
-                .collect();
+        let down: Vec<String> = units
+            .iter()
+            .filter(|(_, state)| matches!(state.as_str(), "stopped" | "failed" | "lost"))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        // Everything is up: return AT ONCE. The long grace exists only to give a
+        // slow pre-start room to finish, so a healthy project must never pay it.
+        if down.is_empty() {
+            return Vec::new();
         }
+
+        // Something is down. It may still be retrying — a service whose
+        // `pre_start` waits on a DB cycles through stopped between attempts —
+        // so keep waiting out the grace and only report what is STILL down when
+        // it expires. Reporting the first down poll blamed services that went on
+        // to run healthily.
     }
-    Vec::new()
+    // Grace expired with services still down: report the last known offenders.
+    project_service_units(project)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, state)| matches!(state.as_str(), "stopped" | "failed" | "lost"))
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// Returns `(unit name, state)` for every SERVICE unit in `project`, or `None`
