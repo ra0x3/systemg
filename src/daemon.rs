@@ -36,7 +36,7 @@ use crate::{
         MAX_STATUS_LOG_LINES, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
         PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
         SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
-        SHELL_COMMAND_FLAG,
+        SHELL_COMMAND_FLAG, STOP_VERIFY_TIMEOUT,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_service_log_writers},
@@ -1311,6 +1311,50 @@ fn run_hook(
 }
 
 /// Wait for a child process with a timeout, returning `Ok(None)` on timeout.
+/// Whether captured service output shows a port-bind collision. Matches the OS
+/// message plus the errno spellings that differ by platform (48 on macOS/BSD,
+/// 98 on Linux), so the classification holds wherever sysg runs.
+fn port_in_use_output(lines: &[String]) -> bool {
+    let lower = lines.join("\n").to_ascii_lowercase();
+    lower.contains("address already in use")
+        || lower.contains("addrinuse")
+        || lower.contains("os error 48")
+        || lower.contains("os error 98")
+}
+
+/// Best-effort port number from captured output, so the diagnostic can name the
+/// contested port. Returns `None` when nothing port-shaped is present — the
+/// diagnostic still stands without it.
+fn port_from_output(lines: &[String]) -> Option<u16> {
+    let output = lines.join("\n");
+    let output = output.as_str();
+    // Common shapes: "127.0.0.1:8080", ":8080", "port 8080", "port=8080".
+    let bytes = output.as_bytes();
+    let mut best: Option<u16> = None;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        let preceded_by_marker =
+            idx > 0 && (bytes[idx - 1] == b':' || bytes[idx - 1] == b'=');
+        let preceded_by_word = output[..idx].to_ascii_lowercase().ends_with("port ");
+        if byte.is_ascii_digit() && (preceded_by_marker || preceded_by_word) {
+            let start = idx;
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+            if let Ok(port) = output[start..idx].parse::<u32>()
+                && (1..=65535).contains(&port)
+            {
+                best = Some(port as u16);
+                break;
+            }
+            continue;
+        }
+        idx += 1;
+    }
+    best
+}
+
 fn wait_with_timeout(
     child: &mut Child,
     timeout: Duration,
@@ -2821,8 +2865,10 @@ impl Daemon {
                 );
             } else {
                 info!("Running pre-start command for '{name}': {pre_start}");
-                self.op_slot
-                    .detail(format!("running pre-start for '{name}'"));
+                self.op_slot.detail_for(
+                    &self.cfg().project.id.clone(),
+                    format!("running pre-start for '{name}'"),
+                );
                 self.run_pre_start_command(name, pre_start)?;
             }
         }
@@ -3158,21 +3204,57 @@ impl Daemon {
                         (None, None) => "terminated unexpectedly".to_string(),
                     };
 
-                    let diag = crate::diag::Diagnostic::error(
-                        crate::diag::SgCode::UnitImmediateExit,
-                        format!("service `{service_name}` exited immediately at start"),
-                    )
-                    .note(format!("the process {how} before it finished starting"))
-                    .evidence(
-                        format!("last output from `{service_name}`"),
-                        crate::logs::tail_service_log(project, service_name, 8),
-                    )
-                    .help_cmd(
-                        "view logs",
-                        format!("sysg logs -s {service_name} -p {project}"),
-                    )
-                    .help_cmd("check status", format!("sysg status -p {project}"))
-                    .help_docs();
+                    let tail = crate::logs::tail_service_log(project, service_name, 8);
+
+                    // A port collision is by far the most common immediate-exit
+                    // cause, and a bare "Address already in use (os error 48)" in
+                    // the tail tells the user nothing actionable. Classify it as
+                    // its own code so the failure names the real problem.
+                    let diag = if port_in_use_output(&tail) {
+                        let port = port_from_output(&tail);
+                        let subject = match port {
+                            Some(port) => format!(
+                                "service `{service_name}` could not bind port {port}: already in use"
+                            ),
+                            None => format!(
+                                "service `{service_name}` could not bind its port: already in use"
+                            ),
+                        };
+                        crate::diag::Diagnostic::error(
+                            crate::diag::SgCode::PortInUse,
+                            subject,
+                        )
+                        .note(
+                            "another process is already listening on that port, so this \
+                             service exited at start",
+                        )
+                        .note(
+                            "stop whatever holds the port, or change the port in this \
+                             service's command",
+                        )
+                        .evidence(format!("last output from `{service_name}`"), tail)
+                        .help_cmd("see what sysg manages", "sysg status")
+                        .help_cmd(
+                            "view logs",
+                            format!("sysg logs -s {service_name} -p {project}"),
+                        )
+                        .help_docs()
+                    } else {
+                        crate::diag::Diagnostic::error(
+                            crate::diag::SgCode::UnitImmediateExit,
+                            format!(
+                                "service `{service_name}` exited immediately at start"
+                            ),
+                        )
+                        .note(format!("the process {how} before it finished starting"))
+                        .evidence(format!("last output from `{service_name}`"), tail)
+                        .help_cmd(
+                            "view logs",
+                            format!("sysg logs -s {service_name} -p {project}"),
+                        )
+                        .help_cmd("check status", format!("sysg status -p {project}"))
+                        .help_docs()
+                    };
 
                     return Err(ProcessManagerError::Diag(Box::new(diag)));
                 }
@@ -3204,8 +3286,10 @@ impl Daemon {
         dep: &str,
     ) -> Result<(), ProcessManagerError> {
         info!("Waiting for dependency '{dep}' of '{service_name}' to complete");
-        self.op_slot
-            .detail(format!("waiting on dependency '{dep}' of '{service_name}'"));
+        self.op_slot.detail_for(
+            &self.cfg().project.id.clone(),
+            format!("waiting on dependency '{dep}' of '{service_name}'"),
+        );
 
         loop {
             match Self::probe_service_state(dep, &self.processes, &self.pid_file)? {
@@ -3271,6 +3355,59 @@ impl Daemon {
                     }
                 }
             }
+        }
+    }
+
+    /// Reports whether a pid is still alive. `kill(pid, 0)` succeeds for a live
+    /// process and for a zombie the caller has yet to reap; a zombie holds no
+    /// resources and no longer runs, so it is treated as dead here.
+    fn pid_is_alive(pid: u32) -> bool {
+        let target = pid as libc::pid_t;
+        if unsafe { libc::kill(target, 0) } != 0 {
+            return false;
+        }
+        !Self::pid_is_zombie(target)
+    }
+
+    /// Reports whether a pid is a reaped-pending zombie rather than a live
+    /// process, so a stop is not held open waiting on a corpse.
+    fn pid_is_zombie(pid: libc::pid_t) -> bool {
+        let Ok(output) = Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output()
+        else {
+            return false;
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .starts_with('Z')
+    }
+
+    /// Chooses the terminal state for a service the monitor saw exit while a
+    /// manual-stop or restart-suppress flag was set.
+    ///
+    /// A restart sets those flags to tear the old instance down, so the flag
+    /// alone does not mean the user stopped the service. A ONE-SHOT that ran and
+    /// exited 0 has COMPLETED — recording it as `stopped` rewrote finished
+    /// builds/migrations as stopped+warn after `restart -p`, and `stopped` reads
+    /// as a FAILED dependency downstream. Long-running services are unaffected:
+    /// a clean exit there is still a stop.
+    fn stopped_or_completed(
+        ctx: &DaemonContext,
+        name: &str,
+        exit_success: bool,
+    ) -> ServiceLifecycleStatus {
+        // `restart_policy: always` is the only declaration that a clean exit
+        // should be treated as a stop worth restarting; everything else that
+        // exits 0 ran to completion. Probe-style units (`redis-cli ping`) declare
+        // no policy at all, so keying off `never` alone would miss them.
+        let wants_restart = ctx.config.services.get(name).is_some_and(|service| {
+            matches!(service.restart_policy.as_deref(), Some("always"))
+        });
+        if exit_success && !wants_restart {
+            ServiceLifecycleStatus::ExitedSuccessfully
+        } else {
+            ServiceLifecycleStatus::Stopped
         }
     }
 
@@ -3958,9 +4095,12 @@ impl Daemon {
         let mut last_outcome = HealthProbeOutcome::Unhealthy;
 
         for attempt in 1..=retries {
-            self.op_slot.detail(format!(
-                "health check for '{service_name}' (attempt {attempt}/{retries})"
-            ));
+            self.op_slot.detail_for(
+                &self.cfg().project.id.clone(),
+                format!(
+                    "health check for '{service_name}' (attempt {attempt}/{retries})"
+                ),
+            );
             match self.perform_configured_health_check(
                 service_name,
                 health_check,
@@ -4860,6 +5000,32 @@ impl Daemon {
             warn!("Failed to wait on '{service_name}' after termination: {err}");
         }
 
+        // VERIFY the process is actually gone before recording it as stopped.
+        // The kill above can silently no-op — a stale recorded pgid signals a
+        // group that no longer belongs to this service, and ESRCH is swallowed
+        // as "already dead". Writing `stopped` on that basis is how `stop -p`
+        // came to report success while the services were still running and
+        // holding their ports. A stop that cannot confirm death must say so.
+        if let Some(process_id) = pid
+            && Self::pid_is_alive(process_id)
+        {
+            let deadline = Instant::now() + STOP_VERIFY_TIMEOUT;
+            while Instant::now() < deadline && Self::pid_is_alive(process_id) {
+                thread::sleep(SERVICE_POLL_INTERVAL);
+            }
+            if Self::pid_is_alive(process_id) {
+                return Err(ProcessManagerError::ServiceStopError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "process {process_id} for '{service_name}' is still alive after termination"
+                        ),
+                    ),
+                });
+            }
+        }
+
         match pid_file.lock()?.remove(service_name) {
             Ok(_) | Err(PidFileError::ServiceNotFound) => {}
             Err(err) => return Err(err.into()),
@@ -4868,7 +5034,26 @@ impl Daemon {
         if config.services.contains_key(service_name) {
             let key = config.state_key(service_name);
             let mut state_guard = state_file.lock()?;
-            state_guard.set(&key, ServiceLifecycleStatus::Stopped, None, None, None)?;
+            // A one-shot that already RAN TO COMPLETION is `done`, and stopping
+            // a project must not rewrite that history into `stopped`. Doing so
+            // reported finished builds/migrations as stopped+warn after a
+            // restart, dragged the project to WARN, and — worse — made them read
+            // as FAILED dependencies (a `Stopped` dep is a hard failure below),
+            // so anything downstream refused to come up. There is no process
+            // left to stop in this case; only the record would change.
+            let already_completed = matches!(
+                state_guard.get(&key).map(|entry| entry.status),
+                Some(ServiceLifecycleStatus::ExitedSuccessfully)
+            );
+            if !already_completed {
+                state_guard.set(
+                    &key,
+                    ServiceLifecycleStatus::Stopped,
+                    None,
+                    None,
+                    None,
+                )?;
+            }
         }
 
         debug!("Service '{service_name}' stopped successfully.");
@@ -5261,7 +5446,7 @@ impl Daemon {
                             &ctx.config,
                             &ctx.state_file,
                             &name,
-                            ServiceLifecycleStatus::Stopped,
+                            Self::stopped_or_completed(&ctx, &name, exit_success),
                             None,
                             None,
                             None,
@@ -5281,7 +5466,7 @@ impl Daemon {
                             &ctx.config,
                             &ctx.state_file,
                             &name,
-                            ServiceLifecycleStatus::Stopped,
+                            Self::stopped_or_completed(&ctx, &name, exit_success),
                             None,
                             exit_code,
                             signal,
@@ -5767,6 +5952,39 @@ impl Drop for Daemon {
         self.shutdown_monitor();
         #[cfg(target_os = "linux")]
         self.context().cancel_all_service_threads();
+    }
+}
+
+#[cfg(test)]
+mod port_in_use_tests {
+    use super::{port_from_output, port_in_use_output};
+
+    fn lines(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn detects_the_macos_and_linux_spellings() {
+        assert!(port_in_use_output(&lines(&[
+            "Error: Address already in use (os error 48)"
+        ])));
+        assert!(port_in_use_output(&lines(&[
+            "thread panicked: Address already in use (os error 98)"
+        ])));
+        assert!(!port_in_use_output(&lines(&["Error: permission denied"])));
+    }
+
+    #[test]
+    fn pulls_the_port_when_the_output_names_one() {
+        assert_eq!(
+            port_from_output(&lines(&["failed to bind 127.0.0.1:8080: in use"])),
+            Some(8080)
+        );
+        assert_eq!(
+            port_from_output(&lines(&["could not listen on port 9101"])),
+            Some(9101)
+        );
+        assert_eq!(port_from_output(&lines(&["Address already in use"])), None);
     }
 }
 

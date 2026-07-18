@@ -1,0 +1,18 @@
+version: "2"
+projects:
+  oneshot:
+    name: One Shot
+    services:
+      probe:
+        command: "sh -c 'echo PONG'"
+      build:
+        command: "sh -c 'echo building; exit 0'"
+        restart_policy: never
+        depends_on:
+          - probe
+      web:
+        command: "sh -c 'while true; do echo serving; sleep 1; done'"
+        restart_policy: always
+        depends_on:
+          - service: build
+            condition: completed

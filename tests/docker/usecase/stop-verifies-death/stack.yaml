@@ -1,0 +1,11 @@
+version: "2"
+projects:
+  stubborn:
+    name: Stubborn
+    services:
+      ignorer:
+        command: "sh -c 'trap \"\" TERM; while true; do echo STUBBORN_ALIVE; sleep 1; done'"
+        restart_policy: always
+      normal:
+        command: "sh -c 'while true; do echo NORMAL_ALIVE; sleep 1; done'"
+        restart_policy: always

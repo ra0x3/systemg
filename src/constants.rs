@@ -175,6 +175,24 @@ pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// the whole supervisor.
 pub const PRE_START_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How long a foreground log-follow keeps retrying a project it has not seen
+/// yet. The control socket (and so `supervisor_running()`) goes live before any
+/// service is spawned, so a project absent from the first status snapshot is
+/// still booting rather than gone. Must outlast a slow project's first unit
+/// registration, including `pre_start` work such as builds and DB waits.
+pub const FOREGROUND_ATTACH_GRACE: Duration = Duration::from_secs(120);
+
+/// How long a synchronous project attach waits for the freshly-booted project
+/// to record its first PID before seeding the status cache. Bounded so a project
+/// whose services exit immediately cannot wedge the attaching caller.
+pub const PROJECT_PID_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a stop waits to CONFIRM a signalled process actually died before
+/// reporting failure. A stop that records `stopped` without verifying death is
+/// how a project came to report itself down while its services still held their
+/// ports; the wait covers a slow shutdown without hiding a failed kill.
+pub const STOP_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Polling interval when waiting for service state changes.
 pub const SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
