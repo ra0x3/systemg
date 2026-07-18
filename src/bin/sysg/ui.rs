@@ -1,3 +1,40 @@
+/// Restores cooked terminal mode on drop.
+///
+/// Raw mode was enabled and disabled by hand at ~20 sites, every one through
+/// `?`. Any early return between an enable and its matching disable left the
+/// TERMINAL ITSELF broken: with raw mode on, `\n` moves down without returning
+/// to column 0, so every later line starts progressively further right and all
+/// output — including the next command's — stair-steps across the screen.
+///
+/// The worst path was `status` → `L` (logs): the child inherits the terminal and
+/// enables raw mode for its own key handling, so when the child was KILLED it
+/// never restored cooked mode and the parent assumed it had. A guard makes the
+/// restore unconditional — normal return, `?`, or unwind.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    /// Enters raw mode, restoring it on drop.
+    fn enter() -> Result<Self, Box<dyn Error>> {
+        terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+/// Forces the terminal back to cooked mode regardless of who left it raw.
+///
+/// Used when handing the terminal to (or taking it back from) a child process:
+/// the child may have died without restoring it, and `disable_raw_mode` is a
+/// no-op when the terminal is already cooked, so this is always safe to call.
+fn force_cooked_mode() {
+    let _ = terminal::disable_raw_mode();
+}
+
 /// Represents status render options.
 struct StatusRenderOptions<'a> {
     format: Option<OutputFormat>,
@@ -823,7 +860,9 @@ fn render_status_interactive(
         health,
     )?;
 
-    terminal::enable_raw_mode()?;
+    // Guarded: the interactive loop hands the terminal to child views and back,
+    // and any `?` inside it must still leave the user in cooked mode.
+    let _raw = RawModeGuard::enter()?;
 
     let result = (|| -> Result<OverallHealth, Box<dyn Error>> {
         loop {
@@ -1095,7 +1134,9 @@ fn render_status_interactive(
         }
     })();
 
-    terminal::disable_raw_mode()?;
+    // `_raw` restores cooked mode on drop, including on the `?` paths inside the
+    // closure above; this makes the common exit explicit and immediate.
+    force_cooked_mode();
     result
 }
 
@@ -1145,7 +1186,7 @@ fn run_status_child_view(
     selected_col: usize,
     health: OverallHealth,
 ) -> Result<(), Box<dyn Error>> {
-    terminal::disable_raw_mode()?;
+    force_cooked_mode();
 
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
 
@@ -1156,12 +1197,18 @@ fn run_status_child_view(
         .stderr(process::Stdio::inherit())
         .status();
 
+    // The child inherited this terminal and may have enabled raw mode for its
+    // own key handling. If it was killed (or crashed) it never restored cooked
+    // mode, and everything printed from here on would stair-step down the
+    // screen. Never trust a child to have left the terminal as it found it.
+    force_cooked_mode();
+
     if !matches!(args.first(), Some(&"logs")) {
         println!("\n\nPress any key to return to status view...");
 
-        terminal::enable_raw_mode()?;
+        let wait = RawModeGuard::enter()?;
         let _ = event::read();
-        terminal::disable_raw_mode()?;
+        drop(wait);
     }
 
     clear_terminal_output()?;

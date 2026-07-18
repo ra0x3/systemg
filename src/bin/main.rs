@@ -554,8 +554,37 @@ Target the project by id with -p instead.",
 }
 
 /// Runs the `sysg` command-line entrypoint.
+/// Restores cooked terminal mode when the process is killed.
+///
+/// The interactive views (status, logs --follow) put the terminal in raw mode.
+/// A SIGTERM/SIGHUP/SIGINT unwinds nothing, so without this the terminal is left
+/// raw after the process dies: `\n` then moves down WITHOUT returning to column
+/// 0, and every subsequent line — from any command, not just sysg — stair-steps
+/// across the screen until the user runs `reset`. Restoring here costs nothing
+/// when the terminal was never raw.
+extern "C" fn restore_terminal_on_signal(sig: libc::c_int) {
+    let _ = crossterm::terminal::disable_raw_mode();
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+/// Installs the terminal-restoring handler for the signals that kill a CLI.
+fn install_terminal_restore_handlers() {
+    for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+        unsafe {
+            libc::signal(
+                sig,
+                restore_terminal_on_signal as *const () as libc::sighandler_t,
+            );
+        }
+    }
+}
+
 fn main() -> process::ExitCode {
-    match run() {
+    install_terminal_restore_handlers();
+    let outcome = match run() {
         Ok(()) => process::ExitCode::SUCCESS,
         Err(err) => {
             if let Some(diag) = err.downcast_ref::<DiagError>() {
@@ -565,7 +594,11 @@ fn main() -> process::ExitCode {
             }
             process::ExitCode::FAILURE
         }
-    }
+    };
+    // Last line of defence: whatever path got us here, the user gets their
+    // terminal back in a usable state.
+    let _ = crossterm::terminal::disable_raw_mode();
+    outcome
 }
 
 /// Dispatches the parsed CLI command.
