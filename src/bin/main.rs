@@ -453,6 +453,27 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
         return config_read_diag(message);
     }
 
+    // The supervisor answers with a plain error string, so conditions that
+    // ALREADY have a precise code were arriving here and being rendered as
+    // SG0001 "command failed". Stopping an unknown project, or stopping one
+    // twice, is a target problem (SG0202) — telling the user only that a
+    // command "failed" hides both what went wrong and that nothing was broken.
+    if message.contains("is not managed by this supervisor") {
+        let project = message
+            .split('\'')
+            .nth(1)
+            .map(str::to_string)
+            .unwrap_or_else(|| "<project>".to_string());
+        return systemg::diag::Diagnostic::error(
+            systemg::diag::SgCode::TargetNotFound,
+            format!("no project '{project}' is loaded in the running supervisor"),
+        )
+        .note("it was never started, or it has already been stopped")
+        .help_cmd("list what is loaded", "sysg status")
+        .help_cmd("start it", format!("sysg start -p {project}"))
+        .help_docs();
+    }
+
     let command = CURRENT_COMMAND.with(|c| c.get());
     let mut diag = systemg::diag::Diagnostic::error(
         systemg::diag::SgCode::Catchall,
@@ -5428,18 +5449,35 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
     }
 }
 
-/// Builds an error explaining the supervisor is busy, naming its current
-/// operation when one can be probed, so a timeout is never a bare spinner.
-fn supervisor_busy_error() -> io::Error {
-    match ipc::current_op() {
-        Some(op) => io::Error::other(format!(
-            "supervisor busy: {}; command not confirmed",
-            op.describe()
-        )),
-        None => {
-            io::Error::other("supervisor did not respond in time; command not confirmed")
-        }
-    }
+/// Builds the SG0107 diagnostic for a command the supervisor refused because it
+/// was already mid-mutation.
+///
+/// This is an EXPECTED, recoverable condition — the supervisor serialises
+/// mutations through a single owner thread, so a concurrent restart is rejected
+/// rather than interleaved. Reporting it as the SG0001 catch-all ("command
+/// failed") framed correct, defensive behaviour as an unexplained error, and
+/// "command not confirmed" implied uncertainty when the outcome is definite:
+/// the command did not run, and the fix is to retry.
+fn supervisor_busy_error() -> DiagError {
+    use systemg::diag::{Diagnostic, SgCode};
+
+    let mut diag = Diagnostic::error(
+        SgCode::SupervisorBusy,
+        "the supervisor is busy with another operation",
+    );
+    diag = match ipc::current_op() {
+        Some(op) => diag
+            .note(format!("in flight: {}", op.describe()))
+            .note("this command was NOT applied; the in-flight operation is unaffected"),
+        None => diag
+            .note("the supervisor did not answer in time")
+            .note("this command was NOT applied"),
+    };
+    DiagError(Box::new(
+        diag.note("retry once the operation above finishes")
+            .help_cmd("see what it is doing", "sysg status")
+            .help_docs(),
+    ))
 }
 
 /// Sends daemonized restart and recycles the supervisor when an old IPC schema rejects it.

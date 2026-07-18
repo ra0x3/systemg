@@ -90,6 +90,12 @@ pub enum SgCode {
     HealthUnmet,
     /// SG0105 — a service could not bind its port because it is already in use.
     PortInUse,
+    /// SG0107 — the supervisor was busy with another mutation and rejected this
+    /// command. Expected and recoverable: the supervisor serialises mutations
+    /// through one owner thread, so a concurrent restart/start/stop is refused
+    /// rather than interleaved. Distinct from a real failure — retrying once the
+    /// in-flight operation finishes is the correct response.
+    SupervisorBusy,
     /// SG0106 — a project was registered but one or more of its services never
     /// came up. Reported by an attaching `start`, which returns as soon as the
     /// supervisor QUEUES the boot: without this the CLI printed "loaded" and
@@ -160,6 +166,7 @@ impl SgCode {
             SgCode::HealthUnmet => "SG0104",
             SgCode::PortInUse => "SG0105",
             SgCode::ProjectServicesNotUp => "SG0106",
+            SgCode::SupervisorBusy => "SG0107",
             SgCode::TargetConfigMismatch => "SG0201",
             SgCode::TargetNotFound => "SG0202",
             SgCode::ConfigFileUnreadable => "SG0203",
@@ -181,7 +188,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 40] = [
+    pub const ALL: [SgCode; 41] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -210,6 +217,7 @@ impl SgCode {
         SgCode::HealthUnmet,
         SgCode::PortInUse,
         SgCode::ProjectServicesNotUp,
+        SgCode::SupervisorBusy,
         SgCode::TargetConfigMismatch,
         SgCode::TargetNotFound,
         SgCode::ConfigFileUnreadable,

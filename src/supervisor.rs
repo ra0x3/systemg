@@ -3598,13 +3598,27 @@ impl Supervisor {
 
     /// Stops every service in every project managed by the supervisor.
     fn stop_all_projects(&mut self) -> Result<(), SupervisorError> {
+        // Best-effort, for the same reason as `shutdown_runtime`: one project
+        // that fails to stop must not leave every project after it — and the
+        // primary — still running while the command reports it stopped
+        // everything.
         let extra_projects: Vec<String> = self.extra_projects.keys().cloned().collect();
+        let mut first_error: Option<SupervisorError> = None;
         for project_id in extra_projects {
-            self.stop_project(&project_id)?;
+            if let Err(err) = self.stop_project(&project_id) {
+                error!("Failed to stop project '{project_id}': {err}");
+                first_error.get_or_insert(err);
+            }
         }
 
-        self.daemon.stop_services()?;
-        Ok(())
+        if let Err(err) = self.daemon.stop_services() {
+            error!("Failed to stop the primary project's services: {err}");
+            first_error.get_or_insert(err.into());
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Collects a fresh status snapshot using each project's configured snapshot mode.
@@ -3630,13 +3644,30 @@ impl Supervisor {
         if let Some(reconciler) = self.reconciler.take() {
             reconciler.stop();
         }
-        for project in self.extra_projects.values() {
-            project.daemon.stop_services()?;
+        // Shutdown is BEST-EFFORT across every project. A `?` here aborted the
+        // whole teardown on the first project that failed to stop cleanly —
+        // which is exactly what a concurrent restart provokes, since the pid
+        // file is being rewritten underneath. Every project after it, AND the
+        // primary, were then never stopped: `stop --supervisor` reported
+        // "Supervisor shutting down" with rc=0 while leaving orphaned service
+        // processes running. Reap everything first, then surface the failure.
+        let mut teardown_error: Option<SupervisorError> = None;
+        for (project_id, project) in &self.extra_projects {
+            if let Err(err) = project.daemon.stop_services() {
+                error!("Failed to stop services in project '{project_id}': {err}");
+                teardown_error.get_or_insert(err.into());
+            }
             project.daemon.shutdown_monitor();
         }
-        self.daemon.stop_services()?;
+        if let Err(err) = self.daemon.stop_services() {
+            error!("Failed to stop the primary project's services: {err}");
+            teardown_error.get_or_insert(err.into());
+        }
         self.daemon.shutdown_monitor();
         ipc::cleanup_runtime_owned(std::process::id() as libc::pid_t)?;
+        if let Some(err) = teardown_error {
+            return Err(err);
+        }
         std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
