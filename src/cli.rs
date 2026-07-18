@@ -451,7 +451,7 @@ pub enum Commands {
     /// Validate a configuration file and report errors with fixes.
     Validate {
         /// Path to the configuration file (defaults to `systemg.yaml`).
-        #[arg(short, long, default_value = "systemg.yaml")]
+        #[arg(default_value = "systemg.yaml")]
         config: String,
 
         /// Emit machine-readable output in the requested format.

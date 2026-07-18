@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  aa:
+    name: AA
+    services:
+      aasvc:
+        command: "sh -c 'while true; do echo AA_TICK; sleep 0.5; done'"
+        restart_policy: always

@@ -38,13 +38,21 @@ check "$?" "term1 streamed alpha's logs (ALPHA_MARKER_LINE present)"
 grep -q BETA_MARKER_LINE "$B_OUT" 2>/dev/null
 check "$?" "term2 streamed BETA's logs (BETA_MARKER_LINE present) <-- the bug"
 
-section "term2 is scoped to its own project (no alpha bleed)"
-# NOTE: term1 is the in-process supervisor and pipes ALL managed services'
-# stderr to its inherited stdout, so it currently also shows beta's lines once
-# beta registers — a pre-existing over-broad-pipe quirk (see use-case-bugs.txt),
-# not the reported bug. term2's scoping is the assertion that matters here.
+section "each terminal is scoped to its OWN project — no cross-project bleed"
+# Both directions must be clean: term1 (the in-process become-supervisor) must
+# NOT show beta's lines, and term2 must NOT show alpha's. term1 was the hard
+# case — it used to inherit the supervisor's stdout and echo EVERY managed
+# service's output; it now streams only its own project via a scoped follow.
 ! grep -q ALPHA_MARKER_LINE "$B_OUT" 2>/dev/null
-check "$?" "term2 did NOT receive alpha's logs (its follow is project-scoped)"
+check "$?" "term2 did NOT receive alpha's logs (project-scoped follow)"
+! grep -q BETA_MARKER_LINE "$A_OUT" 2>/dev/null
+check "$?" "term1 did NOT receive beta's logs (no cross-project bleed)"
+
+section "no raw supervisor tracing bleeds onto the foreground terminal"
+# The in-process supervisor's internal tracing goes to the log file, never the
+# user's terminal — no `DEBUG systemg::supervisor:` / `Supervisor received` noise.
+! grep -qE 'DEBUG systemg|Supervisor received command' "$A_OUT" 2>/dev/null
+check "$?" "term1 shows no raw supervisor DEBUG/tracing lines"
 
 section "status reports FOREGROUND mode (neither was --daemonize'd)"
 # No supervise daemon exists; both projects are foreground-owned. status must

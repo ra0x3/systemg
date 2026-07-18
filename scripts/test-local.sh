@@ -13,19 +13,25 @@
 # a real per-version dir and re-signs, matching the scheme.
 #
 # Usage:
-#   scripts/test-local.sh [VERSION]     install target/release/sysg as <VERSION>
-#                                       (VERSION defaults to `sysg --version`)
-#   scripts/test-local.sh --revert      restore the version active before install
-#   scripts/test-local.sh --revert --clean   ...and delete the tested version dir
+#   scripts/test-local.sh [--version VER] [--no-build]
+#                       Build (unless --no-build) and install target/release/sysg.
+#                       VER defaults to the built binary's own `--version`; pass
+#                       --version to override the label it installs under.
+#   scripts/test-local.sh --revert            restore the pre-install version
+#   scripts/test-local.sh --revert --clean    ...and delete the tested version dir
 #
+# By DEFAULT this rebuilds (cargo build --release) first, so it always installs
+# the latest code — pass --no-build to skip and use the existing binary as-is.
 set -euo pipefail
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
 SYSG_HOME="${HOME}/.sysg"
 VERSIONS_DIR="${SYSG_HOME}/versions"
 ACTIVE_FILE="${SYSG_HOME}/active-version"
 LINK="${HOME}/.local/bin/sysg"
 PREV_MARKER="${SYSG_HOME}/.test-local-prev"
-BUILT_BIN="target/release/sysg"
+BUILT_BIN="${REPO_ROOT}/target/release/sysg"
 
 err()  { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
 info() { printf '\033[0;36m%s\033[0m\n' "$*"; }
@@ -75,23 +81,37 @@ do_revert() {
 }
 
 do_install() {
-  local want_version="${1:-}"
+  local want_version="$1"
+  local do_build="$2"
   guard_no_supervisor
 
+  # Rebuild by default so we never install a stale binary — the whole point of
+  # dogfooding is to run the LATEST code, not whatever was last compiled.
+  if [ "${do_build}" = "yes" ]; then
+    info "Building release binary (cargo build --release)..."
+    ( cd "${REPO_ROOT}" && cargo build --release ) \
+      || { err "cargo build --release failed"; exit 1; }
+  fi
+
   if [ ! -f "${BUILT_BIN}" ]; then
-    err "No built binary at ${BUILT_BIN}. Run: cargo build --release"
+    err "No built binary at ${BUILT_BIN}. Run: cargo build --release (or drop --no-build)."
     exit 1
   fi
 
-  # Determine the version to install under: the arg, else what the binary reports.
-  local version
+  # Determine the version to install under: --version override, else what the
+  # freshly built binary reports.
+  local binary_version version
+  binary_version="$("${BUILT_BIN}" --version 2>/dev/null | awk '{print $NF}')"
   if [ -n "${want_version}" ]; then
     version="${want_version}"
+    if [ -n "${binary_version}" ] && [ "${binary_version}" != "${version}" ]; then
+      err "warning: installing under label '${version}' but the binary reports '${binary_version}' — the version dir and 'sysg --version' will disagree."
+    fi
   else
-    version="$("${BUILT_BIN}" --version 2>/dev/null | awk '{print $NF}')"
+    version="${binary_version}"
   fi
   if [ -z "${version}" ]; then
-    err "Could not determine version. Pass it explicitly: $0 <VERSION>"
+    err "Could not determine version. Pass it explicitly: $0 --version <VER>"
     exit 1
   fi
 
@@ -121,10 +141,33 @@ do_install() {
   info "Revert any time: $0 --revert   (add --clean to also remove the dir)"
 }
 
-case "${1:-}" in
-  --revert) do_revert "${2:-}" ;;
-  --help|-h)
-    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
-    ;;
-  *) do_install "${1:-}" ;;
-esac
+WANT_VERSION=""
+DO_BUILD="yes"
+REVERT=""
+CLEAN=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --version)
+      shift
+      [ "$#" -gt 0 ] || { err "--version needs a value, e.g. --version 0.55.1"; exit 1; }
+      WANT_VERSION="$1"
+      ;;
+    --version=*) WANT_VERSION="${1#*=}" ;;
+    --no-build)  DO_BUILD="no" ;;
+    --revert)    REVERT="yes" ;;
+    --clean)     CLEAN="--clean" ;;
+    --help|-h)
+      sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) err "unknown option: $1"; exit 1 ;;
+  esac
+  shift
+done
+
+if [ -n "${REVERT}" ]; then
+  do_revert "${CLEAN}"
+else
+  do_install "${WANT_VERSION}" "${DO_BUILD}"
+fi

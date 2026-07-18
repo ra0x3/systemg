@@ -452,7 +452,19 @@ fn write_command(
 /// Sends a command to the supervisor and copies the raw response bytes into the provided writer.
 pub fn stream_command_output(
     command: &ControlCommand,
+    writer: impl Write,
+) -> Result<(), ControlError> {
+    stream_command_output_interruptible(command, writer, None)
+}
+
+/// Like [`stream_command_output`], but publishes a clone of the live connection
+/// into `shutdown_slot` so another thread can `shutdown(Both)` it to unblock the
+/// copy loop immediately (e.g. on Ctrl-C). Without a slot this is identical to
+/// [`stream_command_output`].
+pub fn stream_command_output_interruptible(
+    command: &ControlCommand,
     mut writer: impl Write,
+    shutdown_slot: Option<&std::sync::Mutex<Option<UnixStream>>>,
 ) -> Result<(), ControlError> {
     let path = socket_path()?;
     if !path.exists() {
@@ -471,9 +483,28 @@ pub fn stream_command_output(
     stream.write_all(b"\n")?;
     stream.flush()?;
 
+    // Hand a clone of the connection to the caller so it can force-close the read
+    // side from another thread; a shutdown() unblocks the io::copy below at once.
+    if let Some(slot) = shutdown_slot
+        && let Ok(clone) = stream.try_clone()
+        && let Ok(mut guard) = slot.lock()
+    {
+        *guard = Some(clone);
+    }
+
     let mut reader = BufReader::new(stream);
-    io::copy(&mut reader, &mut writer)?;
-    writer.flush()?;
+    // A shutdown mid-copy surfaces as an error; treat it as a clean end.
+    match io::copy(&mut reader, &mut writer) {
+        Ok(_) => {}
+        Err(_) => {
+            if let Some(slot) = shutdown_slot
+                && slot.lock().map(|g| g.is_none()).unwrap_or(false)
+            {
+                // caller cleared the slot after shutting down: intended stop.
+            }
+        }
+    }
+    let _ = writer.flush();
     Ok(())
 }
 

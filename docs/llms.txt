@@ -37,7 +37,7 @@ color, banners, paging, truncation, and accidental log-following where possible.
 
 ## Commands LLMs Should Prefer
 
-- `sysg validate -c <file>`: check a manifest before running it. Exits `0` when
+- `sysg validate [file]`: check a manifest before running it. Exits `0` when
   valid, `1` otherwise. Add `--format json` for structured diagnostics with the
   line, column, category, message, and suggested fix. Run this after writing or
   editing any config.

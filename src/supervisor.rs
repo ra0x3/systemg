@@ -1722,6 +1722,18 @@ impl Supervisor {
     /// Runs the supervisor event loop.
     fn run_internal(&mut self) -> Result<(), SupervisorError> {
         ipc::cleanup_runtime()?;
+
+        // Load (or create with defaults) the supervisor's OWN config — distinct
+        // from any project manifest — and apply its log-rotation defaults as the
+        // process-wide fallback beneath per-service/per-project `logs` blocks,
+        // before any service launches and opens its log files.
+        let supervisor_config =
+            crate::config::supervisor::SupervisorConfig::load_or_create();
+        crate::config::set_log_defaults(
+            supervisor_config.logs.max_bytes,
+            supervisor_config.logs.max_files,
+        );
+
         ipc::write_config_hint(&self.config_path)?;
         let listener = ipc::bind_control_socket()?;
         ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
@@ -5487,6 +5499,78 @@ services:
 
         assert!(out.contains("plain line"), "{out}");
         assert!(!out.contains(crate::logs::SERVICE_MARKER_PREFIX), "{out}");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn repro_project_follow_beta_leak() {
+        let _guard = crate::test_utils::env_lock();
+        let base = std::env::current_dir().unwrap().join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let alpha_dir = runtime::log_dir().join("alpha");
+        let beta_dir = runtime::log_dir().join("beta");
+        fs::create_dir_all(&alpha_dir).unwrap();
+        fs::create_dir_all(&beta_dir).unwrap();
+        fs::write(
+            alpha_dir.join("alphasvc.log"),
+            "2026-07-08T09:00:00Z stdout ALPHA_MARKER_LINE\n",
+        )
+        .unwrap();
+        fs::write(
+            beta_dir.join("betasvc.log"),
+            "2026-07-08T09:00:00Z stdout BETA_MARKER_LINE\n",
+        )
+        .unwrap();
+
+        let snapshot = StatusSnapshot {
+            schema_version: crate::status::STATUS_SCHEMA_VERSION.into(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: vec![
+                offline_unit("alphasvc", "alpha"),
+                offline_unit("betasvc", "beta"),
+            ],
+        };
+
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let request = SupervisorLogRequest {
+            snapshot,
+            service: None,
+            project: Some("alpha".into()),
+            lines: 50,
+            kind: None,
+            follow: false,
+            filter: crate::logs::LogFilter::default(),
+            structured: false,
+            stream: &server,
+        };
+        Supervisor::handle_logs_command(request).expect("logs command");
+        drop(server);
+        use std::io::Read as _;
+        let mut client = client;
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        eprintln!("=== OUT ===\n{out}\n=== END ===");
+        assert!(out.contains("ALPHA_MARKER_LINE"), "alpha present: {out}");
+        assert!(!out.contains("BETA_MARKER_LINE"), "BETA LEAKED: {out}");
 
         unsafe {
             if let Some(home) = original_home {

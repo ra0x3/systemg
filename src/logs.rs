@@ -5,7 +5,7 @@
 use std::{
     env,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, IsTerminal, Read, Seek, SeekFrom, Write},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, mpsc, mpsc::RecvTimeoutError},
     thread,
@@ -1758,7 +1758,11 @@ fn read_service_log_stream(
     let mut buffer = [0_u8; 8192];
     let mut pending = Vec::new();
     let mut forward_pending = Vec::new();
-    let echo_to_terminal = std::io::stderr().is_terminal();
+    // Service log writers write to FILES only; the foreground terminal is fed
+    // exclusively by the project-scoped follow stream. Echoing here (gated only
+    // on "stderr is a TTY", with no project scoping) bled EVERY managed service
+    // of EVERY project into whichever terminal owned the in-process supervisor.
+    let echo_to_terminal = false;
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;

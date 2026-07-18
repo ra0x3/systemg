@@ -12,8 +12,16 @@
 #   - `sysg stop -p alpha` exits 0.
 #   - a1 and a2 are no longer running (alpha stopped).
 #   - b1 is still running on its ORIGINAL pid, still alive per ps (beta untouched).
+#   The `stop -p alpha` runs from a directory with NO config file — the resident
+#   supervisor already knows alpha's config, so `-p <loaded-project>` must never
+#   demand a local `-c`/systemg.yaml (would otherwise fail SG0203).
 set -u
 . /usecase/lib.sh
+
+# Run subsequent commands from a config-less dir so `stop -p` cannot lean on a
+# systemg.yaml in the CWD — it must resolve the project via the supervisor.
+mkdir -p /tmp/no-config-here
+cd /tmp/no-config-here
 
 CONFIG=/usecase/stack.yaml
 

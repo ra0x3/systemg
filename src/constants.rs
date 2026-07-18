@@ -167,6 +167,14 @@ pub const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// Applied during service initialization and health checks.
 pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum time a `pre_start` command may run before it is killed and the start
+/// fails. Pre-starts run inside the supervisor's single-writer owner thread, so
+/// an UNBOUNDED pre-start that hangs (e.g. a network/proxy call that never
+/// returns) would freeze EVERY subsequent mutation across ALL projects. Generous
+/// enough for real migrations/DB-waits, but finite so one hung op cannot wedge
+/// the whole supervisor.
+pub const PRE_START_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Polling interval when waiting for service state changes.
 pub const SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 

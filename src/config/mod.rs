@@ -1,4 +1,9 @@
 //! Configuration management for Systemg.
+
+/// Supervisor-level configuration (`supervisor.xml`) — distinct from project
+/// manifests; holds supervisor-wide defaults such as log-rotation caps.
+pub mod supervisor;
+
 use std::{
     collections::{BTreeSet, HashMap},
     env, fmt, fs,
@@ -306,6 +311,27 @@ pub const LOGS_DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
 /// Default number of rotated service log files retained per active log.
 pub const LOGS_DEFAULT_MAX_FILES: usize = 5;
 
+/// Process-wide log-rotation defaults, set once by the supervisor from its
+/// `supervisor.xml`. When unset, the hardcoded `LOGS_DEFAULT_*` apply. This is
+/// the fallback beneath per-service and per-project `logs` blocks, so a user can
+/// raise/lower the caps for every service via one supervisor config knob.
+static LOG_DEFAULTS: std::sync::OnceLock<(u64, usize)> = std::sync::OnceLock::new();
+
+/// Sets the process-wide log-rotation defaults (max_bytes, max_files). Called by
+/// the supervisor at startup after loading `supervisor.xml`. Idempotent — the
+/// first call wins (the supervisor sets it once before any service launches).
+pub fn set_log_defaults(max_bytes: u64, max_files: usize) {
+    let _ = LOG_DEFAULTS.set((max_bytes, max_files));
+}
+
+/// The active default (max_bytes, max_files): the supervisor-configured value if
+/// set, else the hardcoded constants.
+fn log_defaults() -> (u64, usize) {
+    *LOG_DEFAULTS
+        .get()
+        .unwrap_or(&(LOGS_DEFAULT_MAX_BYTES, LOGS_DEFAULT_MAX_FILES))
+}
+
 /// Stable project namespace and display metadata.
 #[derive(Debug, Clone, serde::Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ProjectConfig {
@@ -421,10 +447,11 @@ pub struct EffectiveLogsConfig {
 
 impl Default for EffectiveLogsConfig {
     fn default() -> Self {
+        let (max_bytes, max_files) = log_defaults();
         Self {
             sink: LogSink::File,
-            max_bytes: LOGS_DEFAULT_MAX_BYTES,
-            max_files: LOGS_DEFAULT_MAX_FILES,
+            max_bytes,
+            max_files,
         }
     }
 }

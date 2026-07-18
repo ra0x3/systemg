@@ -34,8 +34,9 @@ use crate::{
     constants::{
         DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
         MAX_STATUS_LOG_LINES, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
-        PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL,
-        SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG,
+        PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
+        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
+        SHELL_COMMAND_FLAG,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_service_log_writers},
@@ -3818,13 +3819,49 @@ impl Daemon {
             })
         });
 
-        let status =
-            child
-                .wait()
-                .map_err(|source| ProcessManagerError::ServiceStartError {
+        // Bound the pre-start: it runs in the single-writer owner thread, so an
+        // unbounded wait on a hung command (e.g. a network call that never
+        // returns) freezes every later mutation across ALL projects. On timeout,
+        // kill it and fail the start so the owner thread is released. The bound is
+        // PRE_START_TIMEOUT; SYSG_PRE_START_TIMEOUT_SECS overrides it (for tests).
+        let pre_start_timeout = std::env::var("SYSG_PRE_START_TIMEOUT_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(PRE_START_TIMEOUT);
+        let status = match wait_with_timeout(&mut child, pre_start_timeout) {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(handle) = stdout_handle {
+                    let _ = handle.join();
+                }
+                if let Some(handle) = stderr_handle {
+                    let _ = handle.join();
+                }
+                let secs = PRE_START_TIMEOUT.as_secs();
+                write_marker(&format!(
+                    "\u{2716} pre-start timed out after {secs}s; killed"
+                ));
+                self.record_start_failure(service_name, None, None);
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "pre-start for '{service_name}' exceeded {secs}s and was killed"
+                        ),
+                    ),
+                });
+            }
+            Err(source) => {
+                return Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),
                     source,
-                })?;
+                });
+            }
+        };
 
         if let Some(handle) = stdout_handle {
             let _ = handle.join();
@@ -3898,17 +3935,25 @@ impl Daemon {
         // knob: the absolute max wait is derived as retries x (attempt_timeout +
         // interval), so a hopeless check (a port that stays taken) fails fast on
         // connection refusal instead of stranding a foreground start.
-        let client =
-            if health_check.url.is_some() {
-                Some(Client::builder().timeout(attempt_timeout).build().map_err(
-                    |err| ProcessManagerError::ServiceStartError {
+        let client = if health_check.url.is_some() {
+            // A health check is a DIRECT probe to the service — never route it
+            // through an HTTP proxy. reqwest reads HTTP_PROXY/ALL_PROXY from the
+            // environment by default, which made a probe to 127.0.0.1 hang for
+            // the full attempt_timeout (the proxy can't reach localhost) while
+            // `curl` — which bypasses the proxy for localhost — succeeded at once.
+            Some(
+                Client::builder()
+                    .timeout(attempt_timeout)
+                    .no_proxy()
+                    .build()
+                    .map_err(|err| ProcessManagerError::ServiceStartError {
                         service: service_name.to_string(),
                         source: std::io::Error::other(err.to_string()),
-                    },
-                )?)
-            } else {
-                None
-            };
+                    })?,
+            )
+        } else {
+            None
+        };
 
         let mut last_outcome = HealthProbeOutcome::Unhealthy;
 
@@ -5120,6 +5165,7 @@ impl Daemon {
 
             {
                 let mut locked_processes = ctx.lock_processes().unwrap();
+                let mut vanished: Vec<String> = Vec::new();
                 for (name, child) in locked_processes.iter_mut() {
                     match child.try_wait() {
                         Ok(Some(status)) => {
@@ -5134,8 +5180,21 @@ impl Daemon {
                             trace!("Service '{name}' is still running.");
                             active_services += 1;
                         }
+                        // ECHILD ("No child processes"): the child was already
+                        // reaped elsewhere (e.g. a completed cron/one-shot unit).
+                        // It is simply gone — drop it from the map so we stop
+                        // probing it, instead of error-logging every tick forever.
+                        Err(e) if e.raw_os_error() == Some(libc::ECHILD) => {
+                            debug!(
+                                "Service '{name}' already reaped (ECHILD); dropping from monitor."
+                            );
+                            vanished.push(name.clone());
+                        }
                         Err(e) => error!("Failed to check status of '{name}': {e}"),
                     }
+                }
+                for name in vanished {
+                    locked_processes.remove(&name);
                 }
             }
 

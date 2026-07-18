@@ -879,17 +879,19 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
-                            let selected_config_path =
-                                status_unit_config_path(selected_unit, config_path);
+                            // Target by loaded project id (supervisor knows the
+                            // config); --config would ship the project DIR.
                             let mut args = vec![
                                 "inspect",
-                                "--config",
-                                selected_config_path,
                                 "--service",
                                 selected_unit.name.as_str(),
                             ];
+                            let selected_config_path =
+                                status_unit_config_path(selected_unit, config_path);
                             if let Some(project) = selected_unit.project.as_ref() {
                                 args.extend(["--project", project.id.as_str()]);
+                            } else {
+                                args.extend(["--config", selected_config_path]);
                             }
                             run_status_child_view(
                                 &args,
@@ -908,12 +910,11 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
-                            let selected_config_path =
-                                status_unit_config_path(selected_unit, config_path);
+                            // Target by loaded project id; the supervisor knows
+                            // its config. Passing --config would ship the project
+                            // DIR and fail "not a regular file".
                             let mut args = vec![
                                 "logs",
-                                "--config",
-                                selected_config_path,
                                 "--service",
                                 selected_unit.name.as_str(),
                                 "--lines",
@@ -921,8 +922,12 @@ fn render_status_interactive(
                                 "--stream",
                                 "2",
                             ];
+                            let selected_config_path =
+                                status_unit_config_path(selected_unit, config_path);
                             if let Some(project) = selected_unit.project.as_ref() {
                                 args.extend(["--project", project.id.as_str()]);
+                            } else {
+                                args.extend(["--config", selected_config_path]);
                             }
                             run_status_child_view(
                                 &args,
@@ -952,17 +957,23 @@ fn render_status_interactive(
                                     health,
                                 )?;
                             } else {
-                                let selected_config_path =
-                                    status_unit_config_path(selected_unit, config_path);
+                                // Target the unit by its LOADED project id — the
+                                // supervisor already knows that project's config.
+                                // Passing --config would ship the project's DIR
+                                // (project_dir), which restart rejects as "not a
+                                // regular file". Only fall back to --config when
+                                // the unit somehow has no project.
                                 let mut args = vec![
                                     "restart",
-                                    "--config",
-                                    selected_config_path,
                                     "--service",
                                     selected_unit.name.as_str(),
                                 ];
+                                let selected_config_path =
+                                    status_unit_config_path(selected_unit, config_path);
                                 if let Some(project) = selected_unit.project.as_ref() {
                                     args.extend(["--project", project.id.as_str()]);
+                                } else {
+                                    args.extend(["--config", selected_config_path]);
                                 }
                                 run_status_child_view(
                                     &args,

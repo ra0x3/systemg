@@ -193,9 +193,9 @@ resolves the dependency graph, and reports precise, fixable diagnostics.
 Best commands for LLMs:
 
 ```sh
-sysg validate -c sysg.yaml
-sysg validate -c sysg.yaml --format json
-sysg --plain validate -c sysg.yaml
+sysg validate sysg.yaml
+sysg validate sysg.yaml --format json
+sysg --plain validate sysg.yaml
 ```
 
 Behavior:
@@ -214,7 +214,7 @@ and `${VAR}` interpolations that resolve. Run `sysg validate` after writing or
 editing any config, and gate deploys on it:
 
 ```sh
-sysg validate -c production.yaml --plain || exit 1
+sysg validate production.yaml --plain || exit 1
 sysg start -c production.yaml --daemonize
 ```
 

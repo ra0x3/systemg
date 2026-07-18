@@ -370,6 +370,14 @@ where
     let result = operation();
     stop.store(true, Ordering::Relaxed);
     let _ = spinner.join();
+    // Definitively clear the spinner's line after the thread has stopped, so the
+    // command's own output (printed to stdout) starts on a clean line instead of
+    // being appended to a lingering spinner frame.
+    if stderr_is_tty() {
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "{}", clear_progress_spinner_line());
+        let _ = stderr.flush();
+    }
     result
 }
 
@@ -542,15 +550,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     runtime::set_drop_privileges(drop_privileges_effective);
     runtime::capture_socket_activation();
 
+    // A `start` (daemonized OR foreground) becomes/feeds a supervisor whose
+    // internal tracing must NOT spray onto the user's terminal — the foreground
+    // terminal is for the project's OWN service logs (via the scoped follow),
+    // never `DEBUG systemg::supervisor:` noise. Route all of them to the log file.
     let use_file_logging = matches!(
         &args.command,
-        Commands::Start {
-            daemonize: true,
-            ..
-        } | Commands::Restart {
-            daemonize: true,
-            ..
-        } | Commands::Supervise { .. }
+        Commands::Start { .. }
+            | Commands::Restart {
+                daemonize: true,
+                ..
+            }
+            | Commands::Supervise { .. }
     );
     init_logging(&args, use_file_logging);
 
@@ -3740,7 +3751,26 @@ fn start_foreground(
     }
 
     with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid))?;
-    wait_for_foreground_attachment(project_id)
+
+    // Stream ONLY this project's service logs to the terminal via a scoped follow
+    // (the supervisor's own tracing goes to the log file, and service log writers
+    // no longer echo to the terminal), so a foreground start shows its project's
+    // output cleanly instead of every managed service + supervisor internals.
+    let streaming = Arc::new(AtomicBool::new(true));
+    let shutdown = Arc::new(std::sync::Mutex::new(None));
+    let follow_handle = spawn_foreground_log_follow(
+        project_id.clone(),
+        streaming.clone(),
+        shutdown.clone(),
+    );
+
+    let result =
+        wait_for_foreground_attachment(project_id, streaming.clone(), shutdown.clone());
+    streaming.store(false, Ordering::SeqCst);
+    if let Some(handle) = follow_handle {
+        let _ = handle.join();
+    }
+    result
 }
 
 /// Adds a foreground project to the resident supervisor and owns its terminal lifetime.
@@ -3763,12 +3793,17 @@ fn start_foreground_attached(
     // died silently mid-stream) on a supervised follow loop that reconnects
     // VISIBLY on any drop and only stops when this process asks it to.
     let streaming = Arc::new(AtomicBool::new(true));
-    let follow_handle =
-        spawn_foreground_log_follow(project_id.clone(), streaming.clone());
+    let shutdown = Arc::new(std::sync::Mutex::new(None));
+    let follow_handle = spawn_foreground_log_follow(
+        project_id.clone(),
+        streaming.clone(),
+        shutdown.clone(),
+    );
 
-    let result = wait_for_foreground_attachment(project_id);
-    // Tell the follow loop to stop, then let it unwind (it wakes on the flag at
-    // its next connect boundary; the StopProject already closed the stream).
+    let result =
+        wait_for_foreground_attachment(project_id, streaming.clone(), shutdown.clone());
+    // The wait already cleared the flag and force-closed the stream on its exit
+    // path; join the (now unblocked) follow thread.
     streaming.store(false, Ordering::SeqCst);
     if let Some(handle) = follow_handle {
         let _ = handle.join();
@@ -3784,6 +3819,7 @@ fn start_foreground_attached(
 fn spawn_foreground_log_follow(
     project_id: String,
     streaming: Arc<AtomicBool>,
+    shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
 ) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("fg-logs-{project_id}"))
@@ -3804,8 +3840,17 @@ fn spawn_foreground_log_follow(
                 };
                 let mut writer =
                     LogWriter::new(io::stdout(), LogFormat::Text, false, None);
-                let outcome = ipc::stream_command_output(&command, &mut writer);
+                let outcome = ipc::stream_command_output_interruptible(
+                    &command,
+                    &mut writer,
+                    Some(&shutdown),
+                );
                 let _ = writer.flush();
+                // Drop the connection handle now that this attempt ended, so a
+                // stale shutdown target isn't left dangling between reconnects.
+                if let Ok(mut guard) = shutdown.lock() {
+                    *guard = None;
+                }
 
                 // A clean caller-requested stop: leave quietly.
                 if !streaming.load(Ordering::SeqCst) {
@@ -3839,8 +3884,28 @@ fn spawn_foreground_log_follow(
         .ok()
 }
 
-/// Waits for Ctrl-C and then stops the foreground-owned project.
-fn wait_for_foreground_attachment(project_id: String) -> Result<(), Box<dyn Error>> {
+/// Stops the log-follow: clears the streaming flag and force-closes the live
+/// connection so a follow thread blocked in the copy loop unblocks immediately.
+fn stop_foreground_follow(
+    streaming: &Arc<AtomicBool>,
+    shutdown: &Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+) {
+    streaming.store(false, Ordering::SeqCst);
+    if let Ok(guard) = shutdown.lock()
+        && let Some(stream) = guard.as_ref()
+    {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Waits for Ctrl-C and then stops the foreground-owned project. The follow
+/// stream is torn down on EVERY exit path so Ctrl-C (or a detach) stops the
+/// console logs immediately instead of leaving them streaming.
+fn wait_for_foreground_attachment(
+    project_id: String,
+    streaming: Arc<AtomicBool>,
+    shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+) -> Result<(), Box<dyn Error>> {
     let (tx, rx) = mpsc::channel();
     ctrlc::set_handler(move || {
         let _ = tx.send(());
@@ -3858,13 +3923,18 @@ fn wait_for_foreground_attachment(project_id: String) -> Result<(), Box<dyn Erro
         }
         if !supervisor_running() {
             info!("Foreground supervisor is no longer running; detaching.");
+            stop_foreground_follow(&streaming, &shutdown);
             return Ok(());
         }
         if !project_loaded_in_supervisor(&project_id) {
             info!("Foreground project '{project_id}' was stopped elsewhere; detaching.");
+            stop_foreground_follow(&streaming, &shutdown);
             return Ok(());
         }
     }
+
+    // Ctrl-C: stop the console stream at once, then tear down the project.
+    stop_foreground_follow(&streaming, &shutdown);
 
     let stop_result: Result<(), Box<dyn Error>> =
         match ipc::send_command(&ControlCommand::StopProject {
@@ -3887,26 +3957,11 @@ fn wait_for_foreground_attachment(project_id: String) -> Result<(), Box<dyn Erro
         };
     stop_result?;
 
-    if !supervisor_has_daemon_projects()? {
-        match ipc::send_command(&ControlCommand::Shutdown) {
-            Ok(ControlResponse::Message(message)) => {
-                println!("{message}");
-            }
-            Ok(ControlResponse::Ok) => {}
-            Ok(ControlResponse::Error(message)) => {
-                return Err(ControlError::Server(message).into());
-            }
-            Ok(other) => {
-                return Err(io::Error::other(format!(
-                    "unexpected supervisor response: {:?}",
-                    other
-                ))
-                .into());
-            }
-            Err(ControlError::NotAvailable) => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
+    // The supervisor is impartial, warm-persistent infrastructure: it does NOT
+    // shut down just because its last project left. Ctrl-C on a foreground
+    // project deregisters that project and returns the terminal; the supervisor
+    // stays running, idle and ready for the next `sysg start`. It ends ONLY on an
+    // explicit `sysg stop --supervisor` (or `purge`).
 
     Ok(())
 }
@@ -3936,25 +3991,6 @@ fn wait_for_supervisor_ready(child_pid: libc::pid_t) -> Result<(), Box<dyn Error
         "timed out waiting for foreground supervisor to start",
     )
     .into())
-}
-
-/// Returns whether the resident supervisor still owns any daemon-mode project.
-fn supervisor_has_daemon_projects() -> Result<bool, Box<dyn Error>> {
-    match ipc::send_command(&ControlCommand::Status { live: true }) {
-        Ok(ControlResponse::Status(snapshot)) => Ok(snapshot.units.iter().any(|unit| {
-            unit.project
-                .as_ref()
-                .is_some_and(|project| project.mode == ProjectRunMode::Daemon)
-        })),
-        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
-        Ok(other) => Err(io::Error::other(format!(
-            "unexpected supervisor response: {:?}",
-            other
-        ))
-        .into()),
-        Err(ControlError::NotAvailable) => Ok(false),
-        Err(err) => Err(err.into()),
-    }
 }
 
 /// Dispatches a resolved (preflight-cleared) restart plan.
@@ -4114,7 +4150,37 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    // No supervisor: run a one-shot local stop from the config on disk.
+    // If the target names a project the resident supervisor already knows, the
+    // supervisor owns its config — route the stop there and NEVER demand a local
+    // file. This keeps `sysg stop -p <loaded-project>` working from any directory
+    // without `-c`; SG0203 is only correct when the project is genuinely unknown.
+    let plan_project = match &plan {
+        StopPlan::Project { project } => Some(project.clone()),
+        StopPlan::Service {
+            project: Some(project),
+            ..
+        } => Some(project.clone()),
+        _ => None,
+    };
+    if let Some(project) = plan_project
+        && project_loaded_in_supervisor(&project)
+    {
+        let command = match plan {
+            StopPlan::Service { service, project } => ControlCommand::Stop {
+                service: Some(service),
+                project,
+            },
+            _ => ControlCommand::Stop {
+                service: None,
+                project: Some(project),
+            },
+        };
+        with_progress_spinner("Stopping", || send_control_command(command))?;
+        return Ok(());
+    }
+
+    // No supervisor context for the target: run a one-shot local stop from the
+    // config on disk (this is the path that can legitimately surface SG0203).
     let config = match &plan {
         StopPlan::Everything { config } => config.to_string_lossy().to_string(),
         _ => resolve_config_path(DEFAULT_CONFIG_PATH)
@@ -4297,11 +4363,18 @@ fn start_supervisor_daemon(
     // Wait for the child to publish its socket, then follow the boot stream so
     // the parent reports the truth of what came up — not just "socket is live".
     wait_for_supervisor_ready(child_pid).map_err(|err| -> Box<dyn Error> {
-        io::Error::other(format!(
-            "supervisor failed to start; see {}: {err}",
-            supervisor_log_path().display()
-        ))
-        .into()
+        use systemg::diag::{Diagnostic, SgCode};
+        // Point the user at `sysg logs --supervisor`, never a raw file path or an
+        // external tool — sysg owns its logs and its help must route through it.
+        Box::new(DiagError(Box::new(
+            Diagnostic::error(
+                SgCode::Catchall,
+                "the supervisor did not come up in time",
+            )
+            .note(err.to_string())
+            .help_cmd("read the supervisor log", "sysg logs --supervisor")
+            .help_docs(),
+        )))
     })?;
 
     let report = follow_boot(verbose)?;

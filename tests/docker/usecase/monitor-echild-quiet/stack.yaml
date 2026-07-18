@@ -1,0 +1,11 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      oneshot:
+        command: "sh -c 'echo ONESHOT_RAN; exit 0'"
+        restart_policy: "never"
+      web:
+        command: "sleep 3000"
+        restart_policy: "always"

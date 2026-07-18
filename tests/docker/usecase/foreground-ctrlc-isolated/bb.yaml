@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  bb:
+    name: BB
+    services:
+      bbsvc:
+        command: "sh -c 'while true; do echo BB_TICK; sleep 0.5; done'"
+        restart_policy: always

@@ -27,6 +27,9 @@ sysg status 2>/dev/null | grep -qiE 'Project: One' && sysg status 2>/dev/null | 
 check "$?" "both projects are loaded in the supervisor"
 
 section "logs -p two -s twosvc (loaded non-primary, NO -c) must NOT SG0201"
+# From a directory with NO config file, so `-p two` can only be resolved via the
+# supervisor's loaded projects — not a systemg.yaml in the CWD.
+mkdir -p /tmp/no-config-here && cd /tmp/no-config-here
 OUT="$(sysg logs -p two -s twosvc --lines 5 2>&1)"
 echo "$OUT" | grep -q SG0201 && echo "GOT SG0201 (bug)"
 ! echo "$OUT" | grep -q SG0201

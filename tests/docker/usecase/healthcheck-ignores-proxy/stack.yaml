@@ -1,0 +1,14 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "python3 -m http.server 8080 --bind 127.0.0.1"
+        restart_policy: always
+        deployment:
+          health_check:
+            url: http://127.0.0.1:8080/
+            attempt_timeout: 30s
+            retries: 5
+            interval: 1s
