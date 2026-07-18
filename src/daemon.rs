@@ -583,6 +583,14 @@ impl PidFile {
             return Err(PidFileError::ServiceNotFound);
         }
 
+        // Drop the process-GROUP entry too. Leaving it behind orphaned the group
+        // for every exit path that clears a pid (`probe_service_state` reaping a
+        // finished one-shot, for one), and status reports a group with no pid AS
+        // the unit's pid — so a build that had completed successfully showed up
+        // as `lost`/`warn` forever and dragged the project to WARN. `remove()`
+        // already clears both; this path must match it.
+        let _ = self.service_groups.remove(service);
+
         self.write_at(&path)
     }
 
