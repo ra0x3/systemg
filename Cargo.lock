@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "systemg"
-version = "0.55.9"
+version = "0.55.10"
 dependencies = [
  "assert_cmd",
  "caps",
