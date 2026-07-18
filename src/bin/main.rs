@@ -4319,8 +4319,33 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    // A `-p <project>` with NO supervisor running has nothing to stop: there is
+    // no registry to resolve the project against, and the project's services
+    // cannot be running without a supervisor to have started them. Falling
+    // through to the local-config path here produced the circular SG0203 —
+    // "could not read a local config file … target the project by id with -p"
+    // — when `-p` is exactly what the user passed.
+    if !supervisor_running()
+        && let StopPlan::Project { project }
+        | StopPlan::Service {
+            project: Some(project),
+            ..
+        } = &plan
+    {
+        use systemg::diag::{Diagnostic, SgCode};
+        return Err(Box::new(DiagError(Box::new(
+            Diagnostic::error(
+                SgCode::TargetNotFound,
+                format!("no project '{project}' is running"),
+            )
+            .note("there is no supervisor, so nothing from that project is running")
+            .help_cmd("start it", format!("sysg start -p {project}"))
+            .help_docs(),
+        ))));
+    }
+
     // No supervisor context for the target: run a one-shot local stop from the
-    // config on disk (this is the path that can legitimately surface SG0203).
+    // config on disk.
     let config = match &plan {
         StopPlan::Everything { config } => config.to_string_lossy().to_string(),
         _ => resolve_config_path(DEFAULT_CONFIG_PATH)

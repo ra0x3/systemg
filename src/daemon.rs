@@ -3358,6 +3358,21 @@ impl Daemon {
         }
     }
 
+    /// Reads a service's recorded lifecycle status from the state file.
+    ///
+    /// This is the state SHARED across concurrent operations, so it is the only
+    /// reliable answer to "did this service already run to completion?" when
+    /// another restart may have observed the exit first.
+    fn recorded_status(&self, service_name: &str) -> Option<ServiceLifecycleStatus> {
+        let config = self.cfg();
+        if !config.services.contains_key(service_name) {
+            return None;
+        }
+        let key = config.state_key(service_name);
+        let guard = self.state_file.lock().ok()?;
+        guard.get(&key).map(|entry| entry.status)
+    }
+
     /// Reports whether a pid is still alive. `kill(pid, 0)` succeeds for a live
     /// process and for a zombie the caller has yet to reap; a zombie holds no
     /// resources and no longer runs, so it is treated as dead here.
@@ -4554,6 +4569,19 @@ impl Daemon {
             let Some(service_cfg) = config.services.get(service_name) else {
                 continue;
             };
+
+            // `completed_services` records what THIS call observed. A concurrent
+            // restart can reap a one-shot's exit first, so this call never sees
+            // `CompletedSuccess` and would judge a service that ran perfectly as
+            // failed — three racing restarts each reported SG0302 for a build
+            // that had in fact finished with "All packages built successfully!".
+            // The recorded state is the shared truth; consult it before failing.
+            if matches!(
+                self.recorded_status(service_name),
+                Some(ServiceLifecycleStatus::ExitedSuccessfully)
+            ) {
+                continue;
+            }
 
             if !Self::should_verify_service(service_cfg) {
                 continue;
