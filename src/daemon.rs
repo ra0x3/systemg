@@ -5632,6 +5632,17 @@ impl Daemon {
             Err(_) => return to_restart,
         };
 
+        // Clear stale pid entries FIRST, independently of the processes map. A
+        // recorded pid whose process is gone is stale no matter what the map
+        // says — and under concurrent restarts the map can still hold a `Child`
+        // handle for a service that already exited, which made the `tracked`
+        // skip below hide the staleness. Status then reported `lost`/`warn`
+        // indefinitely for a one-shot that had completed successfully, dragging
+        // the whole project to WARN with nothing that could ever clear it.
+        for name in ctx.config.services.keys() {
+            Self::clear_stale_pid_entry(ctx, name);
+        }
+
         for (name, service) in &ctx.config.services {
             if tracked.contains(name) {
                 continue;
@@ -5642,12 +5653,6 @@ impl Daemon {
 
             let policy = service.restart_policy.as_deref();
             if policy != Some("always") && policy != Some("on-failure") {
-                // Not restartable — but a STALE pid entry must still be cleared.
-                // Concurrent restarts can record a pid for a process that is
-                // already gone; with no reconcile for one-shots, status reported
-                // `lost`/`warn` forever for a build that had in fact completed
-                // successfully, and dragged the whole project to WARN.
-                Self::clear_stale_pid_entry(ctx, name);
                 continue;
             }
 
