@@ -130,6 +130,9 @@ struct SpawnParams {
 }
 
 /// Parameters for streaming logs through the supervisor control socket.
+/// A unit to stream logs for: `(project id, service name, live pid)`.
+type LogUnitTarget = (String, String, Option<u32>);
+
 struct SupervisorLogRequest<'a> {
     /// Latest status snapshot used to resolve service/project targets.
     snapshot: crate::status::StatusSnapshot,
@@ -2425,15 +2428,14 @@ impl Supervisor {
             // terminal — and again on every reconnect, so a foreground stream
             // that dropped 32 times replayed that history 32 times. Offline
             // units have nothing to tail: by definition no process is writing.
-            let sections: Vec<(LogSection, Vec<(String, String, Option<u32>)>)> =
-                if request.follow {
-                    vec![(LogSection::Running, running_units)]
-                } else {
-                    vec![
-                        (LogSection::Running, running_units),
-                        (LogSection::Offline, offline_units),
-                    ]
-                };
+            let sections: Vec<(LogSection, Vec<LogUnitTarget>)> = if request.follow {
+                vec![(LogSection::Running, running_units)]
+            } else {
+                vec![
+                    (LogSection::Running, running_units),
+                    (LogSection::Offline, offline_units),
+                ]
+            };
 
             for (section, units) in sections {
                 if units.is_empty() {
