@@ -1499,6 +1499,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                             Err(err) => match err.downcast_ref::<ControlError>() {
+                                // `--stream` is a REPEATING render by design, so
+                                // redrawing the grouped snapshot is correct here
+                                // (unlike the follow path, which must tail).
                                 Some(ControlError::NotAvailable) => {
                                     if logs_stream_tty {
                                         terminal::disable_raw_mode()?;
@@ -1589,18 +1592,27 @@ fn run() -> Result<(), Box<dyn Error>> {
 
                     // If the stream ended on its own (not a key press), surface a
                     // NotAvailable fallback the same way the blocking path does.
-                    if stream_thread.is_finished()
+                    // NEVER in follow mode: see `render_logs_once` below.
+                    if !follow_logs
+                        && stream_thread.is_finished()
                         && let Ok(Err(ControlError::NotAvailable)) = stream_thread.join()
                     {
-                        render_logs_once(!follow_logs)?;
+                        render_logs_once(true)?;
                     }
                 } else {
                     match stream_logs_via_supervisor(follow_logs) {
                         Ok(()) => {}
                         Err(err) => match err.downcast_ref::<ControlError>() {
-                            Some(ControlError::NotAvailable) => {
-                                render_logs_once(!follow_logs)?
+                            Some(ControlError::NotAvailable) if !follow_logs => {
+                                render_logs_once(true)?
                             }
+                            // A follow that loses the supervisor must stay a
+                            // follow: the caller's retry loop reconnects. Falling
+                            // back to a static render replayed the whole grouped
+                            // snapshot — "Offline Services" and all the finished
+                            // one-shot history — into a LIVE terminal, once per
+                            // reconnect (measured: 32 replays).
+                            Some(ControlError::NotAvailable) => {}
                             _ => return Err(err),
                         },
                     }
@@ -3934,6 +3946,13 @@ fn spawn_foreground_log_follow(
         .name(format!("fg-logs-{project_id}"))
         .spawn(move || {
             let mut announced_interrupt = false;
+            // Backlog is for the FIRST attach only. Every reconnect re-requested
+            // the last N lines, and the supervisor answers that with the full
+            // grouped render — "Offline Services" plus the finished output of
+            // every completed one-shot — dumped into a live terminal. Measured
+            // on a real project: 32 reconnects replayed the build/probe history
+            // 32 times. After the first attach a follow must TAIL ONLY.
+            let mut backlog_lines = 20usize;
             // A project that has not registered its first unit yet is BOOTING,
             // not gone. `supervisor_running()` goes true when the control socket
             // appears — well before any service is spawned — so without this
@@ -3947,7 +3966,7 @@ fn spawn_foreground_log_follow(
                 let command = ControlCommand::Logs {
                     service: None,
                     project: Some(project_id.clone()),
-                    lines: 20,
+                    lines: backlog_lines,
                     kind: None,
                     follow: true,
                     since: None,
@@ -3964,6 +3983,8 @@ fn spawn_foreground_log_follow(
                     Some(&shutdown),
                 );
                 let _ = writer.flush();
+                // Subsequent attempts tail only: no backlog replay.
+                backlog_lines = 20;
                 // Drop the connection handle now that this attempt ended, so a
                 // stale shutdown target isn't left dangling between reconnects.
                 if let Ok(mut guard) = shutdown.lock() {

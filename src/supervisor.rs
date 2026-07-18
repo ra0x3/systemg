@@ -2419,10 +2419,23 @@ impl Supervisor {
             offline_units.sort_unstable_by(|left, right| left.1.cmp(&right.1));
             offline_units.dedup_by(|left, right| left.1 == right.1);
 
-            for (section, units) in [
-                (LogSection::Running, running_units),
-                (LogSection::Offline, offline_units),
-            ] {
+            // A FOLLOW tails live output; it must not replay finished history.
+            // Serving the Offline section to a follower dumped every completed
+            // one-shot's output (build, migrations, a redis probe) into a live
+            // terminal — and again on every reconnect, so a foreground stream
+            // that dropped 32 times replayed that history 32 times. Offline
+            // units have nothing to tail: by definition no process is writing.
+            let sections: Vec<(LogSection, Vec<(String, String, Option<u32>)>)> =
+                if request.follow {
+                    vec![(LogSection::Running, running_units)]
+                } else {
+                    vec![
+                        (LogSection::Running, running_units),
+                        (LogSection::Offline, offline_units),
+                    ]
+                };
+
+            for (section, units) in sections {
                 if units.is_empty() {
                     continue;
                 }

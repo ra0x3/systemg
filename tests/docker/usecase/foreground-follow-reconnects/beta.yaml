@@ -3,6 +3,19 @@ projects:
   beta:
     name: Beta
     services:
+      # One-shots that COMPLETE and then sit offline. A real project always has
+      # these (a build, migrations, a redis/postgres probe), and their presence
+      # is what makes the follow stream's fallback rendering observable: a
+      # reconnect that replays static history dumps THEIR finished output into a
+      # live terminal. A fixture with only long-running services can never catch
+      # that — which is exactly why the bug shipped.
+      betabuild:
+        command: "sh -c 'echo BETA_BUILD_DONE'"
+      betaprobe:
+        command: "sh -c 'echo BETA_PROBE_PONG'"
       betasvc:
         command: "sh -c 'while true; do echo BETA_TICK; sleep 1; done'"
         restart_policy: always
+        depends_on:
+          - service: betabuild
+            condition: completed

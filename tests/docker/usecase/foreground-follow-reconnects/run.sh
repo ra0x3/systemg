@@ -19,11 +19,11 @@ set -u
 B_OUT=/tmp/beta.out
 
 section "term1: anchor becomes the supervisor"
-python3 /usecase/fgcap.py /usecase/anchor.yaml 40 /tmp/anchor.out &
+python3 /usecase/fgcap.py /usecase/anchor.yaml 70 /tmp/anchor.out &
 sleep 4
 
 section "term2: beta attaches and streams (captured)"
-python3 /usecase/fgcap.py /usecase/beta.yaml 34 "$B_OUT" &
+python3 /usecase/fgcap.py /usecase/beta.yaml 64 "$B_OUT" &
 sleep 7
 
 TICKS_BEFORE="$(grep -c BETA_TICK "$B_OUT" 2>/dev/null || echo 0)"
@@ -47,6 +47,36 @@ TICKS_AFTER="$(grep -c BETA_TICK "$B_OUT" 2>/dev/null || echo 0)"
 echo "beta ticks after reconnect: $TICKS_AFTER (before: $TICKS_BEFORE)"
 [ "$TICKS_AFTER" -gt "$TICKS_BEFORE" ]
 check "$?" "beta ticks RESUMED after the reconnect (stream did not freeze)"
+
+section "a live stream must not replay STATIC history on reconnect"
+# The reconnect path fell back to rendering a full status-grouped snapshot,
+# which prints an "Offline Services" section and dumps the finished output of
+# every completed one-shot into a LIVE terminal. Observed on a real project:
+# a foreground stream suddenly printed the build/migrations/redis history it had
+# already shown at boot, then died. A follow tails; it never replays.
+! grep -qi 'Offline Services' "$B_OUT"
+check "$?" "no 'Offline Services' block was dumped into the live stream"
+
+# The completed one-shots must not have their history re-emitted mid-stream.
+# They legitimately appear ONCE during the initial boot render, so more than one
+# occurrence means the reconnect replayed them.
+BUILD_ECHOES="$(grep -c BETA_BUILD_DONE "$B_OUT" 2>/dev/null | tr -d ' \n')"
+PROBE_ECHOES="$(grep -c BETA_PROBE_PONG "$B_OUT" 2>/dev/null | tr -d ' \n')"
+BUILD_ECHOES="${BUILD_ECHOES:-0}"; PROBE_ECHOES="${PROBE_ECHOES:-0}"
+echo "one-shot echoes: build=$BUILD_ECHOES probe=$PROBE_ECHOES (each must be <=1)"
+if [ "$BUILD_ECHOES" -le 1 ] && [ "$PROBE_ECHOES" -le 1 ]; then RC=0; else RC=1; fi
+check "$RC" "completed one-shots were not replayed into the live stream"
+
+section "the stream is still ALIVE at the end"
+# The real failure ended with the stream dead: a static dump, then
+# 'log stream ended unexpectedly'. Reconnecting is only correct if it KEEPS
+# streaming afterwards.
+BEFORE_FINAL="$(grep -c BETA_TICK "$B_OUT" 2>/dev/null || echo 0)"
+sleep 6
+AFTER_FINAL="$(grep -c BETA_TICK "$B_OUT" 2>/dev/null || echo 0)"
+echo "ticks still arriving: $BEFORE_FINAL -> $AFTER_FINAL"
+[ "$AFTER_FINAL" -gt "$BEFORE_FINAL" ]
+check "$?" "the stream is STILL alive and tailing at the end"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish
