@@ -1324,6 +1324,27 @@ fn write_log_header(
     )
 }
 
+/// Prefixes every line of `chunk` with its service name.
+///
+/// A multiplexed follow interleaves many services into one stream, so identity
+/// must travel WITH each line. Boxed per-service banners only work when a
+/// service's output is contiguous — once several units tail concurrently, a
+/// banner describes just the first line after it and every later line is
+/// unattributable. This is the `docker compose`/`kubectl logs -f` convention.
+pub fn prefix_lines_with_service(chunk: &[u8], service_name: &str) -> Vec<u8> {
+    let prefix = format!("{service_name} | ");
+    let mut out = Vec::with_capacity(chunk.len() + prefix.len());
+    let mut at_line_start = true;
+    for &byte in chunk {
+        if at_line_start && byte != b'\n' {
+            out.extend_from_slice(prefix.as_bytes());
+        }
+        out.push(byte);
+        at_line_start = byte == b'\n';
+    }
+    out
+}
+
 /// Writes a section header used by the all-services log view.
 pub fn write_log_section_header(
     mut writer: impl Write,
@@ -2161,6 +2182,35 @@ impl LogManager {
         filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
+        self.stream_log_to_socket_labeled(
+            project,
+            service_name,
+            pid,
+            lines,
+            kind,
+            follow,
+            filter,
+            stream,
+            false,
+        )
+    }
+
+    /// As `stream_log_to_socket`, but `prefix_service` labels every line with the
+    /// service name instead of printing a boxed banner. Required whenever
+    /// several units share one stream: see `prefix_lines_with_service`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stream_log_to_socket_labeled(
+        &self,
+        project: &str,
+        service_name: &str,
+        pid: Option<u32>,
+        lines: usize,
+        kind: Option<&str>,
+        follow: bool,
+        filter: &LogFilter,
+        stream: &UnixStream,
+        prefix_service: bool,
+    ) -> Result<(), LogsManagerError> {
         let mode = resolve_tail_mode(
             if follow {
                 TailMode::Follow
@@ -2176,7 +2226,9 @@ impl LogManager {
             .flatten()
             && !snapshot.is_empty()
         {
-            write_log_header(stream.try_clone()?, service_name, pid)?;
+            if !prefix_service {
+                write_log_header(stream.try_clone()?, service_name, pid)?;
+            }
             let mut socket = stream.try_clone()?;
             let snapshot = match kind {
                 Some(kind_name) => filter_captured_log_bytes(&snapshot, kind_name),
@@ -2185,6 +2237,11 @@ impl LogManager {
             let snapshot = filter.apply(&snapshot);
             let tail = tail_log_bytes(&snapshot, lines);
             if !tail.is_empty() {
+                let tail = if prefix_service {
+                    prefix_lines_with_service(&tail, service_name)
+                } else {
+                    tail.to_vec()
+                };
                 socket.write_all(&tail)?;
                 socket.flush()?;
             }
@@ -2204,6 +2261,11 @@ impl LogManager {
                             if chunk.is_empty() {
                                 continue;
                             }
+                            let chunk = if prefix_service {
+                                prefix_lines_with_service(&chunk, service_name)
+                            } else {
+                                chunk.to_vec()
+                            };
                             match socket.write_all(&chunk) {
                                 Ok(()) => {
                                     socket.flush()?;

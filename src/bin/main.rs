@@ -3906,7 +3906,21 @@ fn start_foreground_attached(
         service,
         mode: ProjectRunMode::Foreground,
     };
-    with_progress_spinner("Starting", || send_control_command(command))?;
+    // NO spinner here. A foreground start's whole purpose is to show the
+    // project's output, and the fork path (`start_foreground`) prints its header
+    // and streams straight away. Wrapping the attach in a spinner made the two
+    // paths look completely different for the same command: the first project
+    // started streaming, while a second project attaching to that supervisor sat
+    // on `⠹ Starting` — the boot runs on a background thread, so the spinner had
+    // nothing to report and only hid the stream that followed.
+    // Say what is happening BEFORE the boot begins. A slow project (one whose
+    // pre_start waits on a DB or tunnel) can take a minute to produce its first
+    // line, and a bare spinner left the user unable to tell working from wedged.
+    println!("Starting project '{project_id}' in the foreground…");
+    println!("Streaming its services' output; press Ctrl-C to stop the project.");
+    let boot_progress = spawn_boot_progress_reporter(project_id.clone());
+    send_control_command(command)?;
+    boot_progress.stop();
 
     // The become-supervisor foreground path streams its services' output to the
     // terminal; the attach-to-existing path must do the same. Stream IN-PROCESS
@@ -3930,6 +3944,56 @@ fn start_foreground_attached(
         let _ = handle.join();
     }
     result
+}
+
+/// A running boot-progress reporter; call `stop()` to end it.
+struct BootProgressReporter {
+    running: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl BootProgressReporter {
+    /// Stops the reporter and waits for its final line.
+    fn stop(mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Reports what a project's boot is DOING while it happens.
+///
+/// A foreground attach hands the boot to a background thread in the supervisor,
+/// so the terminal has nothing to show until the first service writes a log
+/// line. On a project whose `pre_start` waits on a DB or tunnel that is a minute
+/// of silence, and the spinner this replaces said only "Starting" — leaving the
+/// user unable to tell a slow boot from a wedged one. The supervisor publishes
+/// its live operation (dependency waits, health-check attempts) through the op
+/// slot; this surfaces it, printing only when the message CHANGES so a slow step
+/// does not scroll the terminal.
+fn spawn_boot_progress_reporter(project_id: String) -> BootProgressReporter {
+    let running = Arc::new(AtomicBool::new(true));
+    let thread_running = Arc::clone(&running);
+    let handle = thread::Builder::new()
+        .name(format!("boot-progress-{project_id}"))
+        .spawn(move || {
+            let mut last = String::new();
+            while thread_running.load(Ordering::SeqCst) {
+                if let Some(op) = ipc::current_op()
+                    && op.label.contains(&project_id)
+                {
+                    let line = op.describe();
+                    if line != last {
+                        println!("  • {line}");
+                        last = line;
+                    }
+                }
+                thread::sleep(Duration::from_millis(400));
+            }
+        })
+        .ok();
+    BootProgressReporter { running, handle }
 }
 
 /// Streams a foreground project's logs in-process on a supervised loop. Connects

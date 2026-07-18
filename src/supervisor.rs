@@ -2468,7 +2468,10 @@ impl Supervisor {
                                 &service_name,
                             ));
                         }
-                        let _ = manager.stream_log_to_socket(
+                        // Prefix each line with the service name: several
+                        // units share this stream, so a banner would only
+                        // describe the first line after it.
+                        let _ = manager.stream_log_to_socket_labeled(
                             &unit_project,
                             &service_name,
                             pid,
@@ -2477,6 +2480,7 @@ impl Supervisor {
                             true,
                             &filter,
                             &stream,
+                            true,
                         );
                     }));
                 }
