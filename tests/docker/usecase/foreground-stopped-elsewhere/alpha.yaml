@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  alpha:
+    name: Alpha
+    services:
+      alphasvc:
+        command: "sleep 3000"
+        restart_policy: always

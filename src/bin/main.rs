@@ -3672,7 +3672,27 @@ fn start_foreground_attached(
     };
     with_progress_spinner("Starting", || send_control_command(command))?;
 
-    wait_for_foreground_attachment(project_id)
+    // The become-supervisor foreground path streams its services' output to the
+    // terminal; the attach-to-existing path must do the same, else a second
+    // `sysg start -c other.yaml` registers its project and then shows nothing.
+    // Follow THIS project's logs by spawning the proven `logs -p <p> --follow`
+    // child inheriting stdout; the Ctrl-C wait below drives teardown, and the
+    // StopProject it issues closes the stream so the child exits on its own.
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
+    let mut follower = process::Command::new(&current_exe)
+        .args(["logs", "--project", project_id.as_str(), "--follow"])
+        .stdin(process::Stdio::null())
+        .stdout(process::Stdio::inherit())
+        .stderr(process::Stdio::inherit())
+        .spawn()
+        .ok();
+
+    let result = wait_for_foreground_attachment(project_id);
+    if let Some(child) = follower.as_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 /// Waits for Ctrl-C and then stops the foreground-owned project.
@@ -3682,16 +3702,22 @@ fn wait_for_foreground_attachment(project_id: String) -> Result<(), Box<dyn Erro
         let _ = tx.send(());
     })?;
 
-    // Wake on EITHER Ctrl-C OR the supervisor disappearing. Blocking only on
-    // Ctrl-C wedged the foreground forever when a `stop --supervisor` (or a
-    // crash) tore the supervisor down out from under it — the terminal never
-    // returned. If the supervisor is already gone, there is nothing to stop.
+    // Wake on Ctrl-C, the supervisor disappearing, OR this project being stopped
+    // out from under us. Blocking only on Ctrl-C wedged the foreground forever
+    // when a `stop --supervisor`/crash tore the supervisor down, OR when a
+    // `stop -p <this-project>` from ANOTHER terminal removed just this project
+    // while the supervisor stayed up (hosting siblings) — the terminal never
+    // returned. In both detach cases the project is already gone; nothing to stop.
     loop {
         if rx.recv_timeout(Duration::from_millis(250)).is_ok() {
             break;
         }
         if !supervisor_running() {
             info!("Foreground supervisor is no longer running; detaching.");
+            return Ok(());
+        }
+        if !project_loaded_in_supervisor(&project_id) {
+            info!("Foreground project '{project_id}' was stopped elsewhere; detaching.");
             return Ok(());
         }
     }
@@ -4549,6 +4575,22 @@ fn service_selector_name(selector: &str) -> &str {
 /// not the one the resolved config defines, which usually means the CLI picked
 /// up a different config than the user expects. Lists what the running
 /// supervisor actually has loaded so the user can retarget without guessing.
+/// Whether `project_id` is currently loaded in the running supervisor. Used to
+/// let an explicit `-p <loaded-project>` be authoritative for read commands
+/// (logs/inspect/status) even when the config resolved from disk is a different
+/// project's — the supervisor already knows the loaded project's config.
+fn project_loaded_in_supervisor(project_id: &str) -> bool {
+    matches!(
+        ipc::send_command(&ControlCommand::Status { live: false }),
+        Ok(ControlResponse::Status(snapshot))
+            if snapshot.units.iter().any(|unit| {
+                unit.project
+                    .as_ref()
+                    .is_some_and(|project| project.id == project_id)
+            })
+    )
+}
+
 fn fail_project_mismatch(requested: &str, config_project: &str) -> ! {
     use systemg::diag::{Diagnostic, SgCode};
 
@@ -4639,6 +4681,14 @@ fn resolve_command_project(
     let config_value = load_config(Some(config_path.to_string_lossy().as_ref())).ok();
 
     if let Some(project) = explicit_project {
+        // A `-p` that names a project ALREADY LOADED in the running supervisor is
+        // authoritative — sysg knows that project's registered config, so the
+        // command targets it regardless of whatever config was resolved from the
+        // cwd/default. This is what lets `logs -p other-project` (and the status
+        // TUI's Logs key) work without pointing -c at the right file.
+        if project_loaded_in_supervisor(&project) {
+            return Ok(Some(project));
+        }
         // A multi-project config declares several projects; `-p` may name any of
         // them, not just the primary. Only reject when the config genuinely does
         // not declare the requested project.

@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  alpha:
+    name: Alpha
+    services:
+      alphasvc:
+        command: "sh -c 'while true; do echo ALPHA_MARKER_LINE; sleep 1; done'"
+        restart_policy: always

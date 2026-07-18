@@ -117,6 +117,7 @@ struct CronProjectRuntime {
     project_id: String,
     daemon: Daemon,
     config: Arc<Config>,
+    mode: ProjectRunMode,
 }
 
 /// Parameters for spawning a child process.
@@ -609,7 +610,7 @@ impl Supervisor {
                 metrics_store,
                 spawn_manager,
                 mode,
-                ProjectRunMode::Daemon,
+                runtime.mode,
                 &config_path,
                 Some(&valid_cron_hashes),
             ) {
@@ -1121,6 +1122,7 @@ impl Supervisor {
             project_id: config_arc.project.id.clone(),
             daemon: daemon.clone(),
             config: Arc::clone(&config_arc),
+            mode: primary_project_mode,
         }]));
         let metrics_settings = config_arc
             .metrics
@@ -1175,6 +1177,7 @@ impl Supervisor {
             project_id: self.daemon.config().project.id.clone(),
             daemon: self.daemon.clone(),
             config: self.daemon.config(),
+            mode: self.primary_project_mode,
         }];
 
         projects.extend(self.extra_projects.iter().map(|(project_id, project)| {
@@ -1182,6 +1185,7 @@ impl Supervisor {
                 project_id: project_id.clone(),
                 daemon: project.daemon.clone(),
                 config: project.daemon.config(),
+                mode: project.mode,
             }
         }));
 
