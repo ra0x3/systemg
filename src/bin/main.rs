@@ -326,19 +326,38 @@ fn format_progress_spinner_frame(frame: &str, label: &str) -> String {
     let budget = width.saturating_sub(frame.chars().count() + 2);
     let shown: String = if label.chars().count() > budget {
         let keep = budget.saturating_sub(1);
-        label.chars().take(keep).chain(std::iter::once('…')).collect()
+        label
+            .chars()
+            .take(keep)
+            .chain(std::iter::once('…'))
+            .collect()
     } else {
         label.to_string()
     };
     format!("\r{frame} {shown}\x1B[K")
 }
 
-/// Usable terminal width, defaulting to 80 when it cannot be determined.
+/// Usable terminal width.
+///
+/// A failed or nonsense probe must not shrink the line to a stub — an
+/// unset/zero winsize (common under a bare pty, or when stdout is not the
+/// controlling terminal) once truncated the spinner to 19 columns on a
+/// 120-column terminal. Prefer the real size, fall back to `COLUMNS`, then to
+/// a sane default, and never accept a width too small to say anything.
 fn terminal_width() -> usize {
-    crossterm::terminal::size()
+    use systemg::constants::{DEFAULT_TERMINAL_WIDTH, MIN_SPINNER_WIDTH};
+
+    let probed = crossterm::terminal::size()
+        .ok()
         .map(|(cols, _)| cols as usize)
-        .unwrap_or(80)
-        .max(20)
+        .filter(|cols| *cols >= MIN_SPINNER_WIDTH);
+    let from_env = || {
+        std::env::var("COLUMNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|cols| *cols >= MIN_SPINNER_WIDTH)
+    };
+    probed.or_else(from_env).unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
 fn clear_progress_spinner_line() -> &'static str {

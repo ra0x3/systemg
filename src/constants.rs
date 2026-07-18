@@ -193,6 +193,14 @@ pub const PROJECT_PID_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// ports; the wait covers a slow shutdown without hiding a failed kill.
 pub const STOP_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Narrowest terminal width the progress spinner will believe. Anything smaller
+/// is treated as a failed probe rather than a real terminal, so a zero/unset
+/// winsize cannot truncate the status line down to a useless stub.
+pub const MIN_SPINNER_WIDTH: usize = 40;
+
+/// Terminal width assumed when the real width cannot be determined.
+pub const DEFAULT_TERMINAL_WIDTH: usize = 80;
+
 /// Polling interval when waiting for service state changes.
 pub const SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
