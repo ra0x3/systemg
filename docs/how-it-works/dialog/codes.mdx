@@ -71,6 +71,13 @@ within the per-attempt budget, across all `retries`.
 A service's health check ran and reported the service is not healthy (an HTTP
 non-2xx response, or a health command that exited non-zero).
 
+### SG0105
+
+A service exited at start because it could not bind its port — something else is
+already listening on it. The diagnostic names the port when the service's output
+reveals it. Stop whatever holds the port, or change the port in the service's
+command.
+
 ## Selectors, status &amp; stop
 
 ### SG0006

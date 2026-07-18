@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "python3 -m http.server 8080 --bind 127.0.0.1"
+        restart_policy: never

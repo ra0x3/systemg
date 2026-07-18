@@ -88,6 +88,8 @@ pub enum SgCode {
     PreStartFailed,
     /// SG0104 — a service never passed its configured health check.
     HealthUnmet,
+    /// SG0105 — a service could not bind its port because it is already in use.
+    PortInUse,
     /// SG0201 — the `-p` project does not match the resolved config.
     TargetConfigMismatch,
     /// SG0202 — the command names a service or project that does not exist.
@@ -151,6 +153,7 @@ impl SgCode {
             SgCode::UnitImmediateExit => "SG0102",
             SgCode::PreStartFailed => "SG0103",
             SgCode::HealthUnmet => "SG0104",
+            SgCode::PortInUse => "SG0105",
             SgCode::TargetConfigMismatch => "SG0201",
             SgCode::TargetNotFound => "SG0202",
             SgCode::ConfigFileUnreadable => "SG0203",
@@ -172,7 +175,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 38] = [
+    pub const ALL: [SgCode; 39] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -199,6 +202,7 @@ impl SgCode {
         SgCode::UnitImmediateExit,
         SgCode::PreStartFailed,
         SgCode::HealthUnmet,
+        SgCode::PortInUse,
         SgCode::TargetConfigMismatch,
         SgCode::TargetNotFound,
         SgCode::ConfigFileUnreadable,
