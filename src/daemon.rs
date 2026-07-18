@@ -5705,7 +5705,16 @@ impl Daemon {
         let Ok(guard) = ctx.lock_pid_file() else {
             return;
         };
-        let Some(pid) = guard.get(name) else {
+        let Some(pid) = guard.get(name).or_else(|| {
+            // A service can be left with a process-GROUP entry and no pid entry
+            // when a concurrent restart records the group and the start then
+            // fails. That orphan keeps the unit looking alive to anything that
+            // consults the group, so it must be swept on the same terms.
+            guard
+                .pgid_for(name)
+                .map(|pgid| pgid as u32)
+                .filter(|_| guard.get(name).is_none())
+        }) else {
             return;
         };
         if Self::pid_is_alive(pid) {
