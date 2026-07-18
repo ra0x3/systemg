@@ -15,9 +15,9 @@ use std::{fmt, io::IsTerminal};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Base URL for per-code documentation pages.
-pub const DOCS_BASE: &str = "https://docs.sysg.dev/errors";
+pub const DOCS_BASE: &str = "https://sysg.dev/how-it-works/dialog/codes";
 
-const RED: &str = "\x1b[1;31m";
+const RED: &str = "\x1b[1;91m";
 const YELLOW: &str = "\x1b[1;33m";
 const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
@@ -168,7 +168,7 @@ impl SgCode {
 
     /// The docs URL for this code.
     pub fn docs_url(self) -> String {
-        format!("{DOCS_BASE}/{}", self.as_str())
+        format!("{DOCS_BASE}#{}", self.as_str().to_lowercase())
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
@@ -550,7 +550,7 @@ mod tests {
         assert!(text.contains("--> sysg.yaml:31 (services.api.health_check)"));
         assert!(text.contains("password authentication failed"));
         assert!(text.contains("sysg logs -s api"));
-        assert!(text.contains(&format!("{DOCS_BASE}/SG0104")));
+        assert!(text.contains(&format!("{DOCS_BASE}#sg0104")));
         assert!(!text.contains('\x1b'));
     }
 

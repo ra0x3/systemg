@@ -34,6 +34,14 @@ original process streams.
 
 ## Service output configuration
 
+<Info>
+  **Default log size cap.** Each service's active log file rotates at **10 MB**
+  (`max_bytes`, 10485760 bytes), and systemg keeps **5** rotated files
+  (`max_files`) per log. So a single service's captured output is bounded to
+  roughly **60 MB** on disk (1 active + 5 rotated) before the oldest is dropped.
+  Raise or lower these with a `logs` block; set `sink: none` to capture nothing.
+</Info>
+
 Use the top-level `logs` block to set defaults for all services:
 
 ```yaml

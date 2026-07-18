@@ -119,7 +119,10 @@ Whether `sysg logs` follows the stream (stays attached and prints new lines as
 they arrive) or prints a one-shot snapshot and exits depends on how it is
 invoked:
 
-- `--follow` / `-f` always follows, until you interrupt it.
+- `--follow` / `-f` always follows, until you interrupt it. In a terminal,
+  press **Esc** or **Ctrl-C** to stop following and return to the shell; the
+  stream reconnects on its own if the supervisor connection drops, so it never
+  freezes silently while a service is still logging.
 - `--no-follow` always prints a one-shot snapshot and exits.
 - With neither flag, systemg follows **only** when stdout is an interactive
   terminal and `SYSTEMG_AGENT` is unset. When stdout is a pipe, a file, an SSH

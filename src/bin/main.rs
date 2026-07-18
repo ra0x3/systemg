@@ -267,6 +267,17 @@ fn agent_mode() -> bool {
     set("SYSTEMG_AGENT") || set("NO_COLOR")
 }
 
+thread_local! {
+    /// The subcommand currently being dispatched, so the top-level catch-all can
+    /// attach help for THAT command instead of a fixed `sysg logs` suggestion.
+    static CURRENT_COMMAND: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// Records the command being run so `catchall_diag` can tailor its help.
+fn set_current_command(command: &Commands) {
+    CURRENT_COMMAND.with(|c| c.set(command.name()));
+}
+
 /// Applies the global `--plain` flag by enabling agent mode for this process,
 /// so every downstream `agent_mode()` check observes it uniformly.
 fn apply_plain_mode(plain: bool) {
@@ -390,10 +401,18 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
         return config_read_diag(message);
     }
 
-    systemg::diag::Diagnostic::error(systemg::diag::SgCode::Catchall, "command failed")
-        .note(message)
-        .help_cmd("supervisor logs", "sysg logs")
-        .help_docs()
+    let command = CURRENT_COMMAND.with(|c| c.get());
+    let mut diag = systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::Catchall,
+        "command failed",
+    )
+    .note(message);
+    // Point at the failing command's own help, not a fixed `sysg logs` — a
+    // `status` error suggesting you check logs is nonsensical.
+    if !command.is_empty() {
+        diag = diag.help_cmd(format!("{command} help"), format!("sysg {command} --help"));
+    }
+    diag.help_docs()
 }
 
 /// Diagnostic for a failed local config read. The resident supervisor already
@@ -500,6 +519,7 @@ fn main() -> process::ExitCode {
 /// Dispatches the parsed CLI command.
 fn run() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
+    set_current_command(&args.command);
     apply_plain_mode(args.plain);
     let euid = Uid::effective();
     let drop_privileges_effective =
@@ -1391,14 +1411,79 @@ fn run() -> Result<(), Box<dyn Error>> {
                 stream_result?;
             } else {
                 let follow_logs = resolve_logs_follow(follow, no_follow);
-                match stream_logs_via_supervisor(follow_logs) {
-                    Ok(()) => {}
-                    Err(err) => match err.downcast_ref::<ControlError>() {
-                        Some(ControlError::NotAvailable) => {
-                            render_logs_once(!follow_logs)?
+                // A follow in a real terminal must exit on Esc/Ctrl-C. The socket
+                // stream blocks, so run it on a background thread and poll keys on
+                // the main thread; a key press restores the terminal and returns.
+                let follow_tty = follow_logs
+                    && unsafe {
+                        libc::isatty(libc::STDIN_FILENO) == 1
+                            && libc::isatty(libc::STDOUT_FILENO) == 1
+                    };
+                if follow_tty {
+                    let stream_cmd = ControlCommand::Logs {
+                        service: service.clone(),
+                        project: target_project.clone(),
+                        lines,
+                        kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
+                        follow: true,
+                        since: since.clone(),
+                        until: until.clone(),
+                        grep: grep.clone(),
+                        all,
+                        structured: structured_output,
+                    };
+                    let log_format_owned = log_format;
+                    let strip_ansi_owned = strip_ansi_output;
+                    let service_owned = service.clone();
+                    let stream_thread = thread::spawn(move || {
+                        let mut writer = LogWriter::new(
+                            io::stdout(),
+                            log_format_owned,
+                            strip_ansi_owned,
+                            service_owned,
+                        );
+                        let outcome =
+                            ipc::stream_command_output(&stream_cmd, &mut writer);
+                        let _ = writer.flush();
+                        outcome
+                    });
+
+                    terminal::enable_raw_mode()?;
+                    let key_result = (|| -> Result<(), Box<dyn Error>> {
+                        loop {
+                            if stream_thread.is_finished() {
+                                return Ok(());
+                            }
+                            if event::poll(Duration::from_millis(100))?
+                                && matches!(
+                                    logs_stream_event_action(event::read()?),
+                                    Some(LogsStreamAction::Exit)
+                                )
+                            {
+                                return Ok(());
+                            }
                         }
-                        _ => return Err(err),
-                    },
+                    })();
+                    terminal::disable_raw_mode()?;
+                    key_result?;
+
+                    // If the stream ended on its own (not a key press), surface a
+                    // NotAvailable fallback the same way the blocking path does.
+                    if stream_thread.is_finished()
+                        && let Ok(Err(ControlError::NotAvailable)) = stream_thread.join()
+                    {
+                        render_logs_once(!follow_logs)?;
+                    }
+                } else {
+                    match stream_logs_via_supervisor(follow_logs) {
+                        Ok(()) => {}
+                        Err(err) => match err.downcast_ref::<ControlError>() {
+                            Some(ControlError::NotAvailable) => {
+                                render_logs_once(!follow_logs)?
+                            }
+                            _ => return Err(err),
+                        },
+                    }
                 }
             }
         }
@@ -3673,26 +3758,85 @@ fn start_foreground_attached(
     with_progress_spinner("Starting", || send_control_command(command))?;
 
     // The become-supervisor foreground path streams its services' output to the
-    // terminal; the attach-to-existing path must do the same, else a second
-    // `sysg start -c other.yaml` registers its project and then shows nothing.
-    // Follow THIS project's logs by spawning the proven `logs -p <p> --follow`
-    // child inheriting stdout; the Ctrl-C wait below drives teardown, and the
-    // StopProject it issues closes the stream so the child exits on its own.
-    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
-    let mut follower = process::Command::new(&current_exe)
-        .args(["logs", "--project", project_id.as_str(), "--follow"])
-        .stdin(process::Stdio::null())
-        .stdout(process::Stdio::inherit())
-        .stderr(process::Stdio::inherit())
-        .spawn()
-        .ok();
+    // terminal; the attach-to-existing path must do the same. Stream IN-PROCESS
+    // (not via a spawned child, which fought for the terminal, took SIGTTOU, and
+    // died silently mid-stream) on a supervised follow loop that reconnects
+    // VISIBLY on any drop and only stops when this process asks it to.
+    let streaming = Arc::new(AtomicBool::new(true));
+    let follow_handle =
+        spawn_foreground_log_follow(project_id.clone(), streaming.clone());
 
     let result = wait_for_foreground_attachment(project_id);
-    if let Some(child) = follower.as_mut() {
-        let _ = child.kill();
-        let _ = child.wait();
+    // Tell the follow loop to stop, then let it unwind (it wakes on the flag at
+    // its next connect boundary; the StopProject already closed the stream).
+    streaming.store(false, Ordering::SeqCst);
+    if let Some(handle) = follow_handle {
+        let _ = handle.join();
     }
     result
+}
+
+/// Streams a foreground project's logs in-process on a supervised loop. Connects
+/// to the supervisor's follow stream and pumps it to stdout; on any drop, if the
+/// caller still wants the stream AND the project is still loaded, it announces the
+/// interruption on stderr and reconnects after a short backoff. Returns when the
+/// caller clears `streaming` or the project is gone — never freezes silently.
+fn spawn_foreground_log_follow(
+    project_id: String,
+    streaming: Arc<AtomicBool>,
+) -> Option<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name(format!("fg-logs-{project_id}"))
+        .spawn(move || {
+            let mut announced_interrupt = false;
+            while streaming.load(Ordering::SeqCst) {
+                let command = ControlCommand::Logs {
+                    service: None,
+                    project: Some(project_id.clone()),
+                    lines: 20,
+                    kind: None,
+                    follow: true,
+                    since: None,
+                    until: None,
+                    grep: None,
+                    all: false,
+                    structured: false,
+                };
+                let mut writer =
+                    LogWriter::new(io::stdout(), LogFormat::Text, false, None);
+                let outcome = ipc::stream_command_output(&command, &mut writer);
+                let _ = writer.flush();
+
+                // A clean caller-requested stop: leave quietly.
+                if !streaming.load(Ordering::SeqCst) {
+                    return;
+                }
+                // The project is genuinely gone — nothing left to follow.
+                if !project_loaded_in_supervisor(&project_id) {
+                    if announced_interrupt {
+                        eprintln!("• log stream ended: project '{project_id}' stopped.");
+                    }
+                    return;
+                }
+                // The stream dropped but the project lives — say so and retry.
+                match outcome {
+                    Ok(()) => eprintln!(
+                        "⚠ log stream ended unexpectedly; reconnecting to '{project_id}'…"
+                    ),
+                    Err(err) => eprintln!(
+                        "⚠ log stream interrupted ({err}); reconnecting to '{project_id}'…"
+                    ),
+                }
+                announced_interrupt = true;
+                for _ in 0..4 {
+                    if !streaming.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+            }
+        })
+        .ok()
 }
 
 /// Waits for Ctrl-C and then stops the foreground-owned project.

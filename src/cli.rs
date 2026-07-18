@@ -384,8 +384,10 @@ pub enum Commands {
 
         /// Follow the log stream until interrupted (like `tail -F`).
         ///
-        /// When neither `--follow` nor `--no-follow` is given, systemg follows only
-        /// when stdout is an interactive terminal and `SYSTEMG_AGENT` is unset;
+        /// Stays attached and prints new lines as they arrive. Press Esc or
+        /// Ctrl-C to stop following and return to the shell. When neither
+        /// `--follow` nor `--no-follow` is given, systemg follows only when
+        /// stdout is an interactive terminal and `SYSTEMG_AGENT` is unset;
         /// otherwise it prints a one-shot snapshot and exits. This keeps
         /// non-interactive callers (agents, pipes, SSH) from wedging.
         #[arg(short = 'f', long, conflicts_with = "no_follow")]
@@ -543,6 +545,27 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+}
+
+impl Commands {
+    /// The subcommand's canonical name, used to attach command-appropriate help
+    /// and docs to an otherwise-generic failure (so a `status` error points at
+    /// status docs, not `sysg logs`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Commands::Start { .. } => "start",
+            Commands::Stop { .. } => "stop",
+            Commands::Restart { .. } => "restart",
+            Commands::Status { .. } => "status",
+            Commands::Inspect { .. } => "inspect",
+            Commands::Logs { .. } => "logs",
+            Commands::Validate { .. } => "validate",
+            Commands::Migrate { .. } => "migrate",
+            Commands::Purge { .. } => "purge",
+            Commands::Supervise { .. } => "supervise",
+            Commands::Spawn { .. } => "spawn",
+        }
+    }
 }
 
 /// Parses command-line arguments and returns a `Cli` struct.
