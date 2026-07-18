@@ -35,6 +35,12 @@ struct Op {
     label: String,
     detail: Option<String>,
     started_at: SystemTime,
+    /// Which operation the active detail belongs to. Details are written from
+    /// deep inside a project's daemon (dependency waits, health polls) into the
+    /// one shared slot, so without an owner a slow project's detail could be
+    /// appended to whatever unrelated command happened to be in the slot — the
+    /// caller then read a wait belonging to a project it never named.
+    owner: Option<String>,
 }
 
 /// Shared slot holding the supervisor's current operation, if any.
@@ -56,6 +62,7 @@ impl OpSlot {
                 label: label.into(),
                 detail: None,
                 started_at: SystemTime::now(),
+                owner: None,
             });
         }
     }
@@ -66,6 +73,20 @@ impl OpSlot {
             && let Some(op) = guard.as_mut()
         {
             op.detail = Some(detail.into());
+            op.owner = None;
+        }
+    }
+
+    /// Updates the detail line only when `owner` matches the operation that is
+    /// actually in the slot, so a background project's progress is never
+    /// attributed to an unrelated command.
+    pub fn detail_for(&self, owner: &str, detail: impl Into<String>) {
+        if let Ok(mut guard) = self.inner.lock()
+            && let Some(op) = guard.as_mut()
+            && op.label.contains(owner)
+        {
+            op.detail = Some(detail.into());
+            op.owner = Some(owner.to_string());
         }
     }
 
@@ -107,6 +128,24 @@ mod tests {
         assert_eq!(report.label, "starting proj");
         assert_eq!(report.detail.as_deref(), Some("waiting on dep"));
         assert!(report.describe().contains("waiting on dep"));
+    }
+
+    #[test]
+    fn detail_for_ignores_a_foreign_owner() {
+        let slot = OpSlot::new();
+        slot.begin("starting project 'alpha'");
+        slot.detail_for("beta", "waiting on beta's dependency");
+        let report = slot.report().expect("report present");
+        assert_eq!(report.detail, None, "beta's detail leaked into alpha's op");
+    }
+
+    #[test]
+    fn detail_for_accepts_the_matching_owner() {
+        let slot = OpSlot::new();
+        slot.begin("starting project 'alpha'");
+        slot.detail_for("alpha", "waiting on dependency 'db'");
+        let report = slot.report().expect("report present");
+        assert_eq!(report.detail.as_deref(), Some("waiting on dependency 'db'"));
     }
 
     #[test]

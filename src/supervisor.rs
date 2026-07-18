@@ -3124,15 +3124,10 @@ impl Supervisor {
         let resolved = resolved.to_path_buf();
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
-        let _ = std::fs::write(
-            "/tmp/sysg-reg-entered",
-            format!("{project_id}|{primary_project}"),
-        );
 
         if project_id == primary_project {
             self.primary_project_mode = mode;
             if service_filter.is_none() {
-                let _ = std::fs::write("/tmp/sysg-guard-hit", &project_id);
                 self.refresh_status_cache();
                 return Ok(project_id);
             }
@@ -3246,9 +3241,39 @@ impl Supervisor {
             None,
         )?;
         self.sync_cron_projects()?;
+        // Seed the cache only AFTER this project's PIDs are on disk. Refreshing
+        // before the boot settles served a snapshot with no units for it, so a
+        // caller polling status right after an attach saw the project as absent
+        // — which reads as the wrong run mode, or as a project that never
+        // started, rather than one still recording its PIDs.
+        self.await_project_pids(&project_id);
         self.refresh_status_cache();
         self.respawn_status_refresher();
         Ok(project_id)
+    }
+
+    /// Blocks briefly until a freshly-booted project has recorded at least one
+    /// PID, so a status snapshot taken right after registration reflects it.
+    /// Bounded: a project whose services all exit immediately never records one,
+    /// and must not wedge the caller.
+    fn await_project_pids(&self, project_id: &str) {
+        let Some(project) = self.extra_projects.get(project_id) else {
+            return;
+        };
+        let deadline =
+            std::time::Instant::now() + crate::constants::PROJECT_PID_SETTLE_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            let recorded = project
+                .daemon
+                .pid_file_handle()
+                .lock()
+                .map(|guard| !guard.services().is_empty())
+                .unwrap_or(false);
+            if recorded {
+                return;
+            }
+            thread::sleep(crate::constants::SERVICE_POLL_INTERVAL);
+        }
     }
 
     /// Restarts one service in the selected project without reloading unrelated projects.
@@ -3544,6 +3569,12 @@ impl Supervisor {
             for service in services {
                 self.daemon.stop_service(&service)?;
             }
+            // The primary's monitor is NOT torn down here (unlike an extra
+            // project's): the supervisor stays warm for a later `start` of this
+            // same project, and `stop_service` already suppresses auto-restart
+            // so nothing respawns. Cron, however, must be resynced — otherwise
+            // the stopped project's scheduled jobs keep firing.
+            self.sync_cron_projects()?;
             return Ok(());
         }
 
