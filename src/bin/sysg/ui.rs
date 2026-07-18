@@ -365,8 +365,25 @@ fn render_service_logs_from_snapshot(
         return Ok(());
     }
 
-    if project.is_some() {
-        warn!("Service '{service_name}' is not present in the requested project");
+    if let Some(project_id) = project {
+        // An absent unit does not mean absent logs: with no supervisor there is
+        // no snapshot to match against, yet the captured files are still on
+        // disk. Read them before declaring the service missing, so a
+        // post-mortem `logs -p <project> -s <service>` works after a crash.
+        let bare = service_name.rsplit('/').next().unwrap_or(service_name);
+        let has_log = get_service_log_path(project_id, bare).exists()
+            || resolve_log_path(project_id, bare, "stdout").exists()
+            || resolve_log_path(project_id, bare, "stderr").exists();
+        if has_log {
+            if snapshot_mode {
+                manager
+                    .show_inactive_log_snapshot(project_id, bare, lines, kind, filter)?;
+            } else {
+                manager.show_inactive_log(project_id, bare, lines, kind, filter)?;
+            }
+        } else {
+            warn!("Service '{service_name}' is not present in the requested project");
+        }
         return Ok(());
     }
 
@@ -395,6 +412,32 @@ fn render_service_logs_from_snapshot(
 
 /// Renders logs for every non-orphaned unit represented in the current status
 /// snapshot.
+/// Lists the service names a project has captured logs for, read straight from
+/// the log directory. This is the only source of truth once the supervisor is
+/// gone and no snapshot can be built.
+fn captured_service_names(project_id: &str) -> Vec<String> {
+    let dir = systemg::runtime::log_dir().join(project_id);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let stem = name.strip_suffix(".log")?;
+            Some(
+                stem.strip_suffix("_stdout")
+                    .or_else(|| stem.strip_suffix("_stderr"))
+                    .unwrap_or(stem)
+                    .to_string(),
+            )
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn render_all_logs_from_snapshot(
     manager: &LogManager,
     snapshot: &StatusSnapshot,
@@ -414,6 +457,25 @@ fn render_all_logs_from_snapshot(
     let render_project_groups = should_render_project_groups(&project_groups);
 
     if project_groups.is_empty() {
+        // No snapshot units — but with the supervisor gone the captured files
+        // are still the record of what ran. Fall back to whatever this project
+        // wrote to disk instead of claiming there is nothing to show.
+        if let Some(project_id) = project {
+            let names = captured_service_names(project_id);
+            if !names.is_empty() {
+                for name in names {
+                    if snapshot_mode {
+                        manager.show_inactive_log_snapshot(
+                            project_id, &name, lines, kind, filter,
+                        )?;
+                    } else {
+                        manager
+                            .show_inactive_log(project_id, &name, lines, kind, filter)?;
+                    }
+                }
+                return Ok(());
+            }
+        }
         println!("No active services");
         return Ok(());
     }
@@ -697,6 +759,26 @@ fn compute_status_preferred_widths(
     widths
 }
 
+/// Renders the empty result set. A machine format still gets a well-formed
+/// snapshot with zero units so consumers can parse it; only humans get prose.
+fn render_empty_status(
+    snapshot: &StatusSnapshot,
+    opts: &StatusRenderOptions,
+) -> Result<OverallHealth, Box<dyn Error>> {
+    if let Some(format) = opts.format {
+        let empty = StatusSnapshot {
+            schema_version: snapshot.schema_version.clone(),
+            captured_at: snapshot.captured_at,
+            overall_health: OverallHealth::Warn,
+            units: Vec::new(),
+        };
+        println!("{}", serialize_machine_output(&empty, format)?);
+    } else {
+        println!("No matching units found.");
+    }
+    Ok(OverallHealth::Warn)
+}
+
 /// Renders the status table in interactive mode with keyboard navigation.
 fn render_status_interactive(
     snapshot: &StatusSnapshot,
@@ -719,8 +801,7 @@ fn render_status_interactive(
     }
 
     if units.is_empty() {
-        println!("No matching units found.");
-        return Ok(OverallHealth::Warn);
+        return render_empty_status(snapshot, opts);
     }
 
     let health = compute_overall_health(&units);
@@ -1402,8 +1483,7 @@ fn render_status_non_interactive(
     }
 
     if units.is_empty() {
-        println!("No matching units found.");
-        return Ok(OverallHealth::Warn);
+        return render_empty_status(snapshot, opts);
     }
 
     let health = compute_overall_health(&units);

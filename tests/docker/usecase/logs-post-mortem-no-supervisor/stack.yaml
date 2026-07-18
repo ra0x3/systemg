@@ -1,0 +1,11 @@
+version: "2"
+projects:
+  postmortem:
+    name: Post Mortem
+    services:
+      talker:
+        command: "sh -c 'while true; do echo TALKER_MARKER_LINE; sleep 1; done'"
+        restart_policy: always
+      chatter:
+        command: "sh -c 'while true; do echo CHATTER_MARKER_LINE; sleep 1; done'"
+        restart_policy: always

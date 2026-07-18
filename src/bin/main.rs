@@ -312,8 +312,33 @@ fn resolve_logs_follow(follow_flag: bool, no_follow_flag: bool) -> bool {
     logs_follow_decision(follow_flag, no_follow_flag, stdout_is_tty(), agent_mode())
 }
 
+/// Renders one spinner frame as an IN-PLACE update.
+///
+/// The line MUST fit the terminal width. `\r` returns to the start of the
+/// current row only — so once a frame wraps, every later frame repaints on the
+/// new row and leaves the wrapped remainder stranded, turning a spinner that
+/// should occupy one line into a wall of near-identical lines. Truncating to the
+/// visible width is what keeps it a single updating line.
 fn format_progress_spinner_frame(frame: &str, label: &str) -> String {
-    format!("\r{frame} {label}\x1B[K")
+    let width = terminal_width();
+    // frame + space, and leave a column spare so writing the final cell cannot
+    // trigger the terminal's auto-wrap.
+    let budget = width.saturating_sub(frame.chars().count() + 2);
+    let shown: String = if label.chars().count() > budget {
+        let keep = budget.saturating_sub(1);
+        label.chars().take(keep).chain(std::iter::once('…')).collect()
+    } else {
+        label.to_string()
+    };
+    format!("\r{frame} {shown}\x1B[K")
+}
+
+/// Usable terminal width, defaulting to 80 when it cannot be determined.
+fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(80)
+        .max(20)
 }
 
 fn clear_progress_spinner_line() -> &'static str {
@@ -1272,9 +1297,20 @@ fn run() -> Result<(), Box<dyn Error>> {
                 };
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
+                // The snapshot only ENRICHES the render (it maps a service to its
+                // project and marks live units). Logs live on disk and stay
+                // readable with no supervisor and no local manifest — which is
+                // exactly the post-mortem case — so a snapshot that cannot be
+                // built must degrade to an empty one, never sink the command.
                 let snapshot = with_progress_spinner("Logging", || {
                     fetch_status_snapshot(Some(&effective_config), false)
-                })?;
+                })
+                .unwrap_or_else(|_| StatusSnapshot {
+                    schema_version: systemg::status::STATUS_SCHEMA_VERSION.to_string(),
+                    captured_at: chrono::Utc::now(),
+                    overall_health: systemg::status::OverallHealth::Warn,
+                    units: Vec::new(),
+                });
 
                 match service.as_ref() {
                     Some(service_name) if structured_output => {
@@ -3825,6 +3861,15 @@ fn spawn_foreground_log_follow(
         .name(format!("fg-logs-{project_id}"))
         .spawn(move || {
             let mut announced_interrupt = false;
+            // A project that has not registered its first unit yet is BOOTING,
+            // not gone. `supervisor_running()` goes true when the control socket
+            // appears — well before any service is spawned — so without this
+            // grace the very first follow attempt sees an unknown project and
+            // retires the stream permanently, leaving the terminal silent for
+            // the whole run. Only trust "project is gone" after it was seen.
+            let mut project_ever_seen = false;
+            let startup_grace =
+                Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
             while streaming.load(Ordering::SeqCst) {
                 let command = ControlCommand::Logs {
                     service: None,
@@ -3856,12 +3901,24 @@ fn spawn_foreground_log_follow(
                 if !streaming.load(Ordering::SeqCst) {
                     return;
                 }
-                // The project is genuinely gone — nothing left to follow.
-                if !project_loaded_in_supervisor(&project_id) {
+                // The project is genuinely gone — nothing left to follow. During
+                // the startup grace an unseen project is still booting, so keep
+                // retrying instead of retiring the stream.
+                if project_loaded_in_supervisor(&project_id) {
+                    project_ever_seen = true;
+                } else if project_ever_seen || Instant::now() >= startup_grace {
                     if announced_interrupt {
                         eprintln!("• log stream ended: project '{project_id}' stopped.");
                     }
                     return;
+                } else {
+                    for _ in 0..2 {
+                        if !streaming.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(250));
+                    }
+                    continue;
                 }
                 // The stream dropped but the project lives — say so and retry.
                 match outcome {
@@ -3917,6 +3974,14 @@ fn wait_for_foreground_attachment(
     // `stop -p <this-project>` from ANOTHER terminal removed just this project
     // while the supervisor stayed up (hosting siblings) — the terminal never
     // returned. In both detach cases the project is already gone; nothing to stop.
+    // A project that has not registered its first unit yet is still BOOTING.
+    // `supervisor_running()` goes true when the control socket appears — well
+    // before any service is spawned — so without this grace the very first
+    // check mistook a booting project for one stopped elsewhere and detached
+    // instantly, killing the terminal owner: no streamed output, and no process
+    // left to receive Ctrl-C. Only trust "gone" once it has actually been seen.
+    let mut project_ever_seen = false;
+    let startup_grace = Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
     loop {
         if rx.recv_timeout(Duration::from_millis(250)).is_ok() {
             break;
@@ -3926,7 +3991,9 @@ fn wait_for_foreground_attachment(
             stop_foreground_follow(&streaming, &shutdown);
             return Ok(());
         }
-        if !project_loaded_in_supervisor(&project_id) {
+        if project_loaded_in_supervisor(&project_id) {
+            project_ever_seen = true;
+        } else if project_ever_seen || Instant::now() >= startup_grace {
             info!("Foreground project '{project_id}' was stopped elsewhere; detaching.");
             stop_foreground_follow(&streaming, &shutdown);
             return Ok(());
@@ -4244,6 +4311,35 @@ fn dispatch_start_daemonize(
     // No usable supervisor: fork one from the plan's config. An ad-hoc unit
     // is started the same way — its staged config becomes the new supervisor's.
     let service = plan_service_name(&plan);
+    // `-p <project>` only names a project a RUNNING supervisor already knows.
+    // With no supervisor there is no registry to resolve it against, so if the
+    // plan's config does not exist we would fork a supervisor that dies on a
+    // missing file (a bare os error 2). Say what the user actually has to do.
+    if let systemg::start::StartPlan::Project { config, project } = &plan
+        && !config.exists()
+    {
+        use systemg::diag::{Diagnostic, SgCode};
+        return Err(Box::new(DiagError(Box::new(
+            Diagnostic::error(
+                SgCode::ConfigFileUnreadable,
+                format!("no running supervisor knows project `{project}`"),
+            )
+            .note(
+                "`-p` targets a project that a running supervisor already has \
+                 loaded; with no supervisor there is nothing to target",
+            )
+            .note(format!(
+                "cold-starting an unregistered project needs its manifest: {} does not exist",
+                config.display()
+            ))
+            .help_cmd(
+                "start it from its config",
+                "sysg start -c <config>.yaml --daemonize",
+            )
+            .help_cmd("see what is loaded", "sysg status")
+            .help_docs(),
+        ))));
+    }
     let config = plan_config(plan);
     info!("Starting systemg supervisor with config {:?}", config);
     start_supervisor_daemon(config, service, stderr, verbose)
@@ -4367,13 +4463,10 @@ fn start_supervisor_daemon(
         // Point the user at `sysg logs --supervisor`, never a raw file path or an
         // external tool — sysg owns its logs and its help must route through it.
         Box::new(DiagError(Box::new(
-            Diagnostic::error(
-                SgCode::Catchall,
-                "the supervisor did not come up in time",
-            )
-            .note(err.to_string())
-            .help_cmd("read the supervisor log", "sysg logs --supervisor")
-            .help_docs(),
+            Diagnostic::error(SgCode::Catchall, "the supervisor did not come up in time")
+                .note(err.to_string())
+                .help_cmd("read the supervisor log", "sysg logs --supervisor")
+                .help_docs(),
         )))
     })?;
 
@@ -4894,7 +4987,20 @@ fn resolve_command_project(
     explicit_project: Option<String>,
     service: Option<&str>,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    let config_path = resolve_config_path(config_arg)?;
+    // An explicit `-p` names the target outright, so a missing/unreadable local
+    // config must not sink the command before the selector is even consulted.
+    // Reading logs after the supervisor is gone — the usual post-mortem — runs
+    // from a directory with no manifest, and failing there sent the user in a
+    // circle: "target the project with -p" when -p was exactly what they passed.
+    let config_path = match resolve_config_path(config_arg) {
+        Ok(path) => path,
+        Err(err) => {
+            if let Some(project) = explicit_project {
+                return Ok(Some(project));
+            }
+            return Err(err);
+        }
+    };
     let config_value = load_config(Some(config_path.to_string_lossy().as_ref())).ok();
 
     if let Some(project) = explicit_project {

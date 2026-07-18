@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  jsonproj:
+    name: Json Proj
+    services:
+      svc:
+        command: "sh -c 'while true; do echo hi; sleep 1; done'"
+        restart_policy: always
