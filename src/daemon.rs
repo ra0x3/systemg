@@ -5642,6 +5642,12 @@ impl Daemon {
 
             let policy = service.restart_policy.as_deref();
             if policy != Some("always") && policy != Some("on-failure") {
+                // Not restartable — but a STALE pid entry must still be cleared.
+                // Concurrent restarts can record a pid for a process that is
+                // already gone; with no reconcile for one-shots, status reported
+                // `lost`/`warn` forever for a build that had in fact completed
+                // successfully, and dragged the whole project to WARN.
+                Self::clear_stale_pid_entry(ctx, name);
                 continue;
             }
 
@@ -5683,6 +5689,41 @@ impl Daemon {
         }
 
         to_restart
+    }
+
+    /// Drops a pid entry whose process is gone, so a unit that will not be
+    /// restarted cannot sit at `lost` forever.
+    ///
+    /// Only clears when the recorded pid is genuinely dead — a live process must
+    /// keep its entry, or status would lose track of something still running.
+    fn clear_stale_pid_entry(ctx: &DaemonContext, name: &str) {
+        let Ok(guard) = ctx.lock_pid_file() else {
+            return;
+        };
+        let Some(pid) = guard.get(name) else {
+            return;
+        };
+        if Self::pid_is_alive(pid) {
+            return;
+        }
+        drop(guard);
+
+        if let Ok(mut guard) = ctx.lock_pid_file() {
+            match guard.remove(name) {
+                Ok(_) | Err(PidFileError::ServiceNotFound) => {
+                    if let Err(err) = guard.save() {
+                        warn!("Failed to save pid file after clearing '{name}': {err}");
+                    } else {
+                        debug!(
+                            "Cleared stale pid entry for '{name}' (pid {pid} is gone)"
+                        );
+                    }
+                }
+                Err(err) => {
+                    warn!("Failed to clear stale pid entry for '{name}': {err}");
+                }
+            }
+        }
     }
 
     /// Handles restarting a service if its restart policy allows.
