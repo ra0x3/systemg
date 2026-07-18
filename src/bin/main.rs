@@ -4502,6 +4502,14 @@ fn dispatch_start_resident(
 fn await_queued_boot(project: &str) -> Vec<String> {
     let deadline = Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
     let mut settled_ticks = 0usize;
+    // Units left behind by a previous stop are ALREADY `stopped` — not
+    // `starting` — so judging the snapshot immediately reads stale state from
+    // before this boot and reports failure in ~1s, before a single service has
+    // been launched. Correct only by luck when the project really is broken; on
+    // a slow but successful boot it is a false failure. Wait for evidence the
+    // boot has actually begun (a unit running, or one freshly completed) before
+    // any verdict.
+    let mut boot_began = false;
     while Instant::now() < deadline {
         thread::sleep(Duration::from_millis(400));
         let Some(units) = project_service_units(project) else {
@@ -4516,8 +4524,20 @@ fn await_queued_boot(project: &str) -> Vec<String> {
             .iter()
             .any(|(_, state)| matches!(state.as_str(), "starting" | "unknown"));
         if pending {
+            boot_began = true;
             settled_ticks = 0;
             continue;
+        }
+        if !boot_began {
+            if units
+                .iter()
+                .any(|(_, state)| matches!(state.as_str(), "running" | "done"))
+            {
+                boot_began = true;
+            } else {
+                // Nothing has moved yet: this is the pre-boot snapshot.
+                continue;
+            }
         }
         // Require consecutive settled polls: a service that exits and is
         // restarted by policy can look settled for a single tick.
