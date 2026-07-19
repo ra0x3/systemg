@@ -1,0 +1,12 @@
+version: "2"
+projects:
+  surface:
+    name: Surface
+    services:
+      ui:
+        command: "sh -c 'while true; do echo UI_TICK; sleep 1; done'"
+        restart_policy: always
+      rollup:
+        command: "sh -c 'trap \"rm -f /tmp/cron-active\" EXIT; touch /tmp/cron-active; date +%s%N >> /tmp/cron-runs; sleep 4'"
+        cron:
+          expression: "*/15 * * * * *"
