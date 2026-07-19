@@ -70,6 +70,11 @@ run_labeled \
   "cd \"${REPO_ROOT}\" && cargo +nightly fmt -- --check"
 
 run_labeled \
+  "rust:sort" \
+  "${YELLOW}" \
+  "cd \"${REPO_ROOT}\" && cargo sort --check --workspace"
+
+run_labeled \
   "rust:clippy" \
   "${GREEN}" \
   "cd \"${REPO_ROOT}\" && cargo clippy --all-targets --all-features -- -D warnings"
