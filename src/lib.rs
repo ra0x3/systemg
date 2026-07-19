@@ -78,6 +78,9 @@ pub mod runtime;
 /// Per-project on-disk state layout.
 pub mod state_store;
 
+/// Indented XML serialization shared by state and command output.
+pub mod xml;
+
 /// The shared command selector (`-s`/`-p`) resolution.
 pub mod selector;
 

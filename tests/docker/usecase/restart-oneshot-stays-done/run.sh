@@ -42,8 +42,12 @@ check "$?" "build is done after start (baseline)"
 check "$?" "web is running after start (baseline)"
 
 section "restart the whole project"
-sysg restart -p oneshot >/dev/null 2>&1
-echo "restart rc: $?"
+RESTART_OUTPUT="$(sysg restart -p oneshot 2>&1)"
+RESTART_RC=$?
+printf '%s\n' "$RESTART_OUTPUT"
+echo "restart rc: $RESTART_RC"
+[ "$RESTART_RC" -eq 0 ]
+check "$?" "restart accepts delayed one-shot completion"
 sleep 10
 
 echo "--- status after restart ---"

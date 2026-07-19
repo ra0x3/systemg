@@ -131,8 +131,9 @@ Reloading configuration from "/path/to/config"
 
 ## Supervisor log rotation
 
-The supervisor log uses the same built-in 10 MB active-file limit and five
-rotated-file retention as the default service policy. No external rotator is
+The supervisor log uses the `supervisor.xml` log defaults: a 10 MB active-file
+limit and five rotated files unless changed by the operator. Services can
+override those defaults in their project manifest. No external rotator is
 required.
 
 <Info>

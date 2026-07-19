@@ -10,7 +10,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     str::FromStr,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -18,7 +18,7 @@ use std::{
 };
 
 use fs2::FileExt;
-use quick_xml::{de::from_str as xml_from_str, se::to_string as xml_to_string};
+use quick_xml::de::from_str as xml_from_str;
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::Error as _};
@@ -30,15 +30,15 @@ use crate::{
     config::{
         BlueGreenDeploymentConfig, Config, DependsOnCondition, EffectiveLogsConfig,
         EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage, LogSink,
-        ServiceConfig, SkipConfig,
+        ServiceConfig, SkipConfig, supervisor::SupervisorTimeouts,
     },
     constants::{
         DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL, DEFAULT_HEALTH_RETRIES,
         DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
         MAX_STATUS_LOG_LINES, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
         PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
-        SERVICE_POLL_INTERVAL, SERVICE_START_STABILITY, SERVICE_START_TIMEOUT,
-        SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG, STOP_VERIFY_TIMEOUT,
+        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
+        SHELL_COMMAND_FLAG,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_managed_service_log_writers},
@@ -47,6 +47,7 @@ use crate::{
     spawn::SpawnedExit,
     state_store::StateStore,
     upgrade::{HandoffDaemonState, HandoffProcess},
+    xml,
 };
 
 /// Capacity of the one-result health-check worker channel.
@@ -89,6 +90,10 @@ const PORT_TOKEN: &str = "port";
 const BIND_TOKEN: &str = "bind";
 /// Output token used when opening a listening socket.
 const LISTEN_TOKEN: &str = "listen";
+/// Extension used by the default blue/green state artifact.
+const BLUE_GREEN_STATE_EXTENSION: &str = "xml";
+/// Extension used by blue/green state artifacts created before v0.56.1.
+const LEGACY_BLUE_GREEN_STATE_EXTENSION: &str = "json";
 
 /// Provides systemtime serde support.
 mod systemtime_serde {
@@ -562,7 +567,7 @@ impl PidFile {
     /// Writes `self` to `path`, creating the project directory if needed.
     fn write_at(&self, path: &std::path::Path) -> Result<(), PidFileError> {
         runtime::create_private_dir(path.parent().unwrap())?;
-        runtime::write_private_file(path, xml_to_string(self)?)?;
+        runtime::write_private_file(path, xml::to_string(self)?)?;
         Ok(())
     }
 
@@ -593,10 +598,14 @@ impl PidFile {
         if !path.exists() {
             return Ok(this);
         }
-        let contents = fs::read_to_string(path)?;
+        let contents = fs::read_to_string(&path)?;
+        let compact = xml::is_compact_nested(&contents);
         let bound = this.store.clone();
         this = xml_from_str::<Self>(&contents)?;
         this.store = bound;
+        if compact {
+            this.write_at(&path)?;
+        }
         Ok(this)
     }
 
@@ -643,21 +652,7 @@ impl PidFile {
 
     /// Reloads from disk. A missing file is treated as empty state.
     pub fn reload(store: StateStore) -> Result<Self, PidFileError> {
-        let mut this = Self {
-            store,
-            ..Self::default()
-        };
-        let _lock = this.acquire_lock()?;
-
-        let path = this.path();
-        if !path.exists() {
-            return Ok(this);
-        }
-        let contents = fs::read_to_string(&path)?;
-        let bound = this.store.clone();
-        this = xml_from_str::<Self>(&contents)?;
-        this.store = bound;
-        Ok(this)
+        Self::load(store)
     }
 
     /// Saves to disk.
@@ -995,6 +990,42 @@ mod pidfile_tests {
     use super::*;
 
     #[test]
+    /// Normalizes compact PID and lifecycle state when they are first loaded.
+    fn load_normalizes_compact_state_files() {
+        let temp = tempdir().expect("tempdir");
+        let store = StateStore::at(temp.path().to_path_buf());
+        fs::write(
+            store.pid_path(),
+            "<PidFile><services><name>svc</name><pid>42</pid></services></PidFile>",
+        )
+        .expect("write pid state");
+        fs::write(
+            store.state_path(),
+            "<ServiceStateFile><services><name>v2:test:svc</name><state><status>running</status><pid>42</pid></state></services></ServiceStateFile>",
+        )
+        .expect("write lifecycle state");
+
+        let pid = PidFile::load(store.clone()).expect("load pid state");
+        let state = ServiceStateFile::load(store.clone()).expect("load lifecycle state");
+
+        assert_eq!(pid.pid_for("svc"), Some(42));
+        assert_eq!(
+            state.get("v2:test:svc").map(|entry| entry.status),
+            Some(ServiceLifecycleStatus::Running)
+        );
+        assert!(
+            fs::read_to_string(store.pid_path())
+                .expect("read pid state")
+                .contains("\n  <services>")
+        );
+        assert!(
+            fs::read_to_string(store.state_path())
+                .expect("read lifecycle state")
+                .contains("\n  <services>")
+        );
+    }
+
+    #[test]
     /// Removes spawn subtree in memory prunes all descendants.
     fn remove_spawn_subtree_in_memory_prunes_all_descendants() {
         let mut pid_file = PidFile {
@@ -1239,17 +1270,24 @@ impl ServiceStateFile {
 
     /// Loads the service state file from disk, creating an empty one if it doesn't exist.
     pub fn load(store: StateStore) -> Result<Self, ServiceStateError> {
-        let path = store.state_path();
+        let mut state = Self {
+            store,
+            ..Self::default()
+        };
+        let _lock = state.acquire_lock()?;
+        let path = state.path();
         if !path.exists() {
-            return Ok(Self {
-                store,
-                ..Self::default()
-            });
+            return Ok(state);
         }
 
-        let contents = fs::read_to_string(path)?;
-        let mut state = xml_from_str::<Self>(&contents)?;
+        let contents = fs::read_to_string(&path)?;
+        let compact = xml::is_compact_nested(&contents);
+        let store = state.store.clone();
+        state = xml_from_str::<Self>(&contents)?;
         state.store = store;
+        if compact {
+            state.save()?;
+        }
         Ok(state)
     }
 
@@ -1319,7 +1357,7 @@ impl ServiceStateFile {
         if let Some(parent) = path.parent() {
             runtime::create_private_dir(parent)?;
         }
-        runtime::write_private_file(&path, xml_to_string(self)?)?;
+        runtime::write_private_file(&path, xml::to_string(self)?)?;
         Ok(())
     }
 
@@ -1404,10 +1442,10 @@ fn run_hook(
                     "Invalid timeout '{}' for hook {} on '{}': {}",
                     raw_timeout, hook_label, service_name, err
                 );
-                command_timeout()
+                command_timeout(PRE_START_TIMEOUT)
             }
         },
-        None => command_timeout(),
+        None => command_timeout(PRE_START_TIMEOUT),
     };
 
     if cancel.is_some_and(|(_, cancelled)| cancelled.load(Ordering::SeqCst)) {
@@ -1565,12 +1603,13 @@ fn spawn_session(command: &mut Command) -> std::io::Result<Child> {
     command.spawn()
 }
 
-fn command_timeout() -> Duration {
+/// Returns the environment override for bounded helper commands, or `fallback`.
+fn command_timeout(fallback: Duration) -> Duration {
     std::env::var("SYSG_PRE_START_TIMEOUT_SECS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
-        .unwrap_or(PRE_START_TIMEOUT)
+        .unwrap_or(fallback)
 }
 
 /// Drains an output stream while retaining only its most recent bounded tail.
@@ -1917,6 +1956,8 @@ struct DaemonContext {
     liveness: Weak<()>,
     /// Operation reporter used by pre-start and health-check waits.
     op_slot: OpSlot,
+    /// Operator-controlled lifecycle timeout policy.
+    timeouts: Arc<RwLock<SupervisorTimeouts>>,
     /// Services currently being replaced through an explicit deployment strategy.
     replacements: Arc<Mutex<HashSet<String>>>,
     /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
@@ -2063,6 +2104,8 @@ pub struct Daemon {
     liveness: Arc<()>,
     /// Reports what a blocking boot step is currently waiting on.
     op_slot: OpSlot,
+    /// Operator-controlled lifecycle timeout policy.
+    timeouts: Arc<RwLock<SupervisorTimeouts>>,
     boot_epoch: Arc<AtomicU64>,
     boot_cancelled: Arc<AtomicBool>,
     replacements: Arc<Mutex<HashSet<String>>>,
@@ -2122,6 +2165,7 @@ impl Daemon {
             boot_cancelled: Arc::clone(&self.boot_cancelled),
             liveness: Arc::downgrade(&self.liveness),
             op_slot: self.op_slot.clone(),
+            timeouts: Arc::clone(&self.timeouts),
             replacements: Arc::clone(&self.replacements),
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::clone(&self.thread_cancellation_tokens),
@@ -2152,6 +2196,7 @@ impl Daemon {
             pipe_stderr: Arc::clone(&ctx.pipe_stderr),
             liveness: ctx.liveness.upgrade()?,
             op_slot: ctx.op_slot.clone(),
+            timeouts: Arc::clone(&ctx.timeouts),
             boot_epoch: Arc::clone(&ctx.boot_epoch),
             boot_cancelled: Arc::clone(&ctx.boot_cancelled),
             replacements: Arc::clone(&ctx.replacements),
@@ -2600,6 +2645,7 @@ impl Daemon {
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             pipe_stderr: Arc::new(AtomicBool::new(false)),
             op_slot: OpSlot::new(),
+            timeouts: Arc::new(RwLock::new(SupervisorTimeouts::default())),
             liveness: Arc::new(()),
             boot_epoch: Arc::new(AtomicU64::new(0)),
             boot_cancelled: Arc::new(AtomicBool::new(false)),
@@ -2611,6 +2657,23 @@ impl Daemon {
     /// boot steps report what they are waiting on.
     pub fn set_op_slot(&mut self, op_slot: OpSlot) {
         self.op_slot = op_slot;
+    }
+
+    /// Applies the supervisor's lifecycle timeout policy to this daemon and all
+    /// views cloned from it.
+    pub fn set_timeouts(&self, timeouts: SupervisorTimeouts) {
+        *self
+            .timeouts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = timeouts;
+    }
+
+    /// Returns the current supervisor lifecycle timeout policy.
+    fn timeouts(&self) -> SupervisorTimeouts {
+        self.timeouts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Starts a new project boot epoch and returns its cancellation token.
@@ -3771,7 +3834,7 @@ impl Daemon {
             }
         })?;
         let child_pid = child.id();
-        let timeout = command_timeout();
+        let timeout = command_timeout(PRE_START_TIMEOUT);
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
         match wait_with_epoch(
             &mut child,
@@ -3836,18 +3899,13 @@ impl Daemon {
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let config = self.cfg();
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
-        let command = config
-            .services
-            .get(service_name)
-            .map(|service| service.command.as_str());
         let state = Self::wait_for_ready(
             service_name,
-            &config.project.id,
             &self.processes,
             &self.pid_file,
-            Some((&self.state_file, &config)),
-            command,
+            (&self.state_file, &config),
             Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
+            self.timeouts().startup_stability(),
         )?;
 
         if let ServiceReadyState::Running = state
@@ -3881,19 +3939,24 @@ impl Daemon {
         Ok(state)
     }
 
-    /// Internal implementation of wait_for_service_ready that accepts explicit handles for processes
-    /// and PID file. This allows the function to be called from both instance methods and static contexts.
+    /// Polls explicit process and state handles until one service reaches a
+    /// running, completed, or failed startup state.
     fn wait_for_ready(
         service_name: &str,
-        project: &str,
         processes: &Arc<Mutex<HashMap<String, ManagedChild>>>,
         pid_file: &Arc<Mutex<PidFile>>,
-        state: Option<(&Arc<Mutex<ServiceStateFile>>, &Arc<Config>)>,
-        command: Option<&str>,
+        state: (&Arc<Mutex<ServiceStateFile>>, &Arc<Config>),
         epoch: Option<(&AtomicU64, u64, &AtomicBool)>,
+        startup_stability: Duration,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let mut waited = Duration::ZERO;
         let mut running_since = None;
+        let project = &state.1.project.id;
+        let command = state
+            .1
+            .services
+            .get(service_name)
+            .map(|service| service.command.as_str());
 
         while waited <= SERVICE_START_TIMEOUT {
             if epoch.is_some_and(|(current, expected, cancelled)| {
@@ -3906,11 +3969,11 @@ impl Daemon {
                 service_name,
                 processes,
                 pid_file,
-                state,
+                Some(state),
             )? {
                 ServiceProbe::Running => {
                     let started = running_since.get_or_insert_with(Instant::now);
-                    if started.elapsed() >= SERVICE_START_STABILITY {
+                    if started.elapsed() >= startup_stability {
                         return Ok(ServiceReadyState::Running);
                     }
 
@@ -5021,7 +5084,7 @@ impl Daemon {
             None
         };
 
-        let pre_start_timeout = command_timeout();
+        let pre_start_timeout = command_timeout(self.timeouts().pre_start_timeout());
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
         if self.boot_cancelled() {
             let _ = Self::terminate_process_tree(
@@ -5611,8 +5674,17 @@ impl Daemon {
                 self.project_root.join(path)
             }
         } else {
-            runtime::state_dir().join(format!("blue_green_{}.json", service_name))
+            runtime::state_dir().join(format!(
+                "blue_green_{service_name}.{BLUE_GREEN_STATE_EXTENSION}"
+            ))
         }
+    }
+
+    /// Resolves the legacy default path used before blue/green state was named as XML.
+    fn legacy_blue_green_state_path(&self, service_name: &str) -> PathBuf {
+        runtime::state_dir().join(format!(
+            "blue_green_{service_name}.{LEGACY_BLUE_GREEN_STATE_EXTENSION}"
+        ))
     }
 
     /// Loads the active slot index from disk, defaulting to slot 0 when no state exists.
@@ -5622,14 +5694,21 @@ impl Daemon {
         blue_green: &BlueGreenDeploymentConfig,
     ) -> Result<usize, ProcessManagerError> {
         let path = self.blue_green_state_path(service_name, blue_green);
-        if !path.exists() {
+        let source_path = if path.exists() {
+            path.clone()
+        } else if blue_green.state_path.is_none() {
+            self.legacy_blue_green_state_path(service_name)
+        } else {
+            path.clone()
+        };
+        if !source_path.exists() {
             return Ok(0);
         }
 
-        let content = fs::read_to_string(&path).map_err(|source| {
+        let content = fs::read_to_string(&source_path).map_err(|source| {
             ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
                 "Failed reading blue/green state '{}': {}",
-                path.display(),
+                source_path.display(),
                 source
             )))
         })?;
@@ -5637,7 +5716,7 @@ impl Daemon {
         let state: BlueGreenState = xml_from_str(&content).map_err(|source| {
             ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(format!(
                 "Failed parsing blue/green state '{}': {}",
-                path.display(),
+                source_path.display(),
                 source
             )))
         })?;
@@ -5647,6 +5726,15 @@ impl Daemon {
                 "blue/green state for '{}' contains invalid slot index {}",
                 service_name, state.active_slot_index
             )));
+        }
+
+        if source_path != path || xml::is_compact_nested(&content) {
+            let formatted = xml::to_string(&state).map_err(|source| {
+                ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(
+                    source.to_string(),
+                ))
+            })?;
+            runtime::write_private_file(&path, formatted)?;
         }
 
         Ok(state.active_slot_index)
@@ -5664,12 +5752,12 @@ impl Daemon {
             fs::create_dir_all(parent)?;
         }
         let content =
-            xml_to_string(&BlueGreenState { active_slot_index }).map_err(|source| {
+            xml::to_string(&BlueGreenState { active_slot_index }).map_err(|source| {
                 ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(
                     source.to_string(),
                 ))
             })?;
-        fs::write(path, content)?;
+        runtime::write_private_file(&path, content)?;
         Ok(())
     }
 
@@ -5697,7 +5785,7 @@ impl Daemon {
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
         let output = output_with_timeout(
             &mut cmd,
-            command_timeout(),
+            command_timeout(PRE_START_TIMEOUT),
             &format!("blue/green switch for {service_name}"),
             Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
         )?;
@@ -5767,9 +5855,11 @@ impl Daemon {
         true
     }
 
-    /// Verifies that the specified services are running after a restart operation. Polls each
-    /// service multiple times to ensure it stays alive. Returns an error if any service fails
-    /// to start or exits immediately.
+    /// Verifies that restarted services reach a valid terminal target.
+    ///
+    /// A service satisfies the restart when it remains running across the
+    /// observation window or exits successfully. A missing process or an
+    /// unsuccessful exit fails verification.
     fn verify_services_running(
         &self,
         services: &[String],
@@ -5804,7 +5894,7 @@ impl Daemon {
                 continue;
             }
 
-            let mut stable = true;
+            let mut target_reached = true;
 
             for attempt in 0..POST_RESTART_VERIFY_ATTEMPTS {
                 if attempt > 0 {
@@ -5819,26 +5909,26 @@ impl Daemon {
                 )? {
                     ServiceProbe::Running => continue,
                     ServiceProbe::NotStarted => {
-                        stable = false;
+                        target_reached = false;
+                        break;
+                    }
+                    ServiceProbe::Exited(status) if status.success() => {
+                        info!(
+                            "Service '{service_name}' completed successfully during post-restart verification"
+                        );
                         break;
                     }
                     ServiceProbe::Exited(status) => {
-                        if status.success() {
-                            info!(
-                                "Service '{service_name}' exited immediately after restart with status {status}"
-                            );
-                        } else {
-                            warn!(
-                                "Service '{service_name}' crashed immediately after restart with status {status}"
-                            );
-                        }
-                        stable = false;
+                        warn!(
+                            "Service '{service_name}' exited unsuccessfully during post-restart verification with status {status}"
+                        );
+                        target_reached = false;
                         break;
                     }
                 }
             }
 
-            if !stable {
+            if !target_reached {
                 failed.push(service_name.clone());
             }
         }
@@ -6181,6 +6271,7 @@ impl Daemon {
         pid_file: &Arc<Mutex<PidFile>>,
         state_file: &Arc<Mutex<ServiceStateFile>>,
         config: &Arc<Config>,
+        stop_verify_timeout: Duration,
     ) -> Result<(), ProcessManagerError> {
         let (pid, service_group_id, has_child, started) = {
             let mut processes_guard = processes.lock()?;
@@ -6302,7 +6393,7 @@ impl Daemon {
         if let Some(process_id) = pid
             && Self::pid_is_alive(process_id)
         {
-            let deadline = Instant::now() + STOP_VERIFY_TIMEOUT;
+            let deadline = Instant::now() + stop_verify_timeout;
             while Instant::now() < deadline && Self::pid_is_alive(process_id) {
                 thread::sleep(SERVICE_POLL_INTERVAL);
             }
@@ -6383,6 +6474,7 @@ impl Daemon {
             &self.pid_file,
             &self.state_file,
             &config,
+            self.timeouts().stop_verify_timeout(),
         );
 
         if result.is_err() {
@@ -6460,6 +6552,10 @@ impl Daemon {
                 &ctx.pid_file,
                 &ctx.state_file,
                 &ctx.config,
+                ctx.timeouts
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .stop_verify_timeout(),
             ) {
                 error!(
                     "Failed to stop dependent service '{service}' after '{root}' failure: {err}"
@@ -7587,6 +7683,42 @@ mod tests {
     }
 
     #[test]
+    /// Migrates legacy compact blue/green state to the default XML path.
+    fn blue_green_state_load_migrates_legacy_json_path() {
+        with_temp_home(|dir| {
+            let daemon = create_daemon(dir, HashMap::new());
+            let blue_green = BlueGreenDeploymentConfig {
+                env_var: None,
+                slots: vec!["8000".to_string(), "8001".to_string()],
+                switch_command: None,
+                candidate_health_check: None,
+                switch_verify: None,
+                state_path: None,
+            };
+            let legacy = daemon.legacy_blue_green_state_path("api");
+            fs::write(
+                &legacy,
+                "<BlueGreenState><active_slot_index>1</active_slot_index></BlueGreenState>",
+            )
+            .expect("write legacy state");
+
+            let active = daemon
+                .read_blue_green_active_index("api", &blue_green)
+                .expect("load blue/green state");
+            let current = daemon.blue_green_state_path("api", &blue_green);
+
+            assert_eq!(active, 1);
+            assert!(legacy.exists());
+            assert!(current.ends_with("blue_green_api.xml"));
+            assert!(
+                fs::read_to_string(current)
+                    .expect("read migrated state")
+                    .contains("\n  <active_slot_index>1</active_slot_index>")
+            );
+        });
+    }
+
+    #[test]
     fn logs_indicate_port_conflict_detects_common_errors() {
         with_temp_home(|_| {
             let log_path = resolve_log_path("demo", "web", "stderr");
@@ -7617,9 +7749,11 @@ mod tests {
     }
 
     #[test]
-    /// Verifies a replacement that exits unsuccessfully is reported as failed.
-    fn restart_service_reports_failure_when_process_stops_immediately() {
+    /// Verifies configured startup stability catches a delayed unsuccessful exit.
+    fn restart_service_respects_configured_startup_stability() {
         with_temp_home(|dir| {
+            const STARTUP_STABILITY_MS: u64 = 600;
+
             fs::write(dir.join("mode.txt"), "initial\n").unwrap();
             fs::write(
                 dir.join("app.sh"),
@@ -7629,7 +7763,7 @@ if [ "$MODE" = "initial" ]; then
   sleep 5
 else
   echo 'startup failed' >&2
-  sleep 0.05
+  sleep 0.4
   exit 1
 fi
 "#,
@@ -7642,6 +7776,10 @@ fi
             services.insert("app".into(), service);
 
             let daemon = create_daemon(dir, services);
+            daemon.set_timeouts(SupervisorTimeouts {
+                startup_stability_ms: STARTUP_STABILITY_MS,
+                ..SupervisorTimeouts::default()
+            });
             daemon.start_services().unwrap();
             thread::sleep(Duration::from_millis(100));
 
@@ -7663,9 +7801,10 @@ fi
     }
 
     #[test]
+    /// Accepts a dependency that exits zero after the initial stability window.
     fn restart_services_allows_successful_one_shot_without_restart_policy() {
         with_temp_home(|dir| {
-            fs::write(dir.join("check.sh"), "exit 0\n").unwrap();
+            fs::write(dir.join("check.sh"), "sleep 0.4\nexit 0\n").unwrap();
             fs::write(
                 dir.join("app.sh"),
                 "trap 'exit 0' TERM\nwhile true; do sleep 1; done\n",
@@ -7680,6 +7819,10 @@ fi
             daemon.start_services().unwrap();
 
             daemon.restart_services().unwrap();
+            assert_eq!(
+                daemon.recorded_status("check"),
+                Some(ServiceLifecycleStatus::ExitedSuccessfully)
+            );
 
             daemon.stop_services().ok();
             daemon.shutdown_monitor();

@@ -4,7 +4,7 @@ projects:
     name: One Shot
     services:
       probe:
-        command: "sh -c 'echo PONG'"
+        command: "sh -c 'sleep 0.4; echo PONG'"
       build:
         command: "sh -c 'echo building; exit 0'"
         restart_policy: never

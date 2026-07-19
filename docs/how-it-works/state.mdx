@@ -22,6 +22,7 @@ directory, keyed by `project.id`:
 ├── sysg.pid                    # Supervisor PID
 ├── control.sock                # Unix socket for IPC
 ├── config_hint                 # Last config path
+├── supervisor.xml              # Supervisor-wide operator defaults
 ├── logs/
 │   ├── supervisor.log          # Supervisor events
 │   ├── arbitration/            # Project-isolated service output
@@ -42,6 +43,9 @@ directory, keyed by `project.id`:
         ├── state.xml
         └── cron_state.xml
 ```
+
+All XML artifacts are written as nested, two-space-indented documents. Compact
+XML written by older releases remains readable.
 
 <Info>
   Each project owns its directory. A project's monitor, PID map, and state file

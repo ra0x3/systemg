@@ -24,7 +24,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{
         Config, LogSink, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
-        load_config_from_file, load_projects_from_file,
+        load_config_from_file, load_projects_from_file, supervisor::SupervisorTimeouts,
     },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
@@ -112,6 +112,8 @@ pub struct Supervisor {
     config_path: PathBuf,
     /// Primary project's process daemon.
     daemon: Daemon,
+    /// Operator-controlled lifecycle timeout policy.
+    timeouts: SupervisorTimeouts,
     /// Whether newly spawned services use legacy detached behavior.
     detach_children: bool,
     /// Scheduler shared by all registered projects.
@@ -1464,6 +1466,7 @@ impl Supervisor {
         let old_path = existing.config_path.clone();
         Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
         let mut replacement = Daemon::from_config(config, self.detach_children)?;
+        replacement.set_timeouts(self.timeouts.clone());
         replacement.set_pipe_stderr(self.pipe_stderr);
         replacement.set_op_slot(self.op_slot.clone());
 
@@ -1666,6 +1669,7 @@ impl Supervisor {
         Ok(Self {
             config_path,
             daemon,
+            timeouts: SupervisorTimeouts::default(),
             detach_children,
             cron_manager,
             service_filter,
@@ -1768,6 +1772,7 @@ impl Supervisor {
             let config = Self::load_handoff_project(project)?;
             Self::register_spawn_limits_for_config(&supervisor.spawn_manager, &config)?;
             let mut daemon = Daemon::from_config(config, false)?;
+            daemon.set_timeouts(supervisor.timeouts.clone());
             daemon.set_op_slot(supervisor.op_slot.clone());
             daemon.set_pipe_stderr(state.pipe_stderr);
             daemon.adopt_handoff_state(&project.daemon)?;
@@ -1938,6 +1943,7 @@ impl Supervisor {
         // Each project gets its OWN pid/state handles bound to its own store, so
         // one project's services never land in a sibling's pid.xml.
         let mut daemon = Daemon::from_config(config, self.detach_children)?;
+        daemon.set_timeouts(self.timeouts.clone());
         daemon.set_pipe_stderr(self.pipe_stderr);
         daemon.set_op_slot(self.op_slot.clone());
         if let Ok(mut projects) = self.boot_projects.write() {
@@ -2539,6 +2545,15 @@ impl Supervisor {
         self.upgrading.store(false, Ordering::Release);
     }
 
+    /// Applies one lifecycle timeout policy to every managed project daemon.
+    fn apply_timeouts(&mut self, timeouts: SupervisorTimeouts) {
+        self.daemon.set_timeouts(timeouts.clone());
+        for project in self.extra_projects.values() {
+            project.daemon.set_timeouts(timeouts.clone());
+        }
+        self.timeouts = timeouts;
+    }
+
     /// Runs the supervisor event loop.
     fn run_internal(&mut self) -> Result<(), SupervisorError> {
         let loaded = self.handoff.take();
@@ -2573,6 +2588,7 @@ impl Supervisor {
         // before any service launches and opens its log files.
         let supervisor_config =
             crate::config::supervisor::SupervisorConfig::load_or_create();
+        self.apply_timeouts(supervisor_config.timeouts.clone());
         crate::config::set_log_defaults(
             supervisor_config.logs.max_bytes,
             supervisor_config.logs.max_files,
@@ -4006,6 +4022,7 @@ impl Supervisor {
             // separately-added project never leaks services into a sibling's
             // pid.xml.
             let mut daemon = Daemon::from_config(config.clone(), self.detach_children)?;
+            daemon.set_timeouts(self.timeouts.clone());
             daemon.set_pipe_stderr(self.pipe_stderr);
             daemon.set_op_slot(self.op_slot.clone());
             if let Ok(mut projects) = self.boot_projects.write() {

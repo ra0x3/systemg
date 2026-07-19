@@ -85,7 +85,7 @@ fn serialize_machine_output<T: serde::Serialize>(
 ) -> Result<String, Box<dyn Error>> {
     match format {
         OutputFormat::Json => Ok(serde_json::to_string_pretty(payload)?),
-        OutputFormat::Xml => Ok(quick_xml::se::to_string(payload)?),
+        OutputFormat::Xml => Ok(systemg::xml::to_string(payload)?),
     }
 }
 

@@ -1129,7 +1129,9 @@ impl CronManager {
 /// Wrapper for cron job entries to make them XML-safe
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct CronJobEntry {
+    /// Stable configuration hash identifying the cron unit.
     hash: String,
+    /// Last persisted scheduler state for the unit.
     state: PersistedCronJobState,
 }
 
@@ -1183,6 +1185,7 @@ impl CronStateFile {
         self.store.cron_path()
     }
 
+    /// Opens the project cron-state lock file.
     fn lock(store: &StateStore) -> Result<fs::File, std::io::Error> {
         let path = store.cron_lock_path();
         if let Some(parent) = path.parent() {
@@ -1196,12 +1199,13 @@ impl CronStateFile {
             .open(path)
     }
 
+    /// Persists the current cron state as indented XML.
     fn write(&self) -> Result<(), std::io::Error> {
         let path = self.path();
         if let Some(parent) = path.parent() {
             crate::runtime::create_private_dir(parent)?;
         }
-        let data = quick_xml::se::to_string(self).map_err(std::io::Error::other)?;
+        let data = crate::xml::to_string(self).map_err(std::io::Error::other)?;
         crate::runtime::write_private_file(&path, data)
     }
 
@@ -1213,26 +1217,32 @@ impl CronStateFile {
     /// Loads the cron state file from disk, creating an empty one if it doesn't exist.
     pub fn load(store: StateStore) -> Result<Self, std::io::Error> {
         let lock = Self::lock(&store)?;
-        FileExt::lock_shared(&lock)?;
-        Self::read(store)
+        FileExt::lock_exclusive(&lock)?;
+        let (state, compact) = Self::read(store)?;
+        if compact {
+            state.write()?;
+        }
+        Ok(state)
     }
 
-    fn read(store: StateStore) -> Result<Self, std::io::Error> {
+    /// Reads cron state while the caller holds the project lock.
+    fn read(store: StateStore) -> Result<(Self, bool), std::io::Error> {
         let empty = || Self {
             store: store.clone(),
             ..Self::default()
         };
         let path = store.cron_path();
         if !path.exists() {
-            return Ok(empty());
+            return Ok((empty(), false));
         }
 
         let raw = fs::read_to_string(&path)?;
 
         if raw.trim().is_empty() || raw.trim() == "<CronStateFile/>" {
-            return Ok(empty());
+            return Ok((empty(), false));
         }
 
+        let compact = crate::xml::is_compact_nested(&raw);
         let mut state = quick_xml::de::from_str::<Self>(&raw).map_err(|err| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1240,9 +1250,10 @@ impl CronStateFile {
             )
         })?;
         state.store = store;
-        Ok(state)
+        Ok((state, compact))
     }
 
+    /// Updates one cron unit while preserving concurrent scheduler writes.
     fn upsert(
         store: StateStore,
         hash: &str,
@@ -1250,7 +1261,7 @@ impl CronStateFile {
     ) -> Result<(), std::io::Error> {
         let lock = Self::lock(&store)?;
         FileExt::lock_exclusive(&lock)?;
-        let mut state = Self::read(store)?;
+        let (mut state, _) = Self::read(store)?;
         state.jobs.insert(hash.to_string(), job);
         state.write()
     }
@@ -1355,6 +1366,35 @@ mod tests {
 
     use super::*;
     use crate::config::ServiceConfig;
+
+    #[test]
+    /// Normalizes compact persisted cron state when it is first loaded.
+    fn load_normalizes_compact_cron_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::at(temp.path().to_path_buf());
+        let state = CronStateFile {
+            jobs: std::collections::BTreeMap::from([(
+                "v2:test:job".to_string(),
+                PersistedCronJobState {
+                    service_name: Some("job".to_string()),
+                    ..PersistedCronJobState::default()
+                },
+            )]),
+            store: store.clone(),
+        };
+        let pretty = crate::xml::to_string(&state).expect("serialize cron state");
+        let compact = pretty.lines().map(str::trim).collect::<String>();
+        fs::write(store.cron_path(), compact).expect("write cron state");
+
+        let state = CronStateFile::load(store.clone()).expect("load cron state");
+
+        assert!(state.jobs().contains_key("v2:test:job"));
+        assert!(
+            fs::read_to_string(store.cron_path())
+                .expect("read cron state")
+                .contains("\n  <jobs>")
+        );
+    }
 
     /// Computes a test hash for a cron configuration.
     fn compute_test_hash(cron_config: &CronConfig) -> String {
@@ -1766,7 +1806,7 @@ mod tests {
             },
         );
 
-        let xml = quick_xml::se::to_string(&state).expect("serialize cron state");
+        let xml = crate::xml::to_string(&state).expect("serialize cron state");
         let parsed: CronStateFile =
             quick_xml::de::from_str(&xml).expect("deserialize legacy state");
         let record = parsed
@@ -1804,7 +1844,7 @@ mod tests {
             },
         );
 
-        let xml = quick_xml::se::to_string(&state).expect("serialize cron state");
+        let xml = crate::xml::to_string(&state).expect("serialize cron state");
         assert!(
             !xml.contains("<status"),
             "in-progress records should omit status instead of writing an empty status element"

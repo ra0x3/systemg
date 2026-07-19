@@ -172,9 +172,10 @@ to finish, then retry instead of issuing overlapping mutations.
 
 ### SG0108
 
-A service's `pre_start` command exceeded its five-minute execution budget.
-systemg terminated the command tree and did not launch the service. Restore the
-resource the command was waiting for, then start the project again.
+A service's `pre_start` command exceeded the `pre_start_secs` budget from
+`supervisor.xml`. systemg terminated the command tree and did not launch the
+service. Restore the resource the command was waiting for, increase the budget
+when the command legitimately needs longer, then start the project again.
 
 ### SG0109
 

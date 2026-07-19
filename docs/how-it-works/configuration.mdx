@@ -85,6 +85,40 @@ services:
       expression: "0 0 2 * * *"
 ```
 
+## Supervisor configuration
+
+Project manifests describe workloads. Supervisor-wide defaults live separately
+in `~/.local/share/systemg/supervisor.xml`, or
+`/var/lib/systemg/supervisor.xml` with `--sys`:
+
+```xml
+<supervisor>
+  <logs>
+    <max_bytes>10485760</max_bytes>
+    <max_files>5</max_files>
+  </logs>
+  <timeouts>
+    <pre_start_secs>300</pre_start_secs>
+    <startup_stability_ms>250</startup_stability_ms>
+    <stop_verify_secs>10</stop_verify_secs>
+  </timeouts>
+</supervisor>
+```
+
+- `pre_start_secs`: default execution budget for deployment `pre_start` commands.
+- `startup_stability_ms`: survival window for services without a health check.
+- `stop_verify_secs`: time allowed to confirm that a terminated process is gone.
+
+The file is created on first supervisor start. Existing compact XML remains
+compatible and is rewritten in the indented form after it parses successfully.
+`SYSG_PRE_START_TIMEOUT_SECS` remains a higher-precedence compatibility override.
+
+<Info>
+  Health-check `attempt_timeout` and `total_timeout` remain in the project
+  manifest because readiness is workload-specific. IPC polling and live-upgrade
+  deadlines are protocol invariants and are not operator settings.
+</Info>
+
 ## The config cache
 
 When you run a command with `-c <file>`, sysg hands that manifest to the resident
@@ -421,7 +455,7 @@ services:
         switch_command: "/usr/local/bin/switch-upstream {candidate_slot}"
         switch_verify:
           command: "curl --fail http://localhost:8000/health"
-        state_path: ".state/api-slot.json"
+        state_path: ".state/api-slot.xml"
 ```
 
 Rolling deployments start the new instance, wait for health checks, then stop the old instance. For single-host zero-downtime with fixed ports, use `blue_green` so traffic can be switched between two slots. A [blue-green deployment](https://en.wikipedia.org/wiki/Blue-green_deployment) uses two identical slots, starts the new version in the idle slot, verifies it, and then switches traffic only after the candidate is ready.
@@ -515,7 +549,7 @@ Controls how restarts are performed and what validation happens before cutover.
 | Field | Type | Description |
 |-------|------|-------------|
 | `strategy` | string | `rolling` or `immediate` |
-| `pre_start` | string | Command that must exit successfully before starting; its process tree is terminated after the five-minute command budget (SG0108) |
+| `pre_start` | string | Command that must exit successfully before starting; its process tree is terminated after the configured supervisor command budget (SG0108) |
 | `health_check` | object | Health check configuration |
 | `grace_period` | string | Time before stopping old instance |
 | `blue_green` | object | Single-host blue/green rollout settings |
@@ -523,7 +557,8 @@ Controls how restarts are performed and what validation happens before cutover.
 <Note>
   `pre_start` runs from the manifest directory with the service environment.
   Its output is captured in the service log. A non-zero exit is SG0103; exceeding
-  the five-minute command budget is SG0108, and the service is not launched.
+  the `supervisor.xml` `pre_start_secs` budget is SG0108, and the service is not
+  launched.
 </Note>
 
 ### Blue/green deployment object

@@ -5,7 +5,7 @@
 > in YAML. It is useful for development environments, local stacks, CI jobs,
 > cron-style units, and agent-managed workflows.
 
-Current release: `0.56.0`
+Current release: `0.56.1`
 
 Primary links:
 
@@ -65,6 +65,10 @@ and Ctrl-C stops only that project.
 Health-check failures use SG0022 (unreachable), SG0023 (probe timeout), or
 SG0104 (reported unhealthy). `attempt_timeout` bounds one probe;
 `total_timeout` bounds the readiness window.
+
+Supervisor-wide log caps and lifecycle defaults live in `supervisor.xml`.
+Persisted and command-output XML is nested and two-space indented; compact
+legacy XML remains readable.
 
 ## Log Behavior
 

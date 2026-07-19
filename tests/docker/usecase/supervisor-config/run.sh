@@ -21,7 +21,7 @@ STATE_DIR="$HOME/.local/share/systemg"
 SUP_XML="$STATE_DIR/supervisor.xml"
 LOG_DIR="$STATE_DIR/logs/demo"
 
-section "first start writes supervisor.xml with default caps"
+section "first start writes indented supervisor.xml with operator defaults"
 sysg start --config "$CONFIG" --daemonize
 check "$?" "start exits 0"
 sleep 2
@@ -32,6 +32,14 @@ grep -q '10485760' "$SUP_XML"
 check "$?" "default max_bytes 10485760 (10MB) present"
 grep -q '<max_files>5</max_files>' "$SUP_XML"
 check "$?" "default max_files 5 present"
+grep -q '^  <logs>$' "$SUP_XML"
+check "$?" "supervisor.xml is nested and indented"
+grep -q '<pre_start_secs>300</pre_start_secs>' "$SUP_XML"
+check "$?" "default pre-start timeout present"
+grep -q '<startup_stability_ms>250</startup_stability_ms>' "$SUP_XML"
+check "$?" "default startup stability present"
+grep -q '<stop_verify_secs>10</stop_verify_secs>' "$SUP_XML"
+check "$?" "default stop verification timeout present"
 
 section "edit the cap tiny, restart; the service log rotates at the new cap"
 sysg stop --supervisor >/dev/null 2>&1
@@ -45,6 +53,12 @@ XML
 sysg start --config "$CONFIG" --daemonize
 check "$?" "restart with the edited supervisor.xml exits 0"
 sleep 4
+grep -q '^  <logs>$' "$SUP_XML"
+check "$?" "compact legacy supervisor.xml is normalized"
+grep -q '<max_bytes>4096</max_bytes>' "$SUP_XML"
+check "$?" "normalization preserves the custom log cap"
+grep -q '<pre_start_secs>300</pre_start_secs>' "$SUP_XML"
+check "$?" "legacy supervisor.xml receives timeout defaults"
 
 echo "--- log dir contents ---"; ls -la "$LOG_DIR" 2>/dev/null
 # The active file must be bounded near the tiny cap (well under, say, 64KB), and

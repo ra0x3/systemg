@@ -2884,7 +2884,7 @@ services:
           interval: "1s"
         switch_verify:
           command: "test -f /tmp/api-ready"
-        state_path: ".state/web-slot.json"
+        state_path: ".state/web-slot.xml"
 "#
         )
         .expect("write yaml");

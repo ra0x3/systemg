@@ -5,7 +5,7 @@ programs from a YAML manifest, starts dependencies in order, supervises long
 running services, runs cron-style units, captures logs, reports status, and
 supports targeted service control through a single CLI named `sysg`.
 
-Current release: `0.56.0`
+Current release: `0.56.1`
 
 Primary links:
 
@@ -25,7 +25,7 @@ Primary links:
 - Debugging method: https://github.com/ra0x3/systemg/blob/main/DEBUGGING.md
 - Repository: https://github.com/ra0x3/systemg
 
-## What Agents Need To Know In 0.56.0
+## What Agents Need To Know In 0.56.1
 
 - Global `--plain` mode for non-interactive callers.
 - `sysg logs` no longer blocks by default when called from pipes, files, SSH, or
@@ -35,6 +35,8 @@ Primary links:
 - Foreground starts stream `service | line`; Ctrl-C stops only that project.
 - Clean exits remain done regardless of restart policy.
 - Health checks separate per-probe `attempt_timeout` from `total_timeout`.
+- `supervisor.xml` exposes log caps and lifecycle timeout defaults.
+- Persisted and command-output XML is nested and two-space indented.
 - Compatible upgrades use same-PID live re-execution without restarting workloads.
 
 ## Agent Mode
@@ -77,7 +79,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 Install or activate a specific version:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.56.0
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.56.1
 ```
 
 System deployments use `scripts/install-systemg.sh` to set up `/usr/bin/sysg`,
@@ -394,6 +396,13 @@ Health checks live under `deployment.health_check`, not at the service level.
 `attempt_timeout` bounds one probe; `total_timeout` keeps fast failures from
 exhausting a slow service's readiness window before both the retry floor and
 time budget are exhausted.
+
+Supervisor-wide defaults live outside project manifests in
+`~/.local/share/systemg/supervisor.xml`, or `/var/lib/systemg/supervisor.xml` in
+system mode. Its `logs` block sets `max_bytes` and `max_files`; its `timeouts`
+block sets `pre_start_secs`, `startup_stability_ms`, and `stop_verify_secs`.
+Compact legacy XML remains readable, while new XML output uses two-space
+indentation.
 
 ## Command Recipes For LLMs
 
