@@ -72,7 +72,13 @@
     "pages": [
       "index",
       "intro",
-      "installation",
+      {
+        "group": "Installation",
+        "pages": [
+          "installation",
+          "installation/upgrading"
+        ]
+      },
       "quickstart",
       {
         "group": "How It Works",

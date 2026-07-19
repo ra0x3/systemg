@@ -180,14 +180,18 @@ live-upgrade metadata. The resident supervisor and its workloads are unchanged.
 ### SG0502
 
 The staged binary is not live-reexec compatible with the resident supervisor.
-Live upgrades require the same protocol and patch-release line; use the
-documented stop-and-upgrade path for an incompatible minor or major release.
+Live upgrades require a newer target on the same major/minor release line and
+the same protocol. Follow the
+[stop-and-upgrade path](/installation/upgrading#compatibility) for an
+incompatible minor or major release, a downgrade, or the `0.56.0` bootstrap.
 
 ### SG0503
 
 The supervisor cannot currently reach a stable handoff point. A project may
 still be booting, a cron run or deployment may be active, or another runtime
-mutation may own the control plane. Retry after the named operation settles.
+mutation may own the control plane. An unresponsive supervisor, dynamic child,
+or non-transferable log stream can also block the handoff. Retry after the named
+condition settles.
 
 ### SG0504
 

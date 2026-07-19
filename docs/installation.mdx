@@ -36,6 +36,11 @@ Switch to an already installed version, or download it:
 $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.50.0
 ```
 
+The installer validates the downloaded binary before changing the active
+version. On compatible releases it also upgrades a running supervisor without
+restarting its services. See [Upgrading `sysg`](/installation/upgrading) for
+compatibility rules and recovery behavior.
+
 ## Next steps
 
 Create your first [configuration](quickstart#create-a-configuration) and start running services.

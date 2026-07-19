@@ -1,0 +1,72 @@
+---
+title: Upgrading sysg
+---
+
+# Upgrading `sysg`
+
+Run the normal installer again to upgrade to the latest release:
+
+```bash
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+```
+
+## Live re-execution
+
+Starting with `0.56.0`, compatible patch releases use **live re-execution**: the
+running supervisor replaces its process image in the same PID while retaining
+its service processes, process groups, control socket, log pipes, project modes,
+and lifecycle state.
+
+The installer performs the upgrade in this order:
+
+1. Download the release into its versioned slot.
+2. Verify its version, executable metadata, and live-reexec protocol.
+3. Ask the resident supervisor whether its runtime is safe to transfer.
+4. Re-execute the supervisor and verify that the same PID reports the target version.
+5. Update the `sysg` symlink and `active-version` file.
+
+The PATH target is not changed if any step fails. A foreground log attachment
+may reconnect while the supervisor image changes, but its project and service
+processes continue running.
+
+## Compatibility
+
+Live re-execution currently requires a newer release with the same major and
+minor version and the same handoff protocol. For example, `0.56.0` can live
+upgrade to `0.56.1`; moving from `0.55.x` to `0.56.0`, changing minor or major
+versions, and downgrading require a stopped supervisor.
+
+`0.56.0` is the first release that understands the handoff protocol. To install
+it while a `0.55.x` supervisor is running:
+
+```bash
+$ sysg stop --supervisor
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.56.0
+```
+
+Restart the required projects after installation. The installer reports
+[`SG0502`](/how-it-works/dialog/codes#sg0502) and leaves the existing PATH target
+unchanged if the old supervisor is still running.
+
+## Safe handoff requirements
+
+The supervisor waits for a stable ownership boundary. It refuses the upgrade
+while a project is booting, a restart or deployment is active, a cron command is
+running, or dynamic child processes cannot be transferred. It also verifies
+that loaded manifests have not changed and that every managed output pipe can
+be inherited.
+
+The refusal is non-destructive. Let the reported operation finish, then rerun
+the installer.
+
+## Failure and rollback
+
+The previous versioned binary remains installed until the replacement has
+restored supervision. Failures before `exec` produce
+[`SG0504`](/how-it-works/dialog/codes#sg0504) and the resident supervisor resumes
+normally. If the replacement cannot restore the handoff, systemg attempts to
+re-execute the previous binary and reports
+[`SG0505`](/how-it-works/dialog/codes#sg0505).
+
+Upgrade diagnostics are documented under
+[SG0501-SG0505](/how-it-works/dialog/codes#upgrade).

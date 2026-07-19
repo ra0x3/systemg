@@ -11,15 +11,14 @@ $ sysg restart
 ```
 
 <Warning>
-**Upgraded (or downgraded) the `sysg` binary itself?** `restart` is an IPC
-message to the resident supervisor process — services are re-spawned from
-their commands, but the supervisor does not re-execute its own binary.
+Do not use `restart` to apply a `sysg` upgrade. Run the installer again; on
+compatible releases it performs a
+[same-PID live re-execution](/installation/upgrading) without restarting
+services. Incompatible releases are refused until the supervisor is stopped.
 
-A full `sysg restart --daemonize` compares the supervisor's version against
-the CLI's and, on any difference, recycles the supervisor process onto the
-installed binary automatically. Scoped restarts (`-s`/`-p`) never recycle —
-they print a drift warning instead; run a full restart (or `sysg stop` +
-`sysg start`) to pick up the new binary.
+A manually replaced PATH binary can still leave version drift. A full
+`sysg restart --daemonize` retains the legacy stop-and-rebuild recovery path;
+scoped restarts (`-s`/`-p`) only report the drift.
 </Warning>
 
 <Note>

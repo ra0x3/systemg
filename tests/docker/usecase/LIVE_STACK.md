@@ -96,16 +96,16 @@ with `./scripts/test-local.sh --revert`.
 
 Re-install after **every** rebuild, or you are testing the old binary.
 
-> **The install REFUSES while a supervisor is running.** It prints
-> `A sysg supervisor is currently running.` and exits — which is easy to miss if
-> you pipe it to `/dev/null`. Every "verification" after that silently runs the
-> **old binary**, and you will chase a bug you already fixed. This wasted real
-> debugging time. Always stop the supervisor first, and confirm the new code is
-> actually in the installed binary:
+> **Never silence the installer.** From `0.56.0` onward, compatible patch
+> releases request same-PID live re-execution and only repoint PATH after the
+> resident supervisor reports the new version. An incompatible or unsafe
+> handoff exits nonzero with `SG0501`-`SG0505` and leaves the old version active.
+> The bootstrap from `0.55.x` to `0.56.0` still requires stopping the old
+> supervisor first. Always read the result and confirm the new code is present:
 >
 > ```sh
-> sysg stop --supervisor; sleep 3; pkill -x sysg
-> ./scripts/test-local.sh --no-build          # do NOT silence this
+> ./scripts/test-local.sh --no-build          # do not silence this
+> sysg --version
 > strings ~/.sysg/versions/*/sysg | grep -c SG0106   # some string only the new build has
 > ```
 

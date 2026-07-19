@@ -12,6 +12,7 @@ Primary links:
 - Documentation: https://sysg.dev
 - Quickstart: https://sysg.dev/quickstart
 - Installation: https://sysg.dev/installation
+- Upgrading sysg: https://sysg.dev/installation/upgrading
 - Commands: https://sysg.dev/how-it-works/commands
 - Logs command: https://sysg.dev/how-it-works/commands/logs
 - Status command: https://sysg.dev/how-it-works/commands/status
