@@ -816,6 +816,12 @@ fn render_empty_status(
             units: Vec::new(),
         };
         println!("{}", serialize_machine_output(&empty, format)?);
+    } else if snapshot
+        .units
+        .iter()
+        .all(|unit| !opts.include_orphans && unit.kind == UnitKind::Orphaned)
+    {
+        println!("No units being supervised");
     } else {
         println!("No matching units found.");
     }

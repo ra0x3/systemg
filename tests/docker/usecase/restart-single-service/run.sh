@@ -25,8 +25,14 @@ API_1="$(unit_field "$S1" api pid demo)"
 echo "before -> web:$WEB_1 api:$API_1"
 
 section "restart -s web bounces web only"
-sysg restart --service web
-check "$?" "restart -s web exits 0"
+RESTART_OUT="$(sysg restart --service web)"
+RESTART_RC=$?
+printf '%s\n' "$RESTART_OUT"
+check "$RESTART_RC" "restart -s web exits 0"
+[ -z "$(printf '%s\n' "$RESTART_OUT" | sed -n '1p')" ] \
+  && [ -z "$(printf '%s\n' "$RESTART_OUT" | sed -n '2p')" ] \
+  && [ "$(printf '%s\n' "$RESTART_OUT" | sed -n '3p')" = "Service 'web' restarted" ]
+check "$?" "restart success appears two lines below progress"
 sleep 3
 S2="$(sysg status --format json 2>/dev/null)"
 WEB_2="$(unit_field "$S2" web pid demo)"

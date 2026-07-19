@@ -482,6 +482,20 @@ where
     result
 }
 
+/// Runs an operation under an in-place spinner, then prints its success message
+/// below the cleared progress row.
+fn with_progress_message<F>(
+    label: &'static str,
+    operation: F,
+) -> Result<(), Box<dyn Error>>
+where
+    F: FnOnce() -> Result<String, Box<dyn Error>>,
+{
+    let message = with_progress_spinner(label, operation)?;
+    println!("\n\n{message}");
+    Ok(())
+}
+
 use std::fmt;
 
 /// Carries a structured diagnostic up to `main` so it renders after any
@@ -1697,7 +1711,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             );
         }
         Commands::UpgradeSupervisor { binary } => {
-            request_live_upgrade(binary)?;
+            with_progress_message("Updating", || request_live_upgrade(binary))?;
         }
         Commands::Supervise {
             config,
@@ -4745,10 +4759,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
     if daemonize {
         restart_daemonized(command, config_path, false)
     } else {
-        let message =
-            with_progress_spinner("Restarting", || send_control_message(command))?;
-        println!("\n\n{message}");
-        Ok(())
+        with_progress_message("Restarting", || send_control_message(command))
     }
 }
 
@@ -4838,9 +4849,10 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
                 project,
             },
         };
-        with_progress_spinner("Stopping", || send_control_command(command))?;
-        return Ok(());
+        return with_progress_message("Stopping", || send_control_message(command));
     }
+
+    cleanup_stopped_runtime();
 
     // If the target names a project the resident supervisor already knows, the
     // supervisor owns its config — route the stop there and NEVER demand a local
@@ -4867,8 +4879,7 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
                 project: Some(project),
             },
         };
-        with_progress_spinner("Stopping", || send_control_command(command))?;
-        return Ok(());
+        return with_progress_message("Stopping", || send_control_message(command));
     }
 
     // A `-p <project>` with NO supervisor running has nothing to stop: there is
@@ -6029,12 +6040,11 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
 
 /// Requests a live supervisor replacement and waits until the same PID reports
 /// the staged version or the previous binary confirms rollback.
-fn request_live_upgrade(binary: String) -> Result<(), Box<dyn Error>> {
+fn request_live_upgrade(binary: String) -> Result<String, Box<dyn Error>> {
     let target = systemg::upgrade::LiveUpgradeInfo::current();
     match supervisor_health() {
         SupervisorHealth::Down => {
-            println!("No running supervisor; activation is safe");
-            return Ok(());
+            return Ok("No running supervisor; activation is safe".into());
         }
         SupervisorHealth::Dying => {
             return Err(Box::new(DiagError(Box::new(
@@ -6057,8 +6067,7 @@ fn request_live_upgrade(binary: String) -> Result<(), Box<dyn Error>> {
         Err(err) => return Err(err.into()),
     };
     if resident == target.version.to_string() {
-        println!("Supervisor is already running {resident}");
-        return Ok(());
+        return Ok(format!("Supervisor is already running {resident}"));
     }
     systemg::upgrade::validate_resident_version(&resident, &target).map_err(DiagError)?;
     let original_pid = ipc::supervisor_peer_pid()?;
@@ -6096,8 +6105,7 @@ fn request_live_upgrade(binary: String) -> Result<(), Box<dyn Error>> {
                         )),
                     ))));
                 }
-                println!("Supervisor upgraded in place to {expected}");
-                return Ok(());
+                return Ok(format!("Supervisor upgraded in place to {expected}"));
             }
         }
         thread::sleep(UPGRADE_PROBE_INTERVAL);

@@ -172,6 +172,15 @@ pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// from being mistaken for a successful launch between process probes.
 pub const SERVICE_START_STABILITY: Duration = Duration::from_millis(250);
 
+/// Default maximum duration of one health-check probe.
+pub const DEFAULT_HEALTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default delay between health-check probes.
+pub const DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Default minimum number of health-check probes before readiness fails.
+pub const DEFAULT_HEALTH_RETRIES: u32 = 3;
+
 /// Maximum time a `pre_start` command may run before it is killed and the start
 /// fails. Pre-starts run inside the supervisor's single-writer owner thread, so
 /// an UNBOUNDED pre-start that hangs (e.g. a network/proxy call that never

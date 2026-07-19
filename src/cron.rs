@@ -1550,6 +1550,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies completed cron records persist exit and process metadata.
     fn persists_execution_history_with_exit_codes() {
         let _guard = crate::test_utils::env_lock();
 
@@ -1589,17 +1590,17 @@ mod tests {
         let due = manager.get_due_jobs();
         assert_eq!(due, vec!["persisted_service".to_string()]);
 
-        manager.mark_job_completed(
-            "persisted_service",
-            CronExecutionStatus::Success,
-            Some(0),
-            vec![],
-        );
         manager.annotate_job_execution(
             "persisted_service",
             Some(4242),
             Some("postgres".to_string()),
             Some("/bin/true".to_string()),
+        );
+        manager.mark_job_completed(
+            "persisted_service",
+            CronExecutionStatus::Success,
+            Some(0),
+            vec![],
         );
 
         let service_hash = compute_test_hash(&cron_config);

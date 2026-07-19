@@ -11,8 +11,8 @@
 #      runs, db bounced to V2, dependents bounced, ordering db -> migrate -> api.
 #   3. restart -s db (no -c): cascades to db + migrate + api + worker (new pids);
 #      lonely (no dep on db) untouched.
-#   4. RE-SKIP migrate + REMOVE worker, restart -c: migrate stops (skipped),
-#      worker verifiably DEAD, db/api/lonely survive.
+#   4. RE-SKIP migrate + REMOVE worker, restart -c: migrate and its dependent
+#      api stop (skipped), worker is verifiably DEAD, and db/lonely survive.
 set -u
 . /usecase/lib.sh
 
@@ -95,8 +95,8 @@ is_down "$WK_BEFORE"
 check "$?" "the removed worker's old process is verifiably DEAD"
 [ "$(pid_of "$S" worker)" = "absent" ]
 check "$?" "status no longer lists worker (reconcile-removed)"
-is_up "$DB3" && is_up "$API3" && is_up "$LON3"
-check "$?" "db, api, lonely survive the churn"
+is_up "$DB3" && is_down "$API3" && is_up "$LON3"
+check "$?" "db and lonely survive while api follows its skipped dependency"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish

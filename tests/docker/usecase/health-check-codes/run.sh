@@ -45,10 +45,31 @@ T1="$(date +%s)"
 cat /tmp/r.err | grep -v WARN | head -4
 grep -q "SG0022" /tmp/r.err
 check "$?" "refused health URL is SG0022 (unreachable)"
+! grep -q "SG0001" /tmp/r.err
+check "$?" "typed health failure is not wrapped in SG0001"
 ELAPSED=$((T1 - T0))
 echo "elapsed: ${ELAPSED}s (max wait = 3 x (2s+1s) = 9s; refused returns instantly so ~a few s)"
 [ "$ELAPSED" -lt 15 ]
 check "$?" "refused endpoint fails FAST (< 15s, not a long hang)"
+sysg purge --force >/dev/null 2>&1
+
+section "total readiness timeout survives fast failures during a slow start"
+rm -f /tmp/health-ready
+sh -c 'sleep 5; touch /tmp/health-ready' &
+mkcfg '            command: "test -f /tmp/health-ready"
+            timeout: "8s"
+            attempt_timeout: "1s"
+            retries: 2
+            interval: "1s"'
+T0="$(date +%s)"
+sysg start --config /usecase/s.yaml --daemonize >/tmp/b.out 2>/tmp/b.err
+BUDGET_RC=$?
+T1="$(date +%s)"
+cat /tmp/b.err | grep -v WARN | head -4
+check "$BUDGET_RC" "service becomes healthy inside its total readiness budget"
+ELAPSED=$((T1 - T0))
+[ "$ELAPSED" -ge 4 ] && [ "$ELAPSED" -lt 12 ]
+check "$?" "fast failures keep probing past the retry floor"
 sysg purge --force >/dev/null 2>&1
 
 section "health command that exits non-zero -> SG0104"

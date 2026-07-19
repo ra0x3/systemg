@@ -1290,9 +1290,8 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Restarts the primary project's own services in place, isolated from any
-    /// sibling project. Bounces the project's running services against
-    /// `new_config` without reloading the whole (possibly multi-project) file.
+    /// Reconciles the primary project's services in place without touching any
+    /// sibling project or unchanged service.
     fn reconcile_primary_project(
         &mut self,
         new_config: Config,
@@ -1305,6 +1304,7 @@ impl Supervisor {
         let metrics_store = metrics::shared_store(metrics_settings)?;
         let diff =
             crate::restart::ManifestDiff::compute(old_config.as_ref(), &new_config);
+        let affected = Self::reconcile_targets(&new_config, &diff)?;
 
         self.stop_primary_workers();
         let mut stop_error = None;
@@ -1328,34 +1328,26 @@ impl Supervisor {
         self.daemon.set_config(new_config);
         self.primary_active = true;
         self.daemon.begin_boot();
-        let restart_result = self.daemon.restart_services();
+        let restart_result = self.daemon.restart_services_subset(&affected);
         let sync_result = self.sync_cron_projects();
-        if let Err(err) = restart_result {
-            if let Err(restore_err) =
-                self.restore_primary_project(old_config, old_metrics)
-            {
-                error!(
-                    "Failed to restore primary project after restart failure: {restore_err}"
-                );
-            }
-            return Err(err.into());
-        }
-        if let Err(err) = sync_result {
-            if let Err(restore_err) =
-                self.restore_primary_project(old_config, old_metrics)
-            {
-                error!(
-                    "Failed to restore primary project after scheduler failure: {restore_err}"
-                );
-            }
-            return Err(err);
-        }
-
         self.metrics_store = metrics_store;
-        self.start_primary_workers()?;
+        let workers_result = self.start_primary_workers();
+        if let Err(err) = restart_result {
+            error!("Project reconcile did not complete: {err}");
+            let failed = Self::reconcile_failures(&err, &affected);
+            sync_result?;
+            workers_result?;
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(&failed),
+            ))
+            .into());
+        }
+        sync_result?;
+        workers_result?;
         Ok(())
     }
 
+    /// Stops primary-project background workers before its daemon state changes.
     fn stop_primary_workers(&mut self) {
         if let Some(collector) = self.metrics_collector.take() {
             collector.stop();
@@ -1366,6 +1358,7 @@ impl Supervisor {
         self.daemon.shutdown_monitor();
     }
 
+    /// Refreshes primary status and starts its status and metrics workers.
     fn start_primary_workers(&mut self) -> Result<(), SupervisorError> {
         self.refresh_status_cache();
         self.respawn_status_refresher()?;
@@ -1378,6 +1371,8 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Restores the previous primary manifest and workloads after a teardown
+    /// failure prevents the new manifest from being applied safely.
     fn restore_primary_project(
         &mut self,
         config: Arc<Config>,
@@ -1407,6 +1402,47 @@ impl Supervisor {
             ))
             .into())
         }
+    }
+
+    /// Returns services directly changed by a manifest plus every transitive
+    /// dependent whose lifecycle must be reevaluated.
+    fn reconcile_targets(
+        config: &Config,
+        diff: &crate::restart::ManifestDiff,
+    ) -> Result<HashSet<String>, ProcessManagerError> {
+        let order = config.service_start_order()?;
+        let mut affected: HashSet<String> = if diff.is_empty() {
+            config.services.keys().cloned().collect()
+        } else {
+            diff.added.union(&diff.changed).cloned().collect()
+        };
+        for name in order {
+            if config.services.get(&name).is_some_and(|service| {
+                service.depends_on.as_ref().is_some_and(|dependencies| {
+                    dependencies
+                        .iter()
+                        .any(|dependency| affected.contains(dependency.service()))
+                })
+            }) {
+                affected.insert(name);
+            }
+        }
+        Ok(affected)
+    }
+
+    /// Extracts stable failed-unit names from a reconcile error, falling back to
+    /// every affected unit when the originating error carries no unit list.
+    fn reconcile_failures(
+        error: &ProcessManagerError,
+        affected: &HashSet<String>,
+    ) -> Vec<String> {
+        let mut failed = match error {
+            ProcessManagerError::ServicesNotRunning { services } => services.clone(),
+            _ => affected.iter().cloned().collect(),
+        };
+        failed.sort_unstable();
+        failed.dedup();
+        failed
     }
 
     /// Replaces an extra project with a freshly loaded runtime and starts it.
@@ -3784,7 +3820,11 @@ impl Supervisor {
         Ok(child_pid)
     }
 
-    /// Reloads config.
+    /// Validates and surgically reconciles the primary project against `path`.
+    ///
+    /// Unchanged services retain their process identity. A valid manifest that
+    /// contains a failing target remains active and returns SG0302 without
+    /// tearing down workloads that already reached their target.
     fn reload_config(&mut self, path: &Path) -> Result<(), SupervisorError> {
         let resolved = if path.is_absolute() {
             path.to_path_buf()
@@ -3820,24 +3860,7 @@ impl Supervisor {
         let old_config = self.daemon.config();
         let old_metrics = self.metrics_store.clone();
         let diff = crate::restart::ManifestDiff::compute(old_config.as_ref(), &config);
-        let bounce_all = diff.is_empty();
-        let order = config.service_start_order()?;
-        let mut affected: HashSet<String> = if bounce_all {
-            config.services.keys().cloned().collect()
-        } else {
-            diff.added.union(&diff.changed).cloned().collect()
-        };
-        for name in &order {
-            if config.services.get(name).is_some_and(|service| {
-                service.depends_on.as_ref().is_some_and(|dependencies| {
-                    dependencies
-                        .iter()
-                        .any(|dependency| affected.contains(dependency.service()))
-                })
-            }) {
-                affected.insert(name.clone());
-            }
-        }
+        let affected = Self::reconcile_targets(&config, &diff)?;
 
         self.stop_primary_workers();
         let mut stop_error = None;
@@ -3862,37 +3885,23 @@ impl Supervisor {
         self.primary_active = true;
         self.daemon.begin_boot();
         let restart_result = self.daemon.restart_services_subset(&affected);
+        let sync_result = self.sync_cron_projects();
+        self.config_path = resolved;
+        let _ = ipc::write_config_hint(&self.config_path);
+        self.metrics_store = metrics_store;
+        let workers_result = self.start_primary_workers();
         if let Err(err) = restart_result {
             error!("Project reconcile did not complete: {err}");
-            let mut failed: Vec<String> = affected.into_iter().collect();
-            failed.sort_unstable();
-            if let Err(restore_err) =
-                self.restore_primary_project(old_config, old_metrics)
-            {
-                error!(
-                    "Failed to restore primary project after reconcile failure: {restore_err}"
-                );
-            }
+            let failed = Self::reconcile_failures(&err, &affected);
+            sync_result?;
+            workers_result?;
             return Err(ProcessManagerError::Diag(Box::new(
                 crate::restart::reconcile_incomplete(&failed),
             ))
             .into());
         }
-        if let Err(err) = self.sync_cron_projects() {
-            if let Err(restore_err) =
-                self.restore_primary_project(old_config, old_metrics)
-            {
-                error!(
-                    "Failed to restore primary project after scheduler failure: {restore_err}"
-                );
-            }
-            return Err(err);
-        }
-
-        self.config_path = resolved;
-        let _ = ipc::write_config_hint(&self.config_path);
-        self.metrics_store = metrics_store;
-        self.start_primary_workers()?;
+        sync_result?;
+        workers_result?;
         Ok(())
     }
 
@@ -5352,6 +5361,111 @@ services:
     }
 
     #[test]
+    /// Verifies a failed added unit leaves unchanged primary processes intact.
+    fn primary_reconcile_failure_preserves_unchanged_processes() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("primary.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "2"
+project:
+  id: primary
+services:
+  web:
+    command: "/bin/sleep 45"
+  api:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write config");
+
+        let mut supervisor =
+            Supervisor::new(config_path.clone(), false, None).expect("create supervisor");
+        supervisor
+            .daemon
+            .start_services()
+            .expect("start primary services");
+        let before = supervisor
+            .daemon
+            .pid_file_handle()
+            .lock()
+            .expect("pid file lock")
+            .services()
+            .clone();
+
+        fs::write(
+            &config_path,
+            r#"
+version: "2"
+project:
+  id: primary
+services:
+  web:
+    command: "/bin/sleep 45"
+  api:
+    command: "/bin/sleep 45"
+  bad:
+    command: "/bin/sh -c 'exit 1'"
+"#,
+        )
+        .expect("rewrite config");
+
+        let error = supervisor
+            .handle_command(ControlCommand::Restart {
+                config: Some(config_path.to_string_lossy().to_string()),
+                service: None,
+                project: Some("primary".into()),
+            })
+            .expect_err("failing added service should make reconcile incomplete");
+        assert!(
+            error.to_string().contains("SG0302"),
+            "unexpected reconcile error: {error}"
+        );
+
+        let after = supervisor
+            .daemon
+            .pid_file_handle()
+            .lock()
+            .expect("pid file lock")
+            .services()
+            .clone();
+        for service in ["web", "api"] {
+            let pid = before.get(service).copied().expect("original service pid");
+            assert_eq!(after.get(service), Some(&pid));
+            assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+        }
+        assert!(supervisor.daemon.config().services.contains_key("bad"));
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
     fn restart_extra_project_without_config_reloads_stored_manifest() {
         let _guard = crate::test_utils::env_lock();
 
@@ -5482,11 +5596,9 @@ services:
     }
 
     #[test]
+    /// Verifies redundant primary registration preserves every service process.
     fn repro_redundant_add_project_bounces_primary() {
         let _guard = crate::test_utils::env_lock();
-
-        let _ = std::fs::remove_file("/tmp/sysg-guard-hit");
-        let _ = std::fs::remove_file("/tmp/sysg-reg-entered");
 
         let base = std::env::current_dir()
             .expect("current_dir")
@@ -5536,7 +5648,6 @@ services:
                 .collect()
         };
 
-        let t_add = std::time::Instant::now();
         supervisor
             .handle_command(ControlCommand::AddProject {
                 config: config_path.to_string_lossy().to_string(),
@@ -5544,9 +5655,6 @@ services:
                 mode: ProjectRunMode::Daemon,
             })
             .expect("redundant add of same primary config");
-        let add_elapsed = t_add.elapsed();
-
-        let guard_hit = std::path::Path::new("/tmp/sysg-guard-hit").exists();
         let pids_after: Vec<(String, u32)> = {
             let guard = supervisor.daemon.pid_file_handle();
             let locked = guard.lock().unwrap();
@@ -5557,11 +5665,6 @@ services:
                 .collect()
         };
 
-        eprintln!(
-            "REPRO guard_hit={guard_hit} add_ms={} before={pids_before:?} after={pids_after:?}",
-            add_elapsed.as_millis()
-        );
-        assert!(guard_hit, "guard early-return marker was not written");
         assert_eq!(
             pids_before, pids_after,
             "redundant AddProject bounced the primary services"

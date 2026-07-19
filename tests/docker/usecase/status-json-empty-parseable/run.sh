@@ -54,5 +54,11 @@ sysg status -s definitely_not_a_service >/tmp/j_human.out 2>&1
 grep -q "No matching units found" /tmp/j_human.out
 check "$?" "non-json output still prints the readable message"
 
+section "an empty supervisor reports that no units are supervised"
+sysg stop -p jsonproj >/dev/null 2>&1
+sysg status >/tmp/j_none.out 2>&1
+grep -q "No units being supervised" /tmp/j_none.out
+check "$?" "unfiltered empty status describes the supervisor state"
+
 sysg stop --supervisor >/dev/null 2>&1
 finish

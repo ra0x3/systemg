@@ -32,6 +32,7 @@ use systemg::{
 use tempfile::tempdir;
 
 #[test]
+/// Verifies status without a config reports the absent supervisor directly.
 fn status_without_config_reports_missing_supervisor_not_missing_manifest() {
     let temp = tempdir().expect("create tempdir");
     let home_guard = HomeEnvGuard::set(temp.path());
@@ -61,6 +62,7 @@ fn status_without_config_reports_missing_supervisor_not_missing_manifest() {
 }
 
 #[test]
+/// Verifies JSON status renders persisted state when no supervisor is running.
 fn status_json_falls_back_to_snapshot_without_supervisor() {
     let temp = tempdir().expect("create tempdir");
     let home_guard = HomeEnvGuard::set(temp.path());
@@ -78,15 +80,14 @@ services:
     .expect("write config");
 
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))
-        .expect("load config for hash");
-    let service = config.services.get("demo").expect("demo service");
-    let hash = service.compute_hash();
+        .expect("load config for state key");
+    let key = config.state_key("demo");
 
     let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
         .expect("load state");
     state
         .set(
-            &hash,
+            &key,
             ServiceLifecycleStatus::ExitedSuccessfully,
             None,
             Some(0),
@@ -128,6 +129,7 @@ services:
 }
 
 #[test]
+/// Verifies a bare format flag defaults to JSON for offline status.
 fn status_format_defaults_to_json_when_value_is_omitted() {
     let temp = tempdir().expect("create tempdir");
     let home_guard = HomeEnvGuard::set(temp.path());
@@ -145,15 +147,14 @@ services:
     .expect("write config");
 
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))
-        .expect("load config for hash");
-    let service = config.services.get("demo").expect("demo service");
-    let hash = service.compute_hash();
+        .expect("load config for state key");
+    let key = config.state_key("demo");
 
     let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
         .expect("load state");
     state
         .set(
-            &hash,
+            &key,
             ServiceLifecycleStatus::ExitedSuccessfully,
             None,
             Some(0),
@@ -177,6 +178,7 @@ services:
 }
 
 #[test]
+/// Verifies XML status renders persisted state when no supervisor is running.
 fn status_xml_falls_back_to_snapshot_without_supervisor() {
     let temp = tempdir().expect("create tempdir");
     let home_guard = HomeEnvGuard::set(temp.path());
@@ -194,15 +196,14 @@ services:
     .expect("write config");
 
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))
-        .expect("load config for hash");
-    let service = config.services.get("demo").expect("demo service");
-    let hash = service.compute_hash();
+        .expect("load config for state key");
+    let key = config.state_key("demo");
 
     let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
         .expect("load state");
     state
         .set(
-            &hash,
+            &key,
             ServiceLifecycleStatus::ExitedSuccessfully,
             None,
             Some(0),
@@ -222,12 +223,13 @@ services:
     let payload: StatusSnapshot = quick_xml::de::from_str(xml).expect("parse status xml");
     assert_eq!(payload.overall_health, OverallHealth::Healthy);
     assert_eq!(payload.units.len(), 1);
-    assert_eq!(payload.units[0].hash, hash);
+    assert_eq!(payload.units[0].hash, key);
 
     drop(home_guard);
 }
 
 #[test]
+/// Verifies JSON inspect renders persisted state without a supervisor.
 fn inspect_json_falls_back_without_supervisor() {
     let temp = tempdir().expect("create tempdir");
     let home_guard = HomeEnvGuard::set(temp.path());
@@ -245,18 +247,17 @@ services:
     .expect("write config");
 
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))
-        .expect("load config for hash");
-    let service = config.services.get("demo").expect("demo service");
-    let hash = service.compute_hash();
+        .expect("load config for state key");
+    let key = config.state_key("demo");
 
     let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
         .expect("load state");
     state
         .set(
-            &hash,
-            ServiceLifecycleStatus::Running,
-            Some(4242),
+            &key,
+            ServiceLifecycleStatus::ExitedSuccessfully,
             None,
+            Some(0),
             None,
         )
         .expect("persist state");
@@ -279,7 +280,7 @@ services:
     );
 
     let payload: Value = serde_json::from_slice(&output.stdout).expect("parse json");
-    assert_eq!(payload["unit"]["hash"], hash);
+    assert_eq!(payload["unit"]["hash"], key);
     assert!(payload["samples"].as_array().unwrap().is_empty());
     assert!(
         output.stderr.is_empty(),
@@ -290,6 +291,7 @@ services:
 }
 
 #[test]
+/// Verifies XML inspect renders persisted state without a supervisor.
 fn inspect_xml_falls_back_without_supervisor() {
     let temp = tempdir().expect("create tempdir");
     let home_guard = HomeEnvGuard::set(temp.path());
@@ -307,18 +309,17 @@ services:
     .expect("write config");
 
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))
-        .expect("load config for hash");
-    let service = config.services.get("demo").expect("demo service");
-    let hash = service.compute_hash();
+        .expect("load config for state key");
+    let key = config.state_key("demo");
 
     let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
         .expect("load state");
     state
         .set(
-            &hash,
-            ServiceLifecycleStatus::Running,
-            Some(4242),
+            &key,
+            ServiceLifecycleStatus::ExitedSuccessfully,
             None,
+            Some(0),
             None,
         )
         .expect("persist state");
@@ -337,7 +338,7 @@ services:
     let payload: InspectPayload =
         quick_xml::de::from_str(xml).expect("parse inspect xml");
     let unit = payload.unit.expect("inspect xml should include unit");
-    assert_eq!(unit.hash, hash);
+    assert_eq!(unit.hash, key);
     assert!(payload.samples.is_empty());
 
     drop(home_guard);

@@ -13,7 +13,7 @@
 #   - the console shows chatty's stdout line (OUT_MARKER_HELLO),
 #   - the console shows chatty's stderr line (ERR_MARKER_OOPS) too,
 #   - a SECOND unit's output also appears (multi-unit interleave),
-#   - lines are tagged with their unit name ([chatty] / [quiet]),
+#   - lines are tagged with their unit name (`chatty |` / `quiet |`),
 #   - after Ctrl-C the stack is torn down (no leftover service processes).
 set -u
 . /usecase/lib.sh
@@ -41,8 +41,8 @@ grep -q "SECOND_UNIT_LINE" "$OUT"
 check "$?" "quiet's line is on the console too"
 
 section "output is tagged per unit"
-grep -q "\[chatty\]" "$OUT"
-check "$?" "lines are prefixed with the unit name [chatty]"
+grep -q "chatty |" "$OUT"
+check "$?" "lines are prefixed with the unit name (chatty |)"
 
 section "the stack was torn down on Ctrl-C"
 sleep 1

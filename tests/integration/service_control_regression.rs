@@ -8,6 +8,7 @@ use common::HomeEnvGuard;
 use systemg::{
     config::load_config,
     daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    diag::SgCode,
     state_store::StateStore,
 };
 use tempfile::tempdir;
@@ -24,16 +25,17 @@ fn all_project_stores() -> Vec<StateStore> {
     }
 }
 
-/// First project service-state file that records `hash`.
-fn any_state_file_with(hash: &str) -> Option<ServiceStateFile> {
+/// Returns the first project service-state file that records `key`.
+fn any_state_file_with(key: &str) -> Option<ServiceStateFile> {
     all_project_stores()
         .into_iter()
         .filter_map(|s| ServiceStateFile::load(s).ok())
-        .find(|s| s.get(hash).is_some())
+        .find(|s| s.get(key).is_some())
 }
 
 #[test]
-fn purge_retains_config_services() {
+/// Verifies forced purge removes tracked state without hiding configured services.
+fn forced_purge_retains_config_services() {
     let temp = tempdir().unwrap();
     let dir = temp.path();
     let home = dir.join("home");
@@ -51,20 +53,20 @@ services:
     fs::write(&config_path, config_yaml).unwrap();
 
     let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
-    let service_hash = config
-        .services
-        .get("sample")
-        .expect("service exists")
-        .compute_hash();
+    let service_key = config.state_key("sample");
+    let mut exited = std::process::Command::new("/usr/bin/true")
+        .spawn()
+        .expect("spawn short-lived process");
+    exited.wait().expect("reap short-lived process");
+    let dead_pid = exited.id();
 
-    // Seed some runtime state so status shows the service prior to purge.
     let store = StateStore::for_project(&config.project.id);
     let mut state_file = ServiceStateFile::load(store.clone()).unwrap_or_default();
     state_file
         .set(
-            &service_hash,
+            &service_key,
             ServiceLifecycleStatus::Running,
-            Some(4242),
+            Some(dead_pid),
             None,
             None,
         )
@@ -72,7 +74,7 @@ services:
     drop(state_file);
 
     let mut pid_file = PidFile::load(store).unwrap_or_default();
-    pid_file.insert("sample", 4242).unwrap();
+    pid_file.insert("sample", dead_pid).unwrap();
     drop(pid_file);
 
     let status_before = cargo_bin_cmd!("sysg")
@@ -82,11 +84,12 @@ services:
         .arg(config_path.to_str().unwrap())
         .output()
         .expect("status before purge to execute");
-    let before_code = status_before.status.code().unwrap_or_default();
     assert!(
-        before_code == 0 || before_code == 1,
-        "status command should exit healthy or warn before purge, got {before_code}"
+        !status_before.status.success(),
+        "disk-only status should report the supervisor as offline"
     );
+    let stderr_before = String::from_utf8_lossy(&status_before.stderr);
+    assert!(stderr_before.contains(SgCode::SupervisorOffline.as_str()));
     let stdout_before = String::from_utf8_lossy(&status_before.stdout);
     assert!(
         stdout_before.contains("sample"),
@@ -96,9 +99,14 @@ services:
     let purge_output = cargo_bin_cmd!("sysg")
         .env("HOME", &home)
         .arg("purge")
+        .arg("--force")
         .output()
         .expect("purge command to execute");
-    assert!(purge_output.status.success());
+    assert!(
+        purge_output.status.success(),
+        "purge failed: {}",
+        String::from_utf8_lossy(&purge_output.stderr)
+    );
 
     let status_after = cargo_bin_cmd!("sysg")
         .env("HOME", &home)
@@ -107,11 +115,12 @@ services:
         .arg(config_path.to_str().unwrap())
         .output()
         .expect("status after purge to execute");
-    let after_code = status_after.status.code().unwrap_or_default();
     assert!(
-        after_code == 0 || after_code == 1,
-        "status command should exit healthy or warn after purge, got {after_code}"
+        !status_after.status.success(),
+        "disk-only status should remain offline after purge"
     );
+    let stderr_after = String::from_utf8_lossy(&status_after.stderr);
+    assert!(stderr_after.contains(SgCode::SupervisorOffline.as_str()));
     let stdout_after = String::from_utf8_lossy(&status_after.stdout);
     assert!(
         stdout_after.contains("sample"),
@@ -123,6 +132,7 @@ services:
     );
 }
 
+/// Builds a project manifest whose worker writes `tag` before sleeping.
 fn config_with_marker(marker: &std::path::Path, tag: &str) -> String {
     format!(
         r#"
@@ -138,6 +148,7 @@ services:
     )
 }
 
+/// Waits until the worker marker contains `expected`.
 fn wait_for_marker_value(marker: &std::path::Path, expected: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -154,32 +165,32 @@ fn wait_for_marker_value(marker: &std::path::Path, expected: &str) {
     }
 }
 
-fn service_hash(config_path: &std::path::Path, service: &str) -> String {
+/// Returns the stable lifecycle state key for `service`.
+fn service_key(config_path: &std::path::Path, service: &str) -> String {
     load_config(Some(config_path.to_str().unwrap()))
         .unwrap()
-        .get_service_hash(service)
-        .expect("service defined in config")
+        .state_key(service)
 }
 
-fn wait_for_state_running(hash: &str) {
+/// Waits until the state entry under `key` is recorded as running.
+fn wait_for_state_running(key: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(state) = any_state_file_with(hash)
-            && let Some(entry) = state.get(hash)
+        if let Some(state) = any_state_file_with(key)
+            && let Some(entry) = state.get(key)
             && matches!(entry.status, ServiceLifecycleStatus::Running)
         {
             return;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("state file never reported hash '{hash}' as Running");
+            panic!("state file never reported key '{key}' as Running");
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// Regression: `restart -s <svc> -c <config>` must reconcile a changed command from
-/// the manifest. The spawned command AND the stored per-hash lifecycle state must
-/// track the new command; the stale hash must not remain the tracked Running entry.
+/// Regression: `restart -s <svc> -c <config>` must reconcile a changed command
+/// while retaining the service's stable lifecycle identity.
 #[test]
 fn restart_with_config_reconciles_changed_command() {
     let temp = tempdir().unwrap();
@@ -191,7 +202,7 @@ fn restart_with_config_reconciles_changed_command() {
     let marker = dir.join("marker.txt");
     let config_path = dir.join("systemg.yaml");
     fs::write(&config_path, config_with_marker(&marker, "V1")).unwrap();
-    let hash_v1 = service_hash(&config_path, "worker");
+    let key_v1 = service_key(&config_path, "worker");
 
     let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
     Command::new(sysg_bin)
@@ -202,11 +213,11 @@ fn restart_with_config_reconciles_changed_command() {
         .success();
 
     wait_for_marker_value(&marker, "V1");
-    wait_for_state_running(&hash_v1);
+    wait_for_state_running(&key_v1);
 
     fs::write(&config_path, config_with_marker(&marker, "V2")).unwrap();
-    let hash_v2 = service_hash(&config_path, "worker");
-    assert_ne!(hash_v1, hash_v2, "changed command must change the hash");
+    let key_v2 = service_key(&config_path, "worker");
+    assert_eq!(key_v1, key_v2, "service state identity must remain stable");
 
     Command::new(sysg_bin)
         .args(["restart", "--service", "worker", "--config"])
@@ -215,16 +226,7 @@ fn restart_with_config_reconciles_changed_command() {
         .success();
 
     wait_for_marker_value(&marker, "V2");
-    wait_for_state_running(&hash_v2);
-
-    let state = any_state_file_with(&hash_v2).expect("state file with v2 hash");
-    let v1_running = state
-        .get(&hash_v1)
-        .is_some_and(|entry| matches!(entry.status, ServiceLifecycleStatus::Running));
-    assert!(
-        !v1_running,
-        "stale V1 hash must not remain a Running entry after config reconcile"
-    );
+    wait_for_state_running(&key_v2);
 
     Command::new(sysg_bin)
         .arg("stop")
@@ -246,7 +248,7 @@ fn stop_project_then_start_reconciles_changed_command() {
     let marker = dir.join("marker.txt");
     let config_path = dir.join("systemg.yaml");
     fs::write(&config_path, config_with_marker(&marker, "V1")).unwrap();
-    let hash_v1 = service_hash(&config_path, "worker");
+    let key_v1 = service_key(&config_path, "worker");
 
     let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
     Command::new(sysg_bin)
@@ -257,7 +259,7 @@ fn stop_project_then_start_reconciles_changed_command() {
         .success();
 
     wait_for_marker_value(&marker, "V1");
-    wait_for_state_running(&hash_v1);
+    wait_for_state_running(&key_v1);
 
     Command::new(sysg_bin)
         .args(["stop", "--project", "repro-proj"])
@@ -268,7 +270,8 @@ fn stop_project_then_start_reconciles_changed_command() {
     let _ = fs::remove_file(&marker);
 
     fs::write(&config_path, config_with_marker(&marker, "V2")).unwrap();
-    let hash_v2 = service_hash(&config_path, "worker");
+    let key_v2 = service_key(&config_path, "worker");
+    assert_eq!(key_v1, key_v2, "service state identity must remain stable");
     Command::new(sysg_bin)
         .args(["start", "--config"])
         .arg(&config_path)
@@ -277,16 +280,7 @@ fn stop_project_then_start_reconciles_changed_command() {
         .success();
 
     wait_for_marker_value(&marker, "V2");
-    wait_for_state_running(&hash_v2);
-
-    let state = any_state_file_with(&hash_v2).expect("state file with v2 hash");
-    let v1_running = state
-        .get(&hash_v1)
-        .is_some_and(|entry| matches!(entry.status, ServiceLifecycleStatus::Running));
-    assert!(
-        !v1_running,
-        "stale V1 hash must not remain a Running entry after stop/start reconcile"
-    );
+    wait_for_state_running(&key_v2);
 
     Command::new(sysg_bin)
         .arg("stop")

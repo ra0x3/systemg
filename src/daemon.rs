@@ -33,6 +33,7 @@ use crate::{
         ServiceConfig, SkipConfig,
     },
     constants::{
+        DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL, DEFAULT_HEALTH_RETRIES,
         DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
         MAX_STATUS_LOG_LINES, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
         PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
@@ -1681,6 +1682,17 @@ enum HealthProbeOutcome {
     Timeout,
 }
 
+/// Timing and attempt count recorded while waiting for service readiness.
+#[derive(Debug, Clone, Copy)]
+struct HealthRun {
+    /// Number of health probes attempted.
+    attempts: u32,
+    /// Wall-clock time spent waiting for readiness.
+    elapsed: Duration,
+    /// Configured total readiness budget, when present.
+    total_timeout: Option<Duration>,
+}
+
 /// Indicates when a service is considered ready for dependents or has already completed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceReadyState {
@@ -2697,9 +2709,7 @@ impl Daemon {
                 Some(ServiceLifecycleStatus::Skipped) => {
                     matches!(service.skip, Some(SkipConfig::Command(_)))
                 }
-                Some(ServiceLifecycleStatus::ExitedSuccessfully) => {
-                    service.restarts_after_success()
-                }
+                Some(ServiceLifecycleStatus::ExitedSuccessfully) => false,
                 _ => true,
             }
         })
@@ -4239,26 +4249,16 @@ impl Daemon {
     /// manual-stop or restart-suppress flag was set.
     ///
     /// A restart sets those flags to tear the old instance down, so the flag
-    /// alone does not mean the user stopped the service. A ONE-SHOT that ran and
-    /// exited 0 has COMPLETED — recording it as `stopped` rewrote finished
-    /// builds/migrations as stopped+warn after `restart -p`, and `stopped` reads
-    /// as a FAILED dependency downstream. Long-running services are unaffected:
-    /// a clean exit there is still a stop.
-    fn stopped_or_completed(
-        ctx: &DaemonContext,
-        name: &str,
-        exit_success: bool,
-    ) -> ServiceLifecycleStatus {
-        // `restart_policy: always` is the only declaration that a clean exit
-        // should be treated as a stop worth restarting; everything else that
-        // exits 0 ran to completion. Probe-style units (`redis-cli ping`) declare
-        // no policy at all, so keying off `never` alone would miss them.
-        let wants_restart = ctx
-            .config
-            .services
-            .get(name)
-            .is_some_and(|service| service.restarts_after_success());
-        if exit_success && !wants_restart {
+    /// alone does not mean the user stopped the service. A unit already recorded
+    /// as successfully completed must remain completed; every other intentional
+    /// teardown is stopped regardless of the process's signal-handling exit code.
+    fn stopped_or_completed(ctx: &DaemonContext, name: &str) -> ServiceLifecycleStatus {
+        let completed = ctx.state_file.lock().ok().and_then(|state| {
+            state
+                .get(&ctx.config.state_key(name))
+                .map(|entry| entry.status)
+        }) == Some(ServiceLifecycleStatus::ExitedSuccessfully);
+        if completed {
             ServiceLifecycleStatus::ExitedSuccessfully
         } else {
             ServiceLifecycleStatus::Stopped
@@ -5175,18 +5175,22 @@ impl Daemon {
         let attempt_timeout = if let Some(raw) = &health_check.attempt_timeout {
             Self::parse_duration(raw)?
         } else {
-            Duration::from_secs(30)
+            DEFAULT_HEALTH_ATTEMPT_TIMEOUT
         };
+        let total_timeout = health_check
+            .total_timeout
+            .as_deref()
+            .map(Self::parse_duration)
+            .transpose()?;
 
-        let retries = health_check.retries.unwrap_or(3).max(1);
+        let retries = health_check
+            .retries
+            .unwrap_or(DEFAULT_HEALTH_RETRIES)
+            .max(1);
         let interval = health_check
             .interval
             .as_deref()
-            .map_or(Ok(Duration::from_secs(2)), Self::parse_duration)?;
-        // `attempt_timeout` caps EACH probe. There is no separate total-timeout
-        // knob: the absolute max wait is derived as retries x (attempt_timeout +
-        // interval), so a hopeless check (a port that stays taken) fails fast on
-        // connection refusal instead of stranding a foreground start.
+            .map_or(Ok(DEFAULT_HEALTH_INTERVAL), Self::parse_duration)?;
         let client = if health_check.url.is_some() {
             // A health check is a DIRECT probe to the service — never route it
             // through an HTTP proxy. reqwest reads HTTP_PROXY/ALL_PROXY from the
@@ -5207,17 +5211,26 @@ impl Daemon {
             None
         };
 
-        let mut last_outcome = HealthProbeOutcome::Unhealthy;
+        let mut last_outcome: HealthProbeOutcome;
+        let started_at = Instant::now();
+        let mut attempt = 0u32;
 
-        for attempt in 1..=retries {
+        loop {
+            attempt = attempt.saturating_add(1);
             if self.boot_cancelled() || !self.boot_active(epoch) {
                 return Err(Self::interrupted(service_name));
             }
+            let progress = match total_timeout {
+                Some(budget) => format!(
+                    "attempt {attempt}, {}s/{}s",
+                    started_at.elapsed().as_secs(),
+                    budget.as_secs()
+                ),
+                None => format!("attempt {attempt}/{retries}"),
+            };
             self.op_slot.detail_for(
                 &self.cfg().project.id.clone(),
-                format!(
-                    "health check for '{service_name}' (attempt {attempt}/{retries})"
-                ),
+                format!("health check for '{service_name}' ({progress})"),
             );
             match self.perform_configured_health_check(
                 service_name,
@@ -5255,17 +5268,35 @@ impl Daemon {
                 return Err(Self::interrupted(service_name));
             }
 
-            if attempt != retries && !self.wait_boot_delay(epoch, interval) {
+            let elapsed = started_at.elapsed();
+            let retry_floor_pending = attempt < retries;
+            let budget_remaining = total_timeout
+                .and_then(|budget| budget.checked_sub(elapsed))
+                .filter(|remaining| !remaining.is_zero());
+            if !retry_floor_pending && budget_remaining.is_none() {
+                break;
+            }
+            let delay = if retry_floor_pending {
+                interval
+            } else {
+                interval.min(budget_remaining.unwrap_or_default())
+            };
+            if !self.wait_boot_delay(epoch, delay) {
                 return Err(Self::interrupted(service_name));
             }
         }
 
+        let elapsed = started_at.elapsed();
         Err(ProcessManagerError::Diag(Box::new(
             self.health_check_failure_diag(
                 service_name,
                 health_check,
                 attempt_timeout,
-                retries,
+                HealthRun {
+                    attempts: attempt,
+                    elapsed,
+                    total_timeout,
+                },
                 last_outcome,
             ),
         )))
@@ -5280,7 +5311,7 @@ impl Daemon {
         service_name: &str,
         health_check: &HealthCheckConfig,
         attempt_timeout: Duration,
-        retries: u32,
+        run: HealthRun,
         outcome: HealthProbeOutcome,
     ) -> crate::diag::Diagnostic {
         use crate::diag::{Diagnostic, SgCode};
@@ -5291,6 +5322,15 @@ impl Daemon {
             .as_deref()
             .or(health_check.command.as_deref())
             .unwrap_or("<unconfigured>");
+        let attempt_summary = match run.total_timeout {
+            Some(budget) => format!(
+                "{} attempts over {}s (configured total readiness budget: {}s)",
+                run.attempts,
+                run.elapsed.as_secs(),
+                budget.as_secs()
+            ),
+            None => format!("{} attempts", run.attempts),
+        };
 
         let alive = self
             .pid_file
@@ -5316,7 +5356,7 @@ impl Daemon {
                     format!("service `{service_name}` failed to become healthy"),
                 )
                 .note(format!(
-                    "the health check against {target} ran but reported the service is not healthy over {retries} attempts",
+                    "the health check against {target} ran but reported the service is not healthy after {attempt_summary}",
                 ));
                 d = if alive {
                     d.note(
@@ -5335,15 +5375,15 @@ impl Daemon {
                 format!("service `{service_name}`'s health check could not reach it"),
             )
             .note(format!(
-                "every probe against {target} failed to connect (the address may be wrong or a port is not listening) over {retries} attempts",
+                "every probe against {target} failed to connect (the address may be wrong or a port is not listening) after {attempt_summary}",
             )),
             HealthProbeOutcome::Timeout => Diagnostic::error(
                 SgCode::HealthCheckTimeout,
                 format!("service `{service_name}`'s health check timed out"),
             )
             .note(format!(
-                "no probe against {target} completed within the {}s per-attempt budget over {retries} attempts",
-                attempt_timeout.as_secs()
+                "no probe against {target} completed within the {}s per-attempt budget after {attempt_summary}",
+                attempt_timeout.as_secs(),
             )),
         };
 
@@ -5552,6 +5592,7 @@ impl Daemon {
             command: health_check.command.as_deref().map(render),
             interval: health_check.interval.clone(),
             attempt_timeout: health_check.attempt_timeout.clone(),
+            total_timeout: health_check.total_timeout.clone(),
             retries: health_check.retries,
         }
     }
@@ -6882,7 +6923,7 @@ impl Daemon {
                             &ctx.config,
                             &ctx.state_file,
                             &name,
-                            Self::stopped_or_completed(&ctx, &name, exit_success),
+                            Self::stopped_or_completed(&ctx, &name),
                             None,
                             None,
                             None,
@@ -6902,7 +6943,7 @@ impl Daemon {
                             &ctx.config,
                             &ctx.state_file,
                             &name,
-                            Self::stopped_or_completed(&ctx, &name, exit_success),
+                            Self::stopped_or_completed(&ctx, &name),
                             None,
                             exit_code,
                             signal,
@@ -7576,6 +7617,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies a replacement that exits unsuccessfully is reported as failed.
     fn restart_service_reports_failure_when_process_stops_immediately() {
         with_temp_home(|dir| {
             fs::write(dir.join("mode.txt"), "initial\n").unwrap();
@@ -7586,9 +7628,9 @@ MODE=$(cat mode.txt)
 if [ "$MODE" = "initial" ]; then
   sleep 5
 else
-  echo 'Error: Server("Address already in use (os error 98)")' >&2
+  echo 'startup failed' >&2
   sleep 0.05
-  exit 0
+  exit 1
 fi
 "#,
             )
@@ -7610,8 +7652,8 @@ fi
             let err = daemon.restart_service("app", svc).unwrap_err();
 
             match err {
-                ProcessManagerError::ServicesNotRunning { services } => {
-                    assert_eq!(services, vec!["app".to_string()]);
+                ProcessManagerError::Diag(diag) => {
+                    assert_eq!(diag.code, crate::diag::SgCode::UnitImmediateExit);
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
@@ -7645,12 +7687,14 @@ fi
     }
 
     #[test]
+    /// Verifies `always` still leaves a clean post-readiness exit completed.
     fn monitor_reaps_services_that_exit_after_running_state() {
         with_temp_home(|dir| {
-            fs::write(dir.join("slow_exit.sh"), "sleep 0.2\n").unwrap();
+            fs::write(dir.join("slow_exit.sh"), "sleep 0.5\n").unwrap();
 
             let mut services = HashMap::new();
-            let service = make_service("sh slow_exit.sh", &[]);
+            let mut service = make_service("sh slow_exit.sh", &[]);
+            service.restart_policy = Some("always".into());
             services.insert("slow".into(), service);
 
             let daemon = create_daemon(dir, services);
@@ -7674,6 +7718,8 @@ fi
                 .get(&service_hash)
                 .expect("state entry present");
             assert_eq!(entry.status, ServiceLifecycleStatus::ExitedSuccessfully);
+            drop(state_guard);
+            assert!(!daemon.needs_start());
 
             daemon.shutdown_monitor();
         });
@@ -8032,9 +8078,10 @@ sleep 30
     }
 
     #[test]
+    /// Verifies an explicit stop suppresses automatic restart after failure.
     fn manual_stop_flag_prevents_restart() {
         with_temp_home(|dir| {
-            let mut service = make_service("sh -c 'sleep 0.1 && exit 1'", &[]);
+            let mut service = make_service("sh -c 'sleep 1 && exit 1'", &[]);
             service.restart_policy = Some("always".into());
 
             let mut services = HashMap::new();

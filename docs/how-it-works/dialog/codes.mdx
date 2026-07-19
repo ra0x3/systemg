@@ -58,13 +58,15 @@ A service's `pre_start` command failed, so the service was not started.
 
 A service's health check could never reach it — every probe failed to connect
 (HTTP connection refused / DNS failure) or the health command could not run. The
-address may be wrong or nothing is listening on the port.
+address may be wrong or nothing is listening on the port. When `total_timeout`
+is configured, probes continue for that full readiness window before this error.
 
 ### SG0023
 
 A service's health check timed out — a probe did not complete within its
 `attempt_timeout`. The endpoint accepted the probe but was too slow to answer
-within the per-attempt budget, across all `retries`.
+within the per-attempt budget before its retries and total readiness window were
+exhausted.
 
 ### SG0104
 

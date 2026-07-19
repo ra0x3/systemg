@@ -4,13 +4,12 @@
 # WHAT THIS TESTS
 #   Unlike a drifting dev server, some services exit immediately when their port
 #   is taken (python http.server: "OSError: [Errno 98] Address already in use").
-#   sysg must report this as a failed start (SG0102 exited-immediately / SG0008
-#   unit-start-failed), NOT healthy — and honor max_restarts instead of looping
-#   forever.
+#   sysg must report this as SG0105 port-in-use, NOT healthy, and honor
+#   max_restarts instead of looping forever.
 #
 # HARD INVARIANTS
 #   - port 39187 pre-occupied,
-#   - starting web (which tries to bind 39187) fails with SG0102/SG0008,
+#   - starting web (which tries to bind 39187) fails with SG0105,
 #   - status never shows web healthy,
 #   - the captured output shows the bind error (Address already in use).
 set -u
@@ -29,11 +28,11 @@ section "start web (tries to bind the taken 39187) -> failed start"
 sysg start --config "$CONFIG" --daemonize >/tmp/s.out 2>/tmp/s.err
 cat /tmp/s.err | grep -v WARN | head -8
 sleep 3
-if grep -qE "SG0102|SG0008" /tmp/s.err || grep -qE "SG0102|SG0008" "$HOME/.local/share/systemg/logs/supervisor.log" 2>/dev/null; then
-  check 0 "bind failure is a typed failed-start (SG0102/SG0008)"
+if grep -q "SG0105" /tmp/s.err || grep -q "SG0105" "$HOME/.local/share/systemg/logs/supervisor.log" 2>/dev/null; then
+  check 0 "bind failure is typed as port-in-use (SG0105)"
 else
   echo "--- log tail ---"; grep -iE "SG0|Address already|failed" "$HOME/.local/share/systemg/logs/supervisor.log" 2>/dev/null | grep -v capability | tail -4
-  check 1 "bind failure is a typed failed-start (SG0102/SG0008)"
+  check 1 "bind failure is typed as port-in-use (SG0105)"
 fi
 
 section "web is NOT reported healthy, and the bind error was captured"

@@ -13,10 +13,12 @@ use common::{HomeEnvGuard, is_process_alive, wait_for_pid};
 use systemg::{
     config::Config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    diag::SgCode,
     state_store::StateStore,
 };
 use tempfile::tempdir;
 
+/// Builds an in-process daemon backed by the configured project's state store.
 fn build_daemon(config: Config) -> Daemon {
     let store = StateStore::for_project(&config.project.id);
     let pid_file = Arc::new(Mutex::new(PidFile::load(store.clone()).unwrap_or_default()));
@@ -27,6 +29,7 @@ fn build_daemon(config: Config) -> Daemon {
 }
 
 #[test]
+/// Verifies live PID data repairs a stale recorded exit during status rendering.
 fn status_recovers_from_stale_exit_state() {
     let temp = tempdir().expect("failed to create temp dir");
     let home = temp.path().join("home");
@@ -52,8 +55,6 @@ services:
     let pid = wait_for_pid("steady");
     assert!(is_process_alive(pid));
 
-    // Force the state file to claim the service exited in error,
-    // simulating the stale metadata the user encountered.
     let config_arc = daemon.config();
     let service_hash = config_arc.state_key("steady");
     let mut state_file = ServiceStateFile::load(daemon.store()).expect("load state file");
@@ -78,8 +79,14 @@ services:
         .expect("run sysg status");
 
     assert!(
-        output.status.success(),
-        "sysg status command should succeed even with stale state"
+        !output.status.success(),
+        "offline status should report an unsupervised process"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(SgCode::SupervisorOffline.as_str()),
+        "offline status should report SG0206: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);

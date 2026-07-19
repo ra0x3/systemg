@@ -404,6 +404,7 @@ services:
         command: "curl --fail http://localhost:8000/health"
         interval: "5s"
         attempt_timeout: "30s"
+        total_timeout: "5m"
         retries: 3
       grace_period: "5s"
       blue_green:
@@ -489,14 +490,15 @@ Probe configuration used to determine readiness/health during deployment workflo
 | `url` | string | HTTP endpoint (alternative to command) |
 | `interval` | string | Time between attempts (default `2s`) |
 | `attempt_timeout` | string | Maximum time for a **single** probe (default `30s`) |
-| `retries` | number | Maximum attempts before giving up (default `3`) |
+| `total_timeout` | string | Minimum total readiness window before giving up; `timeout` is accepted as a compatibility alias |
+| `retries` | number | Minimum attempts before giving up (default `3`) |
 
 <Note>
-`attempt_timeout` bounds **one** probe, not the whole check — the total wait is
-derived: `retries × (attempt_timeout + interval)`. There is no separate
-total-timeout knob. A refused endpoint returns immediately, so a taken port
-fails fast rather than blocking for the full budget. The failure carries a code
-by cause: [`SG0022`](/how-it-works/dialog/codes#sg0022) (could not reach),
+`attempt_timeout` bounds **one** probe. `total_timeout` controls the whole
+readiness window, so connection refusals that return immediately do not exhaust
+a slow-starting service's budget. A check fails only after both `retries` and
+`total_timeout` are exhausted. The failure carries a code by cause:
+[`SG0022`](/how-it-works/dialog/codes#sg0022) (could not reach),
 [`SG0023`](/how-it-works/dialog/codes#sg0023) (a probe timed out), or
 [`SG0104`](/how-it-works/dialog/codes#sg0104) (ran but reported unhealthy).
 </Note>

@@ -957,11 +957,6 @@ impl ServiceConfig {
         )
     }
 
-    /// Returns whether this service should restart after a successful exit.
-    pub(crate) fn restarts_after_success(&self) -> bool {
-        self.restart_policy.as_deref() == Some(RESTART_ALWAYS)
-    }
-
     /// Returns whether this service explicitly disables automatic restarts.
     pub(crate) fn restart_is_disabled(&self) -> bool {
         self.restart_policy.as_deref() == Some(RESTART_NEVER)
@@ -1042,19 +1037,26 @@ pub struct HealthCheckConfig {
     /// Time between health check attempts (e.g., "2s").
     pub interval: Option<String>,
     /// Per-probe timeout cap (e.g., "30s"). Bounds each individual attempt;
-    /// the absolute max wait is derived: retries x (attempt_timeout + interval).
+    /// it does not control the service's whole readiness window.
     pub attempt_timeout: Option<String>,
+    /// Total readiness budget (e.g., "5m"). Probing continues for at least this
+    /// long even when connection failures return immediately. YAML also accepts
+    /// `timeout` for compatibility with early v2 manifests.
+    pub total_timeout: Option<String>,
     /// Number of retries before giving up.
     pub retries: Option<u32>,
 }
 
 /// Deserializes the YAML shape accepted for generic health checks before validation.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawHealthCheckConfig {
     url: Option<String>,
     command: Option<String>,
     interval: Option<String>,
     attempt_timeout: Option<String>,
+    #[serde(alias = "timeout")]
+    total_timeout: Option<String>,
     retries: Option<u32>,
 }
 
@@ -1075,6 +1077,7 @@ impl<'de> Deserialize<'de> for HealthCheckConfig {
             command: raw.command,
             interval: raw.interval,
             attempt_timeout: raw.attempt_timeout,
+            total_timeout: raw.total_timeout,
             retries: raw.retries,
         })
     }
@@ -1359,20 +1362,10 @@ impl Config {
             if let Some(deps) = &cfg.depends_on {
                 for dep in deps {
                     let dep_name = dep.service();
-                    let Some(dep_cfg) = self.services.get(dep_name) else {
+                    if !self.services.contains_key(dep_name) {
                         return Err(ProcessManagerError::UnknownDependency {
                             service: service.clone(),
                             dependency: dep_name.to_string(),
-                        });
-                    };
-
-                    if dep.condition() == DependsOnCondition::Completed
-                        && dep_cfg.restarts_after_success()
-                    {
-                        return Err(ProcessManagerError::DependencyNeverCompletes {
-                            service: service.clone(),
-                            dependency: dep_name.to_string(),
-                            policy: dep_cfg.restart_policy.clone().unwrap_or_default(),
                         });
                     }
 
@@ -2235,6 +2228,7 @@ services:
     }
 
     #[test]
+    /// Verifies dependency ordering remains stable across a simple chain.
     fn service_start_order_resolves_dependencies() {
         let mut services = HashMap::new();
         services.insert("a".into(), minimal_service(None));
@@ -2254,6 +2248,34 @@ services:
 
         let order = config.service_start_order().unwrap();
         assert_eq!(order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    /// Verifies a clean exit can satisfy `completed` regardless of restart policy.
+    fn completed_dependency_accepts_always_policy() {
+        let mut build = minimal_service(None);
+        build.restart_policy = Some(RESTART_ALWAYS.to_string());
+        let mut app = minimal_service(None);
+        app.depends_on = Some(vec![DependsOn::Detailed {
+            service: "build".to_string(),
+            condition: DependsOnCondition::Completed,
+        }]);
+
+        let config = Config {
+            version: Version::V2,
+            project: ProjectConfig::default(),
+            services: HashMap::from([
+                ("build".to_string(), build),
+                ("app".to_string(), app),
+            ]),
+            project_dir: None,
+            env: None,
+            metrics: MetricsConfig::default(),
+            logs: LogsConfig::default(),
+            status: StatusConfig::default(),
+        };
+
+        assert_eq!(config.service_start_order().unwrap(), vec!["build", "app"]);
     }
 
     #[test]
@@ -2930,6 +2952,70 @@ services:
         assert!(
             err.to_string()
                 .contains("health check requires at least one of 'url' or 'command'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    /// Verifies the early-v2 `timeout` spelling maps to the total readiness budget.
+    fn load_config_accepts_health_timeout_alias() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).expect("create yaml");
+        writeln!(
+            yaml_file,
+            r#"
+version: "2"
+services:
+  web:
+    command: "python app.py"
+    deployment:
+      health_check:
+        url: "http://localhost:8000/health"
+        timeout: "300s"
+        retries: 10
+"#
+        )
+        .expect("write yaml");
+
+        let config = load_config(Some(yaml_path.to_str().expect("yaml path")))
+            .expect("load config");
+        let health = config.services["web"]
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.health_check.as_ref())
+            .expect("health check");
+
+        assert_eq!(health.total_timeout.as_deref(), Some("300s"));
+        assert_eq!(health.retries, Some(10));
+    }
+
+    #[test]
+    /// Verifies misspelled health-check fields fail manifest loading.
+    fn load_config_rejects_unknown_health_check_field() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).expect("create yaml");
+        writeln!(
+            yaml_file,
+            r#"
+version: "2"
+services:
+  web:
+    command: "python app.py"
+    deployment:
+      health_check:
+        url: "http://localhost:8000/health"
+        total_timout: "300s"
+"#
+        )
+        .expect("write yaml");
+
+        let err = load_config(Some(yaml_path.to_str().expect("yaml path")))
+            .expect_err("unknown health field should fail validation");
+
+        assert!(
+            err.to_string().contains("unknown field `total_timout`"),
             "unexpected error: {err}"
         );
     }

@@ -16,13 +16,14 @@
 #   - after the churn: exactly one fg proc + one daemon proc, ps == status.
 set -u
 . /usecase/lib.sh
-N=6
+RESTART_ROUNDS=6
+FOREGROUND_RUN_SECONDS=90
 
 section "start daemon + foreground"
 sysg start --config /usecase/daemon.yaml --daemonize
 check "$?" "daemon start exits 0"
 sleep 2
-python3 /usecase/fg_run.py /usecase/fg.yaml 30 >/tmp/fg.out 2>&1 &
+python3 /usecase/fg_run.py /usecase/fg.yaml "$FOREGROUND_RUN_SECONDS" >/tmp/fg.out 2>&1 &
 FGJOB=$!
 sleep 4
 FG_PID0="$(pgrep -f FG_LINE | head -1)"
@@ -30,9 +31,9 @@ echo "foreground pid at start: $FG_PID0"
 [ -n "$FG_PID0" ]
 check "$?" "foreground service running before the churn"
 
-section "$N daemon-project restarts while the foreground is attached"
+section "$RESTART_ROUNDS daemon-project restarts while the foreground is attached"
 CHANGED_DM=0
-for i in $(seq 1 "$N"); do
+for i in $(seq 1 "$RESTART_ROUNDS"); do
   DM_BEFORE="$(pgrep -f DAEMON_LINE | head -1)"
   sysg restart --config /usecase/daemon.yaml -p dmproj >/dev/null 2>&1
   sleep 2
@@ -45,13 +46,13 @@ for i in $(seq 1 "$N"); do
     break
   fi
 done
-echo "daemon pid changed in $CHANGED_DM/$N restarts"
+echo "daemon pid changed in $CHANGED_DM/$RESTART_ROUNDS restarts"
 
 section "the foreground was NEVER touched by the daemon restarts"
 FG_END="$(pgrep -f FG_LINE | head -1)"
 [ "$FG_END" = "$FG_PID0" ] && kill -0 "$FG_PID0" 2>/dev/null
 check "$?" "foreground kept its original pid $FG_PID0 across all daemon restarts"
-[ "$CHANGED_DM" -ge $((N - 1)) ]
+[ "$CHANGED_DM" -ge $((RESTART_ROUNDS - 1)) ]
 check "$?" "daemon restarts actually bounced the daemon service"
 
 section "logs stayed isolated through the churn"

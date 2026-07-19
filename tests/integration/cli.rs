@@ -30,6 +30,7 @@ fn logs_help_reports_combined_default() {
 
 #[cfg(unix)]
 #[test]
+/// Verifies stale supervisor endpoints do not block local stop commands.
 fn stale_socket_doesnt_block_commands() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -324,6 +325,7 @@ services:
 
 #[cfg(unix)]
 #[test]
+/// Verifies rolling restart retires the old process after its grace period.
 fn rolling_restart_cli_does_not_leave_duplicate_long_lived_processes() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -363,7 +365,7 @@ services:
     restart_policy: "always"
     deployment:
       strategy: "rolling"
-      grace_period: "100ms"
+      grace_period: "1s"
 "#,
             service_script.display()
         ),
@@ -404,7 +406,7 @@ services:
         .parse()
         .expect("latest service pid should parse");
 
-    thread::sleep(Duration::from_secs(1));
+    thread::sleep(Duration::from_secs(2));
 
     let alive: Vec<u32> = restarted_pids
         .iter()
@@ -428,6 +430,7 @@ services:
 
 #[cfg(unix)]
 #[test]
+/// Verifies a missing PID file cannot fork a second live supervisor.
 fn restart_daemonize_does_not_start_second_supervisor_when_pidfile_is_missing() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -467,7 +470,7 @@ services:
     restart_policy: "always"
     deployment:
       strategy: "rolling"
-      grace_period: "100ms"
+      grace_period: "1s"
 "#,
             service_script.display()
         ),
@@ -507,7 +510,7 @@ services:
         .success();
 
     let restarted_pids = common::wait_for_lines(&pid_log, 2);
-    thread::sleep(Duration::from_secs(1));
+    thread::sleep(Duration::from_secs(2));
     let alive: Vec<u32> = restarted_pids
         .iter()
         .filter_map(|line| line.trim().parse::<u32>().ok())

@@ -15,8 +15,8 @@ use systemg::{
 };
 use tempfile::tempdir;
 
-/// Loads the cron state file from whichever project directory holds `hash`.
-fn cron_state_with_hash(hash: &str) -> Option<CronStateFile> {
+/// Loads the cron state file from whichever project directory holds `key`.
+fn cron_state_with_key(key: &str) -> Option<CronStateFile> {
     let projects_dir = systemg::runtime::state_dir().join("projects");
     let entries = std::fs::read_dir(&projects_dir).ok()?;
     let mut fallback = None;
@@ -24,7 +24,7 @@ fn cron_state_with_hash(hash: &str) -> Option<CronStateFile> {
         let id = entry.file_name();
         let store = StateStore::for_project(&id.to_string_lossy());
         if let Ok(state) = CronStateFile::load(store) {
-            if state.jobs().contains_key(hash) {
+            if state.jobs().contains_key(key) {
                 return Some(state);
             }
             fallback = Some(state);
@@ -34,6 +34,7 @@ fn cron_state_with_hash(hash: &str) -> Option<CronStateFile> {
 }
 
 #[test]
+/// Verifies that the supervisor persists completed cron execution history.
 fn supervisor_persists_cron_execution_history() {
     use systemg::supervisor::Supervisor;
 
@@ -63,11 +64,7 @@ services:
 
     let config =
         load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
-    let service_hash = config
-        .services
-        .get("history_cron")
-        .expect("history cron service")
-        .compute_hash();
+    let service_key = config.state_key("history_cron");
 
     let config_for_thread = config_path.clone();
     let supervisor_thread = thread::spawn(move || {
@@ -77,7 +74,7 @@ services:
     });
 
     wait_for_supervisor_socket();
-    wait_for_cron_history_record(&service_hash);
+    wait_for_cron_history_record(&service_key);
 
     let content = fs::read_to_string(&marker).expect("read marker");
     assert!(
@@ -91,6 +88,7 @@ services:
         .expect("supervisor thread should shut down cleanly");
 }
 
+/// Waits until the integration supervisor accepts control commands.
 fn wait_for_supervisor_socket() {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -108,11 +106,12 @@ fn wait_for_supervisor_socket() {
     }
 }
 
-fn wait_for_cron_history_record(service_hash: &str) {
+/// Waits for a successful persisted cron record under `service_key`.
+fn wait_for_cron_history_record(service_key: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(state) = cron_state_with_hash(service_hash)
-            && let Some(job) = state.jobs().get(service_hash)
+        if let Some(state) = cron_state_with_key(service_key)
+            && let Some(job) = state.jobs().get(service_key)
             && let Some(record) = job.execution_history.back()
             && record.completed_at.is_some()
             && matches!(record.status, Some(CronExecutionStatus::Success))
@@ -122,9 +121,9 @@ fn wait_for_cron_history_record(service_hash: &str) {
         }
 
         if Instant::now() >= deadline {
-            let state = cron_state_with_hash(service_hash);
+            let state = cron_state_with_key(service_key);
             panic!(
-                "timed out waiting for persisted cron execution history for {service_hash}; state={state:#?}"
+                "timed out waiting for persisted cron execution history for {service_key}; state={state:#?}"
             );
         }
 

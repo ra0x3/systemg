@@ -42,8 +42,14 @@ check "$?" "a2 is running before stop"
 check "$?" "b1 is running before stop"
 
 section "stop -p alpha takes down alpha only"
-sysg stop --project alpha
-check "$?" "stop -p alpha exits 0"
+STOP_OUT="$(sysg stop --project alpha)"
+STOP_RC=$?
+printf '%s\n' "$STOP_OUT"
+check "$STOP_RC" "stop -p alpha exits 0"
+[ -z "$(printf '%s\n' "$STOP_OUT" | sed -n '1p')" ] \
+  && [ -z "$(printf '%s\n' "$STOP_OUT" | sed -n '2p')" ] \
+  && [ "$(printf '%s\n' "$STOP_OUT" | sed -n '3p')" = "Project 'alpha' stopped" ]
+check "$?" "stop success appears two lines below progress"
 sleep 2
 
 STATUS2="$(sysg status --format json 2>/dev/null)"
