@@ -168,3 +168,35 @@ state may be partial.
 ### SG0403
 
 A scoped purge named a project that has no state on disk; nothing was deleted.
+
+## Upgrade
+
+### SG0501
+
+The staged upgrade target is not a trusted sysg executable. The file may be
+missing, non-executable, writable by another user, or unable to report valid
+live-upgrade metadata. The resident supervisor and its workloads are unchanged.
+
+### SG0502
+
+The staged binary is not live-reexec compatible with the resident supervisor.
+Live upgrades require the same protocol and patch-release line; use the
+documented stop-and-upgrade path for an incompatible minor or major release.
+
+### SG0503
+
+The supervisor cannot currently reach a stable handoff point. A project may
+still be booting, a cron run or deployment may be active, or another runtime
+mutation may own the control plane. Retry after the named operation settles.
+
+### SG0504
+
+The resident supervisor validated the target but could not serialize its state
+or execute the replacement binary. It resumed normal operation without
+releasing workload ownership.
+
+### SG0505
+
+The replacement binary started but could not restore the handed-off runtime.
+systemg attempted to re-execute the previous binary; inspect the supervisor log
+before retrying the upgrade.

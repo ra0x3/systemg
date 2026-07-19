@@ -1684,6 +1684,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         } => {
             dispatch_purge(config, project, force)?;
         }
+        Commands::UpgradeInfo => {
+            println!(
+                "{}",
+                serde_json::to_string(&systemg::upgrade::LiveUpgradeInfo::current())?
+            );
+        }
         Commands::Supervise {
             config,
             service,

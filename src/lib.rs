@@ -59,6 +59,9 @@ pub mod logs;
 /// Status tracking.
 pub mod status;
 
+/// Workload-preserving supervisor upgrade protocol.
+pub mod upgrade;
+
 /// Supervisor daemon.
 pub mod supervisor;
 

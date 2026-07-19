@@ -138,6 +138,21 @@ pub enum SgCode {
     PurgeIncomplete,
     /// SG0403 — a scoped purge named a project that has no state on disk.
     PurgeProjectNotFound,
+    /// SG0501 — the proposed live-upgrade binary is missing, malformed, or
+    /// unsafe for the supervisor to execute.
+    UpgradeTargetInvalid,
+    /// SG0502 — the proposed binary does not support a compatible live-reexec
+    /// protocol or is outside the supported patch-release line.
+    UpgradeIncompatible,
+    /// SG0503 — live runtime activity prevents the supervisor from reaching a
+    /// stable handoff point without risking workload ownership.
+    UpgradeEnvironmentUnsafe,
+    /// SG0504 — the resident supervisor could not serialize or execute its
+    /// validated handoff.
+    UpgradeHandoffFailed,
+    /// SG0505 — the replacement supervisor could not restore the handed-off
+    /// runtime and returned control to the previous binary.
+    UpgradeResumeFailed,
 }
 
 impl SgCode {
@@ -187,6 +202,11 @@ impl SgCode {
             SgCode::PurgeSupervisorActive => "SG0401",
             SgCode::PurgeIncomplete => "SG0402",
             SgCode::PurgeProjectNotFound => "SG0403",
+            SgCode::UpgradeTargetInvalid => "SG0501",
+            SgCode::UpgradeIncompatible => "SG0502",
+            SgCode::UpgradeEnvironmentUnsafe => "SG0503",
+            SgCode::UpgradeHandoffFailed => "SG0504",
+            SgCode::UpgradeResumeFailed => "SG0505",
         }
     }
 
@@ -196,7 +216,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 43] = [
+    pub const ALL: [SgCode; 48] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -240,6 +260,11 @@ impl SgCode {
         SgCode::PurgeSupervisorActive,
         SgCode::PurgeIncomplete,
         SgCode::PurgeProjectNotFound,
+        SgCode::UpgradeTargetInvalid,
+        SgCode::UpgradeIncompatible,
+        SgCode::UpgradeEnvironmentUnsafe,
+        SgCode::UpgradeHandoffFailed,
+        SgCode::UpgradeResumeFailed,
     ];
 }
 

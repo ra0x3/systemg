@@ -500,6 +500,10 @@ pub enum Commands {
         force: bool,
     },
 
+    /// INTERNAL: report live-upgrade protocol metadata for installer preflight.
+    #[command(hide = true)]
+    UpgradeInfo,
+
     /// INTERNAL: boot the resident supervisor. Not for direct use — the daemon
     /// re-execs into this after forking so it starts from a clean, single-threaded
     /// process image (no mutexes inherited-locked from the launching CLI's threads).
@@ -566,6 +570,7 @@ impl Commands {
             Commands::Validate { .. } => "validate",
             Commands::Migrate { .. } => "migrate",
             Commands::Purge { .. } => "purge",
+            Commands::UpgradeInfo => "upgrade-info",
             Commands::Supervise { .. } => "supervise",
             Commands::Spawn { .. } => "spawn",
         }
