@@ -39,8 +39,11 @@ error[SG0401]: refused to purge: a supervisor is still managing processes
 | `-c` | `--config` | Purge only the projects this config declares (or `__loose__` if it is project-less). Omit to wipe the whole state root |
 | `-p` | `--project` | Purge only this project's state |
 | `-` | `--force` | Purge even while a supervisor is managing processes — stops it first, then wipes |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
-| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| `-` | `--drop-privileges` | Accepted globally but ignored; purge does not spawn services |
+| `-` | `--plain` | Disable terminal decoration for automation |
+| `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
 
 ## Scope
 

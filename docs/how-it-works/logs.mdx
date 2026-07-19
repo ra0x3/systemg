@@ -4,7 +4,8 @@ title: Logs
 
 # Logs
 
-systemg writes internal operational logs and can optionally capture service stdout/stderr.
+systemg writes internal operational logs and captures service stdout/stderr by
+default.
 
 ## What's logged
 
@@ -18,9 +19,10 @@ systemg writes internal operational logs and can optionally capture service stdo
 `~/.local/share/systemg/logs/supervisor.log` (user mode)
 `/var/log/systemg/supervisor.log` (system mode)
 
-Service output uses the same directory:
+Service output is isolated by project:
 
-- `{service}.log`
+- `~/.local/share/systemg/logs/{project}/{service}.log` (user mode)
+- `/var/log/systemg/{project}/{service}.log` (system mode)
 
 By default, systemg pipes each managed service's stdout and stderr into reader
 threads, then writes both streams through one per-service writer into
@@ -29,7 +31,7 @@ original process streams.
 
 > **Info:** The default service log is stacked in capture order. Each line gets
 > a systemg UTC capture timestamp plus a stream label, such as `stdout` or
-> `stderr`, so `sysg logs --kind stderr` can filter recent lines without needing
+> `stderr`, so `sysg logs --kind stderr` can filter lines without needing
 > a second stderr file.
 
 ## Service output configuration
@@ -45,7 +47,7 @@ original process streams.
 Use the top-level `logs` block to set defaults for all services:
 
 ```yaml
-version: "1"
+version: "2"
 logs:
   sink: file
   max_bytes: 10485760
@@ -75,8 +77,8 @@ Supported sinks:
 ## View logs
 
 ```bash
-# Last 50 lines
-$ sysg logs --kind supervisor
+# Supervisor events
+$ sysg logs --supervisor --no-follow
 
 # Follow in real-time
 $ tail -f ~/.local/share/systemg/logs/supervisor.log
@@ -129,25 +131,15 @@ Reloading configuration from "/path/to/config"
 
 ## Supervisor log rotation
 
-### Using logrotate
+The supervisor log uses the same built-in 10 MB active-file limit and five
+rotated-file retention as the default service policy. No external rotator is
+required.
 
-Create `/etc/logrotate.d/systemg`:
-
-```
-~/.local/share/systemg/logs/supervisor.log {
-    daily
-    rotate 7
-    compress
-    missingok
-}
-```
-
-### Manual rotation
-
-```bash
-$ mv ~/.local/share/systemg/logs/supervisor.log ~/.local/share/systemg/logs/supervisor.log.old
-# systemg creates new file automatically
-```
+<Info>
+  The system installer also writes `/etc/logrotate.d/systemg` with
+  `copytruncate`. Do not rename an active supervisor log by hand: an open writer
+  can continue writing to the renamed file.
+</Info>
 
 ## Troubleshooting
 
@@ -161,7 +153,7 @@ $ mv ~/.local/share/systemg/logs/supervisor.log ~/.local/share/systemg/logs/supe
 
 **Large log files**
 - Configure service log rotation with `logs.max_bytes` and `logs.max_files`
-- Use logrotate for `supervisor.log`
+- Prune rotated backups with `sysg logs --prune --max-size <size>` or `--max-age <age>`
 - Reduce log level
 
 ## See also

@@ -21,8 +21,11 @@ $ sysg spawn --name worker_1 -- python worker.py
 | `-` | `--name` | Required. Unique identifier for spawned process |
 | `-` | `--ttl` | Time-to-live in seconds (optional) |
 | `-` | `--parent-pid` | Parent process ID (defaults to caller's parent PID if not specified) |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
-| `-` | `--log-level` | Override the logging verbosity for the spawned process |
+| `-` | `--drop-privileges` | Accepted globally but ignored by deprecated `spawn`; use child-mode `start` |
+| `-` | `--plain` | Disable terminal decoration for automation |
+| `-` | `--log-level` | Set logging verbosity for this invocation |
 
 ## Examples
 

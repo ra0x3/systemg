@@ -22,7 +22,7 @@ related) workloads cleanly separated inside one running daemon.
 Projects live under the `projects:` map, keyed by id. One file can declare many:
 
 ```yaml
-version: "1"
+version: "2"
 projects:
   arbitration:
     name: Arbitration
@@ -124,8 +124,8 @@ Anywhere you name a service, you can qualify it with its project using
 `project_id/service_name`:
 
 ```sh
-$ sysg restart arbitration/worker
-$ sysg logs gamecast-dev/api
+$ sysg restart -s arbitration/worker
+$ sysg logs -s gamecast-dev/api
 ```
 
 This is equivalent to passing `-p` plus the bare service name. If you supply

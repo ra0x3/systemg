@@ -18,7 +18,10 @@ $ sysg stop
 | `-s` | `--service` | Name of a specific service to stop. If not specified, all services are stopped |
 | `-p` | `--project` | Target a stable project id when stopping services |
 | `-` | `--supervisor` | Shut down the resident supervisor and all registered projects |
+| `-v` | `--verbose` | Print per-service operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Accepted globally but ignored; stop does not spawn services |
+| `-` | `--plain` | Disable terminal decoration for automation |
 | `-` | `--log-level` | Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0) |
 
 ## Examples
@@ -74,7 +77,9 @@ this, plain `sysg status` reports `No running supervisor`.
 3. After a short grace period (about 1 second), `SIGKILL` is sent if needed
 4. The supervisor remains available unless you used `--supervisor`
 
-When stopping a single service, its dependents keep running. Only crashes trigger cascading stops.
+When stopping a single service manually, its dependents keep running. A
+dependency crash temporarily stops its dependents; after the dependency
+recovers, the supervisor starts eligible dependents again.
 
 ## Reloading a manifest after stop
 

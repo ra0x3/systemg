@@ -22,7 +22,12 @@ directory, keyed by `project.id`:
 ├── sysg.pid                    # Supervisor PID
 ├── control.sock                # Unix socket for IPC
 ├── config_hint                 # Last config path
-├── logs/                       # Service output
+├── logs/
+│   ├── supervisor.log          # Supervisor events
+│   ├── arbitration/            # Project-isolated service output
+│   │   └── api.log
+│   └── gamecast/
+│       └── worker.log
 └── projects/
     ├── arbitration/            # one directory per project.id
     │   ├── pid.xml             # Service → PID mapping
@@ -87,12 +92,14 @@ shared scheduler loop routes every run to its own project's file.
 
 ## Persistence
 
-State survives supervisor restarts. Services keep running even if the supervisor crashes.
+State survives supervisor restarts. A supervisor crash may leave service
+processes alive, but they are unsupervised until systemg recovers ownership;
+they cannot restart or enforce dependencies while no supervisor is running.
 
 Clean shutdown removes `sysg.pid`, `control.sock`, and `config_hint`. Stale files after crash? Run `sysg purge`.
 
 <Warning>
-  **Upgrading to v0.55 requires `sysg purge` first.** The per-project
+  **Upgrading from v0.54.x or older requires `sysg purge` first.** The per-project
   `projects/{project.id}/` layout replaces the older flat `pid.xml` /
   `state.xml` / `cron_state.xml` that lived directly under the state directory.
   There is no automatic migration of the old flat files — stop your services,

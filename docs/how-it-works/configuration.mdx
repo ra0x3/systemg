@@ -18,8 +18,9 @@ projects:
 ```
 
 A single file can declare many projects under the `projects:` map, keyed by
-project id. The example below shows one project's full set of sections; the same
-`env` / `logs` / `status` / `services` blocks apply inside each project entry.
+project id. The example below shows one project's full set of sections. Project
+entries may override `env` and `logs`; top-level `metrics` and `status` settings
+apply across the loaded projects.
 
 ```yaml
 version: "2"
@@ -58,7 +59,6 @@ services:
     restart_policy: "always"
     backoff: "10s"
     deployment:
-      strategy: "rolling"
       pre_start: "python manage.py migrate"
       health_check:
         command: "curl --fail http://localhost:8000/health"
@@ -120,9 +120,12 @@ $ sysg restart -c stack.yaml
 ### `version`
 
 **Required**. Specifies the configuration schema version. The current schema is
-`2`. Older `version: "1"` manifests are no longer accepted — bump them to `"2"`
-(run [`sysg migrate`](/how-it-works/commands/migrate), which emits `version: "2"`,
-and `sysg purge` before upgrading).
+`2`. Older `version: "1"` manifests are no longer accepted. For a legacy
+singular-`project:` manifest, run
+[`sysg migrate`](/how-it-works/commands/migrate), which converts the shape and
+emits `version: "2"`. For a loose or existing `projects:` manifest, update the
+version field directly. When upgrading from 0.54.x or older, also follow the
+[state-layout migration](/how-it-works/state#persistence).
 
 ```yaml
 version: "2"
@@ -268,7 +271,9 @@ Fields:
 
 ### `services`
 
-**Required**. Defines the services to manage.
+Defines the services to manage. Each entry under `projects:` requires its own
+`services:` map. A top-level `services:` map is optional and defines the loose
+bundle.
 
 ```yaml
 services:
@@ -510,10 +515,16 @@ Controls how restarts are performed and what validation happens before cutover.
 | Field | Type | Description |
 |-------|------|-------------|
 | `strategy` | string | `rolling` or `immediate` |
-| `pre_start` | string | Command to run before starting |
+| `pre_start` | string | Command that must exit successfully before starting; its process tree is terminated after the five-minute command budget (SG0108) |
 | `health_check` | object | Health check configuration |
 | `grace_period` | string | Time before stopping old instance |
 | `blue_green` | object | Single-host blue/green rollout settings |
+
+<Note>
+  `pre_start` runs from the manifest directory with the service environment.
+  Its output is captured in the service log. A non-zero exit is SG0103; exceeding
+  the five-minute command budget is SG0108, and the service is not launched.
+</Note>
 
 ### Blue/green deployment object
 
@@ -528,17 +539,21 @@ Single-host zero-downtime options for alternating between two rollout slots (typ
 | `switch_verify` | object | Optional post-switch verification check |
 | `state_path` | string | Optional persisted active-slot state file path |
 
-::::info Manifest schema migrations
+::::info Manifest schema compatibility
 
 The top-level `version` field declares the manifest schema version. The current schema is `2`, accepted as either a string or integer, so `version: "2"` and `version: 2` are equivalent. `version: "1"` is no longer accepted.
 
-When upgrading systemg, the binary reads the declared manifest version first, then migrates supported older manifest schemas into the current runtime configuration before starting services. This compatibility step happens in memory; systemg does not rewrite your YAML file just because it can migrate it.
+systemg reads the declared version before the rest of the manifest. Version `1`
+is rejected rather than silently reinterpreted; version `2` is the only current
+runtime schema. systemg never rewrites a manifest as a side effect of starting
+services.
 
-When downgrading systemg, the older binary can only parse and migrate manifest versions it knows about. If a manifest has been updated to a newer schema, keep a copy of the previous manifest or convert it back to a version supported by the older binary before starting that older release.
+When downgrading, the older binary can only parse versions it knows. Keep the
+previous manifest or convert it before starting an older release.
 
-This in-memory version migration is separate from the manifest *shape*
-conversion. To rewrite an old singular-`project:` manifest into the canonical
+Schema validation is separate from manifest *shape* conversion. To rewrite an
+old singular-`project:` manifest into the canonical
 `projects:` map, run [`sysg migrate`](/how-it-works/commands/migrate) — it prints
-the converted YAML to stdout and never touches the source file.
+the converted YAML to stdout unless `--in-place` is requested.
 
 ::::

@@ -5,7 +5,7 @@
 > in YAML. It is useful for development environments, local stacks, CI jobs,
 > cron-style units, and agent-managed workflows.
 
-Current release: `0.51.0`
+Current release: `0.56.0`
 
 Primary links:
 
@@ -19,6 +19,7 @@ Primary links:
 - Configuration: https://sysg.dev/how-it-works/configuration
 - Validate command: https://sysg.dev/how-it-works/commands/validate
 - Claude Code integration: https://sysg.dev/integrations/claude-code
+- Debugging method: https://github.com/ra0x3/systemg/blob/main/DEBUGGING.md
 - Repository: https://github.com/ra0x3/systemg
 
 ## Agent-Friendly Usage
@@ -38,7 +39,7 @@ color, banners, paging, truncation, and accidental log-following where possible.
 
 ## Commands LLMs Should Prefer
 
-- `sysg validate [file]`: check a manifest before running it. Exits `0` when
+- `sysg validate -c <file>`: check a manifest before running it. Exits `0` when
   valid, `1` otherwise. Add `--format json` for structured diagnostics with the
   line, column, category, message, and suggested fix. Run this after writing or
   editing any config.
@@ -54,6 +55,16 @@ color, banners, paging, truncation, and accidental log-following where possible.
 - `sysg logs -s <unit> --grep ERROR --since 2h`: filtered one-shot log query.
 - `sysg logs --path` or `sysg logs -s <unit> --path --all`: locate active and
   rotated log files for external tooling.
+
+Manifest schema `2` is required. One resident supervisor can own many projects.
+For `logs`, bare `-s <unit>` targets only the loose bundle; include
+`-p <project>` for every project-owned unit. Other service selectors require
+`-p` when the name is ambiguous. A foreground `start` attaches to one project,
+and Ctrl-C stops only that project.
+
+Health-check failures use SG0022 (unreachable), SG0023 (probe timeout), or
+SG0104 (reported unhealthy). `attempt_timeout` bounds one probe;
+`total_timeout` bounds the readiness window.
 
 ## Log Behavior
 
@@ -78,3 +89,7 @@ Useful log options:
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
+
+Compatible releases after 0.56.0 replace a running supervisor by same-PID live
+re-execution without restarting workloads. Minor/major changes and downgrades
+require a stopped supervisor.

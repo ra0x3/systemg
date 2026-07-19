@@ -40,6 +40,13 @@ services:
   (re)schedule a cron unit, reload or restart its project so the supervisor
   re-reads the manifest.
 
+<Info>
+  A cron row marked `Failed` or `Failing` means its **most recent run failed**.
+  The scheduler remains active and will run it again at the next scheduled
+  time. A later successful run replaces that health verdict; use
+  `sysg inspect -s <unit>` for run history and `sysg logs -s <unit>` for output.
+</Info>
+
 ## Examples
 
 ```yaml

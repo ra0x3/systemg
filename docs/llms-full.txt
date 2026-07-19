@@ -5,9 +5,7 @@ programs from a YAML manifest, starts dependencies in order, supervises long
 running services, runs cron-style units, captures logs, reports status, and
 supports targeted service control through a single CLI named `sysg`.
 
-Current release: `0.51.0`
-Release context: the changes since commit `b1a640d` make systemg much friendlier
-for LLMs, scripts, SSH commands, and other non-interactive automation.
+Current release: `0.56.0`
 
 Primary links:
 
@@ -24,28 +22,20 @@ Primary links:
 - Configuration: https://sysg.dev/how-it-works/configuration
 - Runtime state: https://sysg.dev/how-it-works/state
 - Logging model: https://sysg.dev/how-it-works/logs
+- Debugging method: https://github.com/ra0x3/systemg/blob/main/DEBUGGING.md
 - Repository: https://github.com/ra0x3/systemg
 
-## What Changed For Agents In 0.50.0
-
-The release after `b1a640d` added an agent-friendly command surface:
+## What Agents Need To Know In 0.56.0
 
 - Global `--plain` mode for non-interactive callers.
-- `SYSTEMG_AGENT=1` support for environment-based agent mode.
-- `NO_COLOR` also implies agent-friendly output.
 - `sysg logs` no longer blocks by default when called from pipes, files, SSH, or
   agent sessions.
-- Explicit `sysg logs --follow` and `sysg logs --no-follow` controls.
-- Structured `sysg logs --format json` output.
-- `sysg logs --raw` for application lines without systemg prefixes.
-- Default ANSI stripping for JSON, raw, non-interactive, and agent log output.
-- `sysg logs --since`, `--until`, `--grep`, and `--all` for bounded log
-  searches across active and rotated history.
-- `sysg logs --path` for locating log files without scraping internal paths.
-- Status and inspect output avoid color and truncation under `--plain`.
-
-There was also dependency maintenance in this range, including a
-`crossbeam-epoch` CVE bump, and the package version was released as `0.50.0`.
+- Manifest schema `2`, multi-project state isolation, and `-p` project targeting.
+- Typed `SGXXXX` diagnostics for start, selectors, restart, purge, and upgrades.
+- Foreground starts stream `service | line`; Ctrl-C stops only that project.
+- Clean exits remain done regardless of restart policy.
+- Health checks separate per-probe `attempt_timeout` from `total_timeout`.
+- Compatible upgrades use same-PID live re-execution without restarting workloads.
 
 ## Agent Mode
 
@@ -87,19 +77,29 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 Install or activate a specific version:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.51.0
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.56.0
 ```
 
 System deployments use `scripts/install-systemg.sh` to set up `/usr/bin/sysg`,
 `/etc/systemg`, and `/var/lib/systemg`. In system mode (`--sys`), state lives in
 `/var/lib/systemg` and logs live in `/var/log/systemg`.
 
+Starting with 0.56.0, the normal installer can live-upgrade a compatible newer
+patch release on the same major/minor line. The resident supervisor keeps its
+PID and workloads while replacing its binary. SG0501-SG0505 explain validation,
+compatibility, handoff safety, and rollback failures. Minor/major upgrades,
+downgrades, and the first transition from pre-0.56 require a stopped supervisor.
+
 ## Core Mental Model
 
-systemg runs a supervisor. Projects are usually loaded from a `systemg.yaml`
-configuration file. Units can be services or cron jobs. Services are long
-running processes that may be restarted. Cron units are scheduled jobs and are
-not persistent services.
+systemg runs one resident supervisor. Schema-v2 manifests may load one or many
+projects from a `systemg.yaml` configuration file. Units can be services or cron
+jobs. Services are long-running processes; cron units are scheduled jobs, not
+persistent services.
+
+A foreground `start` is a terminal attachment to one project, not a separate
+supervisor. Ctrl-C stops that project while the supervisor and sibling projects
+remain. `--daemonize` starts without retaining the attachment.
 
 Common operations:
 
@@ -125,8 +125,9 @@ Most service-specific commands accept:
 -c <path>
 ```
 
-When multiple registered projects contain the same service name, include
-`--project` to disambiguate.
+For `logs`, bare `--service <name>` targets only the loose bundle; include
+`--project` for every project-owned unit. Other service selectors require a
+project when multiple loaded projects contain the same name.
 
 ## Status
 
@@ -194,9 +195,9 @@ resolves the dependency graph, and reports precise, fixable diagnostics.
 Best commands for LLMs:
 
 ```sh
-sysg validate sysg.yaml
-sysg validate sysg.yaml --format json
-sysg --plain validate sysg.yaml
+sysg validate -c sysg.yaml
+sysg validate -c sysg.yaml --format json
+sysg --plain validate -c sysg.yaml
 ```
 
 Behavior:
@@ -208,14 +209,14 @@ Behavior:
 - `--format json` emits `{config, valid, diagnostics[]}` where each diagnostic
   has `line`, `column`, `kind`, `message`, `why`, `suggestion`, and `doc`.
 
-Checks performed: supported `version`, a `services` map with a `command` per
-service, valid YAML syntax, `deployment.health_check` with a `url` or `command`,
-`depends_on` references that exist and contain no cycle, a valid `project.id`,
-and `${VAR}` interpolations that resolve. Run `sysg validate` after writing or
+Checks performed: schema version `2`, project or loose-bundle services with a
+`command`, valid YAML syntax, `deployment.health_check` with a `url` or
+`command`, `depends_on` references that exist and contain no cycle, valid named
+project ids, and `${VAR}` interpolations that resolve. Run `sysg validate` after writing or
 editing any config, and gate deploys on it:
 
 ```sh
-sysg validate production.yaml --plain || exit 1
+sysg validate -c production.yaml --plain || exit 1
 sysg start -c production.yaml --daemonize
 ```
 
@@ -231,7 +232,7 @@ sysg logs -s api --format json
 sysg logs -s api --raw
 sysg logs -s api --grep ERROR --since 2h
 sysg logs -s api --all --grep "panic|ERROR|failed"
-sysg logs --kind supervisor --format json
+sysg logs --supervisor --format json
 sysg logs --path
 sysg logs -s api --path --all
 ```
@@ -319,8 +320,8 @@ upper-bounded or historical read cannot be followed continuously.
 
 ### Active And Rotated History
 
-By default, `sysg logs` reads recent lines from the active log. Use `--all` to
-read active plus rotated history:
+By default, `sysg logs` reads the full active log; use `--lines N` to bound it.
+Use `--all` to read active plus rotated history:
 
 ```sh
 sysg logs -s api --all --grep ERROR
@@ -374,8 +375,8 @@ requires at least one of `--max-size` or `--max-age`.
 
 Manifest reference (see `docs/how-it-works/configuration.mdx` for details):
 
-- Top level: `version` (required), `project` (`id`, `name`, or shorthand
-  string), `env`, `logs` (`sink: file|none`, `max_bytes`, `max_files`),
+- Top level: `version: "2"` (required), canonical `projects` map or deprecated
+  singular `project`, loose `services`, `env`, `logs` (`sink: file|none`, `max_bytes`, `max_files`),
   `status` (`snapshot_mode: off|summary|detailed`, `snapshot_interval_secs`),
   `metrics` (`retention_minutes`, `sample_interval_secs`, `max_memory_bytes`,
   `spillover_path`), and `services` (required).
@@ -390,6 +391,9 @@ Manifest reference (see `docs/how-it-works/configuration.mdx` for details):
   `capabilities`, `limits`, `isolation`.
 
 Health checks live under `deployment.health_check`, not at the service level.
+`attempt_timeout` bounds one probe; `total_timeout` keeps fast failures from
+exhausting a slow service's readiness window before both the retry floor and
+time budget are exhausted.
 
 ## Command Recipes For LLMs
 
@@ -518,3 +522,4 @@ These docs contain the canonical user-facing descriptions:
 - `docs/how-it-works/logs.mdx`: logging architecture and retention model.
 - `docs/how-it-works/configuration.mdx`: service and project configuration.
 - `docs/integrations/claude-code.mdx`: the Claude Code plugin and skill.
+- `DEBUGGING.md`: evidence-first live-stack debugging and verification gates.

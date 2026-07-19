@@ -28,6 +28,8 @@ $ sysg start
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--drop-privileges` | Drop child service privileges during spawn. In root/system mode, services without an explicit `user` run as `nobody` |
 | `-` | `--stderr` | Pipe stderr output from supervised processes to stdout in foreground mode |
+| `-v` | `--verbose` | Print per-service boot progress |
+| `-` | `--plain` | Disable terminal decoration and accidental log following for automation |
 | `-` | `--log-level` | Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0) |
 
 :::info
@@ -55,9 +57,18 @@ Looks for `systemg.yaml` or `sysg.yaml` in the current directory.
 $ sysg start --config /etc/myapp/services.yaml
 ```
 
+### Foreground mode
+
+Without `--daemonize`, the terminal attaches to the selected project. Boot
+progress updates in place, and output from every running service is multiplexed
+with a per-service prefix. Ctrl-C stops only that project and returns the
+terminal; the resident supervisor and other projects remain running.
+
 ### Daemon mode
 
-Run the supervisor in the background. Subsequent commands communicate with this long-lived process.
+Start without retaining a terminal attachment. The command returns after the
+project reaches its target state; subsequent commands use the same resident
+supervisor.
 
 ```sh
 $ sysg start --daemonize
@@ -85,10 +96,10 @@ Useful for development and debugging:
 $ sysg start --stderr
 ```
 
-Output will show stderr lines with service prefix:
+Output identifies the service and captured stream:
 ```
-[api:stderr] Error: Database connection failed
-[worker:stderr] Warning: Queue full, retrying...
+api | 2026-07-19T04:45:26Z stderr Error: Database connection failed
+worker | 2026-07-19T04:45:27Z stderr Warning: Queue full, retrying...
 ```
 
 ### Unit mode (no config file)
@@ -109,13 +120,14 @@ $ sysg start --parent-pid 4242 --name worker-1 --ttl 900 -- python worker.py
 
 ## What happens
 
-1. Manifest mode starts services in dependency order
+1. Manifest mode validates the complete graph and starts dependencies first
 2. Unit mode creates a single managed unit from the command
 3. Child mode attaches a managed child to the parent process tree
 4. Service output follows the configured `logs.sink` policy
-5. PIDs are tracked for other commands
+5. PIDs, process groups, lifecycle state, and cron history are tracked by project
 
-In daemon mode, the supervisor monitors services and handles restarts according to your configuration.
+In either mode, the supervisor owns the services. Foreground versus daemon mode
+controls the terminal attachment, not whether supervision exists.
 
 ## See also
 

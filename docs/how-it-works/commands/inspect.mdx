@@ -25,10 +25,13 @@ immediate runtime collection for a specific inspect request.
 | `-` | `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
 | `-c` | `--config` | Path to configuration file |
 | `-` | `--format` | Emit machine-readable output (`json` or `xml`) instead of a report; defaults to `json` when no value is provided |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Accepted globally but ignored; inspect does not spawn services |
 | `-` | `--no-color` | Disable ANSI colors in output |
+| `-` | `--plain` | Disable terminal decoration for automation |
 | `-` | `--live` | Force immediate runtime collection instead of the configured snapshot mode |
-| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
 
 ## Stream Mode Controls
 

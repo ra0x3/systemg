@@ -107,7 +107,7 @@ impl<'de> Deserialize<'de> for Version {
             {
                 if value < 0 {
                     return Err(E::custom(format!(
-                        "unsupported manifest version '{value}'; supported versions: 1"
+                        "unsupported manifest version '{value}'; supported versions: 2"
                     )));
                 }
                 Version::parse(&value.to_string()).map_err(E::custom)

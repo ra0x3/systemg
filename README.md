@@ -68,7 +68,7 @@ For system-wide deployments, `scripts/install-systemg.sh` sets up `/usr/bin/sysg
 Describe your system in a `systemg.yaml`:
 
 ```yaml
-version: "1"
+version: "2"
 services:
   postgres:
     command: "postgres -D ./data"
@@ -82,7 +82,6 @@ services:
     max_restarts: 5
     backoff: "5s"
     deployment:
-      strategy: "rolling"
       health_check:
         command: "curl --fail http://localhost:8000/health"
 
@@ -103,6 +102,11 @@ sysg restart --service api  # bounce one service, not the world
 
 That's the whole workflow. Log rotation, output sinks, and status-snapshot tuning are covered in the [configuration docs](docs/how-it-works/configuration.mdx).
 
+Run `sysg start` without `--daemonize` for a foreground attachment: systemg
+streams each service as `service | line`, updates slow boot progress in place,
+and stops only that project on Ctrl-C. The resident supervisor stays warm for
+other projects. Run `sysg stop --supervisor` when you intend to stop everything.
+
 ## Why systemg
 
 You declare your processes, their dependencies, and their health checks in one file. systemg starts them in topological order, restarts them according to policy, and won't call a rolling deploy done until the new process passes its health check.
@@ -112,9 +116,12 @@ It sits in the gap between systemd and Docker Compose. systemd wants to own the 
 ### Features
 
 - Dependency-ordered startup, gated on health checks
+- One resident supervisor for many isolated projects
 - Rolling deployments: blue-green process swap, health-validated
 - Restart policies with backoff
 - Cron jobs with overlap detection
+- Foreground multiplexed logs with per-service prefixes
+- Same-PID live upgrades within a compatible release line
 - Lifecycle [hooks](docs/how-it-works/webhooks.mdx) on start/stop
 - `.env` file propagation
 - Tracks child processes your services spawn
@@ -132,4 +139,6 @@ It sits in the gap between systemd and Docker Compose. systemd wants to own the 
 | **Deployments** | Built-in rolling | External tooling | Manual restarts | Recreate/rolling |
 | **Runtime deps** | None | DBus, journal | Python | Docker daemon |
 
-Full documentation lives at [sysg.dev](https://sysg.dev).
+Full documentation lives at [sysg.dev](https://sysg.dev). Maintainers and
+agents investigating supervisor behavior should begin with
+[DEBUGGING.md](DEBUGGING.md).

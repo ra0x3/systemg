@@ -57,6 +57,11 @@ projects:
 |-------|------|-------------|
 | `-` | `<config>` | Path to the manifest to convert (positional, required) |
 | `-` | `--in-place` | Rewrite the file in place, keeping a `.bak` copy, instead of printing to stdout |
+| `-v` | `--verbose` | Print operation progress |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Accepted globally but ignored; migrate does not spawn services |
+| `-` | `--plain` | Disable terminal decoration for automation |
+| `-` | `--log-level` | Set logging verbosity for this invocation |
 
 ## Usage
 

@@ -7,7 +7,7 @@ title: logs
 View stored output from managed services.
 
 ```sh
-$ sysg logs
+$ sysg logs -p myapp
 ```
 
 > **Info:** From the interactive `sysg status` table, select a UNIT with
@@ -41,8 +41,11 @@ $ sysg logs
 | `-` | `--strip-ansi` | Strip ANSI color/escape sequences (default on for `--format json`, `--raw`, and non-interactive output) |
 | `-` | `--no-strip-ansi` | Keep ANSI escape sequences even when they would be stripped by default |
 | `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
-| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| `-` | `--drop-privileges` | Accepted globally but ignored; logs does not spawn services |
+| `-` | `--plain` | Disable color, banners, paging, and implicit log following |
+| `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
 
 ## Scoping
 
@@ -88,10 +91,10 @@ nor `--max-age` is refused with [`SG0017`](/how-it-works/dialog/codes#sg0017).
 
 ## Examples
 
-### View recent logs from all services
+### View one project's service logs
 
 ```sh
-$ sysg logs
+$ sysg logs --project myapp
 ```
 
 ### View logs from specific service
@@ -164,7 +167,7 @@ $ sysg logs --service api --kind stderr
 ### View supervisor logs
 
 ```sh
-$ sysg logs --kind supervisor
+$ sysg logs --supervisor
 ```
 
 ### Show more history
@@ -201,10 +204,10 @@ Because following cannot honor an upper bound, any `--since` / `--until` /
 $ sysg logs --service api --all --grep ERROR
 ```
 
-By default `sysg logs` reads only the tail of the active `{service}.log`. `--all`
-concatenates the rotated backups (`{service}.log.2`, `{service}.log.1`) followed
-by the active file, oldest to newest, so you can grep or time-window across the
-entire retained history in one command instead of `cat`-ing each rotation by
+By default `sysg logs` reads the full active `{service}.log`; pass `--lines N`
+to limit it to the last N lines. `--all` concatenates the rotated backups
+(`{service}.log.2`, `{service}.log.1`) followed by the active file, oldest to
+newest, so you can query the entire retained history without joining files by
 hand. `--all` ignores `--lines`.
 
 ### Machine-readable output
@@ -320,7 +323,7 @@ label:
 
 ## Performance model
 
-For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes both streams through one per-service writer into `{service}.log`. On Linux and macOS, the follow view (`--follow`, or the interactive default) tails that file directly with `tail -F`; the one-shot view (`--no-follow`, or the default when stdout is not an interactive terminal) reads the tail once and exits. `--kind stdout` and `--kind stderr` filter recent captured lines by the stored stream label. The command itself is lightweight; the continuous cost comes from the capture threads, one writer thread, and one append-only file write path per service.
+For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes both streams through one per-service writer into `{project}/{service}.log`. On Linux and macOS, the follow view (`--follow`, or the interactive default) tails that file directly with `tail -F`; the one-shot view (`--no-follow`, or the default when stdout is not an interactive terminal) reads the active file once and exits. `--kind stdout` and `--kind stderr` filter captured lines by the stored stream label. The command itself is lightweight; the continuous cost comes from the capture threads, one writer thread, and one append-only file write path per service.
 
 For high-output production workloads, configure `logs.sink: none` globally or per service to discard service output and avoid systemg log-writer threads, pipe backpressure from log capture, and file growth.
 

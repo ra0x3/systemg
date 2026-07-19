@@ -12,7 +12,7 @@ systemg exists to run a handful of related processes as one unit — with depend
 
 **One binary, no runtime.** systemg is a single self-contained binary. There's nothing to install alongside it, nothing to keep in sync, and the same binary and config run on a laptop and in production. Dev/prod parity is the default, not a project.
 
-**Correct process lifecycle.** Services start in dependency order and are supervised for real: restarts with backoff, process-group teardown that doesn't orphan children, and state that survives a supervisor crash so your services don't die with it.
+**Correct process lifecycle.** Services start in dependency order and are supervised for real: unsuccessful exits restart with backoff, process-group teardown does not orphan children, and persisted state makes ownership recoverable after a supervisor restart.
 
 **Secure because it's the default, not because you configured it.** A service that drops to another user starts from a clean environment with reset supplementary groups and trimmed capabilities — you don't have to remember to ask. The [control socket](security) is authenticated and owner-only. Least privilege is the path of least resistance.
 
