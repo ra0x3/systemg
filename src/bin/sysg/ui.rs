@@ -1935,6 +1935,13 @@ fn format_last_exit(
                     }
                 }
             }
+            Some(CronExecutionStatus::Interrupted(_)) => {
+                if time_str.is_empty() {
+                    "interrupted".to_string()
+                } else {
+                    format!("int {time_str}")
+                }
+            }
             Some(CronExecutionStatus::OverlapError) => {
                 if time_str.is_empty() {
                     "overlap".to_string()
@@ -1975,6 +1982,7 @@ fn last_exit_color(
                     Some(RED_BOLD)
                 }
             }
+            Some(CronExecutionStatus::Interrupted(_)) => Some(YELLOW),
             Some(CronExecutionStatus::OverlapError) => Some(RED_BOLD),
             None => None,
         };
@@ -2537,6 +2545,7 @@ fn unit_row_tint_family(unit: &UnitStatus) -> RowTintFamily {
                             RowTintFamily::Failing
                         }
                     }
+                    CronExecutionStatus::Interrupted(_) => RowTintFamily::Neutral,
                     CronExecutionStatus::OverlapError => RowTintFamily::Warning,
                 };
             }
@@ -4039,6 +4048,12 @@ fn format_inspect_cron_status(
         }
         Some(CronExecutionStatus::Failed(reason)) => {
             colorize(&format!("failed: {reason}"), RED_BOLD, no_color)
+        }
+        Some(CronExecutionStatus::Interrupted(reason)) if reason.trim().is_empty() => {
+            colorize("interrupted", YELLOW, no_color)
+        }
+        Some(CronExecutionStatus::Interrupted(reason)) => {
+            colorize(&format!("interrupted: {reason}"), YELLOW, no_color)
         }
         Some(CronExecutionStatus::OverlapError) => {
             colorize("overlap", YELLOW, no_color)

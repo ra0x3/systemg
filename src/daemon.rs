@@ -10,7 +10,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     str::FromStr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -51,6 +51,8 @@ use crate::{
 const HEALTH_RESULT_CAPACITY: usize = 1;
 /// Delay before retrying monitor state after a lock failure.
 const MONITOR_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// Delay used when a service does not declare restart backoff.
+const DEFAULT_RESTART_BACKOFF: Duration = Duration::from_secs(5);
 /// Thread name for service launch workers.
 const SERVICE_LAUNCH_THREAD: &str = "sysg-service-launch";
 /// Thread name for foreground stderr forwarding.
@@ -1690,17 +1692,24 @@ pub enum ServiceReadyState {
 /// Represents an existing service instance that has been temporarily detached while a
 /// replacement is brought up during a rolling restart.
 struct DetachedService {
+    /// Child handle retained while the replacement is prepared.
     child: Child,
+    /// Process ID of the detached service leader.
     pid: u32,
+    /// Process group containing the detached service tree.
     pgid: Option<libc::pid_t>,
 }
 
+/// Removes a service from the replacement set when its deployment finishes.
 struct ReplacementGuard {
+    /// Shared set of services undergoing explicit replacement.
     services: Arc<Mutex<HashSet<String>>>,
+    /// Service removed when the guard is dropped.
     name: String,
 }
 
 impl Drop for ReplacementGuard {
+    /// Releases the service's replacement claim.
     fn drop(&mut self) {
         self.services
             .lock()
@@ -1722,7 +1731,9 @@ thread_local! {
 
 /// A guard that enforces lock ordering and automatically tracks held locks.
 struct OrderedLockGuard<'a, T> {
+    /// Held mutex guard.
     guard: std::sync::MutexGuard<'a, T>,
+    /// Lock class removed from thread-local tracking on drop.
     lock_type: DaemonLock,
 }
 
@@ -1817,10 +1828,20 @@ struct DaemonContext {
     stopped_for_dependency: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// Flag indicating whether the monitoring loop should remain active.
     running: Arc<AtomicBool>,
+    /// Weak access to the monitor handle without creating a thread ownership cycle.
+    monitor_handle: Weak<Mutex<Option<thread::JoinHandle<()>>>>,
     /// Pipe stderr to stdout.
     pipe_stderr: Arc<AtomicBool>,
+    /// Active boot generation shared with cancellation-aware lifecycle gates.
     boot_epoch: Arc<AtomicU64>,
+    /// Whether the active project boot was explicitly cancelled.
     boot_cancelled: Arc<AtomicBool>,
+    /// Weak runtime ownership used by temporary daemon views in restart workers.
+    liveness: Weak<()>,
+    /// Operation reporter used by pre-start and health-check waits.
+    op_slot: OpSlot,
+    /// Services currently being replaced through an explicit deployment strategy.
+    replacements: Arc<Mutex<HashSet<String>>>,
     /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
     #[cfg(target_os = "linux")]
     thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -1842,7 +1863,6 @@ impl DaemonContext {
     }
 
     /// Acquires the state_file lock with ordering enforcement.
-    #[allow(dead_code)]
     fn lock_state_file(
         &self,
     ) -> Result<OrderedLockGuard<'_, ServiceStateFile>, ProcessManagerError> {
@@ -1981,6 +2001,7 @@ impl Daemon {
         )
     }
 
+    /// Applies one service's resolved environment to a child command.
     fn set_service_env(&self, command: &mut Command, service_name: &str) {
         let config = self.cfg();
         let service = config.services.get(service_name);
@@ -2017,12 +2038,46 @@ impl Daemon {
             restart_in_flight: Arc::clone(&self.restart_in_flight),
             stopped_for_dependency: Arc::clone(&self.stopped_for_dependency),
             running: Arc::clone(&self.running),
+            monitor_handle: Arc::downgrade(&self.monitor_handle),
             pipe_stderr: Arc::clone(&self.pipe_stderr),
             boot_epoch: Arc::clone(&self.boot_epoch),
             boot_cancelled: Arc::clone(&self.boot_cancelled),
+            liveness: Arc::downgrade(&self.liveness),
+            op_slot: self.op_slot.clone(),
+            replacements: Arc::clone(&self.replacements),
             #[cfg(target_os = "linux")]
             thread_cancellation_tokens: Arc::clone(&self.thread_cancellation_tokens),
         }
+    }
+
+    /// Reconstructs a non-owning daemon view for a monitor restart worker.
+    ///
+    /// Returns `None` after the owning daemon has been dropped. Weak ownership
+    /// avoids making the monitor thread keep its own join handle alive forever.
+    fn from_context(ctx: &DaemonContext) -> Option<Self> {
+        Some(Self {
+            processes: Arc::clone(&ctx.processes),
+            config: Arc::new(std::sync::Mutex::new(Arc::clone(&ctx.config))),
+            pid_file: Arc::clone(&ctx.pid_file),
+            state_file: Arc::clone(&ctx.state_file),
+            detach_children: ctx.detach_children,
+            project_root: ctx.project_root.clone(),
+            running: Arc::clone(&ctx.running),
+            monitor_handle: ctx.monitor_handle.upgrade()?,
+            restart_counts: Arc::clone(&ctx.restart_counts),
+            manual_stop_flags: Arc::clone(&ctx.manual_stop_flags),
+            restart_suppressed: Arc::clone(&ctx.restart_suppressed),
+            restart_in_flight: Arc::clone(&ctx.restart_in_flight),
+            stopped_for_dependency: Arc::clone(&ctx.stopped_for_dependency),
+            #[cfg(target_os = "linux")]
+            thread_cancellation_tokens: Arc::clone(&ctx.thread_cancellation_tokens),
+            pipe_stderr: Arc::clone(&ctx.pipe_stderr),
+            liveness: ctx.liveness.upgrade()?,
+            op_slot: ctx.op_slot.clone(),
+            boot_epoch: Arc::clone(&ctx.boot_epoch),
+            boot_cancelled: Arc::clone(&ctx.boot_cancelled),
+            replacements: Arc::clone(&ctx.replacements),
+        })
     }
 
     /// Gets all descendant PIDs recursively.
@@ -2502,6 +2557,7 @@ impl Daemon {
         self.boot_cancelled.load(Ordering::SeqCst)
     }
 
+    /// Builds the lifecycle error returned when project boot is cancelled.
     fn interrupted(service: &str) -> ProcessManagerError {
         ProcessManagerError::ServiceStartError {
             service: service.to_string(),
@@ -2512,6 +2568,7 @@ impl Daemon {
         }
     }
 
+    /// Claims replacement ownership for a service until the returned guard drops.
     fn replacement(&self, name: &str) -> ReplacementGuard {
         self.replacements
             .lock()
@@ -3028,73 +3085,6 @@ impl Daemon {
         }
     }
 
-    /// Launches a service and records its PID using the platform's supervision model.
-    #[cfg(target_os = "linux")]
-    fn launch_service_for_supervision(
-        ctx: &DaemonContext,
-        service_name: String,
-        service_config: ServiceConfig,
-        log_settings: EffectiveLogsConfig,
-    ) -> Result<u32, ProcessManagerError> {
-        Self::launch_service_with_lifetime_thread(
-            ctx,
-            service_name,
-            service_config,
-            log_settings,
-        )
-    }
-
-    /// Launches a service and records its PID using the platform's supervision model.
-    #[cfg(not(target_os = "linux"))]
-    fn launch_service_for_supervision(
-        ctx: &DaemonContext,
-        service_name: String,
-        service_config: ServiceConfig,
-        log_settings: EffectiveLogsConfig,
-    ) -> Result<u32, ProcessManagerError> {
-        let (pid, pgid) = Self::launch_attached_service(
-            &ctx.config.project.id,
-            &service_name,
-            &service_config,
-            ctx.project_root.clone(),
-            Arc::clone(&ctx.processes),
-            ctx.detach_children,
-            ctx.pipe_stderr.load(Ordering::SeqCst),
-            log_settings,
-        )?;
-
-        let record_result = ctx
-            .pid_file
-            .lock()
-            .map_err(ProcessManagerError::from)
-            .and_then(|mut guard| {
-                guard
-                    .insert_with_group(&service_name, pid, pgid)
-                    .map_err(ProcessManagerError::from)
-            });
-
-        if let Err(err) = record_result {
-            error!("Failed to record PID {pid} for service '{service_name}': {err}");
-
-            if let Err(stop_err) = Self::terminate_process_tree(&service_name, pid, pgid)
-            {
-                warn!(
-                    "Also failed to terminate untracked service '{service_name}': {stop_err}"
-                );
-            }
-
-            if let Ok(mut guard) = ctx.processes.lock()
-                && let Some(mut child) = guard.remove(&service_name)
-            {
-                let _ = child.wait();
-            }
-
-            return Err(err);
-        }
-
-        Ok(pid)
-    }
-
     /// Common logic for service startup that's shared between Linux and non-Linux platforms.
     /// Returns Ok(Some(state)) if the service was skipped or completed immediately,
     /// Ok(None) if the service should continue with platform-specific startup.
@@ -3221,6 +3211,7 @@ impl Daemon {
                             warn!(
                                 "Failed to evaluate skip condition for '{name}': {err}"
                             );
+                            return Err(err);
                         }
                     }
                 }
@@ -4779,24 +4770,40 @@ impl Daemon {
                 }
                 let active = self.boot_active(epoch);
                 let secs = pre_start_timeout.as_secs();
-                let reason = if active {
-                    format!("timed out after {secs}s")
-                } else {
-                    "was cancelled".to_string()
-                };
-                write_marker(&format!("\u{2716} pre-start {reason}; killed"));
+                if !active {
+                    write_marker("\u{2716} pre-start was cancelled; killed");
+                    return Err(Self::interrupted(service_name));
+                }
+
+                write_marker(&format!(
+                    "\u{2716} pre-start timed out after {secs}s; killed"
+                ));
                 self.record_start_failure(service_name, None, None);
-                return Err(ProcessManagerError::ServiceStartError {
-                    service: service_name.to_string(),
-                    source: std::io::Error::new(
-                        if active {
-                            ErrorKind::TimedOut
-                        } else {
-                            ErrorKind::Interrupted
-                        },
-                        format!("pre-start for '{service_name}' {reason} and was killed"),
-                    ),
-                });
+                let captured = tail
+                    .lock()
+                    .map(|guard| guard.iter().cloned().collect())
+                    .unwrap_or_default();
+                let project = self.cfg().project.id.clone();
+                let diag = crate::diag::Diagnostic::error(
+                    crate::diag::SgCode::PreStartTimeout,
+                    format!("pre_start for `{service_name}` timed out"),
+                )
+                .origin(
+                    format!("services.{service_name}.deployment.pre_start"),
+                    None,
+                    None,
+                )
+                .note(format!(
+                    "`{command}` did not finish within {secs}s and its process tree was terminated"
+                ))
+                .note("the service was not launched")
+                .evidence("pre_start output", captured)
+                .help_cmd(
+                    "view logs",
+                    format!("sysg logs -s {service_name} -p {project}"),
+                )
+                .help_docs();
+                return Err(ProcessManagerError::Diag(Box::new(diag)));
             }
             Err(source) => {
                 let _ = Self::terminate_process_tree(
@@ -6169,10 +6176,10 @@ impl Daemon {
 
     /// Revives dependents that were stopped as casualties of a crashed
     /// dependency, once every dependency that felled them is healthy again. A
-    /// candidate is revived only when ALL of its `depends_on` are currently
-    /// tracked (up) and it is not skipped; reviving clears its casualty flags
-    /// and drains its record so the normal reconcile pass restarts it. Runs each
-    /// monitor tick, so a multi-level stack heals bottom-up over successive ticks.
+    /// candidate is revived only when every declared dependency condition is
+    /// satisfied and it is not skipped; reviving clears its casualty flags so
+    /// the normal reconcile pass restarts it. Runs each monitor tick, so a
+    /// multi-level stack heals bottom-up over successive ticks.
     fn revive_ready_dependents(ctx: &DaemonContext) {
         let casualties: Vec<String> = match ctx.lock_stopped_for_dependency() {
             Ok(guard) => guard.keys().cloned().collect(),
@@ -6181,11 +6188,6 @@ impl Daemon {
         if casualties.is_empty() {
             return;
         }
-
-        let tracked: HashSet<String> = match ctx.lock_processes() {
-            Ok(guard) => guard.keys().cloned().collect(),
-            Err(_) => return,
-        };
 
         for name in casualties {
             let Some(service) = ctx.config.services.get(&name) else {
@@ -6202,10 +6204,7 @@ impl Daemon {
                 continue;
             }
 
-            let deps_ready = service.depends_on.as_ref().is_none_or(|deps| {
-                deps.iter().all(|dep| tracked.contains(dep.service()))
-            });
-            if !deps_ready {
+            if Self::unmet_restart_dependency(ctx, service).is_some() {
                 continue;
             }
 
@@ -6222,6 +6221,58 @@ impl Daemon {
                 guard.remove(&name);
             }
         }
+    }
+
+    /// Reads one service's persisted lifecycle state from monitor-owned storage.
+    fn recorded_status_in_context(
+        ctx: &DaemonContext,
+        service_name: &str,
+    ) -> Option<ServiceLifecycleStatus> {
+        let key = ctx.config.state_key(service_name);
+        ctx.lock_state_file()
+            .ok()
+            .and_then(|state| state.get(&key).map(|entry| entry.status))
+    }
+
+    /// Whether one dependency has reached its declared restart readiness condition.
+    fn restart_dependency_ready(
+        ctx: &DaemonContext,
+        dependency: &crate::config::DependsOn,
+    ) -> bool {
+        let dependency_name = dependency.service();
+        let restarting = ctx
+            .lock_restart_in_flight()
+            .map(|services| services.contains(dependency_name))
+            .unwrap_or(true);
+        if restarting {
+            return false;
+        }
+
+        match dependency.condition() {
+            DependsOnCondition::Started => ctx.lock_pid_file().ok().is_some_and(|pids| {
+                pids.get(dependency_name).is_some_and(|pid| {
+                    pids.start_for(dependency_name).is_some_and(|started| {
+                        Self::pid_is_alive(pid)
+                            && process_start_time(pid) == Some(started)
+                    })
+                })
+            }),
+            DependsOnCondition::Completed => matches!(
+                Self::recorded_status_in_context(ctx, dependency_name),
+                Some(ServiceLifecycleStatus::ExitedSuccessfully)
+            ),
+        }
+    }
+
+    /// Returns the first dependency that blocks an automatic restart.
+    fn unmet_restart_dependency<'a>(
+        ctx: &DaemonContext,
+        service: &'a ServiceConfig,
+    ) -> Option<&'a str> {
+        service.depends_on.as_ref()?.iter().find_map(|dependency| {
+            (!Self::restart_dependency_ready(ctx, dependency))
+                .then_some(dependency.service())
+        })
     }
 
     /// Stops all running services.
@@ -6737,7 +6788,21 @@ impl Daemon {
                 continue;
             }
 
+            if matches!(
+                Self::recorded_status_in_context(ctx, name),
+                Some(ServiceLifecycleStatus::Skipped)
+            ) {
+                continue;
+            }
+
             if !service.restarts_after_failure() {
+                continue;
+            }
+
+            if let Some(dependency) = Self::unmet_restart_dependency(ctx, service) {
+                debug!(
+                    "Deferring automatic restart of '{name}' until dependency '{dependency}' reaches its required state."
+                );
                 continue;
             }
 
@@ -6839,6 +6904,16 @@ impl Daemon {
 
     /// Handles restarting a service if its restart policy allows.
     fn handle_restart(name: &str, service: &ServiceConfig, ctx: DaemonContext) {
+        if let Some(dependency) = Self::unmet_restart_dependency(&ctx, service) {
+            debug!(
+                "Deferring automatic restart of '{name}' until dependency '{dependency}' reaches its required state."
+            );
+            if let Ok(mut guard) = ctx.lock_restart_in_flight() {
+                guard.remove(name);
+            }
+            return;
+        }
+
         let name = name.to_string();
         let service_clone = service.clone();
         let hooks = service.hooks.clone();
@@ -6865,280 +6940,131 @@ impl Daemon {
             }
         }
 
-        let backoff = service
-            .backoff
-            .as_deref()
-            .unwrap_or("5s")
-            .trim_end_matches('s')
-            .parse::<u64>()
-            .unwrap_or(5);
+        let backoff = match service.backoff.as_deref() {
+            Some(raw) => match Self::parse_duration(raw) {
+                Ok(duration) => duration,
+                Err(err) => {
+                    warn!(
+                        "Invalid restart backoff '{raw}' for '{name}': {err}; using {DEFAULT_RESTART_BACKOFF:?}."
+                    );
+                    DEFAULT_RESTART_BACKOFF
+                }
+            },
+            None => DEFAULT_RESTART_BACKOFF,
+        };
 
         let in_flight = Arc::clone(&ctx.restart_in_flight);
         let in_flight_name = name.clone();
         if let Err(err) = thread::Builder::new()
             .name(format!("sysg-restart-{name}"))
             .spawn(move || {
-            let _in_flight = InFlightGuard::new(&ctx.restart_in_flight, name.clone());
-            warn!("Restarting '{name}' after {backoff} seconds...");
-            thread::sleep(Duration::from_secs(backoff));
+                let _in_flight =
+                    InFlightGuard::new(&ctx.restart_in_flight, name.clone());
+                warn!("Restarting '{name}' after {backoff:?}...");
+                thread::sleep(backoff);
 
-            if !ctx.running.load(Ordering::SeqCst) {
-                return;
-            }
-
-            if ctx
-                .lock_restart_suppressed()
-                .map(|guard| guard.contains(&name))
-                .unwrap_or(true)
-            {
-                info!(
-                    "Skipping automatic restart of '{name}' because it is currently suppressed."
-                );
-                if let Ok(mut counts) = ctx.lock_restart_counts() {
-                    counts.remove(&name);
+                if !ctx.running.load(Ordering::SeqCst) {
+                    return;
                 }
-                return;
-            }
 
-            if ctx
-                .lock_manual_stop_flags()
-                .map(|mut guard| guard.remove(&name))
-                .unwrap_or(true)
-            {
-                info!(
-                    "Skipping automatic restart of '{name}' due to concurrent manual stop."
-                );
-                if let Ok(mut counts) = ctx.lock_restart_counts() {
-                    counts.remove(&name);
-                }
-                return;
-            }
-
-            let restart_result = Self::launch_service_for_supervision(
-                &ctx,
-                name.clone(),
-                service_clone.clone(),
-                service_clone.effective_logs(&ctx.config.logs),
-            );
-
-            match restart_result {
-                Ok(pid) => {
-                    if !ctx.running.load(Ordering::SeqCst) {
-                        #[cfg(target_os = "linux")]
-                        ctx.cancel_service_thread(&name);
-                        let _ = Self::stop_service_with_handles(
-                            &name,
-                            &ctx.processes,
-                            &ctx.pid_file,
-                            &ctx.state_file,
-                            &ctx.config,
-                        );
-                        return;
-                    }
-                    let ready = Self::wait_for_ready(
-                        &name,
-                        &ctx.config.project.id,
-                        &ctx.processes,
-                        &ctx.pid_file,
-                        Some((&ctx.state_file, &ctx.config)),
-                        Some(&service_clone.command),
-                        None,
+                if ctx
+                    .lock_restart_suppressed()
+                    .map(|guard| guard.contains(&name))
+                    .unwrap_or(true)
+                {
+                    info!(
+                        "Skipping automatic restart of '{name}' because it is currently suppressed."
                     );
-                    if !ctx.running.load(Ordering::SeqCst) {
-                        #[cfg(target_os = "linux")]
-                        ctx.cancel_service_thread(&name);
-                        let _ = Self::stop_service_with_handles(
-                            &name,
-                            &ctx.processes,
-                            &ctx.pid_file,
-                            &ctx.state_file,
-                            &ctx.config,
-                        );
-                        return;
+                    if let Ok(mut counts) = ctx.lock_restart_counts() {
+                        counts.remove(&name);
                     }
-                    match ready {
-                        Ok(ServiceReadyState::Running) => {
-                            if let Ok(mut counts) = ctx.lock_restart_counts() {
-                                counts.insert(name.clone(), 0);
-                            }
+                    return;
+                }
 
-                            if let Err(err) = Self::persist_service_state(
-                                &ctx.config,
-                                &ctx.state_file,
-                                &name,
-                                ServiceLifecycleStatus::Running,
-                                Some(pid),
-                                None,
-                                None,
-                            ) {
-                                warn!(
-                                    "Failed to persist running state for restarted '{name}': {err}"
-                                );
-                            }
+                if ctx
+                    .lock_manual_stop_flags()
+                    .map(|mut guard| guard.remove(&name))
+                    .unwrap_or(true)
+                {
+                    info!(
+                        "Skipping automatic restart of '{name}' due to concurrent manual stop."
+                    );
+                    if let Ok(mut counts) = ctx.lock_restart_counts() {
+                        counts.remove(&name);
+                    }
+                    return;
+                }
 
-                            if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) = hooks_cfg
-                                    .action(HookStage::OnStart, HookOutcome::Success)
-                            {
-                                run_hook(
-                                    action,
-                                    &service_clone.env,
-                                    HookStage::OnStart,
-                                    HookOutcome::Success,
-                                    &name,
-                                    &ctx.project_root,
-                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                                );
-                            }
+                if let Some(dependency) =
+                    Self::unmet_restart_dependency(&ctx, &service_clone)
+                {
+                    debug!(
+                        "Deferring automatic restart of '{name}' because dependency '{dependency}' became unavailable during backoff."
+                    );
+                    return;
+                }
 
-                            if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) = hooks_cfg
-                                    .action(HookStage::OnRestart, HookOutcome::Success)
-                            {
-                                run_hook(
-                                    action,
-                                    &service_clone.env,
-                                    HookStage::OnRestart,
-                                    HookOutcome::Success,
-                                    &name,
-                                    &ctx.project_root,
-                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                                );
-                            }
+                let Some(daemon) = Self::from_context(&ctx) else {
+                    debug!(
+                        "Skipping automatic restart of '{name}' because its daemon ended."
+                    );
+                    return;
+                };
+                let restart_result = daemon.start_service(&name, &service_clone);
 
-                            if let Ok(mut pid_file_guard) = ctx.pid_file.lock()
-                                && let Ok(latest) =
-                                    PidFile::reload(pid_file_guard.store())
-                            {
-                                *pid_file_guard = latest;
-                            }
-                        }
-                        Ok(ServiceReadyState::CompletedSuccess) => {
-                            #[cfg(target_os = "linux")]
-                            ctx.cancel_service_thread(&name);
+                if !ctx.running.load(Ordering::SeqCst) {
+                    if matches!(&restart_result, Ok(ServiceReadyState::Running)) {
+                        let _ = daemon.stop_service_with_intent(&name, false);
+                    }
+                    return;
+                }
 
-                            if let Ok(mut counts) = ctx.lock_restart_counts() {
-                                counts.insert(name.clone(), 0);
-                            }
-
-                            if let Err(err) = Self::persist_service_state(
-                                &ctx.config,
-                                &ctx.state_file,
-                                &name,
-                                ServiceLifecycleStatus::ExitedSuccessfully,
-                                None,
-                                Some(0),
-                                None,
-                            ) {
-                                warn!(
-                                    "Failed to persist completion state for restarted '{name}': {err}"
-                                );
-                            }
-
-                            if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) = hooks_cfg
-                                    .action(HookStage::OnStart, HookOutcome::Success)
-                            {
-                                run_hook(
-                                    action,
-                                    &service_clone.env,
-                                    HookStage::OnStart,
-                                    HookOutcome::Success,
-                                    &name,
-                                    &ctx.project_root,
-                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                                );
-                            }
-
-                            if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) = hooks_cfg
-                                    .action(HookStage::OnRestart, HookOutcome::Success)
-                            {
-                                run_hook(
-                                    action,
-                                    &service_clone.env,
-                                    HookStage::OnRestart,
-                                    HookOutcome::Success,
-                                    &name,
-                                    &ctx.project_root,
-                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                                );
-                            }
-                        }
-                        Err(err) => {
-                            #[cfg(target_os = "linux")]
-                            ctx.cancel_service_thread(&name);
-
-                            error!(
-                                "Service '{name}' failed to become ready after restart: {err}"
+                let hook_outcome = match &restart_result {
+                    Ok(ServiceReadyState::Running) => {
+                        info!(
+                            "Service '{name}' restarted and passed its readiness gates."
+                        );
+                        HookOutcome::Success
+                    }
+                    Ok(ServiceReadyState::CompletedSuccess) => {
+                        if matches!(
+                            daemon.recorded_status(&name),
+                            Some(ServiceLifecycleStatus::Skipped)
+                        ) {
+                            info!("Service '{name}' is skipped after restart evaluation.");
+                        } else {
+                            info!(
+                                "Service '{name}' completed successfully during restart."
                             );
-
-                            if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) = hooks_cfg
-                                    .action(HookStage::OnStart, HookOutcome::Error)
-                            {
-                                run_hook(
-                                    action,
-                                    &service_clone.env,
-                                    HookStage::OnStart,
-                                    HookOutcome::Error,
-                                    &name,
-                                    &ctx.project_root,
-                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                                );
-                            }
-
-                            if let Some(hooks_cfg) = hooks.as_ref()
-                                && let Some(action) = hooks_cfg
-                                    .action(HookStage::OnRestart, HookOutcome::Error)
-                            {
-                                run_hook(
-                                    action,
-                                    &service_clone.env,
-                                    HookStage::OnRestart,
-                                    HookOutcome::Error,
-                                    &name,
-                                    &ctx.project_root,
-                                    Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                                );
-                            }
                         }
+                        HookOutcome::Success
                     }
-                }
-                Err(e) => {
-                    error!("Failed to restart '{name}': {e}");
+                    Err(err) => {
+                        error!("Failed to restart '{name}': {err}");
+                        HookOutcome::Error
+                    }
+                };
 
-                    if let Some(hooks_cfg) = hooks.as_ref()
-                        && let Some(action) =
-                            hooks_cfg.action(HookStage::OnStart, HookOutcome::Error)
-                    {
-                        run_hook(
-                            action,
-                            &service_clone.env,
-                            HookStage::OnStart,
-                            HookOutcome::Error,
-                            &name,
-                            &ctx.project_root,
-                            Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                        );
-                    }
-
-                    if let Some(hooks_cfg) = hooks.as_ref()
-                        && let Some(action) =
-                            hooks_cfg.action(HookStage::OnRestart, HookOutcome::Error)
-                    {
-                        run_hook(
-                            action,
-                            &service_clone.env,
-                            HookStage::OnRestart,
-                            HookOutcome::Error,
-                            &name,
-                            &ctx.project_root,
-                            Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                        );
-                    }
+                if matches!(hook_outcome, HookOutcome::Success)
+                    && let Ok(mut counts) = ctx.lock_restart_counts()
+                {
+                    counts.insert(name.clone(), 0);
                 }
-            }
+
+                if let Some(action) = hooks
+                    .as_ref()
+                    .and_then(|cfg| cfg.action(HookStage::OnRestart, hook_outcome))
+                {
+                    run_hook(
+                        action,
+                        &service_clone.env,
+                        HookStage::OnRestart,
+                        hook_outcome,
+                        &name,
+                        &ctx.project_root,
+                        Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
+                    );
+                }
             })
         {
             in_flight
@@ -7153,11 +7079,14 @@ impl Daemon {
 /// Clears a service's `restart_in_flight` entry when the restart thread ends,
 /// on every exit path including early returns.
 struct InFlightGuard {
+    /// Shared set whose entry belongs to this worker.
     set: Arc<Mutex<HashSet<String>>>,
+    /// Service entry removed when the worker finishes.
     name: String,
 }
 
 impl InFlightGuard {
+    /// Claims cleanup responsibility for one in-flight restart entry.
     fn new(set: &Arc<Mutex<HashSet<String>>>, name: String) -> Self {
         Self {
             set: Arc::clone(set),
@@ -7167,6 +7096,7 @@ impl InFlightGuard {
 }
 
 impl Drop for InFlightGuard {
+    /// Releases the restart entry on every worker exit path.
     fn drop(&mut self) {
         self.set
             .lock()

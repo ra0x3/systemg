@@ -18,7 +18,8 @@ pub mod render;
 
 pub use boot::{BootFrame, BootJournal};
 pub use outcome::{
-    Liveness, Outcome, ambiguous_service, outcome_of, project_mismatch, unit_start_failed,
+    Liveness, Outcome, ambiguous_service, dependency_unavailable, outcome_of,
+    project_mismatch, project_services_not_up, unit_start_failed,
 };
 pub use plan::{ProjectMismatch, StartPlan, resolve_plan};
 pub use render::{BootReport, render_boot};

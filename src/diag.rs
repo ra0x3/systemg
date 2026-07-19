@@ -101,6 +101,12 @@ pub enum SgCode {
     /// supervisor QUEUES the boot: without this the CLI printed "loaded" and
     /// exited 0 while the project had comprehensively failed to start.
     ProjectServicesNotUp,
+    /// SG0108 - a service's `pre_start` command exceeded its execution budget
+    /// and was terminated before the service could launch.
+    PreStartTimeout,
+    /// SG0109 - a service was not started because one of its declared
+    /// dependencies did not reach the condition required by the manifest.
+    DependencyUnavailable,
     /// SG0201 — the `-p` project does not match the resolved config.
     TargetConfigMismatch,
     /// SG0202 — the command names a service or project that does not exist.
@@ -167,6 +173,8 @@ impl SgCode {
             SgCode::PortInUse => "SG0105",
             SgCode::ProjectServicesNotUp => "SG0106",
             SgCode::SupervisorBusy => "SG0107",
+            SgCode::PreStartTimeout => "SG0108",
+            SgCode::DependencyUnavailable => "SG0109",
             SgCode::TargetConfigMismatch => "SG0201",
             SgCode::TargetNotFound => "SG0202",
             SgCode::ConfigFileUnreadable => "SG0203",
@@ -188,7 +196,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 41] = [
+    pub const ALL: [SgCode; 43] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -218,6 +226,8 @@ impl SgCode {
         SgCode::PortInUse,
         SgCode::ProjectServicesNotUp,
         SgCode::SupervisorBusy,
+        SgCode::PreStartTimeout,
+        SgCode::DependencyUnavailable,
         SgCode::TargetConfigMismatch,
         SgCode::TargetNotFound,
         SgCode::ConfigFileUnreadable,

@@ -26,7 +26,34 @@ use crate::{
 
 /// Maximum number of execution history entries to keep per cron job.
 const MAX_EXECUTION_HISTORY: usize = 10;
+/// Serialized label for a successful cron execution.
+const CRON_STATUS_SUCCESS: &str = "Success";
+/// Serialized label for a failed cron execution.
+const CRON_STATUS_FAILED: &str = "Failed";
+/// Serialized prefix for a failed cron execution carrying its reason.
+const CRON_STATUS_FAILED_PREFIX: &str = "Failed:";
+/// Serialized label for a supervisor-interrupted cron execution.
+const CRON_STATUS_INTERRUPTED: &str = "Interrupted";
+/// Serialized prefix for an interrupted execution carrying its reason.
+const CRON_STATUS_INTERRUPTED_PREFIX: &str = "Interrupted:";
+/// Serialized label for a cron execution skipped because an earlier run overlapped.
+const CRON_STATUS_OVERLAP: &str = "OverlapError";
+/// Variants accepted by the cron execution status compatibility decoder.
+const CRON_STATUS_VARIANTS: &[&str] = &[
+    CRON_STATUS_SUCCESS,
+    CRON_STATUS_FAILED,
+    CRON_STATUS_INTERRUPTED,
+    CRON_STATUS_OVERLAP,
+];
+/// Reason restored when an older state file discarded a failure detail.
+const LEGACY_CRON_FAILURE_REASON: &str = "failure reason unavailable from legacy state";
+/// Reason restored when an interrupted record contains no detail.
+const UNKNOWN_CRON_INTERRUPTION_REASON: &str = "interruption reason was not recorded";
+/// Reason assigned when recovery finds an execution whose process is gone.
+const STALE_CRON_INTERRUPTION_REASON: &str =
+    "supervisor stopped tracking the execution before it completed";
 
+/// Acquires shared cron state and recovers its value after mutex poisoning.
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -54,6 +81,7 @@ fn cron_record_is_incomplete(record: &CronExecutionRecord) -> bool {
     record.completed_at.is_none() && record.status.is_none() && record.exit_code.is_none()
 }
 
+/// Whether two execution timestamps identify the same persisted run.
 fn same_run(left: SystemTime, right: SystemTime) -> bool {
     left.duration_since(UNIX_EPOCH)
         .ok()
@@ -142,42 +170,91 @@ mod systemtime_serde_opt {
 }
 
 /// Status of a cron job execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CronExecutionStatus {
     /// Cron job completed successfully.
     Success,
     /// Cron job failed with an error message.
     Failed(String),
+    /// Cron job lost supervision before a process result could be observed.
+    Interrupted(String),
     /// Cron job was scheduled to run but previous execution was still running.
     OverlapError,
 }
 
-impl Serialize for CronExecutionStatus {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
+impl CronExecutionStatus {
+    /// Encodes one outcome as an XML-safe scalar while retaining its reason.
+    fn serialized_value(&self) -> String {
         match self {
-            Self::Success => serializer.serialize_str("Success"),
-            Self::Failed(_) => serializer.serialize_str("Failed"),
-            Self::OverlapError => serializer.serialize_str("OverlapError"),
+            Self::Success => CRON_STATUS_SUCCESS.to_string(),
+            Self::Failed(reason) => status_with_reason(CRON_STATUS_FAILED, reason),
+            Self::Interrupted(reason) => {
+                status_with_reason(CRON_STATUS_INTERRUPTED, reason)
+            }
+            Self::OverlapError => CRON_STATUS_OVERLAP.to_string(),
+        }
+    }
+
+    /// Parses the scalar representation used by current and legacy state files.
+    fn from_text<E>(value: &str) -> Result<Self, E>
+    where
+        E: serde::de::Error,
+    {
+        if let Some(reason) = value.strip_prefix(CRON_STATUS_FAILED_PREFIX) {
+            return Ok(Self::Failed(reason.trim().to_string()));
+        }
+        if let Some(reason) = value.strip_prefix(CRON_STATUS_INTERRUPTED_PREFIX) {
+            return Ok(Self::Interrupted(reason.trim().to_string()));
+        }
+        match value {
+            CRON_STATUS_SUCCESS => Ok(Self::Success),
+            CRON_STATUS_FAILED => {
+                Ok(Self::Failed(LEGACY_CRON_FAILURE_REASON.to_string()))
+            }
+            CRON_STATUS_INTERRUPTED => Ok(Self::Interrupted(
+                UNKNOWN_CRON_INTERRUPTION_REASON.to_string(),
+            )),
+            CRON_STATUS_OVERLAP => Ok(Self::OverlapError),
+            other => Err(E::unknown_variant(other, CRON_STATUS_VARIANTS)),
         }
     }
 }
 
+/// Joins a persisted outcome label and optional human-readable reason.
+fn status_with_reason(status: &str, reason: &str) -> String {
+    if reason.trim().is_empty() {
+        status.to_string()
+    } else {
+        format!("{status}: {reason}")
+    }
+}
+
+impl Serialize for CronExecutionStatus {
+    /// Serializes the outcome as a scalar accepted by JSON and XML state stores.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.serialized_value())
+    }
+}
+
+/// Compatibility representation for reasons stored as scalars or XML text nodes.
 #[derive(Deserialize)]
 #[serde(untagged)]
-/// Defines failed reason value values.
-enum FailedReasonValue {
+enum StatusReasonValue {
+    /// Reason stored directly as a string scalar.
     Plain(String),
+    /// Reason stored inside quick-xml's text-node wrapper.
     Text {
+        /// Text content of the serialized reason.
         #[serde(rename = "$text")]
         value: String,
     },
 }
 
-impl FailedReasonValue {
-    /// Converts a compatibility wrapper into the concrete failure reason string.
+impl StatusReasonValue {
+    /// Converts a compatibility wrapper into the concrete outcome reason.
     fn into_reason(self) -> String {
         match self {
             Self::Plain(reason) => reason,
@@ -187,7 +264,7 @@ impl FailedReasonValue {
 }
 
 impl<'de> Deserialize<'de> for CronExecutionStatus {
-    /// Handles deserialize.
+    /// Deserializes current scalar outcomes and historical enum-shaped values.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -198,7 +275,7 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
         impl<'de> Visitor<'de> for CronExecutionStatusVisitor {
             type Value = CronExecutionStatus;
 
-            /// Handles expecting.
+            /// Describes the supported compatibility representations.
             fn expecting(
                 &self,
                 formatter: &mut std::fmt::Formatter<'_>,
@@ -206,26 +283,15 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 formatter.write_str("a cron execution status in enum-tag or text form")
             }
 
-            /// Visits str.
+            /// Parses a borrowed scalar status value.
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
             {
-                if let Some(reason) = value.strip_prefix("Failed:") {
-                    return Ok(CronExecutionStatus::Failed(reason.trim().to_string()));
-                }
-                match value {
-                    "Success" => Ok(CronExecutionStatus::Success),
-                    "OverlapError" => Ok(CronExecutionStatus::OverlapError),
-                    "Failed" => Ok(CronExecutionStatus::Failed("failed".to_string())),
-                    other => Err(E::unknown_variant(
-                        other,
-                        &["Success", "Failed", "OverlapError"],
-                    )),
-                }
+                CronExecutionStatus::from_text(value)
             }
 
-            /// Visits string.
+            /// Parses an owned scalar status value.
             fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
             where
                 E: serde::de::Error,
@@ -233,37 +299,48 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 self.visit_str(&value)
             }
 
-            /// Visits enum.
+            /// Parses serde's externally tagged enum compatibility shape.
             fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
             where
                 A: EnumAccess<'de>,
             {
                 let (variant, access) = data.variant::<String>()?;
-                if let Some(reason) = variant.strip_prefix("Failed:") {
+                if let Some(reason) = variant.strip_prefix(CRON_STATUS_FAILED_PREFIX) {
                     access.unit_variant()?;
                     return Ok(CronExecutionStatus::Failed(reason.trim().to_string()));
                 }
+                if let Some(reason) = variant.strip_prefix(CRON_STATUS_INTERRUPTED_PREFIX)
+                {
+                    access.unit_variant()?;
+                    return Ok(CronExecutionStatus::Interrupted(
+                        reason.trim().to_string(),
+                    ));
+                }
                 match variant.as_str() {
-                    "Success" => {
+                    CRON_STATUS_SUCCESS => {
                         access.unit_variant()?;
                         Ok(CronExecutionStatus::Success)
                     }
-                    "OverlapError" => {
+                    CRON_STATUS_OVERLAP => {
                         access.unit_variant()?;
                         Ok(CronExecutionStatus::OverlapError)
                     }
-                    "Failed" => {
-                        let reason = access.newtype_variant::<FailedReasonValue>()?;
+                    CRON_STATUS_FAILED => {
+                        let reason = access.newtype_variant::<StatusReasonValue>()?;
                         Ok(CronExecutionStatus::Failed(reason.into_reason()))
+                    }
+                    CRON_STATUS_INTERRUPTED => {
+                        let reason = access.newtype_variant::<StatusReasonValue>()?;
+                        Ok(CronExecutionStatus::Interrupted(reason.into_reason()))
                     }
                     other => Err(serde::de::Error::unknown_variant(
                         other,
-                        &["Success", "Failed", "OverlapError"],
+                        CRON_STATUS_VARIANTS,
                     )),
                 }
             }
 
-            /// Visits map.
+            /// Parses quick-xml map and text-node compatibility shapes.
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
@@ -276,19 +353,25 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                     match key.as_str() {
                         "$text" => text_variant = Some(map.next_value::<String>()?),
                         "$value" => failed_reason = Some(map.next_value::<String>()?),
-                        "Success" => {
+                        CRON_STATUS_SUCCESS => {
                             let _: IgnoredAny = map.next_value()?;
                             tagged_variant = Some(CronExecutionStatus::Success);
                         }
-                        "OverlapError" => {
+                        CRON_STATUS_OVERLAP => {
                             let _: IgnoredAny = map.next_value()?;
                             tagged_variant = Some(CronExecutionStatus::OverlapError);
                         }
-                        "Failed" => {
-                            let value = map.next_value::<FailedReasonValue>()?;
+                        CRON_STATUS_FAILED => {
+                            let value = map.next_value::<StatusReasonValue>()?;
                             let reason = value.into_reason();
                             failed_reason = Some(reason.clone());
                             tagged_variant = Some(CronExecutionStatus::Failed(reason));
+                        }
+                        CRON_STATUS_INTERRUPTED => {
+                            let value = map.next_value::<StatusReasonValue>()?;
+                            tagged_variant = Some(CronExecutionStatus::Interrupted(
+                                value.into_reason(),
+                            ));
                         }
                         _ => {
                             let _: IgnoredAny = map.next_value()?;
@@ -301,17 +384,14 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                 }
 
                 if let Some(text) = text_variant {
-                    return match text.as_str() {
-                        "Success" => Ok(CronExecutionStatus::Success),
-                        "OverlapError" => Ok(CronExecutionStatus::OverlapError),
-                        "Failed" => Ok(CronExecutionStatus::Failed(
-                            failed_reason.unwrap_or_else(|| "failed".to_string()),
-                        )),
-                        other => Err(serde::de::Error::unknown_variant(
-                            other,
-                            &["Success", "Failed", "OverlapError"],
-                        )),
-                    };
+                    if text == CRON_STATUS_FAILED {
+                        return Ok(CronExecutionStatus::Failed(
+                            failed_reason.unwrap_or_else(|| {
+                                LEGACY_CRON_FAILURE_REASON.to_string()
+                            }),
+                        ));
+                    }
+                    return CronExecutionStatus::from_text(&text);
                 }
 
                 if let Some(reason) = failed_reason {
@@ -334,10 +414,10 @@ pub struct CronExecutionRecord {
     /// When the cron job execution started.
     #[serde(with = "systemtime_serde")]
     pub started_at: SystemTime,
-    /// When the cron job execution completed (None if still running).
+    /// Observed completion time, absent while running or when supervision ended first.
     #[serde(with = "systemtime_serde_opt")]
     pub completed_at: Option<SystemTime>,
-    /// Final status of the execution (None if still running).
+    /// Terminal outcome, absent only while the execution is actively tracked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<CronExecutionStatus>,
     /// Exit code of the process (None if no exit code available).
@@ -428,12 +508,12 @@ impl CronJobState {
             while state.execution_history.len() > MAX_EXECUTION_HISTORY {
                 state.execution_history.pop_front();
             }
-            state.currently_running = state
+            let live_execution = state
                 .active_record()
-                .is_some_and(incomplete_execution_is_live);
-            if !state.currently_running {
-                state.close_stale_running_execution(SystemTime::now());
-            }
+                .filter(|record| incomplete_execution_is_live(record))
+                .map(|record| record.started_at);
+            state.currently_running = live_execution.is_some();
+            state.close_stale_running_executions(live_execution);
         }
 
         state
@@ -452,6 +532,7 @@ impl CronJobState {
         self.execution_history.push_back(record);
     }
 
+    /// Returns the newest execution that has no terminal outcome.
     fn active_record(&self) -> Option<&CronExecutionRecord> {
         self.execution_history
             .iter()
@@ -459,6 +540,7 @@ impl CronJobState {
             .find(|record| cron_record_is_incomplete(record))
     }
 
+    /// Returns mutable access to the newest execution without a terminal outcome.
     fn active_record_mut(&mut self) -> Option<&mut CronExecutionRecord> {
         self.execution_history
             .iter_mut()
@@ -471,15 +553,23 @@ impl CronJobState {
         self.next_execution = compute_next_execution(&self.schedule, self.timezone);
     }
 
-    /// Marks a stale unfinished execution as failed so the next due run can start.
-    fn close_stale_running_execution(&mut self, now: SystemTime) {
-        if let Some(record) = self.active_record_mut() {
-            record.completed_at = Some(now);
-            record.status = Some(CronExecutionStatus::Failed(
-                "Previous cron execution no longer has a live process".to_string(),
+    /// Marks stale unfinished executions interrupted while retaining one live run.
+    fn close_stale_running_executions(&mut self, live_execution: Option<SystemTime>) {
+        for record in self
+            .execution_history
+            .iter_mut()
+            .filter(|record| cron_record_is_incomplete(record))
+        {
+            if live_execution
+                .is_some_and(|started_at| same_run(record.started_at, started_at))
+            {
+                continue;
+            }
+            record.completed_at = None;
+            record.status = Some(CronExecutionStatus::Interrupted(
+                STALE_CRON_INTERRUPTION_REASON.to_string(),
             ));
         }
-        self.currently_running = false;
     }
 }
 

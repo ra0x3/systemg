@@ -77,6 +77,18 @@ fn error_response(err: &SupervisorError) -> ControlResponse {
         SupervisorError::Process(ProcessManagerError::Diag(diag)) => {
             ControlResponse::Diag(diag.clone())
         }
+        SupervisorError::Process(ProcessManagerError::ServicesNotRunning {
+            services,
+        }) => {
+            let diag = crate::diag::Diagnostic::error(
+                crate::diag::SgCode::ProjectServicesNotUp,
+                "one or more services did not reach their target state",
+            )
+            .note(format!("did not start: {}", services.join(", ")))
+            .help_cmd("check status", "sysg status")
+            .help_docs();
+            ControlResponse::Diag(Box::new(diag))
+        }
         other => ControlResponse::Error(other.to_string()),
     }
 }
@@ -160,6 +172,47 @@ struct SupervisorLogRequest<'a> {
 struct CronCompletionOutcome {
     status: CronExecutionStatus,
     exit_code: Option<i32>,
+}
+
+/// Units left down by one project boot and the first concrete cause observed.
+#[derive(Debug, Default)]
+struct BootFailures {
+    /// Sorted names of units that did not reach their declared boot target.
+    services: Vec<String>,
+    /// First concrete unit diagnostic, retained as the project's root cause.
+    cause: Option<crate::diag::Diagnostic>,
+}
+
+impl BootFailures {
+    /// Creates a stable, sorted failure report from the boot accumulator.
+    fn new(mut services: Vec<String>, cause: Option<crate::diag::Diagnostic>) -> Self {
+        services.sort_unstable();
+        Self { services, cause }
+    }
+
+    /// Whether every requested unit reached its target boot state.
+    fn is_empty(&self) -> bool {
+        self.services.is_empty()
+    }
+
+    /// Unit names suitable for reconcile diagnostics and logs.
+    fn services(&self) -> &[String] {
+        &self.services
+    }
+
+    /// Converts the project result without discarding the originating diagnosis.
+    fn into_error(self, project: &str) -> ProcessManagerError {
+        let Self { services, cause } = self;
+        let mut diag = cause
+            .unwrap_or_else(|| crate::start::project_services_not_up(project, &services));
+        if !services.is_empty() {
+            diag = diag.note(format!(
+                "project `{project}` also left these units down: {}",
+                services.join(", ")
+            ));
+        }
+        ProcessManagerError::Diag(Box::new(diag))
+    }
 }
 
 /// Cheap-to-clone handles the acceptor uses to answer read commands without
@@ -430,6 +483,7 @@ impl Supervisor {
         }
     }
 
+    /// Resolves dependency order and applies an optional single-unit filter.
     fn startup_service_order(
         config: &Config,
         service_filter: Option<&str>,
@@ -467,7 +521,7 @@ impl Supervisor {
         service_filter: Option<&str>,
         spawn_manager: &DynamicSpawnManager,
         boot_journal: Option<&BootJournal>,
-    ) -> Result<Vec<String>, SupervisorError> {
+    ) -> Result<BootFailures, SupervisorError> {
         let project_id = &config.project.id;
         let boot_epoch = daemon.begin_boot();
         let service_order = Self::startup_service_order(config, service_filter)?;
@@ -475,6 +529,7 @@ impl Supervisor {
         let mut completed = HashSet::new();
         let mut failed = HashSet::new();
         let mut skipped = HashSet::new();
+        let mut cause = None;
         'services: for service_name in service_order {
             if !daemon.boot_active(boot_epoch) {
                 break;
@@ -515,6 +570,11 @@ impl Supervisor {
                                     "Failed to evaluate skip condition for '{service_name}': {err}"
                                 );
                                 failed.insert(service_name.clone());
+                                let diag = start::unit_start_failed(
+                                    &service_name,
+                                    err.to_string(),
+                                );
+                                cause.get_or_insert_with(|| diag.clone());
                                 if let Some(journal) = boot_journal {
                                     journal.push(BootFrame::UnitStarting {
                                         project: project_id.clone(),
@@ -523,10 +583,7 @@ impl Supervisor {
                                     journal.record(
                                         project_id,
                                         &service_name,
-                                        start::Outcome::Failed(start::unit_start_failed(
-                                            &service_name,
-                                            err.to_string(),
-                                        )),
+                                        start::Outcome::Failed(diag),
                                     );
                                 }
                                 continue 'services;
@@ -556,6 +613,14 @@ impl Supervisor {
                             "Skipping service '{service_name}' because dependency '{dependency_name}' did not start"
                         );
                         failed.insert(service_name.clone());
+                        let diag = start::dependency_unavailable(
+                            &service_name,
+                            dependency_name,
+                            format!(
+                                "dependency `{dependency_name}` did not reach its required state"
+                            ),
+                        );
+                        cause.get_or_insert_with(|| diag.clone());
                         if let Some(journal) = boot_journal {
                             journal.push(BootFrame::UnitStarting {
                                 project: project_id.clone(),
@@ -564,12 +629,7 @@ impl Supervisor {
                             journal.record(
                                 project_id,
                                 &service_name,
-                                start::Outcome::Failed(start::unit_start_failed(
-                                    &service_name,
-                                    format!(
-                                        "dependency '{dependency_name}' did not start"
-                                    ),
-                                )),
+                                start::Outcome::Failed(diag),
                             );
                         }
                         continue 'services;
@@ -586,6 +646,12 @@ impl Supervisor {
                                 "Skipping service '{service_name}' because dependency '{dependency_name}' did not complete: {err}"
                             );
                             failed.insert(service_name.clone());
+                            let diag = start::dependency_unavailable(
+                                &service_name,
+                                dependency_name,
+                                err.to_string(),
+                            );
+                            cause.get_or_insert_with(|| diag.clone());
                             if let Some(journal) = boot_journal {
                                 journal.push(BootFrame::UnitStarting {
                                     project: project_id.clone(),
@@ -594,10 +660,7 @@ impl Supervisor {
                                 journal.record(
                                     project_id,
                                     &service_name,
-                                    start::Outcome::Failed(start::unit_start_failed(
-                                        &service_name,
-                                        err.to_string(),
-                                    )),
+                                    start::Outcome::Failed(diag),
                                 );
                             }
                             continue 'services;
@@ -644,6 +707,7 @@ impl Supervisor {
                 .and_then(|pid_file| pid_file.services().get(&service_name).copied());
             let outcome = start::outcome_of(&service_name, result, pid);
             if let Some(diag) = outcome.diagnostic() {
+                cause.get_or_insert_with(|| diag.clone());
                 error!(
                     "Service '{service_name}' failed to start [{}]: {}.",
                     diag.code_str(),
@@ -669,9 +733,7 @@ impl Supervisor {
         if daemon.boot_active(boot_epoch) {
             daemon.ensure_monitoring()?;
         }
-        let mut failed: Vec<String> = failed.into_iter().collect();
-        failed.sort_unstable();
-        Ok(failed)
+        Ok(BootFailures::new(failed.into_iter().collect(), cause))
     }
 
     /// Combines per-project snapshots into the supervisor status view.
@@ -1065,9 +1127,7 @@ impl Supervisor {
             )?;
             self.sync_cron_projects()?;
             if !failed.is_empty() {
-                return Err(
-                    ProcessManagerError::ServicesNotRunning { services: failed }.into()
-                );
+                return Err(failed.into_error(project_id).into());
             }
             return Ok(());
         }
@@ -1092,9 +1152,7 @@ impl Supervisor {
             None,
         )?;
         if !failed.is_empty() {
-            return Err(
-                ProcessManagerError::ServicesNotRunning { services: failed }.into()
-            );
+            return Err(failed.into_error(project_id).into());
         }
         Ok(())
     }
@@ -1285,7 +1343,7 @@ impl Supervisor {
             Ok(())
         } else {
             Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(&failed),
+                crate::restart::reconcile_incomplete(failed.services()),
             ))
             .into())
         }
@@ -1340,7 +1398,7 @@ impl Supervisor {
                 Ok(())
             } else {
                 Err(ProcessManagerError::Diag(Box::new(
-                    crate::restart::reconcile_incomplete(&failed),
+                    crate::restart::reconcile_incomplete(failed.services()),
                 ))
                 .into())
             }
@@ -1411,7 +1469,7 @@ impl Supervisor {
             Ok(())
         } else {
             Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(&failed),
+                crate::restart::reconcile_incomplete(failed.services()),
             ))
             .into())
         }
@@ -2220,6 +2278,10 @@ impl Supervisor {
                                                                                 "Cron job '{}' failed: {}",
                                                                                 job_name_clone, reason
                                                                             ),
+                                                                            CronExecutionStatus::Interrupted(reason) => warn!(
+                                                                                "Cron job '{}' was interrupted: {}",
+                                                                                job_name_clone, reason
+                                                                            ),
                                                                             CronExecutionStatus::OverlapError => warn!(
                                                                                 "Cron job '{}' reported overlap state unexpectedly",
                                                                                 job_name_clone
@@ -2234,6 +2296,7 @@ impl Supervisor {
                                                             let lifecycle_status = match status {
                                                                 CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
                                                                 CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
+                                                                CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
                                                             };
                                                             persist_cron_state(
                                                                 &daemon,
@@ -3376,9 +3439,7 @@ impl Supervisor {
                 return Ok(project_id);
             }
             if !failed.is_empty() {
-                return Err(
-                    ProcessManagerError::ServicesNotRunning { services: failed }.into()
-                );
+                return Err(failed.into_error(&project_id).into());
             }
             self.primary_project_mode = mode;
             self.config_path = resolved;
@@ -3467,7 +3528,7 @@ impl Supervisor {
                     ) {
                         Ok(failed) if !failed.is_empty() => error!(
                             "Background boot of project '{boot_project}' left services down: {}",
-                            failed.join(", ")
+                            failed.services().join(", ")
                         ),
                         Err(err) => {
                             error!("Background boot of project '{boot_project}' failed: {err}")
@@ -3527,9 +3588,7 @@ impl Supervisor {
             return Ok(project_id);
         }
         if !failed.is_empty() {
-            return Err(
-                ProcessManagerError::ServicesNotRunning { services: failed }.into()
-            );
+            return Err(failed.into_error(&project_id).into());
         }
         Ok(project_id)
     }

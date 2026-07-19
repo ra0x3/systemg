@@ -3,7 +3,7 @@ use std::{
     error::Error,
     ffi::CString,
     fs, io,
-    io::Write,
+    io::{IsTerminal, Write},
     os::unix::io::IntoRawFd,
     path::{Path, PathBuf},
     process,
@@ -83,6 +83,12 @@ const SUPERVISOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Interval between visible boot progress probes.
 const BOOT_PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
+/// Prefix used for foreground boot progress.
+const FOREGROUND_PROGRESS_PREFIX: &str = "  • ";
+/// Column left unused so a terminal cannot auto-wrap the progress line.
+const TERMINAL_AUTOWRAP_MARGIN: usize = 1;
+/// Error returned when another thread poisoned foreground output ownership.
+const FOREGROUND_OUTPUT_LOCK_ERROR: &str = "foreground output lock is poisoned";
 /// Number of initial follow retries per foreground backoff.
 const FOREGROUND_START_RETRIES: usize = 2;
 /// Number of reconnect retries per foreground backoff.
@@ -395,10 +401,12 @@ fn terminal_width() -> usize {
     probed.or_else(from_env).unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
+/// Returns the terminal sequence that clears the active progress row.
 fn clear_progress_spinner_line() -> &'static str {
     "\r\x1B[2K\r"
 }
 
+/// Runs `operation` while rendering a delayed progress spinner on a terminal.
 fn with_progress_spinner<T, F>(
     label: &'static str,
     operation: F,
@@ -460,9 +468,6 @@ where
     let result = operation();
     stop.store(true, Ordering::Relaxed);
     let _ = spinner.join();
-    // Definitively clear the spinner's line after the thread has stopped, so the
-    // command's own output (printed to stdout) starts on a clean line instead of
-    // being appended to a lingering spinner frame.
     if stderr_is_tty() {
         let mut stderr = io::stderr().lock();
         let _ = write!(stderr, "{}", clear_progress_spinner_line());
@@ -3988,15 +3993,17 @@ fn start_foreground(
 
     println!("Starting project '{project_id}' in the foreground…");
     println!("Streaming its services' output; press Ctrl-C to stop the project.");
-    let boot_progress = match spawn_boot_progress_reporter(project_id.clone()) {
-        Ok(progress) => progress,
-        Err(err) => {
-            let _ = ipc::send_command(&ControlCommand::StopProject {
-                project: project_id,
-            });
-            return Err(err.into());
-        }
-    };
+    let output = ForegroundOutput::new();
+    let boot_progress =
+        match spawn_boot_progress_reporter(project_id.clone(), output.clone()) {
+            Ok(progress) => progress,
+            Err(err) => {
+                let _ = ipc::send_command(&ControlCommand::StopProject {
+                    project: project_id,
+                });
+                return Err(err.into());
+            }
+        };
 
     // Stream ONLY this project's service logs to the terminal via a scoped follow
     // (the supervisor's own tracing goes to the log file, and service log writers
@@ -4008,6 +4015,7 @@ fn start_foreground(
         project_id.clone(),
         streaming.clone(),
         shutdown.clone(),
+        output,
     ) {
         Ok(handle) => handle,
         Err(err) => {
@@ -4076,13 +4084,15 @@ fn start_foreground_attached(
 
     let streaming = Arc::new(AtomicBool::new(true));
     let shutdown = Arc::new(std::sync::Mutex::new(None));
+    let output = ForegroundOutput::new();
     let follow_handle = spawn_foreground_log_follow(
         project_id.clone(),
         streaming.clone(),
         shutdown.clone(),
+        output.clone(),
     )?;
 
-    let boot_progress = match spawn_boot_progress_reporter(project_id.clone()) {
+    let boot_progress = match spawn_boot_progress_reporter(project_id.clone(), output) {
         Ok(progress) => progress,
         Err(err) => {
             stop_foreground_follow(&streaming, &shutdown);
@@ -4146,7 +4156,11 @@ fn start_foreground_attached(
 
 /// A running boot-progress reporter; call `stop()` to end it.
 struct BootProgressReporter {
+    /// Shared foreground terminal whose active progress row must be cleared.
+    output: ForegroundOutput,
+    /// Stop signal observed by the progress thread.
     running: Arc<AtomicBool>,
+    /// Reporter thread joined during orderly shutdown.
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -4157,7 +4171,193 @@ impl BootProgressReporter {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        let _ = self.output.clear_progress();
     }
+}
+
+/// Serialized owner of foreground progress and service-log terminal writes.
+#[derive(Clone)]
+struct ForegroundOutput {
+    /// Mutable terminal state shared by the progress and log threads.
+    inner: Arc<std::sync::Mutex<ForegroundOutputState>>,
+}
+
+/// State required to clear and restore one in-place terminal progress row.
+struct ForegroundOutputState {
+    /// Standard-output handle used by both foreground writers.
+    stdout: io::Stdout,
+    /// Whether standard output supports cursor-control sequences.
+    terminal: bool,
+    /// Most recent progress text, retained while service logs are written.
+    progress: Option<String>,
+    /// Whether the retained progress text is currently visible.
+    progress_visible: bool,
+}
+
+impl ForegroundOutput {
+    /// Creates an output owner configured for the current standard output.
+    fn new() -> Self {
+        let stdout = io::stdout();
+        let terminal = stdout.is_terminal();
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(ForegroundOutputState {
+                stdout,
+                terminal,
+                progress: None,
+                progress_visible: false,
+            })),
+        }
+    }
+
+    /// Whether progress can be repainted in place on this output stream.
+    fn is_terminal(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|state| state.terminal)
+            .unwrap_or(false)
+    }
+
+    /// Displays a progress update in place, or as a line for redirected output.
+    fn show_progress(&self, line: &str) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.progress = Some(line.to_string());
+        state.render_progress()
+    }
+
+    /// Removes the active progress row before foreground reporting ends.
+    fn clear_progress(&self) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.progress = None;
+        state.clear_visible_progress()
+    }
+
+    /// Writes one complete service-log fragment and restores progress below it.
+    fn write_log(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.clear_visible_progress()?;
+        state.stdout.write_all(bytes)?;
+        if state.terminal {
+            state.render_progress()
+        } else {
+            state.stdout.flush()
+        }
+    }
+
+    /// Writes a foreground stream notice without colliding with progress.
+    fn write_notice(&self, message: &str) -> io::Result<()> {
+        let mut line = message.as_bytes().to_vec();
+        line.push(b'\n');
+        self.write_log(&line)
+    }
+
+    /// Flushes the shared standard-output handle.
+    fn flush(&self) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.stdout.flush()
+    }
+}
+
+impl ForegroundOutputState {
+    /// Clears the cursor-controlled progress row when it is visible.
+    fn clear_visible_progress(&mut self) -> io::Result<()> {
+        if self.terminal && self.progress_visible {
+            self.stdout
+                .write_all(clear_progress_spinner_line().as_bytes())?;
+            self.progress_visible = false;
+        }
+        Ok(())
+    }
+
+    /// Renders the retained progress according to output capabilities.
+    fn render_progress(&mut self) -> io::Result<()> {
+        let Some(progress) = self.progress.as_deref() else {
+            return self.stdout.flush();
+        };
+        if self.terminal {
+            self.stdout
+                .write_all(format_foreground_progress(progress).as_bytes())?;
+            self.progress_visible = true;
+        } else {
+            writeln!(self.stdout, "{FOREGROUND_PROGRESS_PREFIX}{progress}")?;
+        }
+        self.stdout.flush()
+    }
+}
+
+/// Buffers follow-stream chunks until complete lines can be written atomically.
+struct ForegroundLogOutput {
+    /// Shared terminal owner that coordinates with progress rendering.
+    output: ForegroundOutput,
+    /// Partial log line retained across stream writes.
+    pending: Vec<u8>,
+}
+
+impl ForegroundLogOutput {
+    /// Creates a line-buffered writer for the shared foreground terminal.
+    fn new(output: ForegroundOutput) -> Self {
+        Self {
+            output,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Writes all complete buffered lines through one terminal transaction.
+    fn write_complete_lines(&mut self) -> io::Result<()> {
+        if let Some(end) = self.pending.iter().rposition(|byte| *byte == b'\n') {
+            let lines: Vec<u8> = self.pending.drain(..=end).collect();
+            self.output.write_log(&lines)?;
+        }
+        Ok(())
+    }
+}
+
+impl Write for ForegroundLogOutput {
+    /// Buffers bytes and commits every complete line to the shared terminal.
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        self.write_complete_lines()?;
+        Ok(bytes.len())
+    }
+
+    /// Commits all buffered output, terminating a final partial log line.
+    fn flush(&mut self) -> io::Result<()> {
+        self.write_complete_lines()?;
+        if !self.pending.is_empty() {
+            self.pending.push(b'\n');
+            self.write_complete_lines()?;
+        }
+        self.output.flush()
+    }
+}
+
+/// Formats one boot-progress row without allowing terminal auto-wrap.
+fn format_foreground_progress(line: &str) -> String {
+    let prefix_width = FOREGROUND_PROGRESS_PREFIX.chars().count();
+    let budget = terminal_width()
+        .saturating_sub(prefix_width)
+        .saturating_sub(TERMINAL_AUTOWRAP_MARGIN);
+    let shown = if line.chars().count() > budget {
+        let keep = budget.saturating_sub(1);
+        line.chars()
+            .take(keep)
+            .chain(std::iter::once('…'))
+            .collect::<String>()
+    } else {
+        line.to_string()
+    };
+    format!("\r{FOREGROUND_PROGRESS_PREFIX}{shown}\x1B[K")
 }
 
 /// Reports what a project's boot is DOING while it happens.
@@ -4170,27 +4370,41 @@ impl BootProgressReporter {
 /// its live operation (dependency waits, health-check attempts) through the op
 /// slot; this surfaces it, printing only when the message CHANGES so a slow step
 /// does not scroll the terminal.
-fn spawn_boot_progress_reporter(project_id: String) -> io::Result<BootProgressReporter> {
+fn spawn_boot_progress_reporter(
+    project_id: String,
+    output: ForegroundOutput,
+) -> io::Result<BootProgressReporter> {
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = Arc::clone(&running);
+    let thread_output = output.clone();
     let handle = thread::Builder::new()
         .name(format!("boot-progress-{project_id}"))
         .spawn(move || {
-            let mut last = String::new();
+            let terminal = thread_output.is_terminal();
+            let mut last_line = String::new();
+            let mut last_phase = None;
             while thread_running.load(Ordering::SeqCst) {
                 if let Some(op) = ipc::current_op()
                     && op.label.contains(&project_id)
                 {
                     let line = op.describe();
-                    if line != last {
-                        println!("  • {line}");
-                        last = line;
+                    let phase = (op.label, op.detail);
+                    let changed = if terminal {
+                        line != last_line
+                    } else {
+                        last_phase.as_ref() != Some(&phase)
+                    };
+                    if changed {
+                        let _ = thread_output.show_progress(&line);
+                        last_line = line;
+                        last_phase = Some(phase);
                     }
                 }
                 thread::sleep(BOOT_PROGRESS_INTERVAL);
             }
         })?;
     Ok(BootProgressReporter {
+        output,
         running,
         handle: Some(handle),
     })
@@ -4198,13 +4412,15 @@ fn spawn_boot_progress_reporter(project_id: String) -> io::Result<BootProgressRe
 
 /// Streams a foreground project's logs in-process on a supervised loop. Connects
 /// to the supervisor's follow stream and pumps it to stdout; on any drop, if the
-/// caller still wants the stream AND the project is still loaded, it announces the
-/// interruption on stderr and reconnects after a short backoff. Returns when the
-/// caller clears `streaming` or the project is gone — never freezes silently.
+/// caller still wants the stream AND the project is still loaded, it announces
+/// the interruption on the shared terminal and reconnects after a short backoff.
+/// Returns when the caller clears `streaming` or the project is gone — never
+/// freezes silently.
 fn spawn_foreground_log_follow(
     project_id: String,
     streaming: Arc<AtomicBool>,
     shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+    output: ForegroundOutput,
 ) -> io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(format!("fg-logs-{project_id}"))
@@ -4239,8 +4455,9 @@ fn spawn_foreground_log_follow(
                     all: false,
                     structured: false,
                 };
+                let terminal_writer = ForegroundLogOutput::new(output.clone());
                 let mut writer =
-                    LogWriter::new(io::stdout(), LogFormat::Text, false, None);
+                    LogWriter::new(terminal_writer, LogFormat::Text, false, None);
                 let outcome = ipc::stream_command_output_interruptible(
                     &command,
                     &mut writer,
@@ -4269,7 +4486,9 @@ fn spawn_foreground_log_follow(
                     project_ever_seen = true;
                 } else if project_ever_seen || Instant::now() >= startup_grace {
                     if announced_interrupt {
-                        eprintln!("• log stream ended: project '{project_id}' stopped.");
+                        let _ = output.write_notice(&format!(
+                            "• log stream ended: project '{project_id}' stopped."
+                        ));
                     }
                     return;
                 } else {
@@ -4283,12 +4502,16 @@ fn spawn_foreground_log_follow(
                 }
                 // The stream dropped but the project lives — say so and retry.
                 match outcome {
-                    Ok(()) => eprintln!(
-                        "⚠ log stream ended unexpectedly; reconnecting to '{project_id}'…"
-                    ),
-                    Err(err) => eprintln!(
-                        "⚠ log stream interrupted ({err}); reconnecting to '{project_id}'…"
-                    ),
+                    Ok(()) => {
+                        let _ = output.write_notice(&format!(
+                            "⚠ log stream ended unexpectedly; reconnecting to '{project_id}'…"
+                        ));
+                    }
+                    Err(err) => {
+                        let _ = output.write_notice(&format!(
+                            "⚠ log stream interrupted ({err}); reconnecting to '{project_id}'…"
+                        ));
+                    }
                 }
                 announced_interrupt = true;
                 for _ in 0..FOREGROUND_RECONNECT_RETRIES {
@@ -4499,7 +4722,10 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
     if daemonize {
         restart_daemonized(command, config_path, false)
     } else {
-        with_progress_spinner("Restarting", || send_control_command(command))
+        let message =
+            with_progress_spinner("Restarting", || send_control_message(command))?;
+        println!("\n\n{message}");
+        Ok(())
     }
 }
 
@@ -5763,6 +5989,7 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
     send_control_command_inner(command, true)
 }
 
+/// Sends a control command and optionally renders its response message.
 fn send_control_command_inner(
     command: ControlCommand,
     announce: bool,
@@ -5788,6 +6015,22 @@ fn send_control_command_inner(
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
         Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
         Ok(ControlResponse::CurrentOp(_)) => Ok(()),
+        Err(ControlError::NotAvailable) => Err(ControlError::NotAvailable.into()),
+        Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Sends a control command whose successful response must contain a message.
+fn send_control_message(command: ControlCommand) -> Result<String, Box<dyn Error>> {
+    match ipc::send_command(&command) {
+        Ok(ControlResponse::Message(message)) => Ok(message),
+        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
+        Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
+        Ok(other) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {other:?}"
+        ))
+        .into()),
         Err(ControlError::NotAvailable) => Err(ControlError::NotAvailable.into()),
         Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
         Err(err) => Err(err.into()),

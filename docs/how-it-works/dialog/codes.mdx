@@ -91,6 +91,19 @@ not work cannot exit `0`. The diagnostic names each service and gives you the
 `sysg logs` command for it; the underlying cause (SG0103 pre-start failure,
 SG0104 health check, SG0105 port in use) is in that service's log.
 
+### SG0108
+
+A service's `pre_start` command exceeded the configured command timeout. systemg
+terminated the command tree and did not launch the service. Restore the resource
+the command was waiting for, then start the project again.
+
+### SG0109
+
+A service was not started because a declared dependency did not reach its
+required `running` or `completed` condition. Resolve the dependency's earlier
+diagnostic first; downstream services remain stopped rather than starting into
+an invalid dependency state.
+
 ## Selectors, status &amp; stop
 
 ### SG0006

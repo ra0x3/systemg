@@ -100,6 +100,34 @@ pub fn health_unmet(service: &str, attempts: u32) -> Diagnostic {
     .help_docs()
 }
 
+/// Builds the SG0109 diagnostic for a unit blocked by an unavailable dependency.
+pub fn dependency_unavailable(
+    service: &str,
+    dependency: &str,
+    reason: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::DependencyUnavailable,
+        format!(
+            "service `{service}` could not start because `{dependency}` was unavailable"
+        ),
+    )
+    .note(reason)
+    .help_cmd("inspect dependency", format!("sysg inspect {dependency}"))
+    .help_docs()
+}
+
+/// Builds the SG0106 diagnostic for a project whose boot left units down.
+pub fn project_services_not_up(project: &str, services: &[String]) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::ProjectServicesNotUp,
+        format!("project `{project}` did not bring every service up"),
+    )
+    .note(format!("did not start: {}", services.join(", ")))
+    .help_cmd("check status", format!("sysg status -p {project}"))
+    .help_docs()
+}
+
 /// Builds the generic SG0008 diagnostic for a unit that failed to start for a
 /// reason without a more specific code.
 pub fn unit_start_failed(service: &str, reason: impl Into<String>) -> Diagnostic {

@@ -1438,6 +1438,7 @@ fn derive_unit_state(
                         UnitState::Failed
                     }
                 }
+                CronExecutionStatus::Interrupted(_) => UnitState::Queued,
                 CronExecutionStatus::OverlapError => UnitState::Overlap,
             };
         }
@@ -1518,6 +1519,7 @@ fn derive_unit_health(
                         UnitHealth::Failing
                     }
                 }
+                CronExecutionStatus::Interrupted(_) => UnitHealth::Idle,
                 CronExecutionStatus::OverlapError => UnitHealth::Warn,
             };
         }
@@ -1713,6 +1715,21 @@ manual run once fixed:\n\n    {logs}\n    {restart}"
                         ),
                     }
                 }
+                CronExecutionStatus::Interrupted(reason) => HealthReport {
+                    health: UnitHealth::Idle,
+                    severity: 2,
+                    title: format!("'{name}' last cron run was interrupted"),
+                    tldr: "The supervisor lost the run before observing its result."
+                        .to_string(),
+                    description: format!(
+                        "The last recorded run of '{name}' has no observed process result: \
+{reason}. This is not an application failure, and the job remains scheduled for \
+its next trigger."
+                    ),
+                    recommended_fix: format!(
+                        "Check the output only if the interrupted work matters:\n\n    {logs}"
+                    ),
+                },
                 CronExecutionStatus::OverlapError => HealthReport {
                     health: UnitHealth::Warn,
                     severity: 4,
@@ -2360,6 +2377,7 @@ impl StatusManager {
                     | Some(CronExecutionStatus::OverlapError) => {
                         return RED_BOLD;
                     }
+                    Some(CronExecutionStatus::Interrupted(_)) => return "",
                     None => {}
                 }
             }
@@ -2628,6 +2646,14 @@ impl StatusManager {
                     format!("{RED_BOLD}failed{RESET}")
                 };
 
+                if reason.trim().is_empty() {
+                    base
+                } else {
+                    format!("{base} - {reason}")
+                }
+            }
+            Some(CronExecutionStatus::Interrupted(reason)) => {
+                let base = format!("{YELLOW_BOLD}interrupted{RESET}");
                 if reason.trim().is_empty() {
                     base
                 } else {
