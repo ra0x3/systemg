@@ -214,6 +214,11 @@ pub enum ControlCommand {
     },
     /// Report the version of the resident supervisor binary.
     Version,
+    /// Replace the resident supervisor binary without restarting its workloads.
+    Upgrade {
+        /// Canonical or resolvable path to the staged replacement binary.
+        binary: String,
+    },
     /// Report the operation the supervisor is currently blocked on, if any.
     CurrentOp,
     /// Spawn a dynamic child process.
@@ -259,6 +264,11 @@ pub enum ControlResponse {
     },
     /// Version of the resident supervisor binary.
     DaemonVersion(String),
+    /// Resident supervisor accepted a live upgrade to this version.
+    UpgradeAccepted {
+        /// Replacement version the installer should wait to observe.
+        version: String,
+    },
     /// The operation the supervisor is currently working on, if any.
     CurrentOp(Option<crate::opslot::OpReport>),
 }

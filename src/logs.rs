@@ -3,14 +3,14 @@
 //! Service output is captured into one canonical per-service log, with each line
 //! tagged by capture timestamp and source stream.
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
         mpsc::RecvTimeoutError,
     },
@@ -20,16 +20,19 @@ use std::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     os::unix::{
-        io::{AsRawFd, FromRawFd, IntoRawFd},
+        io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
         net::UnixStream,
     },
-    process::{Command, Stdio},
+    process::{ChildStderr, ChildStdout, Command, Stdio},
 };
 
 use terminal_size::Width;
 use tracing::debug;
 
-use crate::{config::EffectiveLogsConfig, error::LogsManagerError, runtime};
+use crate::{
+    config::EffectiveLogsConfig, error::LogsManagerError, runtime,
+    upgrade::HandoffLogPipe,
+};
 
 /// Thread name for canonical service log writers.
 const SERVICE_LOG_THREAD: &str = "sysg-service-log";
@@ -39,6 +42,12 @@ const SERVICE_STDOUT_THREAD: &str = "sysg-service-stdout";
 const SERVICE_STDERR_THREAD: &str = "sysg-service-stderr";
 /// Thread name for dynamic child log readers.
 const CHILD_LOG_THREAD: &str = "sysg-child-log";
+/// Lowest descriptor number used for duplicated handoff pipes.
+const MIN_HANDOFF_FD: RawFd = 3;
+/// Maximum time allowed for log readers and writers to quiesce.
+const LOG_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
+/// Delay between log-reader pause checks.
+const LOG_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// High-level bucket for all-services log rendering.
@@ -1934,8 +1943,18 @@ fn flush_remaining_forwarded_line(
 
 /// A completed service output line received by the canonical log writer.
 struct ServiceLogLine {
+    /// Source stream for the captured line.
     stream: LogStream,
+    /// Line bytes without a trailing newline.
     line: Vec<u8>,
+}
+
+/// Command delivered to a service's canonical log writer.
+enum ServiceLogMessage {
+    /// Persist one captured output line.
+    Line(ServiceLogLine),
+    /// Flush all previously delivered lines and acknowledge completion.
+    Flush(mpsc::SyncSender<std::io::Result<()>>),
 }
 
 /// Reads one service output stream and sends completed lines to the canonical writer.
@@ -1943,7 +1962,7 @@ fn read_service_log_stream(
     service_label: &str,
     stream: LogStream,
     mut reader: impl Read,
-    sender: mpsc::Sender<ServiceLogLine>,
+    sender: mpsc::Sender<ServiceLogMessage>,
 ) -> std::io::Result<()> {
     let mut buffer = [0_u8; 8192];
     let mut pending = Vec::new();
@@ -1972,16 +1991,16 @@ fn read_service_log_stream(
                 line.pop();
             }
 
-            let _ = sender.send(ServiceLogLine { stream, line });
+            let _ = sender.send(ServiceLogMessage::Line(ServiceLogLine { stream, line }));
         }
         flush_forwarded_lines(&mut forward_pending, service_label, echo_to_terminal);
     }
 
     if !pending.is_empty() {
-        let _ = sender.send(ServiceLogLine {
+        let _ = sender.send(ServiceLogMessage::Line(ServiceLogLine {
             stream,
             line: pending.clone(),
-        });
+        }));
     }
 
     flush_remaining_forwarded_line(&mut forward_pending, service_label, echo_to_terminal);
@@ -1993,15 +2012,35 @@ fn write_service_log(
     project: &str,
     service_label: &str,
     path: PathBuf,
-    receiver: mpsc::Receiver<ServiceLogLine>,
+    receiver: mpsc::Receiver<ServiceLogMessage>,
     settings: EffectiveLogsConfig,
 ) -> std::io::Result<()> {
     let mut file = ActiveLogFile::open(path, settings)?;
 
     for message in receiver {
-        let formatted = format_captured_log_line(message.stream.as_str(), &message.line);
-        file.write_line(&formatted)?;
-        append_live_log_chunk(project, service_label, LogStream::Combined, &formatted);
+        match message {
+            ServiceLogMessage::Line(line) => {
+                let formatted =
+                    format_captured_log_line(line.stream.as_str(), &line.line);
+                file.write_line(&formatted)?;
+                append_live_log_chunk(
+                    project,
+                    service_label,
+                    LogStream::Combined,
+                    &formatted,
+                );
+            }
+            ServiceLogMessage::Flush(reply) => match file.flush() {
+                Ok(()) => {
+                    let _ = reply.send(Ok(()));
+                }
+                Err(err) => {
+                    let reported = io::Error::new(err.kind(), err.to_string());
+                    let _ = reply.send(Err(reported));
+                    return Err(err);
+                }
+            },
+        }
     }
 
     file.flush()
@@ -2064,6 +2103,532 @@ fn stream_dynamic_child_log(
     }
 
     file.flush()
+}
+
+/// Pause and partial-line state shared with one managed service log reader.
+struct LogReaderState {
+    /// Whether the reader has acknowledged the global handoff pause.
+    paused: AtomicBool,
+    /// Unterminated bytes already consumed from the pipe.
+    pending: Mutex<Vec<u8>>,
+}
+
+/// Supervisor-owned duplicate of one managed service output pipe.
+struct RegisteredLogPipe {
+    /// Stable registry identifier.
+    id: u64,
+    /// Canonical writer shared by both streams of a service.
+    writer_id: u64,
+    /// Project that owns the service.
+    project: String,
+    /// Service that owns the stream.
+    service: String,
+    /// Captured output stream.
+    stream: LogStream,
+    /// Rotation policy restored after re-exec.
+    settings: EffectiveLogsConfig,
+    /// Inheritable duplicate retained without consuming pipe bytes.
+    owner: File,
+    /// Reader pause and partial-line state.
+    state: Arc<LogReaderState>,
+    /// Channel used to flush the canonical writer before re-exec.
+    writer: mpsc::Sender<ServiceLogMessage>,
+}
+
+/// Returns the process-wide registry of managed service output pipes.
+fn registered_log_pipes() -> &'static Mutex<Vec<RegisteredLogPipe>> {
+    static REGISTRY: OnceLock<Mutex<Vec<RegisteredLogPipe>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Global pause requested while log descriptors are prepared for re-exec.
+fn log_handoff_paused() -> &'static AtomicBool {
+    static PAUSED: AtomicBool = AtomicBool::new(false);
+    &PAUSED
+}
+
+/// Returns the next unique log reader or writer identifier.
+fn next_log_handoff_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Sets or clears close-on-exec for one descriptor.
+fn set_close_on_exec(fd: RawFd, enabled: bool) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let next = if enabled {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Enables nonblocking reads so a log worker can promptly acknowledge pause.
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Duplicates a descriptor with close-on-exec enabled.
+fn duplicate_for_handoff(fd: RawFd) -> io::Result<File> {
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, MIN_HANDOFF_FD) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(duplicate) })
+}
+
+/// Starts the canonical writer shared by a service's stdout and stderr readers.
+fn spawn_canonical_service_writer(
+    project: &str,
+    service: &str,
+    settings: EffectiveLogsConfig,
+) -> io::Result<(u64, mpsc::Sender<ServiceLogMessage>)> {
+    let path = get_service_log_path(project, service);
+    let project_label = project.to_string();
+    let service_label = service.to_string();
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name(SERVICE_LOG_THREAD.into())
+        .spawn(move || {
+            if let Err(err) = write_service_log(
+                &project_label,
+                &service_label,
+                path.clone(),
+                receiver,
+                settings,
+            ) {
+                eprintln!(
+                    "Warning: Unable to write service log file at {:?}: {}",
+                    path, err
+                );
+            }
+        })?;
+    Ok((next_log_handoff_id(), sender))
+}
+
+/// Removes a managed log pipe after its reader reaches EOF or fails.
+fn remove_registered_log_pipe(id: u64) {
+    if let Ok(mut registry) = registered_log_pipes().lock() {
+        registry.retain(|entry| entry.id != id);
+    }
+}
+
+/// Reads one managed service pipe while retaining its partial line for handoff.
+fn read_registered_log_stream(
+    service_label: &str,
+    stream: LogStream,
+    mut reader: impl Read,
+    sender: mpsc::Sender<ServiceLogMessage>,
+    state: &LogReaderState,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; 8192];
+    let mut pending = state
+        .pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    loop {
+        if log_handoff_paused().load(Ordering::Acquire) {
+            state.paused.store(true, Ordering::Release);
+            while log_handoff_paused().load(Ordering::Acquire) {
+                thread::sleep(LOG_HANDOFF_POLL_INTERVAL);
+            }
+            state.paused.store(false, Ordering::Release);
+            continue;
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => {
+                pending.extend_from_slice(&buffer[..bytes_read]);
+                while let Some(newline_pos) =
+                    pending.iter().position(|byte| *byte == b'\n')
+                {
+                    let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
+                    if matches!(line.last(), Some(b'\n')) {
+                        line.pop();
+                    }
+                    if matches!(line.last(), Some(b'\r')) {
+                        line.pop();
+                    }
+                    forward_prefixed_line(service_label, &line, false);
+                    if sender
+                        .send(ServiceLogMessage::Line(ServiceLogLine { stream, line }))
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+                *state
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = pending.clone();
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(LOG_HANDOFF_POLL_INTERVAL);
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    if !pending.is_empty() {
+        forward_prefixed_line(service_label, &pending, false);
+        let _ = sender.send(ServiceLogMessage::Line(ServiceLogLine {
+            stream,
+            line: pending,
+        }));
+    }
+    state
+        .pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    Ok(())
+}
+
+/// Registers and starts one managed service output reader.
+#[allow(clippy::too_many_arguments)]
+fn spawn_registered_log_reader<R>(
+    project: &str,
+    service: &str,
+    stream: LogStream,
+    reader: R,
+    pending: Vec<u8>,
+    settings: EffectiveLogsConfig,
+    writer_id: u64,
+    writer: mpsc::Sender<ServiceLogMessage>,
+) -> io::Result<()>
+where
+    R: Read + AsRawFd + Send + 'static,
+{
+    set_nonblocking(reader.as_raw_fd())?;
+    set_close_on_exec(reader.as_raw_fd(), true)?;
+    let owner = duplicate_for_handoff(reader.as_raw_fd())?;
+    let id = next_log_handoff_id();
+    let state = Arc::new(LogReaderState {
+        paused: AtomicBool::new(false),
+        pending: Mutex::new(pending),
+    });
+    registered_log_pipes()
+        .lock()
+        .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?
+        .push(RegisteredLogPipe {
+            id,
+            writer_id,
+            project: project.to_string(),
+            service: service.to_string(),
+            stream,
+            settings,
+            owner,
+            state: Arc::clone(&state),
+            writer: writer.clone(),
+        });
+    let service_label = service.to_string();
+    let thread_name = match stream {
+        LogStream::Stdout => SERVICE_STDOUT_THREAD,
+        LogStream::Stderr => SERVICE_STDERR_THREAD,
+        LogStream::Combined => SERVICE_LOG_THREAD,
+    };
+    if let Err(err) = thread::Builder::new()
+        .name(thread_name.into())
+        .spawn(move || {
+            if let Err(err) =
+                read_registered_log_stream(&service_label, stream, reader, writer, &state)
+            {
+                eprintln!(
+                    "Warning: Unable to read {} for [{}]: {}",
+                    stream.as_str(),
+                    service_label,
+                    err
+                );
+            }
+            remove_registered_log_pipe(id);
+        })
+    {
+        remove_registered_log_pipe(id);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Starts re-exec-aware log capture for a newly spawned managed service.
+///
+/// # Errors
+///
+/// Returns an operating-system error when descriptors or log workers cannot be
+/// created.
+pub fn spawn_managed_service_log_writers(
+    project: &str,
+    service: &str,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    settings: EffectiveLogsConfig,
+) -> io::Result<()> {
+    let (writer_id, writer) = spawn_canonical_service_writer(project, service, settings)?;
+    if let Some(stdout) = stdout {
+        spawn_registered_log_reader(
+            project,
+            service,
+            LogStream::Stdout,
+            stdout,
+            Vec::new(),
+            settings,
+            writer_id,
+            writer.clone(),
+        )?;
+    }
+    if let Some(stderr) = stderr {
+        spawn_registered_log_reader(
+            project,
+            service,
+            LogStream::Stderr,
+            stderr,
+            Vec::new(),
+            settings,
+            writer_id,
+            writer,
+        )?;
+    }
+    Ok(())
+}
+
+/// Returns whether both managed file-log streams can survive supervisor re-exec.
+pub fn service_log_handoff_ready(project: &str, service: &str) -> bool {
+    let Ok(registry) = registered_log_pipes().lock() else {
+        return false;
+    };
+    [LogStream::Stdout, LogStream::Stderr]
+        .into_iter()
+        .all(|stream| {
+            registry.iter().any(|entry| {
+                entry.project == project
+                    && entry.service == service
+                    && entry.stream == stream
+            })
+        })
+}
+
+/// Pauses log readers, flushes canonical writers, and makes retained pipe
+/// descriptors inheritable by the replacement supervisor.
+pub fn prepare_log_pipe_handoff() -> io::Result<Vec<HandoffLogPipe>> {
+    log_handoff_paused().store(true, Ordering::Release);
+    let deadline = std::time::Instant::now() + LOG_HANDOFF_TIMEOUT;
+    loop {
+        let all_paused = registered_log_pipes()
+            .lock()
+            .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?
+            .iter()
+            .all(|entry| entry.state.paused.load(Ordering::Acquire));
+        if all_paused {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            cancel_log_pipe_handoff();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "managed log readers did not pause for supervisor handoff",
+            ));
+        }
+        thread::sleep(LOG_HANDOFF_POLL_INTERVAL);
+    }
+
+    let writers = registered_log_pipes()
+        .lock()
+        .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?
+        .iter()
+        .map(|entry| (entry.writer_id, entry.writer.clone()))
+        .collect::<HashMap<_, _>>();
+    for writer in writers.into_values() {
+        let (reply, response) = mpsc::sync_channel(1);
+        if writer.send(ServiceLogMessage::Flush(reply)).is_err() {
+            cancel_log_pipe_handoff();
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "managed service log writer stopped before handoff",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match response.recv_timeout(remaining) {
+            Ok(result) => result?,
+            Err(_) => {
+                cancel_log_pipe_handoff();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "managed service logs did not flush before handoff",
+                ));
+            }
+        }
+    }
+
+    let mut registry = registered_log_pipes()
+        .lock()
+        .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?;
+    let mut handoff = Vec::with_capacity(registry.len());
+    for entry in registry.iter_mut() {
+        if let Err(err) = set_close_on_exec(entry.owner.as_raw_fd(), false) {
+            for retained in registry.iter() {
+                let _ = set_close_on_exec(retained.owner.as_raw_fd(), true);
+            }
+            log_handoff_paused().store(false, Ordering::Release);
+            return Err(err);
+        }
+        handoff.push(HandoffLogPipe {
+            project: entry.project.clone(),
+            service: entry.service.clone(),
+            stream: entry.stream.as_str().to_string(),
+            fd: entry.owner.as_raw_fd(),
+            pending: entry
+                .state
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            settings: entry.settings,
+        });
+    }
+    Ok(handoff)
+}
+
+/// Restores close-on-exec and resumes readers after a failed exec attempt.
+pub fn cancel_log_pipe_handoff() {
+    if let Ok(registry) = registered_log_pipes().lock() {
+        for entry in registry.iter() {
+            let _ = set_close_on_exec(entry.owner.as_raw_fd(), true);
+        }
+    }
+    log_handoff_paused().store(false, Ordering::Release);
+}
+
+/// Validates inherited log metadata and descriptors without consuming them.
+fn validate_log_pipe_handoff(pipes: &[HandoffLogPipe]) -> io::Result<Vec<LogStream>> {
+    let mut descriptors = HashSet::new();
+    let mut streams = HashSet::new();
+    let mut settings = HashMap::new();
+    let mut parsed = Vec::with_capacity(pipes.len());
+
+    for pipe in pipes {
+        if pipe.project.is_empty() || pipe.service.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handed-off log pipe has an empty project or service",
+            ));
+        }
+        if pipe.fd < MIN_HANDOFF_FD || unsafe { libc::fcntl(pipe.fd, libc::F_GETFD) } < 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("handed-off log descriptor {} is invalid", pipe.fd),
+            ));
+        }
+        if !descriptors.insert(pipe.fd) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("handed-off log descriptor {} is duplicated", pipe.fd),
+            ));
+        }
+
+        let stream = match pipe.stream.as_str() {
+            "stdout" => LogStream::Stdout,
+            "stderr" => LogStream::Stderr,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported handed-off log stream `{other}`"),
+                ));
+            }
+        };
+        if !streams.insert((pipe.project.as_str(), pipe.service.as_str(), stream)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "handed-off {} stream for `{}/{}` is duplicated",
+                    pipe.stream, pipe.project, pipe.service
+                ),
+            ));
+        }
+
+        let key = (pipe.project.as_str(), pipe.service.as_str());
+        if let Some(previous) = settings.insert(key, pipe.settings)
+            && previous != pipe.settings
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "handed-off log settings for `{}/{}` are inconsistent",
+                    pipe.project, pipe.service
+                ),
+            ));
+        }
+        parsed.push(stream);
+    }
+
+    Ok(parsed)
+}
+
+/// Rebuilds managed log readers from descriptors inherited across re-exec.
+///
+/// # Errors
+///
+/// Returns an operating-system error when a descriptor is invalid or a worker
+/// cannot be restored.
+pub fn resume_log_pipe_handoff(pipes: &[HandoffLogPipe]) -> io::Result<()> {
+    if !registered_log_pipes()
+        .lock()
+        .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?
+        .is_empty()
+    {
+        return Err(io::Error::other(
+            "managed log pipe registry was not empty during resume",
+        ));
+    }
+    let streams = validate_log_pipe_handoff(pipes)?;
+    let mut writers: HashMap<(String, String), (u64, mpsc::Sender<ServiceLogMessage>)> =
+        HashMap::new();
+    for (pipe, stream) in pipes.iter().zip(streams) {
+        let key = (pipe.project.clone(), pipe.service.clone());
+        let (writer_id, writer) = match writers.get(&key) {
+            Some((writer_id, writer)) => (*writer_id, writer.clone()),
+            None => {
+                let created = spawn_canonical_service_writer(
+                    &pipe.project,
+                    &pipe.service,
+                    pipe.settings,
+                )?;
+                writers.insert(key, created.clone());
+                created
+            }
+        };
+        let reader = duplicate_for_handoff(pipe.fd)?;
+        spawn_registered_log_reader(
+            &pipe.project,
+            &pipe.service,
+            stream,
+            reader,
+            pipe.pending.clone(),
+            pipe.settings,
+            writer_id,
+            writer,
+        )?;
+    }
+    for pipe in pipes {
+        if unsafe { libc::close(pipe.fd) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Starts a canonical single-stream service log pipeline.

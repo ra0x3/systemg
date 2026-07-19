@@ -2,10 +2,17 @@
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    ffi::CString,
+    fs::File,
     io,
     io::Write,
+    os::fd::{AsRawFd, FromRawFd},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock, mpsc},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -16,7 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{
-        Config, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
+        Config, LogSink, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
         load_config_from_file, load_projects_from_file,
     },
     cron::{CronExecutionStatus, CronManager},
@@ -40,12 +47,18 @@ use crate::{
         collect_runtime_snapshot, collect_runtime_snapshot_with_cron_hashes,
         compute_overall_health, cron_hashes_for_config,
     },
+    upgrade::{
+        HANDOFF_SCHEMA_VERSION, HandoffProject, LIVE_REEXEC_PROTOCOL, LiveUpgradeInfo,
+        SupervisorHandoff, UpgradeTarget,
+    },
 };
 
 /// Interval between cron scheduler scans.
 const CRON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// Delay before retrying a failed control-socket accept.
 const CONTROL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// Maximum time allowed for a live-upgrade acceptance response to reach its client.
+const UPGRADE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Supervisor errors.
 #[derive(Debug, Error)]
@@ -95,28 +108,59 @@ fn error_response(err: &SupervisorError) -> ControlResponse {
 
 /// Daemon supervisor that handles CLI commands.
 pub struct Supervisor {
+    /// Canonical path associated with the primary project manifest.
     config_path: PathBuf,
+    /// Primary project's process daemon.
     daemon: Daemon,
+    /// Whether newly spawned services use legacy detached behavior.
     detach_children: bool,
+    /// Scheduler shared by all registered projects.
     cron_manager: CronManager,
+    /// Optional single-service filter applied to the primary boot.
     service_filter: Option<String>,
+    /// Latest aggregate status snapshot.
     status_cache: StatusCache,
+    /// Periodic status snapshot worker.
     status_refresher: Option<StatusRefresher>,
+    /// Shared metrics history.
     metrics_store: MetricsHandle,
+    /// Periodic metrics collection worker.
     metrics_collector: Option<MetricsCollector>,
+    /// Dynamic child-process ownership and limits.
     spawn_manager: DynamicSpawnManager,
+    /// Whether service stderr is forwarded to supervisor stdout.
     pipe_stderr: bool,
+    /// Attachment mode of the primary project.
     primary_project_mode: ProjectRunMode,
+    /// Whether the primary project remains registered.
     primary_active: bool,
+    /// Additional registered project runtimes.
     extra_projects: BTreeMap<String, ProjectRuntime>,
+    /// Scheduler routing snapshot for all cron-capable projects.
     cron_projects: Arc<RwLock<Vec<CronProjectRuntime>>>,
+    /// Single mutable operation currently reported to clients.
     op_slot: OpSlot,
     /// Additional projects declared in the primary config file (a multi-project
     /// manifest), registered as extra projects once the primary has booted.
     pending_projects: Vec<Config>,
     /// Race-free record of the initial boot, streamed to a `BootStream` client.
     boot_journal: BootJournal,
+    /// Daemons visible to cancellation-aware boot requests.
     boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
+    /// Whether the control plane is quiescing for live re-execution.
+    upgrading: Arc<AtomicBool>,
+    /// Serializes cron due-state mutation with upgrade preflight.
+    cron_gate: Arc<std::sync::Mutex<()>>,
+    /// Inherited runtime state awaiting activation in a replacement image.
+    handoff: Option<LoadedHandoff>,
+}
+
+/// Handoff record loaded by the replacement binary before its event loop starts.
+struct LoadedHandoff {
+    /// Private serialized handoff path removed after successful resume.
+    path: PathBuf,
+    /// Validated runtime state and inherited descriptor numbers.
+    state: SupervisorHandoff,
 }
 
 /// Runtime state for an additional project managed by the resident supervisor.
@@ -224,13 +268,29 @@ struct ReadContext {
     version: String,
     boot_journal: BootJournal,
     boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
+    /// Whether mutations are refused while a live upgrade is committing.
+    upgrading: Arc<AtomicBool>,
 }
 
 /// A mutation command routed from the acceptor to the single-writer owner thread,
 /// paired with a channel to return the owner's response to the waiting connection.
 struct MutationRequest {
+    /// Mutation routed to the supervisor owner thread.
     command: ControlCommand,
+    /// Response returned to the connection worker.
     reply: mpsc::Sender<ControlResponse>,
+    /// Acknowledges that the response reached the client socket.
+    delivered: mpsc::Receiver<bool>,
+}
+
+/// Validated handoff ready to execute after the client receives acceptance.
+struct PreparedUpgrade {
+    /// Replacement executable.
+    target: UpgradeTarget,
+    /// Private serialized handoff record.
+    path: PathBuf,
+    /// Primary manifest path required by the internal supervisor command.
+    config: PathBuf,
 }
 
 /// Handles fallback cron user.
@@ -1513,10 +1573,27 @@ impl Supervisor {
             )
             .into());
         }
-        // The first project becomes the primary daemon; the rest are registered
-        // as extra projects after the primary boots.
         let config = projects.remove(0);
-        let pending_projects = projects;
+        Self::from_primary_config(
+            config_path,
+            config,
+            projects,
+            detach_children,
+            service_filter,
+            primary_project_mode,
+        )
+    }
+
+    /// Builds a supervisor from an already parsed primary project and optional
+    /// projects awaiting the normal initial boot.
+    fn from_primary_config(
+        config_path: PathBuf,
+        config: Config,
+        pending_projects: Vec<Config>,
+        detach_children: bool,
+        service_filter: Option<String>,
+        primary_project_mode: ProjectRunMode,
+    ) -> Result<Self, SupervisorError> {
         let cron_manager = CronManager::new();
         cron_manager.sync_from_config(&config)?;
 
@@ -1570,7 +1647,112 @@ impl Supervisor {
             pending_projects,
             boot_journal: BootJournal::new(),
             boot_projects,
+            upgrading: Arc::new(AtomicBool::new(false)),
+            cron_gate: Arc::new(std::sync::Mutex::new(())),
+            handoff: None,
         })
+    }
+
+    /// Loads the exact project named by a handoff record and verifies that its
+    /// manifest did not change while the supervisor image was replaced.
+    fn load_handoff_project(project: &HandoffProject) -> Result<Config, SupervisorError> {
+        let actual_hash =
+            ipc::manifest_content_hash(&project.config_path).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "could not hash handed-off manifest {}",
+                        project.config_path.display()
+                    ),
+                )
+            })?;
+        if actual_hash != project.config_hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "manifest {} changed during supervisor handoff",
+                    project.config_path.display()
+                ),
+            )
+            .into());
+        }
+        let trusted = runtime::open_trusted_config(&project.config_path)?;
+        load_projects_from_file(trusted, &project.config_path)?
+            .into_iter()
+            .find(|config| config.project.id == project.project_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "project `{}` is absent from handed-off manifest {}",
+                        project.project_id,
+                        project.config_path.display()
+                    ),
+                )
+                .into()
+            })
+    }
+
+    /// Reconstructs a supervisor from a private state record created immediately
+    /// before same-PID live re-execution.
+    pub fn from_handoff(path: PathBuf) -> Result<Self, SupervisorError> {
+        let state = SupervisorHandoff::load(&path)?;
+        let current = LiveUpgradeInfo::current();
+        if state.target_version != current.version {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "handoff targets {}, but replacement binary is {}",
+                    state.target_version, current.version
+                ),
+            )
+            .into());
+        }
+        let primary = state.primary.clone();
+        let primary_config = Self::load_handoff_project(&primary)?;
+        let mut supervisor = Self::from_primary_config(
+            primary.config_path.clone(),
+            primary_config,
+            Vec::new(),
+            false,
+            state.service_filter.clone(),
+            primary.mode,
+        )?;
+        supervisor.primary_active = primary.active;
+        supervisor.pipe_stderr = state.pipe_stderr;
+        supervisor.daemon.set_pipe_stderr(state.pipe_stderr);
+        supervisor.daemon.adopt_handoff_state(&primary.daemon)?;
+        if !primary.active
+            && let Ok(mut projects) = supervisor.boot_projects.write()
+        {
+            projects.remove(&supervisor.daemon.config().project.id);
+        }
+
+        for (project_id, project) in &state.projects {
+            let config = Self::load_handoff_project(project)?;
+            Self::register_spawn_limits_for_config(&supervisor.spawn_manager, &config)?;
+            let mut daemon = Daemon::from_config(config, false)?;
+            daemon.set_op_slot(supervisor.op_slot.clone());
+            daemon.set_pipe_stderr(state.pipe_stderr);
+            daemon.adopt_handoff_state(&project.daemon)?;
+            if project.active
+                && let Ok(mut projects) = supervisor.boot_projects.write()
+            {
+                projects.insert(project_id.clone(), daemon.clone());
+            }
+            supervisor.extra_projects.insert(
+                project_id.clone(),
+                ProjectRuntime {
+                    daemon,
+                    mode: project.mode,
+                    config_path: project.config_path.clone(),
+                },
+            );
+        }
+        supervisor.sync_cron_projects()?;
+        crate::logs::resume_log_pipe_handoff(&state.log_pipes)?;
+        supervisor.handoff = Some(LoadedHandoff { path, state });
+        Ok(supervisor)
     }
 
     /// Sets whether to pipe stderr from services to stdout.
@@ -1875,10 +2057,21 @@ impl Supervisor {
             return;
         }
 
+        if read_ctx.upgrading.load(Ordering::Acquire) {
+            let response =
+                ControlResponse::Diag(Box::new(crate::upgrade::environment_unsafe(
+                    "the supervisor is committing another live upgrade",
+                )));
+            let _ = ipc::write_response(&mut stream, &response);
+            return;
+        }
+
         let (reply_tx, reply_rx) = mpsc::channel();
+        let (delivered_tx, delivered_rx) = mpsc::channel();
         let request = MutationRequest {
             command,
             reply: reply_tx,
+            delivered: delivered_rx,
         };
         if mutation_tx.send(request).is_err() {
             let _ = ipc::write_response(
@@ -1889,15 +2082,18 @@ impl Supervisor {
         }
         match reply_rx.recv() {
             Ok(response) => {
-                let _ = ipc::write_response(&mut stream, &response);
+                let delivered = ipc::write_response(&mut stream, &response).is_ok();
+                let _ = delivered_tx.send(delivered);
             }
             Err(_) => {
-                let _ = ipc::write_response(
+                let delivered = ipc::write_response(
                     &mut stream,
                     &ControlResponse::Error(
                         "supervisor dropped the command before replying".into(),
                     ),
-                );
+                )
+                .is_ok();
+                let _ = delivered_tx.send(delivered);
             }
         }
     }
@@ -2048,10 +2244,292 @@ impl Supervisor {
         }
     }
 
+    /// Sets or clears close-on-exec for one supervisor-owned descriptor.
+    fn set_descriptor_cloexec(fd: libc::c_int, enabled: bool) -> io::Result<()> {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let next = if enabled {
+            flags | libc::FD_CLOEXEC
+        } else {
+            flags & !libc::FD_CLOEXEC
+        };
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Captures one project's parsed manifest and quiesced daemon state.
+    fn project_handoff(
+        daemon: &Daemon,
+        config_path: &Path,
+        mode: ProjectRunMode,
+        active: bool,
+    ) -> Result<HandoffProject, ProcessManagerError> {
+        let state = daemon.handoff_state()?;
+        let config = daemon.config();
+        for process in &state.processes {
+            let Some(service) = config.services.get(&process.service) else {
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: process.service.clone(),
+                    source: io::Error::other(
+                        "managed process is absent from the active manifest",
+                    ),
+                });
+            };
+            if service.effective_logs(&config.logs).sink == LogSink::File
+                && !crate::logs::service_log_handoff_ready(
+                    &config.project.id,
+                    &process.service,
+                )
+            {
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: process.service.clone(),
+                    source: io::Error::other(
+                        "managed stdout or stderr pipe is unavailable for handoff",
+                    ),
+                });
+            }
+        }
+        Ok(HandoffProject {
+            project_id: config.project.id.clone(),
+            config_path: config_path.to_path_buf(),
+            config_hash: ipc::manifest_content_hash(config_path).ok_or_else(|| {
+                ProcessManagerError::ServiceStartError {
+                    service: config.project.id.clone(),
+                    source: io::Error::other("could not hash the active manifest"),
+                }
+            })?,
+            mode,
+            active,
+            daemon: state,
+        })
+    }
+
+    /// Stops monitor threads so process identity and restart bookkeeping cannot
+    /// change while a handoff record is being built.
+    fn quiesce_project_monitors(&self) {
+        self.daemon.shutdown_monitor();
+        for project in self.extra_projects.values() {
+            project.daemon.shutdown_monitor();
+        }
+    }
+
+    /// Restarts project monitors after a handoff attempt is cancelled.
+    fn resume_project_monitors(&self) {
+        if self.primary_active
+            && let Err(err) = self.daemon.ensure_monitoring()
+        {
+            error!("Failed to resume primary monitor after upgrade cancellation: {err}");
+        }
+        for (project_id, project) in &self.extra_projects {
+            if let Err(err) = project.daemon.ensure_monitoring() {
+                error!(
+                    "Failed to resume monitor for project '{project_id}' after upgrade cancellation: {err}"
+                );
+            }
+        }
+    }
+
+    /// Validates runtime suitability, quiesces mutable ownership, and persists a
+    /// complete descriptor-backed supervisor handoff.
+    fn prepare_upgrade(
+        &self,
+        binary: &Path,
+        runtime_lock: &File,
+        listener: &std::os::unix::net::UnixListener,
+    ) -> Result<PreparedUpgrade, Box<crate::diag::Diagnostic>> {
+        let target = UpgradeTarget::inspect(binary, &LiveUpgradeInfo::current())?;
+        if self.pipe_stderr {
+            return Err(Box::new(crate::upgrade::environment_unsafe(
+                "service stderr is attached to supervisor stdout; restart without `--stderr` before upgrading",
+            )));
+        }
+        let cron_gate = self
+            .cron_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self
+            .upgrading
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(Box::new(crate::upgrade::environment_unsafe(
+                "another live upgrade is already committing",
+            )));
+        }
+        if let Some(job) = self
+            .cron_manager
+            .get_all_jobs()
+            .into_iter()
+            .find(|job| job.currently_running)
+        {
+            self.upgrading.store(false, Ordering::Release);
+            return Err(Box::new(crate::upgrade::environment_unsafe(format!(
+                "cron unit `{}` is currently running",
+                job.service_name
+            ))));
+        }
+        let active_children = self.spawn_manager.active_child_count();
+        if active_children > 0 {
+            self.upgrading.store(false, Ordering::Release);
+            return Err(Box::new(crate::upgrade::environment_unsafe(format!(
+                "{active_children} dynamic child process(es) are still active"
+            ))));
+        }
+        drop(cron_gate);
+
+        self.quiesce_project_monitors();
+        let prepared = (|| {
+            let primary = Self::project_handoff(
+                &self.daemon,
+                &self.config_path,
+                self.primary_project_mode,
+                self.primary_active,
+            )
+            .map_err(|err| {
+                Box::new(crate::upgrade::environment_unsafe(err.to_string()))
+            })?;
+            let mut projects = BTreeMap::new();
+            for (project_id, project) in &self.extra_projects {
+                let handoff = Self::project_handoff(
+                    &project.daemon,
+                    &project.config_path,
+                    project.mode,
+                    true,
+                )
+                .map_err(|err| {
+                    Box::new(crate::upgrade::environment_unsafe(err.to_string()))
+                })?;
+                projects.insert(project_id.clone(), handoff);
+            }
+            let log_pipes = crate::logs::prepare_log_pipe_handoff().map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(err.to_string()))
+            })?;
+            Self::set_descriptor_cloexec(runtime_lock.as_raw_fd(), false).map_err(
+                |err| Box::new(crate::upgrade::handoff_failed(err.to_string())),
+            )?;
+            Self::set_descriptor_cloexec(listener.as_raw_fd(), false).map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(err.to_string()))
+            })?;
+            let source_binary = std::env::current_exe()
+                .and_then(std::fs::canonicalize)
+                .map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(format!(
+                    "could not resolve the resident binary for rollback: {err}"
+                )))
+            })?;
+            let state = SupervisorHandoff {
+                schema: HANDOFF_SCHEMA_VERSION,
+                protocol: LIVE_REEXEC_PROTOCOL,
+                source_binary,
+                source_version: LiveUpgradeInfo::current().version,
+                target_version: target.info.version.clone(),
+                rollback_reason: None,
+                lock_fd: runtime_lock.as_raw_fd(),
+                listener_fd: listener.as_raw_fd(),
+                service_filter: self.service_filter.clone(),
+                pipe_stderr: self.pipe_stderr,
+                primary,
+                projects,
+                log_pipes,
+            };
+            let path = state.persist().map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(err.to_string()))
+            })?;
+            Ok(PreparedUpgrade {
+                target,
+                path,
+                config: self.config_path.clone(),
+            })
+        })();
+        if prepared.is_err() {
+            crate::logs::cancel_log_pipe_handoff();
+            let _ = Self::set_descriptor_cloexec(runtime_lock.as_raw_fd(), true);
+            let _ = Self::set_descriptor_cloexec(listener.as_raw_fd(), true);
+            self.resume_project_monitors();
+            self.upgrading.store(false, Ordering::Release);
+        }
+        prepared
+    }
+
+    /// Executes the validated replacement binary in the current supervisor PID.
+    fn execute_upgrade(prepared: &PreparedUpgrade) -> io::Result<()> {
+        let values = [
+            prepared.target.path.to_string_lossy().to_string(),
+            "supervise".to_string(),
+            "--config".to_string(),
+            prepared.config.to_string_lossy().to_string(),
+            "--handoff".to_string(),
+            prepared.path.to_string_lossy().to_string(),
+        ];
+        let args = values
+            .iter()
+            .map(|value| {
+                CString::new(value.as_str()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "upgrade argument contains a NUL byte",
+                    )
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        nix::unistd::execv(&args[0], &args)
+            .map(|_| ())
+            .map_err(io::Error::other)
+    }
+
+    /// Restores the resident image after its final `exec` call failed.
+    fn recover_upgrade(
+        &self,
+        prepared: &PreparedUpgrade,
+        runtime_lock: &File,
+        listener: &std::os::unix::net::UnixListener,
+    ) {
+        if let Err(err) = std::fs::remove_file(&prepared.path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            warn!(
+                "Failed to remove cancelled handoff {:?}: {err}",
+                prepared.path
+            );
+        }
+        crate::logs::cancel_log_pipe_handoff();
+        let _ = Self::set_descriptor_cloexec(runtime_lock.as_raw_fd(), true);
+        let _ = Self::set_descriptor_cloexec(listener.as_raw_fd(), true);
+        self.resume_project_monitors();
+        self.upgrading.store(false, Ordering::Release);
+    }
+
     /// Runs the supervisor event loop.
     fn run_internal(&mut self) -> Result<(), SupervisorError> {
-        let _runtime_lock = ipc::lock_supervisor_runtime()?;
-        ipc::cleanup_runtime()?;
+        let loaded = self.handoff.take();
+        let resumed = loaded.is_some();
+        let (runtime_lock, listener, handoff_path) = match loaded {
+            Some(LoadedHandoff { path, state }) => {
+                if let Some(reason) = &state.rollback_reason {
+                    error!(
+                        "Replacement supervisor failed; resumed {} after rollback: {reason}",
+                        state.source_version
+                    );
+                }
+                let lock = unsafe { File::from_raw_fd(state.lock_fd) };
+                let listener = unsafe {
+                    std::os::unix::net::UnixListener::from_raw_fd(state.listener_fd)
+                };
+                Self::set_descriptor_cloexec(lock.as_raw_fd(), true)?;
+                Self::set_descriptor_cloexec(listener.as_raw_fd(), true)?;
+                (lock, listener, Some(path))
+            }
+            None => {
+                let lock = ipc::lock_supervisor_runtime()?;
+                ipc::cleanup_runtime()?;
+                let listener = ipc::bind_control_socket()?;
+                (lock, listener, None)
+            }
+        };
 
         // Load (or create with defaults) the supervisor's OWN config — distinct
         // from any project manifest — and apply its log-rotation defaults as the
@@ -2065,7 +2543,6 @@ impl Supervisor {
         );
 
         ipc::write_config_hint(&self.config_path)?;
-        let listener = ipc::bind_control_socket()?;
         ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
 
         match self.collect_aggregate_snapshot(false) {
@@ -2080,15 +2557,29 @@ impl Supervisor {
             version: env!("CARGO_PKG_VERSION").to_string(),
             boot_journal: self.boot_journal.clone(),
             boot_projects: Arc::clone(&self.boot_projects),
+            upgrading: Arc::clone(&self.upgrading),
         };
-        Self::spawn_acceptor(listener, read_ctx, mutation_tx)?;
+        Self::spawn_acceptor(listener.try_clone()?, read_ctx, mutation_tx)?;
 
         if let Ok(socket_path) = ipc::socket_path() {
             info!("systemg supervisor listening on {:?}", socket_path);
         }
 
-        self.boot_primary_services()?;
-        self.daemon.ensure_monitoring()?;
+        if resumed {
+            if self.primary_active {
+                self.daemon.ensure_monitoring()?;
+            }
+            for project in self.extra_projects.values() {
+                project.daemon.ensure_monitoring()?;
+            }
+            self.boot_journal.push(BootFrame::Done {
+                started: 0,
+                failed: 0,
+            });
+        } else {
+            self.boot_primary_services()?;
+            self.daemon.ensure_monitoring()?;
+        }
 
         let config_handle = self.daemon.config();
         let pid_handle = self.daemon.pid_file_handle();
@@ -2134,11 +2625,19 @@ impl Supervisor {
         let cron_manager = self.cron_manager.clone();
         let cron_projects = Arc::clone(&self.cron_projects);
         let metrics_store = self.metrics_store.clone();
+        let upgrading = Arc::clone(&self.upgrading);
+        let cron_gate = Arc::clone(&self.cron_gate);
 
         thread::Builder::new()
             .name("sysg-cron".to_string())
             .spawn(move || loop {
                 thread::sleep(CRON_TICK_INTERVAL);
+                let _gate = cron_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if upgrading.load(Ordering::Acquire) {
+                    continue;
+                }
 
                 let due_jobs = cron_manager.get_due_job_refs();
                 if !due_jobs.is_empty() {
@@ -2460,6 +2959,13 @@ impl Supervisor {
                 }
             })?;
 
+        if let Some(path) = handoff_path
+            && let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            warn!("Failed to remove completed supervisor handoff {path:?}: {err}");
+        }
+
         loop {
             let request = match mutation_rx.recv() {
                 Ok(request) => request,
@@ -2468,18 +2974,52 @@ impl Supervisor {
                     break;
                 }
             };
-            let should_shutdown = matches!(request.command, ControlCommand::Shutdown);
-            let owns_slot = !matches!(request.command, ControlCommand::AddProject { .. });
-            let _op = owns_slot
-                .then(|| self.op_slot.guard(Self::mutation_label(&request.command)));
-            let response = match self.handle_command(request.command) {
+            let MutationRequest {
+                command,
+                reply,
+                delivered,
+            } = request;
+            if let ControlCommand::Upgrade { binary } = command {
+                let _op = self.op_slot.guard("upgrading supervisor");
+                match self.prepare_upgrade(Path::new(&binary), &runtime_lock, &listener) {
+                    Ok(prepared) => {
+                        let version = prepared.target.info.version.to_string();
+                        let _ = reply.send(ControlResponse::UpgradeAccepted { version });
+                        let accepted = delivered
+                            .recv_timeout(UPGRADE_ACCEPT_TIMEOUT)
+                            .unwrap_or(false);
+                        if accepted {
+                            if let Err(err) = Self::execute_upgrade(&prepared) {
+                                error!(
+                                    "Failed to execute live supervisor upgrade: {err}"
+                                );
+                                self.recover_upgrade(&prepared, &runtime_lock, &listener);
+                            }
+                        } else {
+                            warn!(
+                                "Upgrade client disconnected before acceptance was delivered"
+                            );
+                            self.recover_upgrade(&prepared, &runtime_lock, &listener);
+                        }
+                    }
+                    Err(diag) => {
+                        let _ = reply.send(ControlResponse::Diag(diag));
+                    }
+                }
+                continue;
+            }
+            let should_shutdown = matches!(command, ControlCommand::Shutdown);
+            let owns_slot = !matches!(command, ControlCommand::AddProject { .. });
+            let _op =
+                owns_slot.then(|| self.op_slot.guard(Self::mutation_label(&command)));
+            let response = match self.handle_command(command) {
                 Ok(response) => response,
                 Err(err) => {
                     error!("Supervisor command failed: {err}");
                     error_response(&err)
                 }
             };
-            let _ = request.reply.send(response);
+            let _ = reply.send(response);
             if should_shutdown {
                 info!("Supervisor shutdown request completed; ending event loop");
                 break;
@@ -2508,6 +3048,7 @@ impl Supervisor {
                 format!("stopping project '{project}'")
             }
             ControlCommand::Spawn { name, .. } => format!("spawning '{name}'"),
+            ControlCommand::Upgrade { .. } => "upgrading supervisor".to_string(),
             ControlCommand::Shutdown => "shutting down".to_string(),
             other => format!("{other:?}"),
         }
@@ -2977,6 +3518,9 @@ impl Supervisor {
             }
             ControlCommand::Version => Ok(ControlResponse::DaemonVersion(
                 env!("CARGO_PKG_VERSION").to_string(),
+            )),
+            ControlCommand::Upgrade { .. } => Ok(ControlResponse::Error(
+                "upgrade command must be handled by the supervisor owner loop".into(),
             )),
             ControlCommand::CurrentOp => {
                 Ok(ControlResponse::CurrentOp(self.op_slot.report()))

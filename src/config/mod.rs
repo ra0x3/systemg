@@ -442,7 +442,7 @@ pub struct LogsConfig {
 }
 
 /// Fully resolved logging policy for a service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct EffectiveLogsConfig {
     /// Where service stdout/stderr should be sent.
     pub sink: LogSink,

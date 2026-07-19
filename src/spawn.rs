@@ -18,6 +18,14 @@ const MAX_SPAWNS_PER_WINDOW: usize = 10;
 /// Window used to enforce the per-parent spawn rate limit.
 const SPAWN_RATE_WINDOW: Duration = Duration::from_secs(1);
 
+/// Returns whether a dynamic child PID still names a live process.
+fn child_is_running(pid: u32) -> bool {
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -204,6 +212,15 @@ impl DynamicSpawnManager {
             children_by_pid: Arc::new(Mutex::new(HashMap::new())),
             spawn_timestamps: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Returns the number of live dynamic children whose wait/log ownership
+    /// cannot yet be transferred by the supervisor handoff protocol.
+    pub fn active_child_count(&self) -> usize {
+        lock_recover(&self.children_by_pid)
+            .values()
+            .filter(|child| child.last_exit.is_none() && child_is_running(child.pid))
+            .count()
     }
 
     /// Registers a service with dynamic spawn capability.

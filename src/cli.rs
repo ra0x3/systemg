@@ -504,6 +504,14 @@ pub enum Commands {
     #[command(hide = true)]
     UpgradeInfo,
 
+    /// INTERNAL: ask the resident supervisor to execute a staged binary.
+    #[command(hide = true)]
+    UpgradeSupervisor {
+        /// Path to the staged replacement binary.
+        #[arg(long)]
+        binary: String,
+    },
+
     /// INTERNAL: boot the resident supervisor. Not for direct use — the daemon
     /// re-execs into this after forking so it starts from a clean, single-threaded
     /// process image (no mutexes inherited-locked from the launching CLI's threads).
@@ -528,6 +536,10 @@ pub enum Commands {
         /// Record the primary project as terminal-attached rather than daemonized.
         #[arg(long)]
         foreground: bool,
+
+        /// Private state record inherited from a live supervisor re-exec.
+        #[arg(long)]
+        handoff: Option<String>,
     },
 
     /// DEPRECATED: Spawn a dynamic child process from a parent service.
@@ -571,6 +583,7 @@ impl Commands {
             Commands::Migrate { .. } => "migrate",
             Commands::Purge { .. } => "purge",
             Commands::UpgradeInfo => "upgrade-info",
+            Commands::UpgradeSupervisor { .. } => "upgrade-supervisor",
             Commands::Supervise { .. } => "supervise",
             Commands::Spawn { .. } => "spawn",
         }

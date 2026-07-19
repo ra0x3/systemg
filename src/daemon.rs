@@ -2,7 +2,7 @@
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, ErrorKind, Read},
     os::unix::process::CommandExt,
@@ -40,11 +40,12 @@ use crate::{
         SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG, STOP_VERIFY_TIMEOUT,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
-    logs::{resolve_log_path, spawn_service_log_writers},
+    logs::{resolve_log_path, spawn_managed_service_log_writers},
     opslot::OpSlot,
     runtime,
     spawn::SpawnedExit,
     state_store::StateStore,
+    upgrade::{HandoffDaemonState, HandoffProcess},
 };
 
 /// Capacity of the one-result health-check worker channel.
@@ -1689,11 +1690,75 @@ pub enum ServiceReadyState {
     CompletedSuccess,
 }
 
+/// Waitable service process retained either as an originating `Child` or as a
+/// PID adopted by the same supervisor process after `exec`.
+#[derive(Debug)]
+struct ManagedChild {
+    /// Stable process identifier.
+    pid: u32,
+    /// Standard-library handle available before the first supervisor re-exec.
+    child: Option<Child>,
+}
+
+impl ManagedChild {
+    /// Reconstructs a waitable handle after same-PID supervisor re-execution.
+    fn adopt(pid: u32) -> Self {
+        Self { pid, child: None }
+    }
+
+    /// Returns the managed process identifier.
+    fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// Checks for process completion without blocking.
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        if let Some(child) = self.child.as_mut() {
+            return child.try_wait();
+        }
+        self.wait_with_flags(libc::WNOHANG)
+    }
+
+    /// Waits until the managed process exits and returns its status.
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        if let Some(child) = self.child.as_mut() {
+            return child.wait();
+        }
+        self.wait_with_flags(0)?.ok_or_else(|| {
+            std::io::Error::other("blocking wait returned without a process status")
+        })
+    }
+
+    /// Calls `waitpid` for an adopted child using the supplied flags.
+    fn wait_with_flags(&self, flags: libc::c_int) -> std::io::Result<Option<ExitStatus>> {
+        let mut status = 0;
+        let waited =
+            unsafe { libc::waitpid(self.pid as libc::pid_t, &mut status, flags) };
+        if waited == 0 {
+            Ok(None)
+        } else if waited == self.pid as libc::pid_t {
+            Ok(Some(ExitStatus::from_raw(status)))
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+}
+
+impl From<Child> for ManagedChild {
+    /// Wraps a newly spawned service process.
+    fn from(child: Child) -> Self {
+        Self {
+            pid: child.id(),
+            child: Some(child),
+        }
+    }
+}
+
 /// Represents an existing service instance that has been temporarily detached while a
 /// replacement is brought up during a rolling restart.
 struct DetachedService {
     /// Child handle retained while the replacement is prepared.
-    child: Child,
+    child: ManagedChild,
     /// Process ID of the detached service leader.
     pid: u32,
     /// Process group containing the detached service tree.
@@ -1802,7 +1867,7 @@ fn acquire_lock<'a, T>(
 #[derive(Clone)]
 struct DaemonContext {
     /// Shared map of running service processes.
-    processes: Arc<Mutex<HashMap<String, Child>>>,
+    processes: Arc<Mutex<HashMap<String, ManagedChild>>>,
     /// The PID file for tracking service PIDs.
     pid_file: Arc<Mutex<PidFile>>,
     /// Persistent state for recording service lifecycle transitions.
@@ -1851,7 +1916,8 @@ impl DaemonContext {
     /// Acquires the processes lock with ordering enforcement.
     fn lock_processes(
         &self,
-    ) -> Result<OrderedLockGuard<'_, HashMap<String, Child>>, ProcessManagerError> {
+    ) -> Result<OrderedLockGuard<'_, HashMap<String, ManagedChild>>, ProcessManagerError>
+    {
         acquire_lock(&self.processes, DaemonLock::Processes)
     }
 
@@ -1949,7 +2015,7 @@ impl DaemonContext {
 #[derive(Clone)]
 pub struct Daemon {
     /// Running processes.
-    processes: Arc<Mutex<HashMap<String, Child>>>,
+    processes: Arc<Mutex<HashMap<String, ManagedChild>>>,
     /// Service config.
     config: Arc<std::sync::Mutex<Arc<Config>>>,
     /// PID tracking.
@@ -2652,6 +2718,227 @@ impl Daemon {
         Arc::clone(&self.pid_file)
     }
 
+    /// Captures verified kernel identities for every process currently owned by
+    /// this daemon without reaping or otherwise disturbing them.
+    pub(crate) fn handoff_processes(
+        &self,
+    ) -> Result<Vec<HandoffProcess>, ProcessManagerError> {
+        let processes = self.processes.lock()?;
+        let pids = self.pid_file.lock()?;
+        let mut snapshot = Vec::with_capacity(processes.len());
+        for (service, child) in processes.iter() {
+            let pid = child.id();
+            if pids.get(service) != Some(pid) {
+                return Err(Self::handoff_identity_error(
+                    service,
+                    format!("PID file does not own process {pid}"),
+                ));
+            }
+            let started = pids.start_for(service).ok_or_else(|| {
+                Self::handoff_identity_error(service, "process start identity is missing")
+            })?;
+            if !Self::pid_is_alive(pid) || process_start_time(pid) != Some(started) {
+                return Err(Self::handoff_identity_error(
+                    service,
+                    format!("process {pid} is no longer the recorded instance"),
+                ));
+            }
+            let pgid = pids.pgid_for(service).ok_or_else(|| {
+                Self::handoff_identity_error(service, "process group identity is missing")
+            })?;
+            if Self::process_group_for_pid(pid) != Some(pgid as libc::pid_t) {
+                return Err(Self::handoff_identity_error(
+                    service,
+                    format!("process {pid} no longer belongs to group {pgid}"),
+                ));
+            }
+            snapshot.push(HandoffProcess {
+                service: service.clone(),
+                pid,
+                pgid,
+                started,
+            });
+        }
+        for (service, pid) in pids.services() {
+            if Self::pid_is_alive(*pid) && !processes.contains_key(service) {
+                return Err(Self::handoff_identity_error(
+                    service,
+                    format!("live process {pid} has no waitable supervisor handle"),
+                ));
+            }
+        }
+        snapshot.sort_unstable_by(|left, right| left.service.cmp(&right.service));
+        Ok(snapshot)
+    }
+
+    /// Reconstructs waitable service handles after same-PID supervisor re-exec,
+    /// rejecting any process whose persisted kernel identity changed.
+    pub(crate) fn adopt_handoff_processes(
+        &self,
+        expected: &[HandoffProcess],
+    ) -> Result<(), ProcessManagerError> {
+        let mut processes = self.processes.lock()?;
+        if !processes.is_empty() {
+            return Err(Self::handoff_identity_error(
+                "supervisor",
+                "process map was not empty before handoff adoption",
+            ));
+        }
+        let pids = self.pid_file.lock()?;
+        for process in expected {
+            if !self.cfg().services.contains_key(&process.service) {
+                return Err(Self::handoff_identity_error(
+                    &process.service,
+                    "service is absent from the handed-off manifest",
+                ));
+            }
+            if pids.get(&process.service) != Some(process.pid)
+                || pids.start_for(&process.service) != Some(process.started)
+                || pids.pgid_for(&process.service) != Some(process.pgid)
+                || !Self::pid_is_alive(process.pid)
+                || process_start_time(process.pid) != Some(process.started)
+                || Self::process_group_for_pid(process.pid)
+                    != Some(process.pgid as libc::pid_t)
+            {
+                return Err(Self::handoff_identity_error(
+                    &process.service,
+                    format!(
+                        "process {} changed before the replacement supervisor resumed",
+                        process.pid
+                    ),
+                ));
+            }
+            if processes
+                .insert(process.service.clone(), ManagedChild::adopt(process.pid))
+                .is_some()
+            {
+                return Err(Self::handoff_identity_error(
+                    &process.service,
+                    "handoff contains the service more than once",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Captures all daemon bookkeeping needed to continue supervising the same
+    /// workload after re-exec.
+    pub(crate) fn handoff_state(
+        &self,
+    ) -> Result<HandoffDaemonState, ProcessManagerError> {
+        let replacements = self
+            .replacements
+            .lock()
+            .map_err(ProcessManagerError::from)?;
+        if let Some(service) = replacements.iter().next() {
+            return Err(Self::handoff_identity_error(
+                service,
+                "a deployment replacement is still active",
+            ));
+        }
+        drop(replacements);
+        let in_flight = self
+            .restart_in_flight
+            .lock()
+            .map_err(ProcessManagerError::from)?;
+        if let Some(service) = in_flight.iter().next() {
+            return Err(Self::handoff_identity_error(
+                service,
+                "an automatic restart is still active",
+            ));
+        }
+        drop(in_flight);
+        let mut manual_stops = self
+            .manual_stop_flags
+            .lock()
+            .map_err(ProcessManagerError::from)?
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        manual_stops.sort_unstable();
+        let mut restart_suppressed = self
+            .restart_suppressed
+            .lock()
+            .map_err(ProcessManagerError::from)?
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        restart_suppressed.sort_unstable();
+        let restart_counts = self
+            .restart_counts
+            .lock()
+            .map_err(ProcessManagerError::from)?
+            .iter()
+            .map(|(service, count)| (service.clone(), *count))
+            .collect::<BTreeMap<_, _>>();
+        let stopped_for_dependency = self
+            .stopped_for_dependency
+            .lock()
+            .map_err(ProcessManagerError::from)?
+            .iter()
+            .map(|(service, dependencies)| {
+                let mut dependencies = dependencies.iter().cloned().collect::<Vec<_>>();
+                dependencies.sort_unstable();
+                (service.clone(), dependencies)
+            })
+            .collect::<BTreeMap<_, _>>();
+        Ok(HandoffDaemonState {
+            processes: self.handoff_processes()?,
+            manual_stops,
+            restart_suppressed,
+            restart_counts,
+            stopped_for_dependency,
+        })
+    }
+
+    /// Restores daemon bookkeeping and waitable process ownership after re-exec.
+    pub(crate) fn adopt_handoff_state(
+        &self,
+        state: &HandoffDaemonState,
+    ) -> Result<(), ProcessManagerError> {
+        self.adopt_handoff_processes(&state.processes)?;
+        *self
+            .manual_stop_flags
+            .lock()
+            .map_err(ProcessManagerError::from)? =
+            state.manual_stops.iter().cloned().collect();
+        *self
+            .restart_suppressed
+            .lock()
+            .map_err(ProcessManagerError::from)? =
+            state.restart_suppressed.iter().cloned().collect();
+        *self
+            .restart_counts
+            .lock()
+            .map_err(ProcessManagerError::from)? = state
+            .restart_counts
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        *self
+            .stopped_for_dependency
+            .lock()
+            .map_err(ProcessManagerError::from)? = state
+            .stopped_for_dependency
+            .iter()
+            .map(|(service, dependencies)| {
+                (service.clone(), dependencies.iter().cloned().collect())
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Builds a process-management error for an unverifiable handoff identity.
+    fn handoff_identity_error(
+        service: &str,
+        message: impl Into<String>,
+    ) -> ProcessManagerError {
+        ProcessManagerError::ServiceStartError {
+            service: service.to_string(),
+            source: std::io::Error::other(message.into()),
+        }
+    }
+
     /// The project state store this daemon's files are bound to.
     pub fn store(&self) -> StateStore {
         StateStore::for_project(&self.cfg().project.id)
@@ -2782,7 +3069,7 @@ impl Daemon {
         service_name: &str,
         service_config: &ServiceConfig,
         working_dir: PathBuf,
-        processes: Arc<Mutex<HashMap<String, Child>>>,
+        processes: Arc<Mutex<HashMap<String, ManagedChild>>>,
         // Vestigial: every service now leads its own session unconditionally, so
         // this flag no longer changes spawn behaviour. Kept until the plumbing
         // is removed.
@@ -2925,11 +3212,11 @@ impl Daemon {
                         Ok(())
                     }
                 } else {
-                    spawn_service_log_writers(
+                    spawn_managed_service_log_writers(
                         project,
                         service_name,
-                        stdout.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
-                        stderr.map(|reader| Box::new(reader) as Box<dyn Read + Send>),
+                        stdout,
+                        stderr,
                         log_settings,
                     )
                 };
@@ -2946,7 +3233,9 @@ impl Daemon {
                     });
                 }
 
-                processes.lock()?.insert(service_name.to_string(), child);
+                processes
+                    .lock()?
+                    .insert(service_name.to_string(), child.into());
 
                 if let Err(err) = privilege.apply_post_spawn(pid as libc::pid_t) {
                     warn!(
@@ -3104,7 +3393,7 @@ impl Daemon {
             Some((&self.state_file, &config)),
         )? {
             ServiceProbe::Running => {
-                let pid = self.processes.lock()?.get(name).map(Child::id);
+                let pid = self.processes.lock()?.get(name).map(ManagedChild::id);
                 if let Some(pid) = pid {
                     let pgid = Self::process_group_for_pid(pid);
                     self.pid_file.lock()?.insert_with_group(name, pid, pgid)?;
@@ -3587,7 +3876,7 @@ impl Daemon {
     fn wait_for_ready(
         service_name: &str,
         project: &str,
-        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        processes: &Arc<Mutex<HashMap<String, ManagedChild>>>,
         pid_file: &Arc<Mutex<PidFile>>,
         state: Option<(&Arc<Mutex<ServiceStateFile>>, &Arc<Config>)>,
         command: Option<&str>,
@@ -3983,7 +4272,7 @@ impl Daemon {
     /// handle is temporarily removed and inserted back when still running.
     fn probe_service_state(
         service_name: &str,
-        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        processes: &Arc<Mutex<HashMap<String, ManagedChild>>>,
         pid_file: &Arc<Mutex<PidFile>>,
     ) -> Result<ServiceProbe, ProcessManagerError> {
         Self::probe_service_state_recording(service_name, processes, pid_file, None)
@@ -4001,7 +4290,7 @@ impl Daemon {
     /// record atomic.
     fn probe_service_state_recording(
         service_name: &str,
-        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        processes: &Arc<Mutex<HashMap<String, ManagedChild>>>,
         pid_file: &Arc<Mutex<PidFile>>,
         state: Option<(&Arc<Mutex<ServiceStateFile>>, &Arc<Config>)>,
     ) -> Result<ServiceProbe, ProcessManagerError> {
@@ -5847,7 +6136,7 @@ impl Daemon {
     /// terminated when the root leader has already disappeared.
     fn stop_service_with_handles(
         service_name: &str,
-        processes: &Arc<Mutex<HashMap<String, Child>>>,
+        processes: &Arc<Mutex<HashMap<String, ManagedChild>>>,
         pid_file: &Arc<Mutex<PidFile>>,
         state_file: &Arc<Mutex<ServiceStateFile>>,
         config: &Arc<Config>,

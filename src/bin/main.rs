@@ -68,6 +68,12 @@ const FETCH_SPINNER_TICK: Duration = Duration::from_millis(80);
 const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 const BUSY_PROBE_EVERY_TICKS: usize = 12;
 const RESTART_DAEMON_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+/// Maximum time allowed for a replacement supervisor to confirm its version.
+const UPGRADE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound for each version probe during supervisor replacement.
+const UPGRADE_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+/// Delay between replacement supervisor version probes.
+const UPGRADE_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_CONFIG_PATH: &str = "systemg.yaml";
 /// Maximum time allowed for the supervisor to acknowledge a shutdown request.
 const SUPERVISOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1690,19 +1696,29 @@ fn run() -> Result<(), Box<dyn Error>> {
                 serde_json::to_string(&systemg::upgrade::LiveUpgradeInfo::current())?
             );
         }
+        Commands::UpgradeSupervisor { binary } => {
+            request_live_upgrade(binary)?;
+        }
         Commands::Supervise {
             config,
             service,
             pipe_stderr,
             verbose: _,
             foreground,
+            handoff,
         } => {
             let mode = if foreground {
                 ProjectRunMode::Foreground
             } else {
                 ProjectRunMode::Daemon
             };
-            run_supervisor_in_process(PathBuf::from(config), service, pipe_stderr, mode);
+            run_supervisor_in_process(
+                PathBuf::from(config),
+                service,
+                pipe_stderr,
+                mode,
+                handoff.map(PathBuf::from),
+            );
         }
         Commands::Spawn {
             name,
@@ -3982,6 +3998,7 @@ fn start_foreground(
             service,
             pipe_stderr,
             ProjectRunMode::Foreground,
+            None,
         );
     }
 
@@ -5258,6 +5275,7 @@ fn start_supervisor_daemon(
             service,
             pipe_stderr,
             ProjectRunMode::Daemon,
+            None,
         );
     }
 
@@ -5345,17 +5363,31 @@ fn run_supervisor_in_process(
     service: Option<String>,
     pipe_stderr: bool,
     mode: ProjectRunMode,
+    handoff: Option<PathBuf>,
 ) -> ! {
     install_supervisor_panic_hook();
-    let mut supervisor =
-        match Supervisor::new_with_mode(config_path, false, service, mode) {
-            Ok(supervisor) => supervisor,
-            Err(err) => {
-                error!("Supervisor failed to initialize: {err}");
-                process::exit(1);
+    let handed_off = handoff.is_some();
+    let handoff_path = handoff.clone();
+    let supervisor = match handoff {
+        Some(path) => Supervisor::from_handoff(path),
+        None => Supervisor::new_with_mode(config_path, false, service, mode),
+    };
+    let mut supervisor = match supervisor {
+        Ok(supervisor) => supervisor,
+        Err(err) => {
+            error!("Supervisor failed to initialize: {err}");
+            if let Some(path) = handoff_path
+                && let Err(rollback_err) =
+                    systemg::upgrade::rollback_handoff(&path, err.to_string())
+            {
+                error!("Supervisor rollback failed: {rollback_err}");
             }
-        };
-    supervisor.set_pipe_stderr(pipe_stderr);
+            process::exit(1);
+        }
+    };
+    if !handed_off {
+        supervisor.set_pipe_stderr(pipe_stderr);
+    }
     exit_supervisor(supervisor.run());
 }
 
@@ -5995,6 +6027,71 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
     send_control_command_inner(command, true)
 }
 
+/// Requests a live supervisor replacement and waits until the same PID reports
+/// the staged version or the previous binary confirms rollback.
+fn request_live_upgrade(binary: String) -> Result<(), Box<dyn Error>> {
+    let target = systemg::upgrade::LiveUpgradeInfo::current();
+    let resident = match ipc::send_command(&ControlCommand::Version) {
+        Ok(ControlResponse::DaemonVersion(version)) => version,
+        Ok(ControlResponse::Diag(diag)) => return Err(Box::new(DiagError(diag))),
+        Ok(other) => {
+            return Err(io::Error::other(format!(
+                "unexpected supervisor version response: {other:?}"
+            ))
+            .into());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    systemg::upgrade::validate_resident_version(&resident, &target).map_err(DiagError)?;
+    let original_pid = ipc::supervisor_peer_pid()?;
+    let expected = match ipc::send_command(&ControlCommand::Upgrade { binary }) {
+        Ok(ControlResponse::UpgradeAccepted { version }) => version,
+        Ok(ControlResponse::Diag(diag)) => return Err(Box::new(DiagError(diag))),
+        Ok(ControlResponse::Error(message)) => {
+            return Err(ControlError::Server(message).into());
+        }
+        Ok(other) => {
+            return Err(io::Error::other(format!(
+                "unexpected supervisor upgrade response: {other:?}"
+            ))
+            .into());
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let deadline = Instant::now() + UPGRADE_CONFIRM_TIMEOUT;
+    let mut observed = resident;
+    while Instant::now() < deadline {
+        if let Ok(ipc::CommandAck::Response(ControlResponse::DaemonVersion(version))) =
+            ipc::send_command_with_timeout(
+                &ControlCommand::Version,
+                UPGRADE_PROBE_TIMEOUT,
+            )
+        {
+            observed = version;
+            if observed == expected {
+                let resumed_pid = ipc::supervisor_peer_pid()?;
+                if resumed_pid != original_pid {
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::upgrade::resume_failed(format!(
+                            "supervisor PID changed from {original_pid} to {resumed_pid}"
+                        )),
+                    ))));
+                }
+                println!("Supervisor upgraded in place to {expected}");
+                return Ok(());
+            }
+        }
+        thread::sleep(UPGRADE_PROBE_INTERVAL);
+    }
+
+    Err(Box::new(DiagError(Box::new(
+        systemg::upgrade::resume_failed(format!(
+            "expected supervisor {expected}, but resident version is {observed}"
+        )),
+    ))))
+}
+
 /// Sends a control command and optionally renders its response message.
 fn send_control_command_inner(
     command: ControlCommand,
@@ -6016,6 +6113,12 @@ fn send_control_command_inner(
         }
         Ok(ControlResponse::DaemonVersion(version)) => {
             println!("{version}");
+            Ok(())
+        }
+        Ok(ControlResponse::UpgradeAccepted { version }) => {
+            if announce {
+                println!("Supervisor accepted live upgrade to {version}");
+            }
             Ok(())
         }
         Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
