@@ -217,15 +217,11 @@ DOWNLOADED_VERSION=$(
     | sed 's/^v//' || true
 )
 
-if [ -n "$DOWNLOADED_VERSION" ] && [ "$DOWNLOADED_VERSION" != "$VERSION" ]; then
-  if [ "${SYSG_INSTALL_ALLOW_VERSION_MISMATCH:-}" != "1" ]; then
-    echo "X Version mismatch detected (got $DOWNLOADED_VERSION, expected $VERSION)" >&2
-    echo "" >&2
-    echo "  To continue anyway: SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1" >&2
-    cd "$ORIGINAL_DIR"
-    rm -rf "$TEMP_DIR"
-    exit 1
-  fi
+if [ "$DOWNLOADED_VERSION" != "$VERSION" ]; then
+  echo "X Version mismatch detected (got ${DOWNLOADED_VERSION:-unknown}, expected $VERSION)" >&2
+  cd "$ORIGINAL_DIR"
+  rm -rf "$TEMP_DIR"
+  exit 1
 fi
 
 mkdir -p "$VERSION_DIR"

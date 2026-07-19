@@ -60,10 +60,6 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.50.0
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --help
 ```
 
-## Environment Variables
-
-- `SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1` - Allow installation even if the downloaded binary reports a different version than expected
-
 ## Platform Support
 
 The installer supports the following platforms:
