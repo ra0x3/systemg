@@ -6031,6 +6031,20 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
 /// the staged version or the previous binary confirms rollback.
 fn request_live_upgrade(binary: String) -> Result<(), Box<dyn Error>> {
     let target = systemg::upgrade::LiveUpgradeInfo::current();
+    match supervisor_health() {
+        SupervisorHealth::Down => {
+            println!("No running supervisor; activation is safe");
+            return Ok(());
+        }
+        SupervisorHealth::Dying => {
+            return Err(Box::new(DiagError(Box::new(
+                systemg::upgrade::environment_unsafe(
+                    "the resident supervisor is alive but is not answering its control socket",
+                ),
+            ))));
+        }
+        SupervisorHealth::Serving => {}
+    }
     let resident = match ipc::send_command(&ControlCommand::Version) {
         Ok(ControlResponse::DaemonVersion(version)) => version,
         Ok(ControlResponse::Diag(diag)) => return Err(Box::new(DiagError(diag))),
@@ -6042,6 +6056,10 @@ fn request_live_upgrade(binary: String) -> Result<(), Box<dyn Error>> {
         }
         Err(err) => return Err(err.into()),
     };
+    if resident == target.version.to_string() {
+        println!("Supervisor is already running {resident}");
+        return Ok(());
+    }
     systemg::upgrade::validate_resident_version(&resident, &target).map_err(DiagError)?;
     let original_pid = ipc::supervisor_peer_pid()?;
     let expected = match ipc::send_command(&ControlCommand::Upgrade { binary }) {

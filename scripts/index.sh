@@ -66,6 +66,23 @@ SYSG_ACTIVE_VERSION_FILE="$SYSG_ROOT/active-version"
 
 mkdir -p "$SYSG_VERSIONS_DIR"
 
+activate_version() {
+  if ! "$VERSION_BINARY" upgrade-supervisor --binary "$VERSION_BINARY"; then
+    echo "X sysg $VERSION was installed but not activated" >&2
+    echo "" >&2
+    echo "  The existing PATH target and active-version record were left unchanged." >&2
+    return 1
+  fi
+
+  LINK_TMP="$SYSG_BIN_DIR/.sysg-link.$$"
+  ACTIVE_TMP="$SYSG_ROOT/.active-version.$$"
+  rm -f "$LINK_TMP" "$ACTIVE_TMP"
+  ln -s "$VERSION_BINARY" "$LINK_TMP"
+  printf '%s\n' "$VERSION" > "$ACTIVE_TMP"
+  mv -f "$LINK_TMP" "$SYSG_BIN_DIR/sysg"
+  mv -f "$ACTIVE_TMP" "$SYSG_ACTIVE_VERSION_FILE"
+}
+
 if [ "$OS" = "linux" ]; then
   if [ "$ARCH" = "x86_64" ]; then
     TARGET="x86_64-unknown-linux-gnu"
@@ -136,23 +153,17 @@ if [ -x "$VERSION_BINARY" ]; then
   )
 
   if [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+    activate_version
     if [ "$CURRENT_ACTIVE_VERSION" = "$VERSION" ]; then
       echo "✔ sysg $VERSION is already installed and active"
-      echo ""
-      echo "  Run: sysg --help to get started"
-      echo ""
-      echo "✔ Setup complete!"
-      exit 0
     else
-      echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
-      ln -sf "$VERSION_BINARY" "$SYSG_BIN_DIR/sysg"
       echo "✔ Switched to sysg $VERSION"
-      echo ""
-      echo "  Run: sysg --help to get started"
-      echo ""
-      echo "✔ Setup complete!"
-      exit 0
     fi
+    echo ""
+    echo "  Run: sysg --help to get started"
+    echo ""
+    echo "✔ Setup complete!"
+    exit 0
   else
     rm -rf "$VERSION_DIR"
   fi
@@ -220,8 +231,11 @@ fi
 mkdir -p "$VERSION_DIR"
 mv "$BINARY" "$VERSION_BINARY"
 
-ln -sf "$VERSION_BINARY" "$SYSG_BIN_DIR/sysg"
-echo "$VERSION" > "$SYSG_ACTIVE_VERSION_FILE"
+if ! activate_version; then
+  cd "$ORIGINAL_DIR"
+  rm -rf "$TEMP_DIR"
+  exit 1
+fi
 
 for check_dir in "$HOME/.sysg/bin" "/usr/local/bin"; do
   if [ -d "$check_dir" ] && [ "$check_dir" != "$SYSG_BIN_DIR" ]; then

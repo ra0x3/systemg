@@ -20,12 +20,41 @@ if [ ! -f "$SOURCE" ]; then
   exit 1
 fi
 
-install -Dm755 "$SOURCE" /usr/bin/sysg
+VERSION=$("$SOURCE" --version 2>/dev/null | awk 'NR == 1 { print $2; exit }' | sed 's/^v//')
+if [ -z "$VERSION" ]; then
+  echo "Could not determine the version of: $SOURCE" >&2
+  exit 1
+fi
+
+VERSIONS_DIR="/usr/lib/systemg/versions"
+VERSION_DIR="$VERSIONS_DIR/$VERSION"
+TARGET="$VERSION_DIR/sysg"
+STAGED="$VERSION_DIR/.sysg.$$"
+
+install -d -m755 "$VERSIONS_DIR"
+install -d -m755 "$VERSION_DIR"
+install -m755 "$SOURCE" "$STAGED"
+if [ "$("$STAGED" --version 2>/dev/null | awk 'NR == 1 { print $2; exit }' | sed 's/^v//')" != "$VERSION" ]; then
+  echo "Staged binary failed version verification." >&2
+  exit 1
+fi
+mv -f "$STAGED" "$TARGET"
 
 install -d -m755 /etc/systemg
 install -d -m755 /var/lib/systemg
 install -d -m755 /var/log/systemg
 install -d -m755 /etc/systemg/logrotate
+
+if ! "$TARGET" --sys upgrade-supervisor --binary "$TARGET"; then
+  echo "sysg $VERSION was installed but not activated." >&2
+  echo "The existing /usr/bin/sysg target was left unchanged." >&2
+  exit 1
+fi
+
+LINK_TMP="/usr/bin/.sysg-link.$$"
+rm -f "$LINK_TMP"
+ln -s "$TARGET" "$LINK_TMP"
+mv -f "$LINK_TMP" /usr/bin/sysg
 
 cat <<'LOGROTATE' > /etc/logrotate.d/systemg
 /var/log/systemg/supervisor.log {

@@ -33,28 +33,10 @@ ACTIVE_FILE="${SYSG_HOME}/active-version"
 LINK="${HOME}/.local/bin/sysg"
 PREV_MARKER="${SYSG_HOME}/.test-local-prev"
 BUILT_BIN="${REPO_ROOT}/target/release/sysg"
-RUNTIME_DIR="${HOME}/.local/share/systemg"
-SUPERVISOR_PID_FILE="${RUNTIME_DIR}/sysg.pid"
-CONTROL_SOCKET="${RUNTIME_DIR}/control.sock"
 
 err()  { printf '\033[0;31m%s\033[0m\n' "$*" >&2; }
 info() { printf '\033[0;36m%s\033[0m\n' "$*"; }
 ok()   { printf '\033[0;32m%s\033[0m\n' "$*"; }
-
-# Refuse to swap the binary while a supervisor is resident — a version mismatch
-# between the CLI and a live daemon triggers a recycle of the running stack.
-guard_no_supervisor() {
-  local pid=""
-  if [ -r "${SUPERVISOR_PID_FILE}" ]; then
-    pid="$(tr -d '[:space:]' < "${SUPERVISOR_PID_FILE}")"
-  fi
-  if { [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; } \
-     || [ -S "${CONTROL_SOCKET}" ]; then
-    err "A sysg supervisor is currently running${pid:+ (PID ${pid})}."
-    err "Stop it first with 'sysg stop --supervisor', then retry."
-    exit 1
-  fi
-}
 
 binary_version() {
   "$1" --version 2>/dev/null | awk '{print $NF}'
@@ -75,13 +57,22 @@ repoint() {
     err "Refusing to activate a mislabeled or corrupted slot."
     exit 1
   fi
-  ln -sfn "${target}" "${LINK}"
-  printf '%s\n' "${version}" > "${ACTIVE_FILE}"
+  if ! "${target}" upgrade-supervisor --binary "${target}"; then
+    err "Version '${version}' was installed but not activated."
+    err "The existing PATH target and active-version record were left unchanged."
+    return 1
+  fi
+  local link_tmp="${LINK}.tmp.$$"
+  local active_tmp="${ACTIVE_FILE}.tmp.$$"
+  rm -f "${link_tmp}" "${active_tmp}"
+  ln -s "${target}" "${link_tmp}"
+  printf '%s\n' "${version}" > "${active_tmp}"
+  mv -f "${link_tmp}" "${LINK}"
+  mv -f "${active_tmp}" "${ACTIVE_FILE}"
 }
 
 do_revert() {
   local clean="${1:-}"
-  guard_no_supervisor
   if [ ! -f "${PREV_MARKER}" ]; then
     err "No test-local install to revert (marker ${PREV_MARKER} not found)."
     exit 1
@@ -103,7 +94,6 @@ do_revert() {
 do_install() {
   local want_version="$1"
   local do_build="$2"
-  guard_no_supervisor
 
   # Rebuild by default so we never install a stale binary — the whole point of
   # dogfooding is to run the LATEST code, not whatever was last compiled.
@@ -112,8 +102,6 @@ do_install() {
     ( cd "${REPO_ROOT}" && cargo build --release ) \
       || { err "cargo build --release failed"; exit 1; }
   fi
-
-  guard_no_supervisor
 
   if [ ! -f "${BUILT_BIN}" ]; then
     err "No built binary at ${BUILT_BIN}. Run: cargo build --release (or drop --no-build)."
@@ -206,7 +194,6 @@ if [ -n "${REVERT}" ] && [ -n "${ACTIVATE}" ]; then
 elif [ -n "${REVERT}" ]; then
   do_revert "${CLEAN}"
 elif [ -n "${ACTIVATE}" ]; then
-  guard_no_supervisor
   repoint "${ACTIVATE}"
   ok "Activated. Active: $(cat "${ACTIVE_FILE}") -> $("${LINK}" --version)"
 else
