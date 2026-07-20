@@ -10,99 +10,101 @@ page. A diagnostic's `docs` link points straight at its code here.
 
 ## General
 
-### SG0001
+### [SG0001](/how-it-works/dialog/codes#sg0001)
 
 Catchall — a failure that has no more specific diagnosis yet.
 
-### SG0002
+### [SG0002](/how-it-works/dialog/codes#sg0002)
 
 Persisted cron history or active-run state could not be restored. The scheduler
 may continue without reliable history; inspect the supervisor log and the
 project's `cron_state.xml` before deleting anything.
 
-### SG0003
+### [SG0003](/how-it-works/dialog/codes#sg0003)
 
 A cron unit could not be registered without conflicting with existing scheduler
 state. Reload the owning project after the active mutation finishes.
 
-### SG0004
+### [SG0004](/how-it-works/dialog/codes#sg0004)
 
 A finite unit that exited successfully was recorded as failed or stopped. The
 process completed its work; the persisted lifecycle state is inconsistent.
 
-### SG0005
+### [SG0005](/how-it-works/dialog/codes#sg0005)
 
 The supervisor is using an outdated or different project manifest. Resubmit the
 intended file with `-c <path>` before mutating the project.
 
-### SG0007
+### [SG0007](/how-it-works/dialog/codes#sg0007)
 
 The supervisor cannot safely restart or transfer ownership while another
 operation controls its runtime. Let the named operation settle, then retry.
 
-### SG0008
+### [SG0008](/how-it-works/dialog/codes#sg0008)
 
 A service failed to start without a more specific diagnosis. Read the attached
-reason and service logs; specific failures use SG0102-SG0109 instead.
+reason and service logs; specific failures use
+[`SG0102`](/how-it-works/dialog/codes#sg0102)–[`SG0109`](/how-it-works/dialog/codes#sg0109)
+instead.
 
-### SG0009
+### [SG0009](/how-it-works/dialog/codes#sg0009)
 
 Persisted service state disagrees with the live process table. Use
 `sysg status --live` to refresh runtime evidence before taking action.
 
-### SG0010
+### [SG0010](/how-it-works/dialog/codes#sg0010)
 
 The requested service log source is unavailable or points at the wrong runtime
 scope. Confirm the project selector and configured log sink.
 
-### SG0011
+### [SG0011](/how-it-works/dialog/codes#sg0011)
 
 A live log-follow stream became stale or could not reconnect to its project.
 The workload may still be running; check `sysg status` before stopping it.
 
-### SG0012
+### [SG0012](/how-it-works/dialog/codes#sg0012)
 
 Log output exceeded a safe storage or display bound. Narrow the query with
 `--lines`, `--since`, or `--grep`, or adjust configured rotation limits.
 
-### SG0013
+### [SG0013](/how-it-works/dialog/codes#sg0013)
 
 A daemonized service inherited an environment that systemg cannot safely
 reproduce. Review its `env`, privilege, and session-variable settings.
 
-### SG0014
+### [SG0014](/how-it-works/dialog/codes#sg0014)
 
 The installer could not obtain or verify the expected release artifact. The
 active version remains unchanged.
 
-### SG0015
+### [SG0015](/how-it-works/dialog/codes#sg0015)
 
 Supervisor IPC, PID files, or tracked process ownership disagree. Avoid manual
 PID-file edits; inspect live status and the supervisor log before recovery.
 
-### SG0016
+### [SG0016](/how-it-works/dialog/codes#sg0016)
 
 A rolling deployment failed without a more specific health, switch, or process
 diagnostic. The previous instance is retained when systemg can do so safely.
 
-### SG0017
+### [SG0017](/how-it-works/dialog/codes#sg0017)
 
 `logs --prune` was run with no `--max-size` or `--max-age` bound, so there is
 nothing to prune against. Pass at least one bound.
 
-### SG0019
+### [SG0019](/how-it-works/dialog/codes#sg0019)
 
 `sysg logs` ran with no `-s`, `-p`, or `--supervisor`, so there is no target to
 read. Logs are always scoped: pass `-p <project>` (a whole project), `-s <service>`
 (a loose service, or `-p <project> -s <service>`), or `--supervisor`.
 
-### SG0020
+### [SG0020](/how-it-works/dialog/codes#sg0020)
 
 `logs --supervisor` was combined with a `-s`/`-p` selector. The supervisor's own
 log is a single stream; drop the selector, or drop `--supervisor` to read a
 service's logs.
 
-### SG0021
+### [SG0021](/how-it-works/dialog/codes#sg0021)
 
 `logs -s <service>` (with no `-p`) named a service that is not in the loose
 bundle. A bare `-s` reads only `__loose__`; if the service belongs to a project,
@@ -110,48 +112,48 @@ pass `-p <project> -s <service>`.
 
 ## Start
 
-### SG0101
+### [SG0101](/how-it-works/dialog/codes#sg0101)
 
 A cron unit was targeted by a direct `start` or `restart`. Cron units are
 schedule entries rather than persistent services: inspect the failed run, fix
 its cause, and wait for the next scheduled run. Restarting the owning project
 reloads its schedule but does not trigger an immediate run.
 
-### SG0102
+### [SG0102](/how-it-works/dialog/codes#sg0102)
 
 A service exited immediately at start, before it finished starting.
 
-### SG0103
+### [SG0103](/how-it-works/dialog/codes#sg0103)
 
 A service's `pre_start` command failed, so the service was not started.
 
-### SG0022
+### [SG0022](/how-it-works/dialog/codes#sg0022)
 
 A service's health check could never reach it — every probe failed to connect
 (HTTP connection refused / DNS failure) or the health command could not run. The
 address may be wrong or nothing is listening on the port. When `total_timeout`
 is configured, probes continue for that full readiness window before this error.
 
-### SG0023
+### [SG0023](/how-it-works/dialog/codes#sg0023)
 
 A service's health check timed out — a probe did not complete within its
 `attempt_timeout`. The endpoint accepted the probe but was too slow to answer
 within the per-attempt budget before its retries and total readiness window were
 exhausted.
 
-### SG0104
+### [SG0104](/how-it-works/dialog/codes#sg0104)
 
 A service's health check ran and reported the service is not healthy (an HTTP
 non-2xx response, or a health command that exited non-zero).
 
-### SG0105
+### [SG0105](/how-it-works/dialog/codes#sg0105)
 
 A service exited at start because it could not bind its port — something else is
 already listening on it. The diagnostic names the port when the service's output
 reveals it. Stop whatever holds the port, or change the port in the service's
 command.
 
-### SG0106
+### [SG0106](/how-it-works/dialog/codes#sg0106)
 
 A project was registered with a running supervisor, but one or more of its
 services never came up.
@@ -161,23 +163,26 @@ supervisor boots it on a background thread — which keeps a slow boot from
 blocking every other command. The start waits for that boot to settle and
 reports this code when services are left stopped or failed, so a start that did
 not work cannot exit `0`. The diagnostic names each service and gives you the
-`sysg logs` command for it; the underlying cause (SG0103 pre-start failure,
-SG0104 health check, SG0105 port in use) is in that service's log.
+`sysg logs` command for it; the underlying cause
+([`SG0103`](/how-it-works/dialog/codes#sg0103) pre-start failure,
+[`SG0104`](/how-it-works/dialog/codes#sg0104) health check,
+[`SG0105`](/how-it-works/dialog/codes#sg0105) port in use) is in that service's
+log.
 
-### SG0107
+### [SG0107](/how-it-works/dialog/codes#sg0107)
 
 The supervisor is busy with another mutation, such as start, stop, restart,
 reconcile, or upgrade. The diagnostic names the active operation; wait for it
 to finish, then retry instead of issuing overlapping mutations.
 
-### SG0108
+### [SG0108](/how-it-works/dialog/codes#sg0108)
 
 A service's `pre_start` command exceeded the `pre_start_secs` budget from
 `supervisor.xml`. systemg terminated the command tree and did not launch the
 service. Restore the resource the command was waiting for, increase the budget
 when the command legitimately needs longer, then start the project again.
 
-### SG0109
+### [SG0109](/how-it-works/dialog/codes#sg0109)
 
 A service was not started because a declared dependency did not reach its
 required `running` or `completed` condition. Resolve the dependency's earlier
@@ -186,78 +191,78 @@ an invalid dependency state.
 
 ## Selectors, status &amp; stop
 
-### SG0006
+### [SG0006](/how-it-works/dialog/codes#sg0006)
 
 A bare `-s <name>` selector matched a service in more than one loaded project, so
 the target is ambiguous. Pass `-p` to choose the project.
 
-### SG0201
+### [SG0201](/how-it-works/dialog/codes#sg0201)
 
 The `-p` project does not match the config sysg resolved.
 
-### SG0202
+### [SG0202](/how-it-works/dialog/codes#sg0202)
 
 The command names a service or project that does not exist.
 
-### SG0203
+### [SG0203](/how-it-works/dialog/codes#sg0203)
 
 A config file could not be found or read.
 
-### SG0204
+### [SG0204](/how-it-works/dialog/codes#sg0204)
 
 Mutually exclusive selectors were combined (e.g. `--supervisor` with `-s`/`-p`,
 or two `logs` modes).
 
-### SG0205
+### [SG0205](/how-it-works/dialog/codes#sg0205)
 
 The supervisor's process is alive but not answering its control socket, so the
 command was refused instead of routed into a dying daemon.
 
-### SG0206
+### [SG0206](/how-it-works/dialog/codes#sg0206)
 
 No supervisor is running, so `status` reports state read off disk; any processes
 still alive are unsupervised orphans.
 
 ## Restart
 
-### SG0301
+### [SG0301](/how-it-works/dialog/codes#sg0301)
 
 A restart's new manifest is invalid, so the restart was refused and nothing
 changed.
 
-### SG0302
+### [SG0302](/how-it-works/dialog/codes#sg0302)
 
 A restart ran but left one or more units short of their target state.
 
-### SG0303
+### [SG0303](/how-it-works/dialog/codes#sg0303)
 
 A supervisor recycle stopped the old daemon but the new one did not come up.
 
 ## Purge
 
-### SG0401
+### [SG0401](/how-it-works/dialog/codes#sg0401)
 
 A purge was refused because a live supervisor is still managing processes; stop
 it or pass `--force`.
 
-### SG0402
+### [SG0402](/how-it-works/dialog/codes#sg0402)
 
 A purge removed some state but hit an IO error before finishing, so the on-disk
 state may be partial.
 
-### SG0403
+### [SG0403](/how-it-works/dialog/codes#sg0403)
 
 A scoped purge named a project that has no state on disk; nothing was deleted.
 
 ## Upgrade
 
-### SG0501
+### [SG0501](/how-it-works/dialog/codes#sg0501)
 
 The staged upgrade target is not a trusted sysg executable. The file may be
 missing, non-executable, writable by another user, or unable to report valid
 live-upgrade metadata. The resident supervisor and its workloads are unchanged.
 
-### SG0502
+### [SG0502](/how-it-works/dialog/codes#sg0502)
 
 The staged binary is not live-reexec compatible with the resident supervisor.
 Live upgrades require a newer target on the same major/minor release line and
@@ -265,7 +270,7 @@ the same protocol. Follow the
 [stop-and-upgrade path](/installation/upgrading#compatibility) for an
 incompatible minor or major release, a downgrade, or the `0.56.0` bootstrap.
 
-### SG0503
+### [SG0503](/how-it-works/dialog/codes#sg0503)
 
 The supervisor cannot currently reach a stable handoff point. A project may
 still be booting, a cron run or deployment may be active, or another runtime
@@ -273,13 +278,13 @@ mutation may own the control plane. An unresponsive supervisor, dynamic child,
 or non-transferable log stream can also block the handoff. Retry after the named
 condition settles.
 
-### SG0504
+### [SG0504](/how-it-works/dialog/codes#sg0504)
 
 The resident supervisor validated the target but could not serialize its state
 or execute the replacement binary. It resumed normal operation without
 releasing workload ownership.
 
-### SG0505
+### [SG0505](/how-it-works/dialog/codes#sg0505)
 
 The replacement binary started but could not restore the handed-off runtime.
 systemg attempted to re-execute the previous binary; inspect the supervisor log

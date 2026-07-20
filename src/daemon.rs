@@ -1908,6 +1908,9 @@ fn acquire_lock<'a, T>(
     Ok(OrderedLockGuard { guard, lock_type })
 }
 
+#[cfg(target_os = "linux")]
+type CancelTokens = Arc<Mutex<HashMap<(String, u32), Arc<AtomicBool>>>>;
+
 /// Shared context for daemon operations to reduce function parameters and ensure
 /// consistent lock ordering.
 ///
@@ -1961,7 +1964,7 @@ struct DaemonContext {
     replacements: Arc<Mutex<HashSet<String>>>,
     /// Cancellation tokens for Linux service generations.
     #[cfg(target_os = "linux")]
-    thread_cancellation_tokens: Arc<Mutex<HashMap<(String, u32), Arc<AtomicBool>>>>,
+    thread_cancellation_tokens: CancelTokens,
 }
 
 impl DaemonContext {
@@ -2101,7 +2104,7 @@ pub struct Daemon {
     stopped_for_dependency: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// Linux thread cancellation.
     #[cfg(target_os = "linux")]
-    thread_cancellation_tokens: Arc<Mutex<HashMap<(String, u32), Arc<AtomicBool>>>>,
+    thread_cancellation_tokens: CancelTokens,
     /// Pipe stderr to stdout.
     pipe_stderr: Arc<AtomicBool>,
     /// Ownership sentinel: `Drop` only tears down the shared monitor/threads when

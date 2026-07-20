@@ -68,8 +68,9 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 Live re-execution starts with `0.56.0` and currently applies to newer patch
 releases on the same major/minor line. Installing `0.56.0` over a running
 `0.55.x` supervisor requires `sysg stop --supervisor` first. An incompatible or
-unsafe handoff leaves the active version unchanged and reports `SG0501` through
-`SG0505`.
+unsafe handoff leaves the active version unchanged and reports
+[`SG0501`](https://sysg.dev/how-it-works/dialog/codes#sg0501) through
+[`SG0505`](https://sysg.dev/how-it-works/dialog/codes#sg0505).
 
 ### Show Help
 

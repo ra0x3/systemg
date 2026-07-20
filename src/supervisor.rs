@@ -1339,7 +1339,8 @@ impl Supervisor {
             })?;
         Self::register_spawn_limits_for_config(&self.spawn_manager, &new_config)?;
         let old_config = daemon.config();
-        let diff = crate::restart::ManifestDiff::compute(old_config.as_ref(), &new_config);
+        let diff =
+            crate::restart::ManifestDiff::compute(old_config.as_ref(), &new_config);
         let affected = Self::reconcile_targets(&new_config, &diff)?;
 
         let mut stop_error = None;
@@ -3892,7 +3893,8 @@ impl Supervisor {
         for path in paths {
             let (resolved, configs) = self.load_restart_manifest(&path)?;
             for config in &configs {
-                if let Some(other) = declared.insert(config.project.id.clone(), resolved.clone())
+                if let Some(other) =
+                    declared.insert(config.project.id.clone(), resolved.clone())
                     && other != resolved
                 {
                     return Err(ProcessManagerError::Diag(Box::new(
@@ -4499,12 +4501,7 @@ impl Supervisor {
                 service_name,
             )))
         })?;
-        reject_direct_cron_control(
-            service,
-            service_name,
-            &target_project,
-            "restarted",
-        )?;
+        reject_direct_cron_control(service, service_name, &target_project, "restarted")?;
 
         let primary_project = self.daemon.config().project.id.clone();
         if target_project == primary_project {

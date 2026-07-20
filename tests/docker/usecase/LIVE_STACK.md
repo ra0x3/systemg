@@ -99,15 +99,17 @@ Re-install after **every** rebuild, or you are testing the old binary.
 > **Never silence the installer.** From `0.56.0` onward, compatible patch
 > releases request same-PID live re-execution and only repoint PATH after the
 > resident supervisor reports the new version. An incompatible or unsafe
-> handoff exits nonzero with `SG0501`-`SG0505` and leaves the old version active.
+> handoff exits nonzero with
+> [`SG0501`](https://sysg.dev/how-it-works/dialog/codes#sg0501)–[`SG0505`](https://sysg.dev/how-it-works/dialog/codes#sg0505)
+> and leaves the old version active.
 > The bootstrap from `0.55.x` to `0.56.0` still requires stopping the old
 > supervisor first. Always read the result and confirm the new code is present:
 >
-> ```sh
+> <pre><code>
 > ./scripts/test-local.sh --no-build          # do not silence this
 > sysg --version
-> strings ~/.sysg/versions/*/sysg | grep -c SG0106   # some string only the new build has
-> ```
+> strings ~/.sysg/versions/*/sysg | grep -c <a href="https://sysg.dev/how-it-works/dialog/codes#sg0106">SG0106</a>   # some string only the new build has
+> </code></pre>
 
 ---
 
@@ -231,8 +233,9 @@ cd /tmp && sysg logs -p gamecast-dev --lines 5 --no-follow
 ```
 
 Files live under `~/.local/share/systemg/logs/<project-id>/`. If this errors with
-SG0203 telling you to "target the project by id with -p" — which is what you
-just did — that is the circular-diagnostic regression.
+[`SG0203`](https://sysg.dev/how-it-works/dialog/codes#sg0203) telling you to
+"target the project by id with -p" — which is what you just did — that is the
+circular-diagnostic regression.
 
 ### start (fork vs attach)
 
@@ -255,8 +258,9 @@ lsof -nP -iTCP:5433        # nothing listening == arb_rs__dev will fail
 ```
 
 That is a *feature* for testing — a real, reproducible startup failure. Expect
-`SG0106` naming `arb_rs__dev` and **rc=1**. A `Project 'arbitration-dev' loaded`
-with **rc=0** while services are down is the regression.
+[`SG0106`](https://sysg.dev/how-it-works/dialog/codes#sg0106) naming
+`arb_rs__dev` and **rc=1**. A `Project 'arbitration-dev' loaded` with **rc=0**
+while services are down is the regression.
 
 ### restart
 
