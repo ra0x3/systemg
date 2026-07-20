@@ -119,34 +119,26 @@ compatible and is rewritten in the indented form after it parses successfully.
   deadlines are protocol invariants and are not operator settings.
 </Info>
 
-## The config cache
+## Registered manifests
 
-When you run a command with `-c <file>`, sysg hands that manifest to the resident
-supervisor and remembers the path. That memory is a **convenience**: for later
-commands, you can omit `-c` and sysg reuses the last manifest you submitted —
-handy when nothing has changed.
+When you run a command with `-c <file>`, the resident supervisor remembers that
+manifest's resolved path for each project it registers. Later commands can omit
+`-c` and target the registered project from any working directory.
 
-<Warning>
-The cache is a convenience, **not** a source of truth. If you edit the manifest
-on disk and then run a command **without** `-c`, sysg would be acting on a stale
-copy — so it refuses with [`SG0018`](/how-it-works/dialog/codes#sg0018) and asks
-you to re-submit once with `-c`. Passing `-c` is always accepted; it applies the
-change and refreshes the cache, after which bare commands work again.
-</Warning>
+`sysg restart` treats the files at those paths as the source of truth. It reads
+and validates every registered manifest before touching a process, then
+re-registers added, changed, and removed projects and services. An invalid
+manifest returns `SG0301` and leaves the running workloads unchanged.
 
 ```sh
 # submit the manifest once
 $ sysg start -c stack.yaml --daemonize
 
-# later, with no edits, -c is optional
+# later, -c is optional even after editing stack.yaml
 $ sysg status
 
-# you edit stack.yaml, then forget -c:
+# adopt the current manifest and reconcile its changes
 $ sysg restart
-error[SG0018]: the manifest on disk changed since it was last submitted
-
-# re-submit to apply + refresh the cache
-$ sysg restart -c stack.yaml
 ```
 
 ## Configuration sections

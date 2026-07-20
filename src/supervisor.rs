@@ -24,7 +24,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{
         Config, LogSink, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
-        load_config_from_file, load_projects_from_file, supervisor::SupervisorTimeouts,
+        load_projects_from_file, supervisor::SupervisorTimeouts,
     },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
@@ -386,56 +386,6 @@ fn split_project_selector(selector: &str) -> Option<(&str, &str)> {
     } else {
         Some((project, service))
     }
-}
-
-/// Loads the project named `project_id` from a file that may declare many
-/// projects. The single-project loader collapses a `projects:` map to one
-/// arbitrary project, so a per-project reload must fan out and pick the match.
-/// Falls back to the sole project for a single-project file.
-fn load_named_project(
-    path: &Path,
-    project_id: &str,
-) -> Result<Option<Config>, SupervisorError> {
-    let file = runtime::open_trusted_config(path)?;
-    let mut projects = load_projects_from_file(file, path)?;
-    if let Some(idx) = projects
-        .iter()
-        .position(|config| config.project.id == project_id)
-    {
-        return Ok(Some(projects.swap_remove(idx)));
-    }
-    if projects.len() == 1 {
-        return Ok(Some(projects.swap_remove(0)));
-    }
-    Ok(None)
-}
-
-/// Picks the sub-config for the targeted service from a file that may declare
-/// many projects. Prefers the project the user named (`-p`/prefix) that also
-/// declares the service, then any project declaring it, then the sole project
-/// for a single-project file. Returns `None` if nothing matches.
-fn select_override_project(
-    mut projects: Vec<Config>,
-    service_name: &str,
-    requested_project: Option<&str>,
-) -> Option<Config> {
-    if let Some(requested) = requested_project
-        && let Some(idx) = projects.iter().position(|config| {
-            config.project.id == requested && config.services.contains_key(service_name)
-        })
-    {
-        return Some(projects.swap_remove(idx));
-    }
-    if let Some(idx) = projects
-        .iter()
-        .position(|config| config.services.contains_key(service_name))
-    {
-        return Some(projects.swap_remove(idx));
-    }
-    if projects.len() == 1 {
-        return Some(projects.swap_remove(0));
-    }
-    None
 }
 
 /// Orders `root` and its transitive dependents so a dependency is always
@@ -1230,71 +1180,87 @@ impl Supervisor {
         project_id: &str,
         config_path: Option<&Path>,
     ) -> Result<(), SupervisorError> {
-        if let Some(config_path) = config_path {
-            let resolved = if config_path.is_absolute() {
-                config_path.to_path_buf()
-            } else {
-                std::env::current_dir()?.join(config_path)
-            };
-            let resolved = resolved.canonicalize().unwrap_or(resolved);
-            let Some(config) = load_named_project(&resolved, project_id)? else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("project '{project_id}' is not declared by the config"),
-                )
-                .into());
-            };
-
-            let primary_project = self.daemon.config().project.id.clone();
-            if project_id == primary_project {
-                // Restart ONLY the primary project's own services. Do NOT
-                // reload_config the whole (possibly multi-project) file — that
-                // would tear down sibling projects. Reconcile the primary in
-                // place against its new manifest.
-                self.reconcile_primary_project(config)?;
-                self.config_path = resolved;
-                let _ = ipc::write_config_hint(&self.config_path);
-                self.respawn_status_refresher()?;
-                return Ok(());
-            }
-
-            self.replace_extra_project_runtime(config, resolved)?;
-            return Ok(());
-        }
-
         let primary_project = self.daemon.config().project.id.clone();
-        if project_id == primary_project {
-            // Reload the primary project's stored manifest and reconcile it,
-            // isolated from any sibling. A multi-project file is fanned out and
-            // the primary's own entry selected, so siblings are never touched.
-            let stored = self.config_path.clone();
-            let config = match load_named_project(&stored, &primary_project) {
-                Ok(Some(config)) => config,
-                _ => (*self.daemon.config()).clone(),
-            };
-            self.reconcile_primary_project(config)?;
-            return Ok(());
-        }
-
-        let Some(project_runtime) = self.extra_projects.get(project_id) else {
+        let stored = match config_path {
+            Some(path) => path.to_path_buf(),
+            None if project_id == primary_project => self.config_path.clone(),
+            None => self
+                .extra_projects
+                .get(project_id)
+                .map(|runtime| runtime.config_path.clone())
+                .ok_or_else(|| {
+                    ProcessManagerError::Diag(Box::new(crate::stop::project_not_found(
+                        project_id,
+                    )))
+                })?,
+        };
+        let (resolved, mut configs) = self.load_restart_manifest(&stored)?;
+        let Some(index) = configs
+            .iter()
+            .position(|config| config.project.id == project_id)
+        else {
             return Err(ProcessManagerError::Diag(Box::new(
                 crate::stop::project_not_found(project_id),
             ))
             .into());
         };
+        let config = configs.swap_remove(index);
 
-        let stored = project_runtime.config_path.clone();
-        let Some(config) = load_named_project(&stored, project_id)? else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project '{project_id}' is no longer declared by its stored config"
-                ),
-            )
-            .into());
-        };
-        self.replace_extra_project_runtime(config, stored)?;
+        if project_id == primary_project {
+            self.reconcile_primary_project(config)?;
+            self.config_path = resolved;
+            ipc::write_config_hint(&self.config_path)?;
+            self.respawn_status_refresher()?;
+        } else {
+            self.reconcile_extra_project(config, resolved)?;
+        }
         Ok(())
+    }
+
+    /// Resolves, trust-checks, parses, and validates a restart manifest before
+    /// any managed process is touched.
+    fn load_restart_manifest(
+        &self,
+        path: &Path,
+    ) -> Result<(PathBuf, Vec<Config>), SupervisorError> {
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .join(path)
+        };
+        let resolved = resolved.canonicalize().unwrap_or(resolved);
+        let loaded = (|| -> Result<Vec<Config>, SupervisorError> {
+            let file = runtime::open_trusted_config(&resolved)?;
+            let configs = load_projects_from_file(file, &resolved)?;
+            if configs.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("config at {} declared no projects", resolved.display()),
+                )
+                .into());
+            }
+            let mut ids = BTreeSet::new();
+            for config in &configs {
+                if !ids.insert(config.project.id.clone()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("duplicate project id '{}'", config.project.id),
+                    )
+                    .into());
+                }
+            }
+            Ok(configs)
+        })();
+        match loaded {
+            Ok(configs) => Ok((resolved, configs)),
+            Err(err) => Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::manifest_rejected(err.to_string()),
+            ))
+            .into()),
+        }
     }
 
     /// Reconciles the primary project's services in place without touching any
@@ -1351,6 +1317,61 @@ impl Supervisor {
         }
         sync_result?;
         workers_result?;
+        Ok(())
+    }
+
+    /// Reconciles an additional project in place so unchanged services retain
+    /// their identity and changed services use their configured deployment strategy.
+    fn reconcile_extra_project(
+        &mut self,
+        new_config: Config,
+        config_path: PathBuf,
+    ) -> Result<(), SupervisorError> {
+        let project_id = new_config.project.id.clone();
+        let daemon = self
+            .extra_projects
+            .get(&project_id)
+            .map(|runtime| runtime.daemon.clone())
+            .ok_or_else(|| {
+                ProcessManagerError::Diag(Box::new(crate::stop::project_not_found(
+                    &project_id,
+                )))
+            })?;
+        Self::register_spawn_limits_for_config(&self.spawn_manager, &new_config)?;
+        let old_config = daemon.config();
+        let diff = crate::restart::ManifestDiff::compute(old_config.as_ref(), &new_config);
+        let affected = Self::reconcile_targets(&new_config, &diff)?;
+
+        let mut stop_error = None;
+        for name in &diff.removed {
+            if let Err(err) = daemon.stop_service(name) {
+                error!("Failed to stop removed service '{name}': {err}");
+                stop_error.get_or_insert(err);
+            }
+        }
+        if let Some(err) = stop_error {
+            self.restore_extra_project(&project_id, &daemon)?;
+            return Err(err.into());
+        }
+
+        daemon.set_config(new_config);
+        daemon.begin_boot();
+        let restart_result = daemon.restart_services_subset(&affected);
+        if let Some(runtime) = self.extra_projects.get_mut(&project_id) {
+            runtime.config_path = config_path;
+        }
+        let sync_result = self.sync_cron_projects();
+        self.refresh_status_cache();
+        self.respawn_status_refresher()?;
+        if let Err(err) = restart_result {
+            let failed = Self::reconcile_failures(&err, &affected);
+            sync_result?;
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(&failed),
+            ))
+            .into());
+        }
+        sync_result?;
         Ok(())
     }
 
@@ -3464,11 +3485,7 @@ impl Supervisor {
                         "Project '{project_id}' restarted"
                     )))
                 } else {
-                    let target_path = config
-                        .as_ref()
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| self.config_path.clone());
-                    self.reload_config(&target_path)?;
+                    self.restart_all_targets(config.as_deref().map(Path::new))?;
                     self.refresh_status_cache();
                     Ok(ControlResponse::Message("All services restarted".into()))
                 }
@@ -3841,88 +3858,253 @@ impl Supervisor {
         Ok(child_pid)
     }
 
-    /// Validates and surgically reconciles the primary project against `path`.
-    ///
-    /// Unchanged services retain their process identity. A valid manifest that
-    /// contains a failing target remains active and returns SG0302 without
-    /// tearing down workloads that already reached their target.
+    /// Validates and reconciles every project declared by one manifest.
     fn reload_config(&mut self, path: &Path) -> Result<(), SupervisorError> {
-        let resolved = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.config_path
-                .parent()
-                .unwrap_or_else(|| Path::new("/"))
-                .join(path)
-        };
+        let (resolved, configs) = self.load_restart_manifest(path)?;
+        let owned = self
+            .extra_projects
+            .iter()
+            .filter(|(_, runtime)| runtime.config_path == self.config_path)
+            .map(|(project_id, _)| project_id.clone())
+            .collect();
+        self.apply_restart_manifest(resolved, configs, true, owned)
+    }
 
+    /// Reloads all registered manifests on a bare restart, validating every
+    /// file before the first project mutation.
+    fn restart_all_targets(
+        &mut self,
+        config_path: Option<&Path>,
+    ) -> Result<(), SupervisorError> {
+        if let Some(path) = config_path {
+            return self.reload_config(path);
+        }
+
+        let primary_path = self.config_path.clone();
+        let mut paths = BTreeSet::from([primary_path.clone()]);
+        paths.extend(
+            self.extra_projects
+                .values()
+                .map(|runtime| runtime.config_path.clone()),
+        );
+        let mut loaded = Vec::with_capacity(paths.len());
+        let mut declared = BTreeMap::<String, PathBuf>::new();
+        for path in paths {
+            let (resolved, configs) = self.load_restart_manifest(&path)?;
+            for config in &configs {
+                if let Some(other) = declared.insert(config.project.id.clone(), resolved.clone())
+                    && other != resolved
+                {
+                    return Err(ProcessManagerError::Diag(Box::new(
+                        crate::restart::manifest_rejected(format!(
+                            "project '{}' is declared by both {} and {}",
+                            config.project.id,
+                            other.display(),
+                            resolved.display()
+                        )),
+                    ))
+                    .into());
+                }
+            }
+            let owned = self
+                .extra_projects
+                .iter()
+                .filter(|(_, runtime)| runtime.config_path == resolved)
+                .map(|(project_id, _)| project_id.clone())
+                .collect();
+            loaded.push((resolved, configs, path == primary_path, owned));
+        }
+        loaded.sort_by_key(|(_, _, owns_primary, _)| !*owns_primary);
+        for (resolved, configs, owns_primary, owned) in loaded {
+            self.apply_restart_manifest(resolved, configs, owns_primary, owned)?;
+        }
+        Ok(())
+    }
+
+    /// Applies one fully validated manifest to the runtimes sourced from it.
+    fn apply_restart_manifest(
+        &mut self,
+        resolved: PathBuf,
+        mut configs: Vec<Config>,
+        owns_primary: bool,
+        owned_extras: BTreeSet<String>,
+    ) -> Result<(), SupervisorError> {
         info!("Reloading configuration from {:?}", resolved);
-        // DEFENSIVE: validate the entire new manifest BEFORE tearing anything
-        // down. A bad manifest refuses the whole restart (SG0301) and leaves the
-        // running services exactly as they were — never a half-applied migration.
-        let config = match runtime::open_trusted_config(&resolved)
-            .map_err(SupervisorError::from)
-            .and_then(|trusted| {
-                load_config_from_file(trusted, &resolved).map_err(SupervisorError::from)
-            }) {
-            Ok(config) => config,
-            Err(err) => {
+        let declared = configs
+            .iter()
+            .map(|config| config.project.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        if owns_primary {
+            let primary_id = self.daemon.config().project.id.clone();
+            let index = configs
+                .iter()
+                .position(|config| config.project.id == primary_id)
+                .unwrap_or(0);
+            let primary = configs.remove(index);
+            if primary.project.id == primary_id {
+                self.reconcile_primary_project(primary)?;
+                self.config_path = resolved.clone();
+                ipc::write_config_hint(&self.config_path)?;
+            } else {
+                if self.extra_projects.contains_key(&primary.project.id) {
+                    return Err(ProcessManagerError::Diag(Box::new(
+                        crate::restart::manifest_rejected(format!(
+                            "project '{}' cannot replace the primary while it is already registered",
+                            primary.project.id
+                        )),
+                    ))
+                    .into());
+                }
+                self.replace_primary_project_runtime(primary, resolved.clone())?;
+            }
+        }
+
+        let primary_id = self.daemon.config().project.id.clone();
+        for config in configs {
+            let project_id = config.project.id.clone();
+            if project_id == primary_id {
                 return Err(ProcessManagerError::Diag(Box::new(
-                    crate::restart::manifest_rejected(err.to_string()),
+                    crate::restart::manifest_rejected(format!(
+                        "project '{project_id}' is declared by multiple registered manifests"
+                    )),
                 ))
                 .into());
             }
-        };
+            if self.extra_projects.contains_key(&project_id) {
+                self.reconcile_extra_project(config, resolved.clone())?;
+            } else {
+                self.add_extra_project(config, resolved.clone())?;
+            }
+        }
 
+        for project_id in owned_extras {
+            if !declared.contains(&project_id)
+                && self.extra_projects.contains_key(&project_id)
+            {
+                self.stop_project(&project_id)?;
+            }
+        }
+        self.sync_cron_projects()?;
+        self.refresh_status_cache();
+        self.respawn_status_refresher()?;
+        Ok(())
+    }
+
+    /// Registers a new project synchronously so restart can report its outcome.
+    fn add_extra_project(
+        &mut self,
+        config: Config,
+        config_path: PathBuf,
+    ) -> Result<(), SupervisorError> {
+        let project_id = config.project.id.clone();
+        Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
+        let mut daemon = Daemon::from_config(config, self.detach_children)?;
+        daemon.set_timeouts(self.timeouts.clone());
+        daemon.set_pipe_stderr(self.pipe_stderr);
+        daemon.set_op_slot(self.op_slot.clone());
+        if let Ok(mut projects) = self.boot_projects.write() {
+            projects.insert(project_id.clone(), daemon.clone());
+        }
+        let result = Self::start_project_services(
+            &daemon,
+            daemon.config().as_ref(),
+            None,
+            &self.spawn_manager,
+            None,
+        );
+        let failed = match result {
+            Ok(failed) => failed,
+            Err(err) => {
+                let _ = daemon.stop_services();
+                if let Ok(mut projects) = self.boot_projects.write() {
+                    projects.remove(&project_id);
+                }
+                return Err(err);
+            }
+        };
+        self.extra_projects.insert(
+            project_id.clone(),
+            ProjectRuntime {
+                daemon,
+                mode: ProjectRunMode::Daemon,
+                config_path,
+            },
+        );
+        self.sync_cron_projects()?;
+        if !failed.is_empty() {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(failed.services()),
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
+    /// Replaces the primary runtime when its manifest renames or replaces the project.
+    fn replace_primary_project_runtime(
+        &mut self,
+        config: Config,
+        config_path: PathBuf,
+    ) -> Result<(), SupervisorError> {
+        let old_id = self.daemon.config().project.id.clone();
+        let old_config = self.daemon.config();
+        let old_daemon = self.daemon.clone();
+        let old_metrics = self.metrics_store.clone();
         let metrics_settings = config
             .metrics
             .to_settings(config.project_dir.as_deref().map(Path::new));
         let metrics_store = metrics::shared_store(metrics_settings)?;
-        let old_config = self.daemon.config();
-        let old_metrics = self.metrics_store.clone();
-        let diff = crate::restart::ManifestDiff::compute(old_config.as_ref(), &config);
-        let affected = Self::reconcile_targets(&config, &diff)?;
+        Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
+        let new_id = config.project.id.clone();
+        let mut replacement = Daemon::from_config(config, self.detach_children)?;
+        replacement.set_timeouts(self.timeouts.clone());
+        replacement.set_pipe_stderr(self.pipe_stderr);
+        replacement.set_op_slot(self.op_slot.clone());
 
         self.stop_primary_workers();
-        let mut stop_error = None;
-        for name in &diff.removed {
-            if let Err(err) = self.daemon.stop_service(name) {
-                error!("Failed to stop removed service '{name}' during reconcile: {err}");
-                stop_error.get_or_insert(err);
-            }
-        }
-        if let Some(err) = stop_error {
-            if let Err(restore_err) =
-                self.restore_primary_project(old_config, old_metrics)
-            {
-                error!(
-                    "Failed to restore primary project after stop failure: {restore_err}"
-                );
-            }
+        old_daemon.cancel_boot();
+        old_daemon.shutdown_monitor();
+        if let Err(err) = old_daemon.stop_services() {
+            self.restore_primary_project(old_config, old_metrics)?;
             return Err(err.into());
         }
 
-        self.daemon.set_config(config.clone());
-        self.primary_active = true;
-        self.daemon.begin_boot();
-        let restart_result = self.daemon.restart_services_subset(&affected);
-        let sync_result = self.sync_cron_projects();
-        self.config_path = resolved;
-        let _ = ipc::write_config_hint(&self.config_path);
-        self.metrics_store = metrics_store;
-        let workers_result = self.start_primary_workers();
-        if let Err(err) = restart_result {
-            error!("Project reconcile did not complete: {err}");
-            let failed = Self::reconcile_failures(&err, &affected);
-            sync_result?;
-            workers_result?;
+        let result = Self::start_project_services(
+            &replacement,
+            replacement.config().as_ref(),
+            None,
+            &self.spawn_manager,
+            None,
+        );
+        let failed = match result {
+            Ok(failed) => failed,
+            Err(err) => {
+                let _ = replacement.stop_services();
+                self.restore_primary_project(old_config, old_metrics)?;
+                return Err(err);
+            }
+        };
+        if !failed.is_empty() {
+            let _ = replacement.stop_services();
+            self.restore_primary_project(old_config, old_metrics)?;
             return Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(&failed),
+                crate::restart::reconcile_incomplete(failed.services()),
             ))
             .into());
         }
-        sync_result?;
-        workers_result?;
+
+        self.daemon = replacement;
+        self.primary_active = true;
+        self.config_path = config_path;
+        self.metrics_store = metrics_store;
+        if let Ok(mut projects) = self.boot_projects.write() {
+            projects.remove(&old_id);
+            projects.insert(new_id, self.daemon.clone());
+        }
+        ipc::write_config_hint(&self.config_path)?;
+        self.sync_cron_projects()?;
+        self.start_primary_workers()?;
         Ok(())
     }
 
@@ -4235,135 +4417,149 @@ impl Supervisor {
         let (selector_project, service_name) = split_project_selector(selector)
             .map(|(project_id, service_name)| (Some(project_id), service_name))
             .unwrap_or((None, selector));
-
-        // A single config FILE may declare MANY projects. The single-project
-        // loader collapses it to one arbitrary project, which for a `-p other`
-        // targeting a sibling project hands the wrong sub-config downstream.
-        // Load every project and pick the one owning the targeted service,
-        // preferring the requested project when one is named.
         let requested_project = project.or(selector_project);
-        let override_config = if let Some(path) = config_path {
-            runtime::ensure_trusted_config(path)?;
-            let file = runtime::open_trusted_config(path)?;
-            let projects = load_projects_from_file(file, path)?;
-            select_override_project(projects, service_name, requested_project)
-        } else {
-            None
-        };
-        let config_project = override_config
-            .as_ref()
-            .map(|config| config.project.id.as_str());
+        if let (Some(flag), Some(prefix)) = (project, selector_project)
+            && flag != prefix
+        {
+            return Err(ProcessManagerError::Diag(Box::new(start::project_mismatch(
+                flag, prefix,
+            )))
+            .into());
+        }
 
-        // A restart that names a service no project declares is a false success
-        // waiting to happen — refuse it with a typed diagnostic (SG0202) before
-        // resolving a target, exactly as the stop path does.
-        let known = match project.or(selector_project) {
-            Some(project_id) => {
-                let in_override = override_config
-                    .as_ref()
-                    .is_some_and(|config| config.services.contains_key(service_name));
-                let in_primary = self.daemon.config().project.id == project_id
-                    && self.daemon.config().services.contains_key(service_name);
-                let in_extra =
-                    self.extra_projects.get(project_id).is_some_and(|runtime| {
-                        runtime.daemon.config().services.contains_key(service_name)
-                    });
-                in_override || in_primary || in_extra
+        let paths = if let Some(path) = config_path {
+            BTreeSet::from([path.to_path_buf()])
+        } else if let Some(project_id) = requested_project {
+            let path = if self.daemon.config().project.id == project_id {
+                Some(self.config_path.clone())
+            } else {
+                self.extra_projects
+                    .get(project_id)
+                    .map(|runtime| runtime.config_path.clone())
             }
-            None => {
-                let in_override = override_config
-                    .as_ref()
-                    .is_some_and(|config| config.services.contains_key(service_name));
-                in_override || !self.projects_containing_service(service_name).is_empty()
-            }
+            .ok_or_else(|| {
+                ProcessManagerError::Diag(Box::new(crate::stop::project_not_found(
+                    project_id,
+                )))
+            })?;
+            BTreeSet::from([path])
+        } else {
+            let mut paths = BTreeSet::from([self.config_path.clone()]);
+            paths.extend(
+                self.extra_projects
+                    .values()
+                    .map(|runtime| runtime.config_path.clone()),
+            );
+            paths
         };
-        if !known {
+
+        let mut candidates = Vec::new();
+        for path in paths {
+            let (resolved, configs) = self.load_restart_manifest(&path)?;
+            candidates.extend(configs.into_iter().filter_map(|config| {
+                let matches_project = requested_project
+                    .is_none_or(|project_id| config.project.id == project_id);
+                (matches_project && config.services.contains_key(service_name))
+                    .then_some((resolved.clone(), config))
+            }));
+        }
+        if candidates.is_empty() {
             return Err(ProcessManagerError::Diag(Box::new(
                 crate::stop::service_not_found(service_name),
             ))
             .into());
         }
+        let mut projects = candidates
+            .iter()
+            .map(|(_, config)| config.project.id.clone())
+            .collect::<Vec<_>>();
+        projects.sort_unstable();
+        projects.dedup();
+        if requested_project.is_none() && projects.len() > 1 {
+            return Err(ProcessManagerError::Diag(Box::new(start::ambiguous_service(
+                service_name,
+                &projects,
+            )))
+            .into());
+        }
+        if candidates.len() > 1 {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::manifest_rejected(format!(
+                    "project '{}' is declared by multiple registered manifests",
+                    projects[0]
+                )),
+            ))
+            .into());
+        }
 
-        let target_project = self.resolve_service_target_project(
+        let (resolved, config) = candidates.remove(0);
+        let target_project = config.project.id.clone();
+        let service = config.services.get(service_name).ok_or_else(|| {
+            ProcessManagerError::Diag(Box::new(crate::stop::service_not_found(
+                service_name,
+            )))
+        })?;
+        reject_direct_cron_control(
+            service,
             service_name,
-            project,
-            selector_project,
-            config_project,
+            &target_project,
+            "restarted",
         )?;
-        let primary_project = self.daemon.config().project.id.clone();
 
+        let primary_project = self.daemon.config().project.id.clone();
         if target_project == primary_project {
-            if let (Some(config), Some(path)) = (override_config.as_ref(), config_path) {
-                let cached = self.daemon.config();
-                let new_hash = config
-                    .services
-                    .get(service_name)
-                    .map(|svc| svc.compute_hash());
-                let cached_hash = cached
-                    .services
-                    .get(service_name)
-                    .map(|svc| svc.compute_hash());
-                if new_hash != cached_hash {
-                    self.reload_config(path)?;
+            let old = self.daemon.config();
+            let diff = crate::restart::ManifestDiff::compute(old.as_ref(), &config);
+            if !diff.is_empty() {
+                let affected = Self::reconcile_targets(&config, &diff)?;
+                self.reconcile_primary_project(config)?;
+                self.config_path = resolved;
+                ipc::write_config_hint(&self.config_path)?;
+                if affected.contains(service_name) {
                     return Ok(());
                 }
             }
-
-            let config_handle = self.daemon.config();
-            let resolved_config: &Config = match override_config.as_ref() {
-                Some(config) => config,
-                None => &config_handle,
-            };
-            Self::cascade_restart(
+            let live = self.daemon.config();
+            return Self::cascade_restart(
                 &self.daemon,
-                resolved_config,
+                live.as_ref(),
                 service_name,
                 &target_project,
-            )?;
-            return Ok(());
+            );
         }
 
-        let Some(project_runtime) = self.extra_projects.get(&target_project) else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("project '{target_project}' is not managed by this supervisor"),
-            )
-            .into());
-        };
-        let config_handle = project_runtime.daemon.config();
-
-        if let (Some(config), Some(path)) = (override_config.as_ref(), config_path) {
-            let new_hash = config
-                .services
-                .get(service_name)
-                .map(|svc| svc.compute_hash());
-            let cached_hash = config_handle
-                .services
-                .get(service_name)
-                .map(|svc| svc.compute_hash());
-            if new_hash != cached_hash {
-                let resolved = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    std::env::current_dir()?.join(path)
-                };
-                let resolved = resolved.canonicalize().unwrap_or(resolved);
-                self.replace_extra_project_runtime(config.clone(), resolved)?;
+        if !self.extra_projects.contains_key(&target_project) {
+            return self.add_extra_project(config, resolved);
+        }
+        let old = self
+            .extra_projects
+            .get(&target_project)
+            .map(|runtime| runtime.daemon.config())
+            .ok_or_else(|| {
+                ProcessManagerError::Diag(Box::new(crate::stop::project_not_found(
+                    &target_project,
+                )))
+            })?;
+        let diff = crate::restart::ManifestDiff::compute(old.as_ref(), &config);
+        if !diff.is_empty() {
+            let affected = Self::reconcile_targets(&config, &diff)?;
+            self.reconcile_extra_project(config, resolved)?;
+            if affected.contains(service_name) {
                 return Ok(());
             }
         }
-
-        let resolved_config: &Config = match override_config.as_ref() {
-            Some(config) => config,
-            None => &config_handle,
-        };
+        let runtime = self.extra_projects.get(&target_project).ok_or_else(|| {
+            ProcessManagerError::Diag(Box::new(crate::stop::project_not_found(
+                &target_project,
+            )))
+        })?;
+        let live = runtime.daemon.config();
         Self::cascade_restart(
-            &project_runtime.daemon,
-            resolved_config,
+            &runtime.daemon,
+            live.as_ref(),
             service_name,
             &target_project,
-        )?;
-        Ok(())
+        )
     }
 
     /// Stops one service in the selected project without touching unrelated projects.

@@ -66,9 +66,6 @@ pub enum SgCode {
     /// SG0017 — `logs --prune` was run without a `--max-size` or `--max-age`
     /// bound, so there is nothing to prune against.
     PruneBoundMissing,
-    /// SG0018 — the manifest on disk changed since it was last submitted, but the
-    /// command ran without `-c`, so it would act on a stale cached manifest.
-    DirtyManifest,
     /// SG0019 — `logs` ran with no `-s`/`-p`/`--supervisor` selector, so there is
     /// no target to read.
     LogsTargetRequired,
@@ -178,7 +175,6 @@ impl SgCode {
             SgCode::SupervisorStateDesynchronized => "SG0015",
             SgCode::RollingDeploymentFailed => "SG0016",
             SgCode::PruneBoundMissing => "SG0017",
-            SgCode::DirtyManifest => "SG0018",
             SgCode::LogsTargetRequired => "SG0019",
             SgCode::LogsSupervisorConflict => "SG0020",
             SgCode::LooseServiceNotFound => "SG0021",
@@ -219,7 +215,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 49] = [
+    pub const ALL: [SgCode; 48] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -237,7 +233,6 @@ impl SgCode {
         SgCode::SupervisorStateDesynchronized,
         SgCode::RollingDeploymentFailed,
         SgCode::PruneBoundMissing,
-        SgCode::DirtyManifest,
         SgCode::LogsTargetRequired,
         SgCode::LogsSupervisorConflict,
         SgCode::LooseServiceNotFound,
