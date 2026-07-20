@@ -559,67 +559,6 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
     diag.help_docs()
 }
 
-/// Diagnostic for a failed local config read. The resident supervisor already
-/// The manifest path a command carries, for the dirty-manifest guard. Commands
-/// that do not act on a manifest (or own their own config model, like purge)
-/// return `None` and are never guarded.
-fn command_config_arg(command: &Commands) -> Option<&str> {
-    match command {
-        Commands::Start { config, .. }
-        | Commands::Stop { config, .. }
-        | Commands::Restart { config, .. }
-        | Commands::Inspect { config, .. }
-        | Commands::Logs { config, .. } => Some(config.as_str()),
-        Commands::Status { config, .. } => {
-            Some(config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH))
-        }
-        _ => None,
-    }
-}
-
-/// Refuses a command that ran without `-c` while the on-disk manifest at the
-/// recorded hint path has drifted from what the supervisor last loaded.
-///
-/// The manifest cache is a convenience — it lets you omit `-c` when nothing
-/// changed. But once you edit the manifest, the supervisor's cached copy is
-/// stale, and acting on it would apply the wrong thing (or silently ignore your
-/// change). Re-submit once with `-c <path>` so the supervisor loads the latest;
-/// after that, bare commands work again. A command that already passed an
-/// explicit config is never dirty — it just submitted the truth.
-fn guard_dirty_manifest(config_arg: &str) -> Result<(), Box<dyn Error>> {
-    if config_arg != DEFAULT_CONFIG_PATH {
-        return Ok(());
-    }
-    // An explicit `systemg.yaml` in cwd is a real config the command will load;
-    // only guard when we would fall back to the resident hint.
-    if PathBuf::from(DEFAULT_CONFIG_PATH).exists() {
-        return Ok(());
-    }
-    if ipc::manifest_is_dirty() {
-        let hint = ipc::read_config_hint()
-            .ok()
-            .flatten()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "<config>".to_string());
-        return Err(Box::new(DiagError(Box::new(dirty_manifest_diag(&hint)))));
-    }
-    Ok(())
-}
-
-/// Builds the SG0018 diagnostic for a stale cached manifest.
-fn dirty_manifest_diag(hint: &str) -> systemg::diag::Diagnostic {
-    systemg::diag::Diagnostic::error(
-        systemg::diag::SgCode::DirtyManifest,
-        "the manifest on disk changed since it was last submitted",
-    )
-    .note(
-        "this command ran without -c, so it would act on the supervisor's stale cached manifest",
-    )
-    .note("re-run once with -c so the supervisor loads the latest manifest; after that, -c is optional again")
-    .help_cmd("submit the latest manifest", format!("sysg <command> -c {hint}"))
-    .help_docs()
-}
-
 /// holds each project's manifest, so the real fix is to target the project by
 /// id rather than hunt for a file in the current directory.
 fn config_read_diag(message: &str) -> systemg::diag::Diagnostic {
@@ -722,13 +661,6 @@ fn run() -> Result<(), Box<dyn Error>> {
             )
             .into());
         }
-    }
-
-    // Refuse a bare command (no -c) whose supervisor-cached manifest has been
-    // dirtied on disk, so the supervisor always reflects the latest manifest you
-    // pointed it at. Commands without a manifest are exempt.
-    if let Some(config_arg) = command_config_arg(&args.command) {
-        guard_dirty_manifest(config_arg)?;
     }
 
     let verbose = args.verbose;
@@ -4733,7 +4665,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
     let command = match plan {
         RestartPlan::Recycle { .. } => unreachable!("handled above"),
         RestartPlan::Everything { config } => ControlCommand::Restart {
-            config: Some(config.to_string_lossy().to_string()),
+            config: restart_scoped_config(&config),
             service: None,
             project: None,
         },

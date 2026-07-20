@@ -90,13 +90,6 @@ diagnostic. The previous instance is retained when systemg can do so safely.
 `logs --prune` was run with no `--max-size` or `--max-age` bound, so there is
 nothing to prune against. Pass at least one bound.
 
-### SG0018
-
-The manifest on disk changed since it was last submitted, but the command ran
-without `-c`, so it would act on the supervisor's stale cached manifest. Re-run
-once with `-c <path>` so the supervisor loads the latest; after that, `-c` is
-optional again. See [config caching](/how-it-works/configuration#the-config-cache).
-
 ### SG0019
 
 `sysg logs` ran with no `-s`, `-p`, or `--supervisor`, so there is no target to
