@@ -42,6 +42,8 @@ const SERVICE_STDOUT_THREAD: &str = "sysg-service-stdout";
 const SERVICE_STDERR_THREAD: &str = "sysg-service-stderr";
 /// Thread name for dynamic child log readers.
 const CHILD_LOG_THREAD: &str = "sysg-child-log";
+/// Directory containing separately managed dynamic-child logs.
+const SPAWN_LOG_DIR: &str = "spawn";
 /// Lowest descriptor number used for duplicated handoff pipes.
 const MIN_HANDOFF_FD: RawFd = 3;
 /// Maximum time allowed for log readers and writers to quiesce.
@@ -230,6 +232,32 @@ fn is_rotated_backup(file_name: &str) -> bool {
     })
 }
 
+/// Returns regular log files from the root and each project directory.
+fn managed_log_files(log_dir: &Path) -> Result<Vec<PathBuf>, LogsManagerError> {
+    let mut files = Vec::new();
+
+    for entry in fs::read_dir(log_dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_file() {
+            files.push(entry.path());
+            continue;
+        }
+        if !file_type.is_dir() || entry.file_name() == SPAWN_LOG_DIR {
+            continue;
+        }
+
+        for project_entry in fs::read_dir(entry.path())? {
+            let project_entry = project_entry?;
+            if project_entry.file_type()?.is_file() {
+                files.push(project_entry.path());
+            }
+        }
+    }
+
+    Ok(files)
+}
+
 /// Prunes rotated log files by age and total size, keeping active `.log` files intact.
 pub fn prune_logs(
     max_size: Option<&str>,
@@ -244,11 +272,7 @@ pub fn prune_logs(
     }
 
     let mut backups: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
-    for entry in fs::read_dir(&log_dir)? {
-        let path = entry?.path();
-        if !path.is_file() {
-            continue;
-        }
+    for path in managed_log_files(&log_dir)? {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -2793,7 +2817,7 @@ pub fn spawn_dynamic_child_log_writer(
     };
 
     let mut path = runtime::log_dir();
-    path.push("spawn");
+    path.push(SPAWN_LOG_DIR);
     let file_name = format!(
         "{}_{}_{}_{}.log",
         owner_component, child_component, pid, kind
@@ -3166,30 +3190,15 @@ impl LogManager {
         let log_dir = runtime::log_dir();
         runtime::create_private_dir(&log_dir)?;
 
-        for entry in fs::read_dir(&log_dir)? {
-            let path = entry?.path();
-            if !path.is_file() {
-                continue;
-            }
-
+        for path in managed_log_files(&log_dir)? {
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
 
-            if file_name == "supervisor.log"
-                || file_name.ends_with("_stdout.log")
-                || file_name.ends_with("_stderr.log")
-                || (file_name.ends_with(".log")
-                    && !file_name.contains("_stdout.log")
-                    && !file_name.contains("_stderr.log"))
-            {
+            if file_name.ends_with(".log") {
                 truncate_log_file(&path)?;
                 remove_rotated_log_files(&path)?;
-            } else if file_name.strip_suffix(".log").is_none()
-                && (file_name.contains("_stdout.log.")
-                    || file_name.contains("_stderr.log.")
-                    || file_name.starts_with("supervisor.log."))
-            {
+            } else if is_rotated_backup(file_name) {
                 fs::remove_file(&path)?;
             }
         }
@@ -3888,15 +3897,20 @@ mod tests {
         crate::runtime::set_drop_privileges(false);
 
         let log_dir = crate::runtime::log_dir();
-        fs::create_dir_all(&log_dir).unwrap();
-        fs::write(log_dir.join("svc.log"), vec![b'a'; 100]).unwrap();
-        fs::write(log_dir.join("svc.log.1"), vec![b'a'; 100]).unwrap();
-        fs::write(log_dir.join("svc.log.2"), vec![b'a'; 100]).unwrap();
+        let project_log_dir = log_dir.join("demo");
+        let spawn_log_dir = log_dir.join(SPAWN_LOG_DIR);
+        fs::create_dir_all(&project_log_dir).unwrap();
+        fs::create_dir_all(&spawn_log_dir).unwrap();
+        fs::write(project_log_dir.join("svc.log"), vec![b'a'; 100]).unwrap();
+        fs::write(project_log_dir.join("svc.log.1"), vec![b'a'; 100]).unwrap();
+        fs::write(project_log_dir.join("svc.log.2"), vec![b'a'; 100]).unwrap();
+        fs::write(spawn_log_dir.join("child.log.1"), vec![b'a'; 100]).unwrap();
 
         let summary = super::prune_logs(Some("150"), None).unwrap();
 
         assert!(summary.removed_files >= 1);
-        assert!(log_dir.join("svc.log").exists());
+        assert!(project_log_dir.join("svc.log").exists());
+        assert!(spawn_log_dir.join("child.log.1").exists());
 
         unsafe {
             if let Some(home) = original_home {

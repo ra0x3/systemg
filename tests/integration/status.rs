@@ -252,6 +252,7 @@ services:
 
     let sysg_bin = assert_cmd::cargo::cargo_bin!("sysg");
     let output = Command::new(sysg_bin)
+        .env("RUST_LOG", "error")
         .arg("inspect")
         .arg("--service")
         .arg("demo")

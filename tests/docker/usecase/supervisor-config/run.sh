@@ -53,6 +53,8 @@ XML
 sysg start --config "$CONFIG" --daemonize
 check "$?" "restart with the edited supervisor.xml exits 0"
 sleep 4
+sysg stop --project demo >/dev/null 2>&1
+check "$?" "chatty project stops before log inspection"
 grep -q '^  <logs>$' "$SUP_XML"
 check "$?" "compact legacy supervisor.xml is normalized"
 grep -q '<max_bytes>4096</max_bytes>' "$SUP_XML"

@@ -24,10 +24,18 @@ use predicates::prelude::PredicateBooleanExt;
 use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
-    state_store::StateStore,
+    logs::{get_service_log_path, resolve_log_path},
+    state_store::{LOOSE_PROJECT_ID, StateStore},
 };
 #[cfg(target_os = "linux")]
 use tempfile::tempdir;
+
+#[cfg(target_os = "linux")]
+/// Writes a log fixture after creating its project directory.
+fn write_log(path: &Path, contents: &str) {
+    fs::create_dir_all(path.parent().expect("log parent")).expect("create log parent");
+    fs::write(path, contents).expect("write log fixture");
+}
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -51,12 +59,10 @@ services:
     )
     .expect("write config");
 
-    let log_dir = home.join(".local/share/systemg/logs");
-    fs::create_dir_all(&log_dir).expect("make log dir");
-    let stdout_path = log_dir.join("arb_rs_stdout.log");
-    let stderr_path = log_dir.join("arb_rs_stderr.log");
-    fs::write(&stdout_path, "streamed stdout line\n").expect("write stdout log");
-    fs::write(&stderr_path, "").expect("write stderr log");
+    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "arb_rs", "stdout");
+    let stderr_path = resolve_log_path(LOOSE_PROJECT_ID, "arb_rs", "stderr");
+    write_log(&stdout_path, "streamed stdout line\n");
+    write_log(&stderr_path, "");
 
     let mut pid_file = PidFile::load(StateStore::loose()).expect("load pid file");
     pid_file.insert("arb_rs", 999_999).expect("insert pid");
@@ -114,13 +120,14 @@ services:
         .expect("start quiet service");
     thread::sleep(Duration::from_millis(300));
 
-    let log_dir = home.join(".local/share/systemg/logs");
+    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "quiet", "stdout");
+    let stderr_path = resolve_log_path(LOOSE_PROJECT_ID, "quiet", "stderr");
     assert!(
-        !log_dir.join("quiet_stdout.log").exists(),
+        !stdout_path.exists(),
         "stdout log should not be created when logs.sink is none"
     );
     assert!(
-        !log_dir.join("quiet_stderr.log").exists(),
+        !stderr_path.exists(),
         "stderr log should not be created when logs.sink is none"
     );
 
@@ -151,11 +158,7 @@ services:
 
     let config =
         load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
-    let hash = config
-        .services
-        .get("demo")
-        .expect("demo service")
-        .compute_hash();
+    let hash = config.state_key("demo");
 
     let mut child = StdCommand::new("/bin/sleep")
         .arg("30")
@@ -177,10 +180,8 @@ services:
     let mut pid_file = PidFile::load(store).expect("load pid file");
     let _ = pid_file.remove("demo");
 
-    let log_dir = home.join(".local/share/systemg/logs");
-    fs::create_dir_all(&log_dir).expect("make log dir");
-    fs::write(log_dir.join("demo_stdout.log"), "snapshot log line\n")
-        .expect("write stdout log");
+    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stdout");
+    write_log(&stdout_path, "snapshot log line\n");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     cmd.env("SYSTEMG_TAIL_MODE", "oneshot")
@@ -231,11 +232,7 @@ services:
 
     let config =
         load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
-    let hash = config
-        .services
-        .get("demo")
-        .expect("demo service")
-        .compute_hash();
+    let hash = config.state_key("demo");
 
     let mut child = StdCommand::new("/bin/sleep")
         .arg("30")
@@ -254,13 +251,11 @@ services:
         )
         .expect("persist state");
 
-    let log_dir = home.join(".local/share/systemg/logs");
-    fs::create_dir_all(&log_dir).expect("make log dir");
-    fs::write(
-        log_dir.join("demo_stdout.log"),
+    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stdout");
+    write_log(
+        &stdout_path,
         "first log line\nsecond log line\nthird log line\nfourth log line\n",
-    )
-    .expect("write stdout log");
+    );
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     let output = cmd
@@ -318,11 +313,7 @@ services:
 
     let config =
         load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
-    let hash = config
-        .services
-        .get("demo")
-        .expect("demo service")
-        .compute_hash();
+    let hash = config.state_key("demo");
 
     let mut child = StdCommand::new("/bin/sleep")
         .arg("30")
@@ -341,19 +332,17 @@ services:
         )
         .expect("persist state");
 
-    let log_dir = home.join(".local/share/systemg/logs");
-    fs::create_dir_all(&log_dir).expect("make log dir");
-    fs::write(
-        log_dir.join("demo.log"),
+    let combined_path = get_service_log_path(LOOSE_PROJECT_ID, "demo");
+    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stdout");
+    let stderr_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stderr");
+    write_log(
+        &combined_path,
         "2026-05-14T02:00:00.000000Z stdout first\n\
 2026-05-14T02:00:00.000001Z stderr second\n\
 2026-05-14T02:00:00.000002Z stdout third\n",
-    )
-    .expect("write combined log");
-    fs::write(log_dir.join("demo_stdout.log"), "stdout-only\n")
-        .expect("write stdout log");
-    fs::write(log_dir.join("demo_stderr.log"), "stderr-only\n")
-        .expect("write stderr log");
+    );
+    write_log(&stdout_path, "stdout-only\n");
+    write_log(&stderr_path, "stderr-only\n");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     let output = cmd
@@ -404,22 +393,22 @@ fn logs_without_service_groups_running_before_offline() {
         &config_path,
         r#"
 version: "2"
-services:
-  beta:
-    command: "/bin/sleep 30"
-  alpha:
-    command: "/bin/echo alpha"
+projects:
+  logs-fixture:
+    name: Logs Fixture
+    services:
+      beta:
+        command: "/bin/sleep 30"
+      alpha:
+        command: "/bin/echo alpha"
 "#,
     )
     .expect("write config");
 
     let config =
         load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
-    let beta_hash = config
-        .services
-        .get("beta")
-        .expect("beta service")
-        .compute_hash();
+    let beta_hash = config.state_key("beta");
+    let project_id = config.project.id.clone();
 
     let mut child = StdCommand::new("/bin/sleep")
         .arg("30")
@@ -438,10 +427,10 @@ services:
         )
         .expect("persist state");
 
-    let log_dir = home.join(".local/share/systemg/logs");
-    fs::create_dir_all(&log_dir).expect("make log dir");
-    fs::write(log_dir.join("beta_stdout.log"), "beta line\n").expect("write beta log");
-    fs::write(log_dir.join("alpha_stdout.log"), "alpha line\n").expect("write alpha log");
+    let beta_log = resolve_log_path(&project_id, "beta", "stdout");
+    let alpha_log = resolve_log_path(&project_id, "alpha", "stdout");
+    write_log(&beta_log, "beta line\n");
+    write_log(&alpha_log, "alpha line\n");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     let output = cmd
@@ -449,6 +438,8 @@ services:
         .arg("logs")
         .arg("--config")
         .arg(&config_path)
+        .arg("--project")
+        .arg(&project_id)
         .arg("--kind")
         .arg("stdout")
         .arg("--lines")
@@ -510,23 +501,22 @@ fn logs_purge_truncates_only_selected_service() {
     fs::create_dir_all(&home).expect("failed to create home dir");
     let _home = HomeEnvGuard::set(&home);
 
-    let log_dir = home.join(".local/share/systemg/logs");
-    fs::create_dir_all(&log_dir).expect("make log dir");
+    let api_stdout = resolve_log_path(LOOSE_PROJECT_ID, "api", "stdout");
+    let api_stderr = resolve_log_path(LOOSE_PROJECT_ID, "api", "stderr");
+    let worker_stdout = resolve_log_path(LOOSE_PROJECT_ID, "worker", "stdout");
+    let worker_stderr = resolve_log_path(LOOSE_PROJECT_ID, "worker", "stderr");
 
-    let api_stdout = log_dir.join("api_stdout.log");
-    let api_stderr = log_dir.join("api_stderr.log");
-    let worker_stdout = log_dir.join("worker_stdout.log");
-    let worker_stderr = log_dir.join("worker_stderr.log");
-
-    fs::write(&api_stdout, "api stdout\n").expect("write api stdout");
-    fs::write(&api_stderr, "api stderr\n").expect("write api stderr");
-    fs::write(&worker_stdout, "worker stdout\n").expect("write worker stdout");
-    fs::write(&worker_stderr, "worker stderr\n").expect("write worker stderr");
+    write_log(&api_stdout, "api stdout\n");
+    write_log(&api_stderr, "api stderr\n");
+    write_log(&worker_stdout, "worker stdout\n");
+    write_log(&worker_stderr, "worker stderr\n");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     cmd.arg("logs")
         .arg("--service")
         .arg("api")
+        .arg("--project")
+        .arg(LOOSE_PROJECT_ID)
         .arg("--purge")
         .assert()
         .success()
@@ -551,17 +541,15 @@ fn logs_purge_without_service_truncates_all_logs() {
     let log_dir = home.join(".local/share/systemg/logs");
     fs::create_dir_all(&log_dir).expect("make log dir");
 
-    let api_stdout = log_dir.join("api_stdout.log");
-    let api_stderr = log_dir.join("api_stderr.log");
+    let api_stdout = log_dir.join("alpha/api_stdout.log");
+    let api_stderr = log_dir.join("beta/api_stderr.log");
     let supervisor = log_dir.join("supervisor.log");
     let spawn_log = log_dir.join("spawn/child_stdout.log");
 
-    fs::write(&api_stdout, "api stdout\n").expect("write api stdout");
-    fs::write(&api_stderr, "api stderr\n").expect("write api stderr");
-    fs::write(&supervisor, "supervisor event\n").expect("write supervisor");
-    fs::create_dir_all(spawn_log.parent().expect("spawn parent"))
-        .expect("create spawn dir");
-    fs::write(&spawn_log, "spawn output\n").expect("write spawn log");
+    write_log(&api_stdout, "api stdout\n");
+    write_log(&api_stderr, "api stderr\n");
+    write_log(&supervisor, "supervisor event\n");
+    write_log(&spawn_log, "spawn output\n");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
     cmd.arg("logs")

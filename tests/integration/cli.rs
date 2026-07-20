@@ -406,7 +406,8 @@ services:
         .parse()
         .expect("latest service pid should parse");
 
-    thread::sleep(Duration::from_secs(2));
+    assert_ne!(first_pid, latest_pid, "restart should launch a replacement");
+    common::wait_for_process_exit(first_pid);
 
     let alive: Vec<u32> = restarted_pids
         .iter()
@@ -509,8 +510,16 @@ services:
         .assert()
         .success();
 
+    let current_supervisor_pid = systemg::ipc::supervisor_peer_pid()
+        .expect("read supervisor socket peer after restart")
+        as libc::pid_t;
+    assert_eq!(
+        current_supervisor_pid, old_supervisor_pid,
+        "restart should remain routed to the original supervisor"
+    );
+
     let restarted_pids = common::wait_for_lines(&pid_log, 2);
-    thread::sleep(Duration::from_secs(2));
+    common::wait_for_process_exit(first_pid);
     let alive: Vec<u32> = restarted_pids
         .iter()
         .filter_map(|line| line.trim().parse::<u32>().ok())

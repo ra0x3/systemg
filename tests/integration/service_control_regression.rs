@@ -54,7 +54,8 @@ services:
 
     let config = load_config(Some(config_path.to_str().unwrap())).unwrap();
     let service_key = config.state_key("sample");
-    let mut exited = std::process::Command::new("/usr/bin/true")
+    let mut exited = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
         .spawn()
         .expect("spawn short-lived process");
     exited.wait().expect("reap short-lived process");
