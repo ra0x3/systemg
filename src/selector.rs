@@ -2,7 +2,7 @@
 //! a target set, identically for `start`, `stop`, and `restart`.
 //!
 //! Each command's plan (`StartPlan`, `StopPlan`, `RestartPlan`) is built on top
-//! of a [`Target`] so the selector semantics — including the `-p`-vs-selector
+//! of a [`crate::selector::Target`] so the selector semantics — including the `-p`-vs-selector
 //! mismatch rule — live in exactly one place and cannot drift between commands.
 
 /// Splits a `project/service` selector into its parts, or `None` if unqualified.

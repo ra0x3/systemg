@@ -1,8 +1,8 @@
 //! The `purge` command, rebuilt from first principles.
 //!
-//! - [`plan`] — resolves selectors into an exhaustive [`PurgePlan`], with a
-//!   [`preflight`](plan::preflight) that refuses to wipe state out from under a
-//!   live supervisor (SG0401) before any deletion.
+//! - [`crate::purge::plan`] — resolves selectors into an exhaustive
+//!   [`crate::purge::PurgePlan`], with a [`crate::purge::preflight`] that refuses
+//!   to wipe state out from under a live supervisor (SG0401) before any deletion.
 
 pub mod plan;
 

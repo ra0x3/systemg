@@ -1,8 +1,9 @@
 //! The `logs` command's plan layer, rebuilt from first principles.
 //!
-//! - [`plan`] — resolves the mode flags + selectors into one exhaustive
-//!   [`LogsPlan`], or a typed [`LogsPlanError`].
-//! - [`diagnostics`] — typed diagnostics for the mode-resolution failures.
+//! - [`crate::logs_cmd::plan`] — resolves the mode flags + selectors into one
+//!   exhaustive [`crate::logs_cmd::LogsPlan`], or a typed
+//!   [`crate::logs_cmd::LogsPlanError`].
+//! - [`crate::logs_cmd::diagnostics`] — typed diagnostics for mode resolution.
 //!
 //! The log I/O itself (tailing, streaming, rotation, formatting) lives in
 //! [`crate::logs`]; this module only decides which mode an invocation is.

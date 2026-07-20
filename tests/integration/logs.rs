@@ -24,12 +24,14 @@ use predicates::prelude::PredicateBooleanExt;
 use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    state_store::StateStore,
 };
 #[cfg(target_os = "linux")]
 use tempfile::tempdir;
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Streams persisted output when the recorded process has no readable descriptors.
 fn logs_streams_when_pid_has_no_fds() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -56,7 +58,7 @@ services:
     fs::write(&stdout_path, "streamed stdout line\n").expect("write stdout log");
     fs::write(&stderr_path, "").expect("write stderr log");
 
-    let mut pid_file = PidFile::load().expect("load pid file");
+    let mut pid_file = PidFile::load(StateStore::loose()).expect("load pid file");
     pid_file.insert("arb_rs", 999_999).expect("insert pid");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
@@ -80,6 +82,7 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Discards service output when the configured log sink is disabled.
 fn logs_sink_none_discards_service_output_without_files() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -126,6 +129,7 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Uses lifecycle state when a live service is absent from the PID file.
 fn logs_uses_snapshot_runtime_when_pid_file_is_missing_service() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -158,7 +162,8 @@ services:
         .spawn()
         .expect("spawn sleep");
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let store = StateStore::for_project(&config.project.id);
+    let mut state = ServiceStateFile::load(store.clone()).expect("load state");
     state
         .set(
             &hash,
@@ -169,7 +174,7 @@ services:
         )
         .expect("persist state");
 
-    let mut pid_file = PidFile::load().expect("load pid file");
+    let mut pid_file = PidFile::load(store).expect("load pid file");
     let _ = pid_file.remove("demo");
 
     let log_dir = home.join(".local/share/systemg/logs");
@@ -204,6 +209,7 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Returns only the requested number of trailing service log lines.
 fn logs_lines_returns_last_lines_for_service() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -236,7 +242,8 @@ services:
         .spawn()
         .expect("spawn sleep");
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &hash,
@@ -289,6 +296,7 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Preserves capture order when reading the combined stdout and stderr log.
 fn logs_default_reads_combined_stdout_stderr_in_capture_order() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -321,7 +329,8 @@ services:
         .spawn()
         .expect("spawn sleep");
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &hash,
@@ -382,6 +391,7 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Orders running services before offline services without process-group state.
 fn logs_without_service_groups_running_before_offline() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -416,7 +426,8 @@ services:
         .spawn()
         .expect("spawn sleep");
 
-    let mut state = ServiceStateFile::load().expect("load state");
+    let mut state = ServiceStateFile::load(StateStore::for_project(&config.project.id))
+        .expect("load state");
     state
         .set(
             &beta_hash,
@@ -484,12 +495,14 @@ services:
 }
 
 #[cfg(target_os = "linux")]
+/// Reads a fixture log as UTF-8 text.
 fn read_log(path: &Path) -> String {
     fs::read_to_string(path).expect("read log file")
 }
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Purges only the selected service's log streams.
 fn logs_purge_truncates_only_selected_service() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -527,6 +540,7 @@ fn logs_purge_truncates_only_selected_service() {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Purges every managed log when no service selector is present.
 fn logs_purge_without_service_truncates_all_logs() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();

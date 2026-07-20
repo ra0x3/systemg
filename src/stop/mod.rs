@@ -1,7 +1,8 @@
 //! The `stop` command, rebuilt from first principles.
 //!
-//! - [`plan`] — resolves stop's selectors into one exhaustive [`StopPlan`].
-//! - [`diagnostics`] — typed diagnostics for stop failures.
+//! - [`crate::stop::plan`] — resolves stop's selectors into one exhaustive
+//!   [`crate::stop::StopPlan`].
+//! - [`crate::stop::diagnostics`] — typed diagnostics for stop failures.
 
 pub mod diagnostics;
 pub mod plan;

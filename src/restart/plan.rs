@@ -5,7 +5,7 @@
 //! of any command. Two ideas keep it honest:
 //!
 //! - [`RestartPlan`] — an exhaustive enum of *what* to restart, resolved from
-//!   the shared [`Target`](crate::selector::Target).
+//!   the shared [`crate::selector::Target`].
 //! - [`preflight`] — a total check of *whether the world permits it*, run before
 //!   the plan is dispatched. It can reject the plan (returning a typed
 //!   [`Diagnostic`]) or upgrade a whole-config restart to a supervisor

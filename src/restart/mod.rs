@@ -1,8 +1,8 @@
 //! The `restart` command, rebuilt from first principles.
 //!
-//! - [`plan`] — resolves selectors into an exhaustive [`RestartPlan`], with a
-//!   [`preflight`](plan::preflight) that refuses illegal operations before any
-//!   side effect.
+//! - [`crate::restart::plan`] — resolves selectors into an exhaustive
+//!   [`crate::restart::RestartPlan`], with a [`crate::restart::preflight`] that
+//!   refuses illegal operations before any side effect.
 
 pub mod plan;
 pub mod reconcile;

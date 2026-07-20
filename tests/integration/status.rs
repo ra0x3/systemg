@@ -2,12 +2,6 @@
 mod common;
 
 use std::fs;
-#[cfg(target_os = "linux")]
-use std::{
-    sync::Arc,
-    thread,
-    time::{Duration, Instant},
-};
 
 use assert_cmd::Command;
 use common::HomeEnvGuard;
@@ -22,12 +16,6 @@ use systemg::{
     ipc::InspectPayload,
     state_store::StateStore,
     status::{OverallHealth, StatusSnapshot},
-};
-#[cfg(target_os = "linux")]
-use systemg::{
-    config::{SpawnMode, StatusSnapshotMode},
-    spawn::DynamicSpawnManager,
-    status::collect_runtime_snapshot,
 };
 use tempfile::tempdir;
 
@@ -346,6 +334,7 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Reports a tracked zombie as non-running process state.
 fn status_flags_zombie_processes() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -371,7 +360,7 @@ services:
         unsafe { libc::_exit(0) };
     }
 
-    let mut pid_file = PidFile::load().expect("load pid file");
+    let mut pid_file = PidFile::load(StateStore::loose()).expect("load pid file");
     pid_file
         .insert("arb_rs", child_pid as u32)
         .expect("insert zombie pid");
@@ -422,6 +411,7 @@ services:
 }
 
 #[cfg(target_os = "linux")]
+/// Waits until procfs reports the supplied process as a zombie.
 fn wait_for_z_state(pid: u32) {
     use std::{
         path::Path,
@@ -449,6 +439,7 @@ fn wait_for_z_state(pid: u32) {
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Reports explicitly skipped services without a running process.
 fn status_reports_skipped_services() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -518,6 +509,7 @@ services:
 
 #[cfg(target_os = "linux")]
 #[test]
+/// Reports a finite unit's successful exit from persisted state.
 fn status_reports_successful_exit() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();

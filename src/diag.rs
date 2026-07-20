@@ -1,12 +1,12 @@
 //! rustc-style diagnostics for sysg.
 //!
-//! Every user-facing failure renders as a [`Diagnostic`]: what happened, the
+//! Every user-facing failure renders as a [`crate::diag::Diagnostic`]: what happened, the
 //! evidence sysg captured while it happened, and the exact next commands to
 //! run — colored on a terminal, plain when piped, structured over IPC. The
 //! design goal is the Rust compiler's: assume the user made an honest mistake
 //! and hand it back with a map, not a dead end.
 //!
-//! Every diagnostic carries a typed [`SgCode`]. The enum *is* the error
+//! Every diagnostic carries a typed [`crate::diag::SgCode`]. The enum *is* the error
 //! taxonomy: a code that isn't a variant cannot be constructed, and adding a
 //! failure mode means adding a variant. There is no stringly-typed seam.
 

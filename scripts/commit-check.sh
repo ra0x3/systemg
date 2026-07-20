@@ -82,7 +82,7 @@ run_labeled \
 run_labeled \
   "rust:docs" \
   "${BLUE}" \
-  "cd \"${REPO_ROOT}\" && cargo rustdoc --lib -- -D missing_docs"
+  "cd \"${REPO_ROOT}\" && cargo rustdoc --lib -- -D warnings -D missing_docs"
 
 run_labeled \
   "docs:mintlify" \

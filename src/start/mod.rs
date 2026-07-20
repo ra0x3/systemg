@@ -4,8 +4,8 @@
 //! truthfully, no other command can be trusted. The module is split into small,
 //! total pieces:
 //!
-//! - [`outcome`] — the typed per-unit "came up" ladder every boot step produces.
-//! - [`boot`] — the race-free boot journal that records and replays progress.
+//! - [`crate::start::outcome`] — the typed per-unit "came up" ladder every boot step produces.
+//! - [`crate::start::boot`] — the race-free boot journal that records and replays progress.
 
 /// Race-free boot progress recording and replay.
 pub mod boot;
