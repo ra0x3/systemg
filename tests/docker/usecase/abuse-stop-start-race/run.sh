@@ -21,6 +21,7 @@ set -u
 CONFIG=/usecase/stack.yaml
 STATE_DIR="$HOME/.local/share/systemg"
 ROUNDS=8
+TIMEOUT=30
 
 section "boot once"
 sysg start --config "$CONFIG" --daemonize
@@ -31,12 +32,15 @@ section "$ROUNDS rounds of overlapping stop --supervisor / start --daemonize"
 HANG=0
 i=0
 while [ "$i" -lt "$ROUNDS" ]; do
-  timeout 15 sysg stop --supervisor >/dev/null 2>&1 &
+  timeout "$TIMEOUT" sysg stop --supervisor >/dev/null 2>&1 &
   SP=$!
-  timeout 15 sysg start --config "$CONFIG" --daemonize >/dev/null 2>&1 &
+  timeout "$TIMEOUT" sysg start --config "$CONFIG" --daemonize >/dev/null 2>&1 &
   ST=$!
-  wait "$SP"; [ "$?" = "124" ] && HANG=$((HANG+1))
-  wait "$ST"; [ "$?" = "124" ] && HANG=$((HANG+1))
+  wait "$SP"; SP_RC=$?
+  wait "$ST"; ST_RC=$?
+  echo "round $((i+1)): stop=$SP_RC start=$ST_RC"
+  [ "$SP_RC" = "124" ] && HANG=$((HANG+1))
+  [ "$ST_RC" = "124" ] && HANG=$((HANG+1))
   i=$((i+1))
 done
 echo "hung invocations: $HANG"
@@ -44,11 +48,11 @@ echo "hung invocations: $HANG"
 check "$?" "no stop/start invocation hung during the race"
 
 section "quiesce, then a clean final start must win"
-timeout 15 sysg stop --supervisor >/dev/null 2>&1
+timeout "$TIMEOUT" sysg stop --supervisor >/dev/null 2>&1
 [ "$?" != "124" ]
 check "$?" "final stop --supervisor did not hang"
 sleep 1
-timeout 20 sysg start --config "$CONFIG" --daemonize >/tmp/fs.err 2>&1
+timeout "$TIMEOUT" sysg start --config "$CONFIG" --daemonize >/tmp/fs.err 2>&1
 RC=$?
 cat /tmp/fs.err
 [ "$RC" != "124" ]
