@@ -36,9 +36,10 @@ services:
 - Overlap detection prevents duplicate runs
 - Cron units are scheduled by the supervisor, not run as persistent services.
   Unlike services, they cannot be started or restarted directly with
-  `sysg start -s <unit>` or `sysg restart -s <unit>` — both are rejected. To
-  (re)schedule a cron unit, reload or restart its project so the supervisor
-  re-reads the manifest.
+  `sysg start -s <unit>` or `sysg restart -s <unit>` — both return
+  [`SG0101`](/how-it-works/dialog/codes#sg0101). To (re)schedule a cron unit,
+  reload or restart its project so the supervisor re-reads the manifest. A
+  project restart does not run the unit immediately.
 
 <Info>
   A cron row marked `Failed` or `Failing` means its **most recent run failed**.

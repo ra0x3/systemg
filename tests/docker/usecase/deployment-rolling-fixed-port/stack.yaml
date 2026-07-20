@@ -1,0 +1,16 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "exec python3 /usecase/server.py 18080 /tmp/server-pids"
+        restart_policy: always
+        deployment:
+          strategy: rolling
+          pre_start: "sh /usecase/pre.sh"
+          health_check:
+            url: "http://127.0.0.1:18080/health"
+            interval: "1s"
+            retries: 3
+          grace_period: "1s"

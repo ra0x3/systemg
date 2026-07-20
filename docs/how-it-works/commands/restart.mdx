@@ -94,14 +94,17 @@ need to pass `--config` again if the project already has a known config path.
 ## Cron units
 
 `restart --service <CRON_UNIT>` is invalid. Cron units are scheduler entries,
-not persistent services, so they cannot be restarted directly:
+not persistent services, so they cannot be restarted directly. The command
+returns [`SG0101`](/how-it-works/dialog/codes#sg0101):
 
 ```
-cron unit '<name>' cannot be restarted directly; reload project '<project>' to reschedule it
+error[SG0101]: cron unit `<name>` cannot be restarted directly
 ```
 
 To reschedule cron definitions, reload or restart the whole project. A project
-restart re-reads the manifest and reschedules every cron unit it defines.
+restart re-reads the manifest and reschedules every cron unit it defines; it
+does not run the cron unit immediately. Failed cron runs remain scheduled for
+their next trigger.
 
 ## Deployment strategies
 
@@ -111,13 +114,15 @@ before retiring the old instance:
 1. New instance starts
 2. Health checks pass
 3. (Optional) blue/green `switch_command` shifts traffic to candidate slot
-4. Old instance receives `SIGTERM`
-5. Grace period allows requests to complete
-6. Old instance stops
+4. Candidate remains alive through the configured grace/stability gate
+5. Old instance receives `SIGTERM` and stops
 
 This is zero downtime only when both instances can run concurrently and traffic
-can reach the candidate. Fixed-port services need a blue-green configuration;
-services without rolling deployment stop and then start.
+can reach the candidate. When systemg can infer a fixed port from the health URL
+or `PORT` environment variable, it preflights the rollout as an immediate
+restart instead of launching a candidate that cannot bind. Use blue-green slots
+when fixed-port zero downtime is required. Services without rolling deployment
+stop and then start.
 
 For deployment scripts, prefer:
 

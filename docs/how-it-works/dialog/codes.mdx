@@ -117,6 +117,13 @@ pass `-p <project> -s <service>`.
 
 ## Start
 
+### SG0101
+
+A cron unit was targeted by a direct `start` or `restart`. Cron units are
+schedule entries rather than persistent services: inspect the failed run, fix
+its cause, and wait for the next scheduled run. Restarting the owning project
+reloads its schedule but does not trigger an immediate run.
+
 ### SG0102
 
 A service exited immediately at start, before it finished starting.

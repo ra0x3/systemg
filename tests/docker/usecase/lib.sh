@@ -76,6 +76,10 @@ print(len(data.get("units",[])))
 # pid_alive <pid> -> exit 0 if the pid is a live process.
 pid_alive() { kill -0 "$1" 2>/dev/null; }
 
+http_get() {
+  python3 -c 'import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout=2).read().decode())' "$1"
+}
+
 # stderr_has_code <code> <file> -> exit 0 if the captured stderr names the code.
 stderr_has_code() { grep -q "$1" "$2"; }
 

@@ -6,3 +6,5 @@ projects:
       worker:
         command: "sleep 3000"
         restart_policy: "never"
+        deployment:
+          strategy: immediate

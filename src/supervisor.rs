@@ -350,24 +350,30 @@ fn clear_cron_pid(daemon: &Daemon, service_name: &str, expected_pid: u32) {
     }
 }
 
-/// Rejects direct control of a cron unit. `verb` is the past-tense action
-/// (e.g. "started", "restarted") and `remedy` is the project-level fix
-/// (e.g. "schedule", "reschedule").
+/// Rejects direct control of a cron unit with a schedule-aware diagnostic.
 fn reject_direct_cron_control(
     service_config: &crate::config::ServiceConfig,
     service_name: &str,
     target_project: &str,
     verb: &str,
-    remedy: &str,
 ) -> Result<(), SupervisorError> {
     if service_config.cron.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "cron unit '{service_name}' cannot be {verb} directly; reload project '{target_project}' to {remedy} it"
-            ),
+        let diag = crate::diag::Diagnostic::error(
+            crate::diag::SgCode::CronDirectControl,
+            format!("cron unit `{service_name}` cannot be {verb} directly"),
         )
-        .into());
+        .note("cron units run only when their schedule fires")
+        .note("restarting the project reloads the schedule but does not run the job immediately")
+        .help_cmd(
+            "inspect the failed run",
+            format!("sysg logs -p {target_project} -s {service_name}"),
+        )
+        .help_cmd(
+            "reload the schedule",
+            format!("sysg restart -p {target_project}"),
+        )
+        .help_docs();
+        return Err(ProcessManagerError::Diag(Box::new(diag)).into());
     }
     Ok(())
 }
@@ -1146,7 +1152,6 @@ impl Supervisor {
             service_name,
             &target_project,
             "started",
-            "schedule",
         )?;
 
         // Explicitly naming a service is a direct order to run THIS one, so it
@@ -4215,7 +4220,6 @@ impl Supervisor {
                 &name,
                 target_project,
                 "restarted",
-                "reschedule",
             )?;
             daemon.restart_service(&name, service_config)?;
         }
@@ -5168,11 +5172,11 @@ services:
                 project: Some("beta".into()),
             })
             .expect_err("direct cron unit start should be rejected");
-        assert!(
-            err.to_string()
-                .contains("cron unit 'beta_cron' cannot be started directly"),
-            "unexpected cron start error: {err}"
-        );
+        assert!(matches!(
+            err,
+            SupervisorError::Process(ProcessManagerError::Diag(diag))
+                if diag.code == crate::diag::SgCode::CronDirectControl
+        ));
 
         let restart_err = supervisor
             .handle_command(ControlCommand::Restart {
@@ -5181,12 +5185,11 @@ services:
                 project: Some("beta".into()),
             })
             .expect_err("direct cron unit restart should be rejected");
-        assert!(
-            restart_err
-                .to_string()
-                .contains("cron unit 'beta_cron' cannot be restarted directly"),
-            "unexpected cron restart error: {restart_err}"
-        );
+        assert!(matches!(
+            restart_err,
+            SupervisorError::Process(ProcessManagerError::Diag(diag))
+                if diag.code == crate::diag::SgCode::CronDirectControl
+        ));
 
         supervisor
             .handle_command(ControlCommand::Restart {

@@ -1,0 +1,28 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "exec python3 /usecase/server.py"
+        restart_policy: always
+        deployment:
+          strategy: rolling
+          pre_start: "sh /usecase/pre.sh"
+          health_check:
+            url: "http://127.0.0.1:18082/health"
+            interval: "1s"
+            retries: 3
+          grace_period: "1s"
+          blue_green:
+            env_var: PORT
+            slots: ["18082", "18083"]
+            switch_command: "sh /usecase/switch.sh {active_slot} {candidate_slot}"
+            candidate_health_check:
+              url: "http://127.0.0.1:{slot}/health"
+              interval: "1s"
+              retries: 3
+            switch_verify:
+              command: "sh /usecase/verify.sh {candidate_slot}"
+              interval: "1s"
+              retries: 2

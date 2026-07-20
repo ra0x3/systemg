@@ -1,0 +1,14 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      ready:
+        command: "sh -c 'echo ready >> /tmp/ready-runs'"
+      web:
+        command: "sleep 3000"
+        restart_policy: always
+        backoff: "1s"
+        depends_on: ["ready"]
+        deployment:
+          strategy: immediate
