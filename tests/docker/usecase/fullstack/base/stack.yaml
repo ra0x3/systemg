@@ -1,0 +1,41 @@
+version: "2"
+projects:
+  shop:
+    name: Shop
+    services:
+      db:
+        command: "/usr/lib/postgresql/14/bin/postgres -D /var/lib/pg -k /tmp -p 5433"
+        user: pg
+        restart_policy: always
+        deployment:
+          strategy: immediate
+          health_check:
+            command: "pg_isready -h 127.0.0.1 -p 5433 -q"
+            interval: "2s"
+            retries: 15
+      cache:
+        command: "redis-server --port 6380 --save '' --appendonly no"
+        restart_policy: always
+        deployment:
+          strategy: immediate
+          health_check:
+            command: "redis-cli -p 6380 ping"
+            interval: "2s"
+            retries: 15
+      web:
+        command: "python3 /usecase/app/web.py"
+        depends_on:
+          - service: db
+            condition: started
+          - service: cache
+            condition: started
+        restart_policy: always
+        env:
+          GREETING: "hello"
+          WEB_PORT: "8080"
+        deployment:
+          strategy: immediate
+          health_check:
+            command: "curl -fsS http://127.0.0.1:8080/health"
+            interval: "2s"
+            retries: 15

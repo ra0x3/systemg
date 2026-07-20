@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
+    ffi::CString,
     fs, io,
-    io::Write,
+    io::{IsTerminal, Write},
     os::unix::io::IntoRawFd,
     path::{Path, PathBuf},
     process,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -26,13 +27,16 @@ use nix::{
     unistd::{Pid, Uid},
 };
 use sha2::{Digest, Sha256};
-use sysinfo::{Pid as SysPid, ProcessRefreshKind, ProcessesToUpdate, System, Users};
+use sysinfo::{
+    Pid as SysPid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, Users,
+};
 use systemg::{
     charting::{self, ChartConfig, parse_stream_duration},
     cli::{Cli, Commands, OutputFormat, parse_args},
-    config::{EffectiveLogsConfig, load_config},
+    config::{Config, EffectiveLogsConfig, load_config},
+    constants::{PROCESS_CHECK_INTERVAL, SERVICE_POLL_INTERVAL},
     cron::{CronExecutionStatus, CronStateFile},
-    daemon::{Daemon, PidFile, ServiceLifecycleStatus},
+    daemon::{Daemon, ServiceLifecycleStatus},
     ipc::{self, ControlCommand, ControlError, ControlResponse, InspectPayload},
     logs::{
         LogFilter, LogFormat, LogManager, LogSection, LogWriter, RotatingLogWriter,
@@ -42,13 +46,14 @@ use systemg::{
     metrics::MetricSample,
     runtime::{self, RuntimeMode},
     spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
+    state_store::StateStore,
     status::{
         CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, ProjectRunMode,
         SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitIntent, UnitKind,
         UnitMetricsSummary, UnitState, UnitStatus, UptimeInfo, collect_disk_snapshot,
         compute_overall_health, explain_unit_health, format_elapsed,
     },
-    supervisor::Supervisor,
+    supervisor::{Supervisor, SupervisorError},
     validate::{self, ValidationReport},
 };
 use tracing::{error, info, warn};
@@ -61,8 +66,53 @@ const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
 const FETCH_SPINNER_DELAY: Duration = Duration::from_millis(120);
 const FETCH_SPINNER_TICK: Duration = Duration::from_millis(80);
 const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+const BUSY_PROBE_EVERY_TICKS: usize = 12;
 const RESTART_DAEMON_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+/// Maximum time allowed for a replacement supervisor to confirm its version.
+const UPGRADE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
+/// Bound for each version probe during supervisor replacement.
+const UPGRADE_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+/// Delay between replacement supervisor version probes.
+const UPGRADE_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_CONFIG_PATH: &str = "systemg.yaml";
+/// Maximum time allowed for the supervisor to acknowledge a shutdown request.
+const SUPERVISOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum time allowed for a requested supervisor shutdown to finish cleanly.
+const SUPERVISOR_GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Maximum wait after each forced supervisor signal.
+const SUPERVISOR_FORCE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum time allowed for supervisor runtime files to disappear.
+const SUPERVISOR_RUNTIME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time allowed for a new supervisor control socket to become usable.
+const SUPERVISOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Interval between foreground attachment and reconnect checks.
+const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Interval between visible boot progress probes.
+const BOOT_PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
+/// Prefix used for foreground boot progress.
+const FOREGROUND_PROGRESS_PREFIX: &str = "  • ";
+/// Column left unused so a terminal cannot auto-wrap the progress line.
+const TERMINAL_AUTOWRAP_MARGIN: usize = 1;
+/// Error returned when another thread poisoned foreground output ownership.
+const FOREGROUND_OUTPUT_LOCK_ERROR: &str = "foreground output lock is poisoned";
+/// Number of initial follow retries per foreground backoff.
+const FOREGROUND_START_RETRIES: usize = 2;
+/// Number of reconnect retries per foreground backoff.
+const FOREGROUND_RECONNECT_RETRIES: usize = 4;
+/// Number of historical lines included by the first foreground attachment.
+const FOREGROUND_BACKLOG_LINES: usize = 20;
+/// Capacity of the single-result foreground boot channel.
+const FOREGROUND_BOOT_RESULT_CAPACITY: usize = 1;
+/// Number of service log lines inspected for a foreground port collision.
+const PORT_DIAGNOSTIC_TAIL_LINES: usize = 12;
+/// Thread name for terminal progress rendering.
+const SPINNER_THREAD: &str = "sysg-spinner";
+/// Thread name for interactive log streaming.
+const LOG_STREAM_THREAD: &str = "sysg-log-stream";
+/// Thread name for attached foreground project boots.
+const FOREGROUND_BOOT_THREAD: &str = "sysg-foreground-boot";
+/// Thread name for bounded supervisor health probes.
+const SUPERVISOR_PROBE_THREAD: &str = "sysg-supervisor-probe";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InspectStreamAction {
@@ -170,7 +220,7 @@ fn wait_for_inspect_stream_action(
             return Ok(InspectStreamAction::Refresh);
         }
 
-        let poll_timeout = remaining.min(Duration::from_millis(50));
+        let poll_timeout = remaining.min(SERVICE_POLL_INTERVAL);
         if event::poll(poll_timeout)?
             && let Some(action) = inspect_stream_event_action(event::read()?)
         {
@@ -190,7 +240,7 @@ fn wait_for_logs_stream_action(
             return Ok(LogsStreamAction::Refresh);
         }
 
-        let poll_timeout = remaining.min(Duration::from_millis(50));
+        let poll_timeout = remaining.min(SERVICE_POLL_INTERVAL);
         if event::poll(poll_timeout)?
             && let Some(action) = logs_stream_event_action(event::read()?)
         {
@@ -264,6 +314,17 @@ fn agent_mode() -> bool {
     set("SYSTEMG_AGENT") || set("NO_COLOR")
 }
 
+thread_local! {
+    /// The subcommand currently being dispatched, so the top-level catch-all can
+    /// attach help for THAT command instead of a fixed `sysg logs` suggestion.
+    static CURRENT_COMMAND: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+}
+
+/// Records the command being run so `catchall_diag` can tailor its help.
+fn set_current_command(command: &Commands) {
+    CURRENT_COMMAND.with(|c| c.set(command.name()));
+}
+
 /// Applies the global `--plain` flag by enabling agent mode for this process,
 /// so every downstream `agent_mode()` check observes it uniformly.
 fn apply_plain_mode(plain: bool) {
@@ -298,14 +359,60 @@ fn resolve_logs_follow(follow_flag: bool, no_follow_flag: bool) -> bool {
     logs_follow_decision(follow_flag, no_follow_flag, stdout_is_tty(), agent_mode())
 }
 
+/// Renders one spinner frame as an IN-PLACE update.
+///
+/// The line MUST fit the terminal width. `\r` returns to the start of the
+/// current row only — so once a frame wraps, every later frame repaints on the
+/// new row and leaves the wrapped remainder stranded, turning a spinner that
+/// should occupy one line into a wall of near-identical lines. Truncating to the
+/// visible width is what keeps it a single updating line.
 fn format_progress_spinner_frame(frame: &str, label: &str) -> String {
-    format!("\r{frame} {label}\x1B[K")
+    let width = terminal_width();
+    // frame + space, and leave a column spare so writing the final cell cannot
+    // trigger the terminal's auto-wrap.
+    let budget = width.saturating_sub(frame.chars().count() + 2);
+    let shown: String = if label.chars().count() > budget {
+        let keep = budget.saturating_sub(1);
+        label
+            .chars()
+            .take(keep)
+            .chain(std::iter::once('…'))
+            .collect()
+    } else {
+        label.to_string()
+    };
+    format!("\r{frame} {shown}\x1B[K")
 }
 
+/// Usable terminal width.
+///
+/// A failed or nonsense probe must not shrink the line to a stub — an
+/// unset/zero winsize (common under a bare pty, or when stdout is not the
+/// controlling terminal) once truncated the spinner to 19 columns on a
+/// 120-column terminal. Prefer the real size, fall back to `COLUMNS`, then to
+/// a sane default, and never accept a width too small to say anything.
+fn terminal_width() -> usize {
+    use systemg::constants::{DEFAULT_TERMINAL_WIDTH, MIN_SPINNER_WIDTH};
+
+    let probed = crossterm::terminal::size()
+        .ok()
+        .map(|(cols, _)| cols as usize)
+        .filter(|cols| *cols >= MIN_SPINNER_WIDTH);
+    let from_env = || {
+        std::env::var("COLUMNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|cols| *cols >= MIN_SPINNER_WIDTH)
+    };
+    probed.or_else(from_env).unwrap_or(DEFAULT_TERMINAL_WIDTH)
+}
+
+/// Returns the terminal sequence that clears the active progress row.
 fn clear_progress_spinner_line() -> &'static str {
     "\r\x1B[2K\r"
 }
 
+/// Runs `operation` while rendering a delayed progress spinner on a terminal.
 fn with_progress_spinner<T, F>(
     label: &'static str,
     operation: F,
@@ -319,33 +426,74 @@ where
 
     let stop = Arc::new(AtomicBool::new(false));
     let spinner_stop = Arc::clone(&stop);
-    let spinner = thread::spawn(move || {
-        thread::sleep(FETCH_SPINNER_DELAY);
-        if spinner_stop.load(Ordering::Relaxed) {
-            return;
-        }
+    let spinner =
+        match thread::Builder::new()
+            .name(SPINNER_THREAD.into())
+            .spawn(move || {
+                thread::sleep(FETCH_SPINNER_DELAY);
+                if spinner_stop.load(Ordering::Relaxed) {
+                    return;
+                }
 
-        let mut stderr = io::stderr().lock();
-        let mut frame_idx = 0usize;
-        loop {
-            if spinner_stop.load(Ordering::Relaxed) {
-                let _ = write!(stderr, "{}", clear_progress_spinner_line());
-                let _ = stderr.flush();
-                return;
-            }
+                let mut stderr = io::stderr().lock();
+                let mut frame_idx = 0usize;
+                let mut op_label: Option<String> = None;
+                let mut ticks_since_probe = 0usize;
+                loop {
+                    if spinner_stop.load(Ordering::Relaxed) {
+                        let _ = write!(stderr, "{}", clear_progress_spinner_line());
+                        let _ = stderr.flush();
+                        return;
+                    }
 
-            let frame = FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
-            let _ = write!(stderr, "{}", format_progress_spinner_frame(frame, label));
-            let _ = stderr.flush();
-            frame_idx += 1;
-            thread::sleep(FETCH_SPINNER_TICK);
-        }
-    });
+                    if ticks_since_probe == 0 {
+                        op_label = ipc::current_op().map(|op| op.describe());
+                    }
+                    ticks_since_probe = (ticks_since_probe + 1) % BUSY_PROBE_EVERY_TICKS;
+
+                    let shown = match &op_label {
+                        Some(detail) => format!("{label}: {detail}"),
+                        None => label.to_string(),
+                    };
+                    let frame =
+                        FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
+                    let _ = write!(
+                        stderr,
+                        "{}",
+                        format_progress_spinner_frame(frame, &shown)
+                    );
+                    let _ = stderr.flush();
+                    frame_idx += 1;
+                    thread::sleep(FETCH_SPINNER_TICK);
+                }
+            }) {
+            Ok(handle) => handle,
+            Err(_) => return operation(),
+        };
 
     let result = operation();
     stop.store(true, Ordering::Relaxed);
     let _ = spinner.join();
+    if stderr_is_tty() {
+        let mut stderr = io::stderr().lock();
+        let _ = write!(stderr, "{}", clear_progress_spinner_line());
+        let _ = stderr.flush();
+    }
     result
+}
+
+/// Runs an operation under an in-place spinner, then prints its success message
+/// below the cleared progress row.
+fn with_progress_message<F>(
+    label: &'static str,
+    operation: F,
+) -> Result<(), Box<dyn Error>>
+where
+    F: FnOnce() -> Result<String, Box<dyn Error>>,
+{
+    let message = with_progress_spinner(label, operation)?;
+    println!("\n\n{message}");
+    Ok(())
 }
 
 use std::fmt;
@@ -372,19 +520,134 @@ impl Error for DiagError {}
 /// Wraps errors that never became a structured diagnostic, so every failure
 /// leaves the user with next steps instead of a bare message.
 fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
-    systemg::diag::Diagnostic::error("SG0001", "command failed")
-        .note(message)
-        .help_cmd(
-            "supervisor log",
-            format!("tail -n 50 {}", supervisor_log_path().display()),
+    if message.contains("Failed to read config") {
+        return config_read_diag(message);
+    }
+
+    // The supervisor answers with a plain error string, so conditions that
+    // ALREADY have a precise code were arriving here and being rendered as
+    // SG0001 "command failed". Stopping an unknown project, or stopping one
+    // twice, is a target problem (SG0202) — telling the user only that a
+    // command "failed" hides both what went wrong and that nothing was broken.
+    if message.contains("is not managed by this supervisor") {
+        let project = message
+            .split('\'')
+            .nth(1)
+            .map(str::to_string)
+            .unwrap_or_else(|| "<project>".to_string());
+        return systemg::diag::Diagnostic::error(
+            systemg::diag::SgCode::TargetNotFound,
+            format!("no project '{project}' is loaded in the running supervisor"),
         )
-        .help_cmd("check status", "sysg status")
+        .note("it was never started, or it has already been stopped")
+        .help_cmd("list what is loaded", "sysg status")
+        .help_cmd("start it", format!("sysg start -p {project}"))
+        .help_docs();
+    }
+
+    let command = CURRENT_COMMAND.with(|c| c.get());
+    let mut diag = systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::Catchall,
+        "command failed",
+    )
+    .note(message);
+    // Point at the failing command's own help, not a fixed `sysg logs` — a
+    // `status` error suggesting you check logs is nonsensical.
+    if !command.is_empty() {
+        diag = diag.help_cmd(format!("{command} help"), format!("sysg {command} --help"));
+    }
+    diag.help_docs()
+}
+
+/// Diagnostic for a failed local config read. The resident supervisor already
+/// The manifest path a command carries, for the dirty-manifest guard. Commands
+/// that do not act on a manifest (or own their own config model, like purge)
+/// return `None` and are never guarded.
+fn command_config_arg(command: &Commands) -> Option<&str> {
+    match command {
+        Commands::Start { config, .. }
+        | Commands::Stop { config, .. }
+        | Commands::Restart { config, .. }
+        | Commands::Inspect { config, .. }
+        | Commands::Logs { config, .. } => Some(config.as_str()),
+        Commands::Status { config, .. } => {
+            Some(config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH))
+        }
+        _ => None,
+    }
+}
+
+/// Refuses a command that ran without `-c` while the on-disk manifest at the
+/// recorded hint path has drifted from what the supervisor last loaded.
+///
+/// The manifest cache is a convenience — it lets you omit `-c` when nothing
+/// changed. But once you edit the manifest, the supervisor's cached copy is
+/// stale, and acting on it would apply the wrong thing (or silently ignore your
+/// change). Re-submit once with `-c <path>` so the supervisor loads the latest;
+/// after that, bare commands work again. A command that already passed an
+/// explicit config is never dirty — it just submitted the truth.
+fn guard_dirty_manifest(config_arg: &str) -> Result<(), Box<dyn Error>> {
+    if config_arg != DEFAULT_CONFIG_PATH {
+        return Ok(());
+    }
+    // An explicit `systemg.yaml` in cwd is a real config the command will load;
+    // only guard when we would fall back to the resident hint.
+    if PathBuf::from(DEFAULT_CONFIG_PATH).exists() {
+        return Ok(());
+    }
+    if ipc::manifest_is_dirty() {
+        let hint = ipc::read_config_hint()
+            .ok()
+            .flatten()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "<config>".to_string());
+        return Err(Box::new(DiagError(Box::new(dirty_manifest_diag(&hint)))));
+    }
+    Ok(())
+}
+
+/// Builds the SG0018 diagnostic for a stale cached manifest.
+fn dirty_manifest_diag(hint: &str) -> systemg::diag::Diagnostic {
+    systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::DirtyManifest,
+        "the manifest on disk changed since it was last submitted",
+    )
+    .note(
+        "this command ran without -c, so it would act on the supervisor's stale cached manifest",
+    )
+    .note("re-run once with -c so the supervisor loads the latest manifest; after that, -c is optional again")
+    .help_cmd("submit the latest manifest", format!("sysg <command> -c {hint}"))
+    .help_docs()
+}
+
+/// holds each project's manifest, so the real fix is to target the project by
+/// id rather than hunt for a file in the current directory.
+fn config_read_diag(message: &str) -> systemg::diag::Diagnostic {
+    let mut diag = systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::ConfigFileUnreadable,
+        "could not read a local config file",
+    )
+        .note(message)
+        .note(
+            "the resident supervisor keeps each project's config; you usually do not need a local file. \
+Target the project by id with -p instead.",
+        );
+
+    if let Ok(Some(hint)) = ipc::read_config_hint() {
+        diag = diag.note(format!(
+            "the running supervisor last loaded: {}",
+            hint.display()
+        ));
+    }
+
+    diag.help_cmd("list what is loaded", "sysg status")
+        .help_cmd("start a resident project", "sysg start -p <project>")
         .help_docs()
 }
 
 /// Runs the `sysg` command-line entrypoint.
 fn main() -> process::ExitCode {
-    match run() {
+    let outcome = match run() {
         Ok(()) => process::ExitCode::SUCCESS,
         Err(err) => {
             if let Some(diag) = err.downcast_ref::<DiagError>() {
@@ -394,12 +657,17 @@ fn main() -> process::ExitCode {
             }
             process::ExitCode::FAILURE
         }
-    }
+    };
+    // Last line of defence: whatever path got us here, the user gets their
+    // terminal back in a usable state.
+    let _ = crossterm::terminal::disable_raw_mode();
+    outcome
 }
 
 /// Dispatches the parsed CLI command.
 fn run() -> Result<(), Box<dyn Error>> {
     let args = parse_args();
+    set_current_command(&args.command);
     apply_plain_mode(args.plain);
     let euid = Uid::effective();
     let drop_privileges_effective =
@@ -422,15 +690,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     runtime::set_drop_privileges(drop_privileges_effective);
     runtime::capture_socket_activation();
 
+    // A `start` (daemonized OR foreground) becomes/feeds a supervisor whose
+    // internal tracing must NOT spray onto the user's terminal — the foreground
+    // terminal is for the project's OWN service logs (via the scoped follow),
+    // never `DEBUG systemg::supervisor:` noise. Route all of them to the log file.
     let use_file_logging = matches!(
         &args.command,
-        Commands::Start {
-            daemonize: true,
-            ..
-        } | Commands::Restart {
-            daemonize: true,
-            ..
-        }
+        Commands::Start { .. }
+            | Commands::Restart {
+                daemonize: true,
+                ..
+            }
+            | Commands::Supervise { .. }
     );
     init_logging(&args, use_file_logging);
 
@@ -453,6 +724,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // Refuse a bare command (no -c) whose supervisor-cached manifest has been
+    // dirtied on disk, so the supervisor always reflects the latest manifest you
+    // pointed it at. Commands without a manifest are exempt.
+    if let Some(config_arg) = command_config_arg(&args.command) {
+        guard_dirty_manifest(config_arg)?;
+    }
+
+    let verbose = args.verbose;
     match args.command {
         Commands::Start {
             config,
@@ -479,103 +758,24 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
 
             let start_target =
-                resolve_start_target(&config, service, name.as_deref(), command)?;
-            let command_project = resolve_command_project(
-                &config,
-                project.clone(),
+                resolve_start_target(&config, service.clone(), name.as_deref(), command)?;
+            let plan = systemg::start::resolve_plan(
+                start_target.config_path.clone(),
                 start_target.service.as_deref(),
-            )?;
+                project.as_deref(),
+                start_target.ad_hoc,
+            )
+            .map_err(|mismatch| {
+                DiagError(Box::new(systemg::start::project_mismatch(
+                    &mismatch.flag,
+                    &mismatch.selector,
+                )))
+            })?;
 
             if daemonize {
-                if supervisor_running() {
-                    if args.drop_privileges {
-                        warn!(
-                            "--drop-privileges is managed by the running supervisor and has no effect for this start request"
-                        );
-                    }
-
-                    if start_target.ad_hoc {
-                        info!(
-                            "Staged unit config at {:?}. Running supervisor was left unchanged.",
-                            start_target.config_path
-                        );
-                        println!(
-                            "Unit staged at {}. Run `sysg restart --daemonize --config {}` to apply it.",
-                            start_target.config_path.display(),
-                            start_target.config_path.display()
-                        );
-                    } else if let Some(service_name) = start_target.service {
-                        let command = ControlCommand::Start {
-                            service: Some(service_name.clone()),
-                            project: command_project
-                                .clone()
-                                .or(start_target.project_id.clone()),
-                        };
-                        with_progress_spinner("Starting", || {
-                            send_control_command(command)
-                        })?;
-                        info!(
-                            "Service '{service_name}' start command sent to supervisor"
-                        );
-                    } else if project.is_some() {
-                        let command = ControlCommand::Start {
-                            service: None,
-                            project: project.clone(),
-                        };
-                        with_progress_spinner("Starting", || {
-                            send_control_command(command)
-                        })?;
-                    } else {
-                        let command = ControlCommand::AddProject {
-                            config: start_target
-                                .config_path
-                                .to_string_lossy()
-                                .to_string(),
-                            service: None,
-                            mode: ProjectRunMode::Daemon,
-                        };
-                        with_progress_spinner("Starting", || {
-                            send_control_command(command)
-                        })?;
-                    }
-                    return Ok(());
-                }
-
-                info!(
-                    "Starting systemg supervisor with config {:?}",
-                    start_target.config_path
-                );
-                start_supervisor_daemon(
-                    start_target.config_path,
-                    start_target.service,
-                    stderr,
-                )?;
+                dispatch_start_daemonize(plan, stderr, verbose, args.drop_privileges)?;
             } else {
-                if supervisor_running() {
-                    match start_target.service {
-                        Some(service_name) => {
-                            let command = ControlCommand::Start {
-                                service: Some(service_name.clone()),
-                                project: command_project.or(start_target.project_id),
-                            };
-                            with_progress_spinner("Starting", || {
-                                send_control_command(command)
-                            })?;
-                            info!(
-                                "Service '{service_name}' start command sent to supervisor"
-                            );
-                        }
-                        None => {
-                            start_foreground_attached(start_target.config_path, None)?;
-                        }
-                    }
-                } else {
-                    start_foreground(
-                        start_target.config_path,
-                        start_target.service,
-                        stderr,
-                    )?;
-                }
+                dispatch_start_foreground(plan, stderr)?;
             }
         }
         Commands::Stop {
@@ -584,71 +784,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             config,
             supervisor,
         } => {
-            if supervisor {
-                send_control_command(ControlCommand::Shutdown)?;
-                return Ok(());
-            }
-
-            let service_name = service.clone();
-            if supervisor_running() {
-                let target_project = if service_name.is_some() {
-                    resolve_command_project(&config, project, service_name.as_deref())?
-                } else if project.is_some() {
-                    project
-                } else {
-                    Some(resolve_project_context_from_config(&config)?)
-                };
-                let command = if let Some(name) = service_name.clone() {
-                    ControlCommand::Stop {
-                        service: Some(name),
-                        project: target_project,
-                    }
-                } else {
-                    ControlCommand::Stop {
-                        service: None,
-                        project: target_project,
-                    }
-                };
-                send_control_command(command)?;
-            } else {
-                match build_daemon(&config) {
-                    Ok(daemon) => {
-                        if let Some(service) = service_name.as_deref() {
-                            daemon.stop_service(service)?;
-                        } else {
-                            daemon.stop_services()?;
-                        }
-                    }
-                    Err(err) => {
-                        warn!(
-                            "No supervisor detected and unable to load config '{}': {}",
-                            config, err
-                        );
-                        if let Ok(Some(hint)) = ipc::read_config_hint() {
-                            let hint_str = hint.to_string_lossy();
-                            match build_daemon(hint_str.as_ref()) {
-                                Ok(daemon) => {
-                                    if let Some(service) = service_name.as_deref() {
-                                        daemon.stop_service(service)?;
-                                    } else {
-                                        daemon.stop_services()?;
-                                    }
-                                    info!(
-                                        "stop fallback executed using config hint {:?}",
-                                        hint
-                                    );
-                                }
-                                Err(hint_err) => {
-                                    warn!(
-                                        "Fallback using config hint {:?} failed: {}",
-                                        hint, hint_err
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let config_path =
+                resolve_config_path(&config).unwrap_or_else(|_| config.into());
+            let plan = systemg::stop::resolve_plan(
+                config_path,
+                service.as_deref(),
+                project.as_deref(),
+                supervisor,
+            )
+            .map_err(stop_plan_diag)?;
+            dispatch_stop(plan)?;
         }
         Commands::Restart {
             config,
@@ -656,62 +801,39 @@ fn run() -> Result<(), Box<dyn Error>> {
             project,
             daemonize,
         } => {
-            if supervisor_running() {
-                if args.drop_privileges {
-                    warn!(
-                        "--drop-privileges is managed by the running supervisor and has no effect for this restart request"
-                    );
-                }
-                let target_project = if service.is_some() {
-                    resolve_command_project(&config, project.clone(), service.as_deref())?
-                } else {
-                    project.clone()
-                };
-                let config_override = if config.is_empty()
-                    || (config == DEFAULT_CONFIG_PATH && project.is_some())
-                {
-                    None
-                } else {
-                    Some(resolve_config_path(&config)?.display().to_string())
-                };
-
-                let command = ControlCommand::Restart {
-                    config: config_override.clone(),
-                    service: service.clone(),
-                    project: target_project,
-                };
-                if daemonize {
-                    let recycle_config_path = config_override
-                        .as_ref()
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| {
-                            resolve_config_path(&config)
-                                .unwrap_or_else(|_| PathBuf::from(&config))
-                        });
-                    restart_daemonized(
-                        command,
-                        recycle_config_path,
-                        service.is_none() && project.is_none(),
-                    )?;
-                } else {
-                    with_progress_spinner("Restarting", || {
-                        send_control_command(command)
-                    })?;
-                }
-            } else if daemonize {
-                let config_path = resolve_config_path(&config)?;
-                start_supervisor_daemon(config_path, None, false)?;
-            } else {
+            if args.drop_privileges && supervisor_running() {
                 warn!(
-                    "No running supervisor detected; executing restart in local one-shot mode. \
-Use --daemonize in deployment scripts to ensure daemonized supervision is restored if detection fails."
+                    "--drop-privileges is managed by the running supervisor and has no effect for this restart request"
                 );
-                let daemon = build_daemon(&config)?;
-                with_progress_spinner("Restarting", || {
-                    daemon
-                        .restart_services()
-                        .map_err(|err| Box::new(err) as Box<dyn Error>)
-                })?;
+            }
+            let config_path =
+                resolve_config_path(&config).unwrap_or_else(|_| config.clone().into());
+            let plan = systemg::restart::resolve_plan(
+                config_path,
+                service.as_deref(),
+                project.as_deref(),
+            )
+            .map_err(|mismatch| {
+                DiagError(Box::new(systemg::start::project_mismatch(
+                    &mismatch.flag,
+                    &mismatch.selector,
+                )))
+            })?;
+
+            let world = systemg::restart::World {
+                supervisor_running: supervisor_running(),
+                version_drifted: matches!(
+                    daemon_version_drift(),
+                    VersionDrift::Drifted(_) | VersionDrift::PreVersionDaemon
+                ),
+            };
+            match systemg::restart::preflight(plan, world) {
+                systemg::restart::Preflight::Refused(diag) => {
+                    return Err(Box::new(DiagError(diag)));
+                }
+                systemg::restart::Preflight::Ready(plan) => {
+                    dispatch_restart(plan, daemonize, verbose)?;
+                }
             }
         }
         Commands::Status {
@@ -729,13 +851,14 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 resolve_status_project_filter(config.as_deref(), project.clone())?;
             let render_config = config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH);
 
-            let render_opts = StatusRenderOptions {
+            let mut render_opts = StatusRenderOptions {
                 format,
                 no_color: no_color || agent_mode(),
                 full_cmd,
                 include_orphans: all,
                 service_filter: service.as_deref(),
                 project_filter: target_project.as_deref(),
+                offline: false,
             };
 
             if let Some(stream_interval) = stream {
@@ -751,10 +874,14 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 };
                 let sleep_interval = Duration::from_secs(stream_seconds);
                 loop {
-                    match fetch_status_snapshot(config.as_deref(), live) {
-                        Ok(snapshot) => {
+                    match fetch_status_reading(config.as_deref(), live) {
+                        Ok(reading) => {
+                            print!("\x1B[2J\x1B[H");
+                            print_presence_banner(reading.presence);
+                            render_opts.offline =
+                                reading.presence != SupervisorPresence::Live;
                             if let Err(e) = render_status(
-                                &snapshot,
+                                &reading.snapshot,
                                 &render_opts,
                                 true,
                                 render_config,
@@ -777,18 +904,25 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     thread::sleep(sleep_interval);
                 }
             } else {
-                let snapshot = with_progress_spinner("Computing", || {
-                    fetch_status_snapshot(config.as_deref(), live)
+                let reading = with_progress_spinner("Computing", || {
+                    fetch_status_reading(config.as_deref(), live)
                 })?;
 
-                let health =
-                    render_status(&snapshot, &render_opts, false, render_config)?;
+                if let Some(diag) = status_ambiguous_service(
+                    &reading.snapshot,
+                    service.as_deref(),
+                    target_project.as_deref(),
+                ) {
+                    eprintln!("{}", diag.render_for_terminal());
+                    process::exit(2);
+                }
 
-                let exit_code = match health {
-                    OverallHealth::Healthy => 0,
-                    OverallHealth::Warn => 1,
-                    OverallHealth::Failing => 2,
-                };
+                print_presence_banner(reading.presence);
+                render_opts.offline = reading.presence != SupervisorPresence::Live;
+                let health =
+                    render_status(&reading.snapshot, &render_opts, false, render_config)?;
+
+                let exit_code = status_exit_code(reading.presence, health);
                 process::exit(exit_code);
             }
         }
@@ -807,18 +941,50 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             {
                 effective_config = hint.to_string_lossy().to_string();
             }
+            if let Err(err) =
+                systemg::inspect::resolve_plan(&service, project.as_deref(), live)
+            {
+                use systemg::inspect::InspectPlanError;
+                let diag = match err {
+                    InspectPlanError::Mismatch(mismatch) => {
+                        systemg::start::project_mismatch(
+                            &mismatch.flag,
+                            &mismatch.selector,
+                        )
+                    }
+                    InspectPlanError::NotAService => {
+                        systemg::inspect::service_not_found(&service)
+                    }
+                };
+                return Err(Box::new(DiagError(Box::new(diag))));
+            }
             let target_project = resolve_command_project(
                 &effective_config,
                 project.clone(),
                 Some(&service),
             )?;
 
+            // A bare `-s web` that matches a `web` in more than one loaded
+            // project is ambiguous — refuse with SG0006 rather than silently
+            // inspecting whichever one resolves first, exactly as status does.
+            if project.is_none()
+                && let Ok(snapshot) = fetch_status_snapshot(Some(&effective_config), live)
+                && let Some(diag) =
+                    status_ambiguous_service(&snapshot, Some(&service), None)
+            {
+                return Err(Box::new(DiagError(Box::new(diag))));
+            }
+
             let stream_seconds = match stream.as_deref() {
                 Some(value) => match parse_stream_duration(value) {
                     Ok(seconds) => seconds,
                     Err(err) => {
-                        eprintln!("Invalid stream duration '{}': {}", value, err);
-                        process::exit(1);
+                        return Err(Box::new(DiagError(Box::new(
+                            systemg::inspect::invalid_stream_duration(
+                                value,
+                                err.to_string(),
+                            ),
+                        ))));
                     }
                 },
                 None => 5,
@@ -860,7 +1026,12 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                                 live,
                             )?;
                             if payload.unit.is_none() {
-                                eprintln!("Service '{service}' not found.");
+                                let _ = terminal::disable_raw_mode();
+                                eprint!(
+                                    "{}",
+                                    systemg::inspect::service_not_found(&service)
+                                        .render_for_terminal()
+                                );
                                 process::exit(2);
                             }
 
@@ -945,8 +1116,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                     )
                 })?;
                 if payload.unit.is_none() {
-                    eprintln!("Service '{service}' not found.");
-                    process::exit(2);
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::inspect::service_not_found(&service),
+                    ))));
                 }
 
                 let health = render_inspect(&payload, &render_opts)?;
@@ -968,6 +1140,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             project,
             lines,
             kind,
+            supervisor,
             follow,
             no_follow,
             since,
@@ -981,31 +1154,59 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             no_strip_ansi,
             stream,
         } => {
-            if path {
-                match service.as_deref() {
-                    Some(service_name) => {
-                        let active = get_service_log_path(service_name);
-                        if all {
-                            for path in systemg::logs::rotated_history_paths(&active)
-                                .into_iter()
-                                .rev()
-                            {
-                                println!("{}", path.display());
-                            }
-                        } else {
-                            println!("{}", active.display());
+            let logs_modes = systemg::logs_cmd::Modes {
+                path,
+                purge,
+                prune,
+                follow,
+                supervisor,
+            };
+            let logs_plan = match systemg::logs_cmd::resolve_plan(
+                logs_modes,
+                service.as_deref(),
+                project.as_deref(),
+                max_size.clone(),
+                max_age.clone(),
+            ) {
+                Ok(plan) => plan,
+                Err(err) => {
+                    use systemg::logs_cmd::LogsPlanError;
+                    let diag = match err {
+                        LogsPlanError::ConflictingModes { modes } => {
+                            systemg::logs_cmd::conflicting_modes(&modes)
                         }
-                    }
-                    None => println!("{}", systemg::runtime::log_dir().display()),
+                        LogsPlanError::FollowWithMode { mode } => {
+                            systemg::logs_cmd::follow_with_mode(mode)
+                        }
+                        LogsPlanError::PruneBoundMissing => {
+                            systemg::logs_cmd::prune_bound_missing()
+                        }
+                        LogsPlanError::SupervisorWithSelector => {
+                            systemg::logs_cmd::supervisor_with_selector()
+                        }
+                        LogsPlanError::TargetRequired => {
+                            systemg::logs_cmd::target_required()
+                        }
+                        LogsPlanError::Mismatch(mismatch) => {
+                            systemg::start::project_mismatch(
+                                &mismatch.flag,
+                                &mismatch.selector,
+                            )
+                        }
+                    };
+                    return Err(Box::new(DiagError(Box::new(diag))));
                 }
+            };
+
+            if matches!(logs_plan, systemg::logs_cmd::LogsPlan::Supervisor) {
+                LogManager::new().show_supervisor_log(lines)?;
                 return Ok(());
             }
             if prune {
                 if max_size.is_none() && max_age.is_none() {
-                    eprintln!(
-                        "Specify --max-size and/or --max-age to prune rotated logs."
-                    );
-                    process::exit(2);
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::logs_cmd::prune_bound_missing(),
+                    ))));
                 }
                 let summary = prune_logs(max_size.as_deref(), max_age.as_deref())?;
                 println!(
@@ -1030,43 +1231,117 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 service.as_deref(),
             )?;
 
-            let pid = Arc::new(Mutex::new(PidFile::load().unwrap_or_default()));
-            let manager = LogManager::new(pid.clone());
+            let log_project = target_project.clone().or_else(|| {
+                load_config(Some(&effective_config))
+                    .ok()
+                    .map(|c| c.project.id)
+            });
+            // The project subdir captured logs live under. A bare `-s` with no
+            // resolvable project reads the loose bundle, mirroring the plan's
+            // __loose__-only rule.
+            let log_project_id = log_project
+                .clone()
+                .unwrap_or_else(|| systemg::state_store::LOOSE_PROJECT_ID.to_string());
+
+            // A bare `-s <service>` (no -p, no `project/` prefix, no resolvable
+            // project) reads the loose bundle only. If that service has no loose
+            // log at all, it is not a loose service — refuse with SG0021 rather
+            // than silently reading an unrelated project's logs.
+            if let Some(service_name) = service.as_deref()
+                && project.is_none()
+                && !service_name.contains('/')
+                && log_project_id == systemg::state_store::LOOSE_PROJECT_ID
+                && !purge
+                && !path
+            {
+                let loose = systemg::state_store::LOOSE_PROJECT_ID;
+                let has_loose_log = get_service_log_path(loose, service_name).exists()
+                    || resolve_log_path(loose, service_name, "stdout").exists()
+                    || resolve_log_path(loose, service_name, "stderr").exists();
+                if !has_loose_log {
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::logs_cmd::loose_service_not_found(service_name),
+                    ))));
+                }
+            }
+
+            // A project-scoped `-p <project> -s <service>` miss is a plain
+            // target-not-found (SG0202), reusing the shared stop diagnostic.
+            if let Some(service_name) = service.as_deref()
+                && log_project_id != systemg::state_store::LOOSE_PROJECT_ID
+                && !service_name.contains('/')
+                && !purge
+                && !path
+            {
+                let bare = service_selector_name(service_name);
+                let scoped_log = get_service_log_path(&log_project_id, bare).exists()
+                    || resolve_log_path(&log_project_id, bare, "stdout").exists()
+                    || resolve_log_path(&log_project_id, bare, "stderr").exists();
+                if !scoped_log {
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::stop::service_not_found(bare),
+                    ))));
+                }
+            }
+
+            let manager = LogManager::new();
+
+            if path {
+                match service.as_deref() {
+                    Some(service_name) => {
+                        let active = get_service_log_path(&log_project_id, service_name);
+                        if all {
+                            for path in systemg::logs::rotated_history_paths(&active)
+                                .into_iter()
+                                .rev()
+                            {
+                                println!("{}", path.display());
+                            }
+                        } else {
+                            println!("{}", active.display());
+                        }
+                    }
+                    None => println!("{}", systemg::runtime::log_dir().display()),
+                }
+                return Ok(());
+            }
 
             if purge {
-                if target_project.is_some() {
-                    let snapshot = with_progress_spinner("Purging logs", || {
-                        fetch_status_snapshot(Some(&effective_config), false)
-                    })?;
-                    let matching_units: Vec<_> = snapshot
-                        .units
-                        .iter()
-                        .filter(|unit| {
-                            status_unit_matches_selector(
-                                unit,
-                                service.as_deref(),
-                                target_project.as_deref(),
-                            )
-                        })
-                        .collect();
-                    if matching_units.is_empty() {
-                        eprintln!("No matching units found.");
-                        process::exit(2);
-                    }
-                    for unit in matching_units {
-                        info!("Purging logs for service: {}", unit.name);
-                        manager.clear_service_logs(&unit.name)?;
-                    }
-                } else {
-                    match service.as_deref() {
-                        Some(service_name) => {
-                            info!("Purging logs for service: {service_name}");
-                            manager.clear_service_logs(service_name)?;
+                // A serving supervisor owns the in-memory live-log buffer the
+                // reader replays from, so clearing files CLI-side would leave it
+                // showing "purged" lines. Route the clear through the supervisor
+                // when one is up; fall back to a local file clear when it is not.
+                if supervisor_running() {
+                    match ipc::send_command(&ControlCommand::ClearLogs {
+                        service: service.clone(),
+                        project: target_project.clone(),
+                    }) {
+                        Ok(ControlResponse::Message(message)) => {
+                            println!("{message}");
+                            return Ok(());
                         }
-                        None => {
-                            info!("Purging logs for all services");
-                            manager.clear_all_logs()?;
+                        Ok(ControlResponse::Ok) => return Ok(()),
+                        Ok(ControlResponse::Error(message)) => {
+                            return Err(ControlError::Server(message).into());
                         }
+                        Ok(other) => {
+                            return Err(io::Error::other(format!(
+                                "unexpected supervisor response: {other:?}"
+                            ))
+                            .into());
+                        }
+                        Err(ControlError::NotAvailable) => {}
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+                match service.as_deref() {
+                    Some(service_name) => {
+                        info!("Purging logs for service: {service_name}");
+                        manager.clear_service_logs(&log_project_id, service_name)?;
+                    }
+                    None => {
+                        info!("Purging logs for all services");
+                        manager.clear_all_logs()?;
                     }
                 }
                 return Ok(());
@@ -1083,8 +1358,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             let log_format = match format {
                 Some(OutputFormat::Json) => LogFormat::Json,
                 Some(OutputFormat::Xml) => {
-                    eprintln!("`sysg logs` does not support --format xml; use json.");
-                    process::exit(2);
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::logs_cmd::unsupported_format("xml"),
+                    ))));
                 }
                 None if raw => LogFormat::Raw,
                 None => LogFormat::Text,
@@ -1136,14 +1412,40 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 };
 
             let render_logs_once = |snapshot_mode: bool| -> Result<(), Box<dyn Error>> {
+                // The snapshot only ENRICHES the render (it maps a service to its
+                // project and marks live units). Logs live on disk and stay
+                // readable with no supervisor and no local manifest — which is
+                // exactly the post-mortem case — so a snapshot that cannot be
+                // built must degrade to an empty one, never sink the command.
                 let snapshot = with_progress_spinner("Logging", || {
                     fetch_status_snapshot(Some(&effective_config), false)
-                })?;
+                })
+                .unwrap_or_else(|_| StatusSnapshot {
+                    schema_version: systemg::status::STATUS_SCHEMA_VERSION.to_string(),
+                    captured_at: chrono::Utc::now(),
+                    overall_health: systemg::status::OverallHealth::Warn,
+                    units: Vec::new(),
+                });
 
                 match service.as_ref() {
                     Some(service_name) if structured_output => {
                         info!("Fetching logs for service: {service_name}");
+                        let service_project = snapshot
+                            .units
+                            .iter()
+                            .find(|unit| {
+                                status_unit_matches_selector(
+                                    unit,
+                                    Some(service_name),
+                                    target_project.as_deref(),
+                                )
+                            })
+                            .and_then(|unit| {
+                                unit.project.as_ref().map(|project| project.id.clone())
+                            })
+                            .unwrap_or_else(|| log_project_id.clone());
                         let bytes = manager.collect_service_log(
+                            &service_project,
                             service_name,
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
@@ -1239,6 +1541,9 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                                 }
                             }
                             Err(err) => match err.downcast_ref::<ControlError>() {
+                                // `--stream` is a REPEATING render by design, so
+                                // redrawing the grouped snapshot is correct here
+                                // (unlike the follow path, which must tail).
                                 Some(ControlError::NotAvailable) => {
                                     if logs_stream_tty {
                                         terminal::disable_raw_mode()?;
@@ -1271,14 +1576,90 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
                 stream_result?;
             } else {
                 let follow_logs = resolve_logs_follow(follow, no_follow);
-                match stream_logs_via_supervisor(follow_logs) {
-                    Ok(()) => {}
-                    Err(err) => match err.downcast_ref::<ControlError>() {
-                        Some(ControlError::NotAvailable) => {
-                            render_logs_once(!follow_logs)?
+                // A follow in a real terminal must exit on Esc/Ctrl-C. The socket
+                // stream blocks, so run it on a background thread and poll keys on
+                // the main thread; a key press restores the terminal and returns.
+                let follow_tty = follow_logs
+                    && unsafe {
+                        libc::isatty(libc::STDIN_FILENO) == 1
+                            && libc::isatty(libc::STDOUT_FILENO) == 1
+                    };
+                if follow_tty {
+                    let stream_cmd = ControlCommand::Logs {
+                        service: service.clone(),
+                        project: target_project.clone(),
+                        lines,
+                        kind: kind.as_ref().map(|kind| kind.as_str().to_string()),
+                        follow: true,
+                        since: since.clone(),
+                        until: until.clone(),
+                        grep: grep.clone(),
+                        all,
+                        structured: structured_output,
+                    };
+                    let log_format_owned = log_format;
+                    let strip_ansi_owned = strip_ansi_output;
+                    let service_owned = service.clone();
+                    let stream_thread = thread::Builder::new()
+                        .name(LOG_STREAM_THREAD.into())
+                        .spawn(move || {
+                            let mut writer = LogWriter::new(
+                                io::stdout(),
+                                log_format_owned,
+                                strip_ansi_owned,
+                                service_owned,
+                            );
+                            let outcome =
+                                ipc::stream_command_output(&stream_cmd, &mut writer);
+                            let _ = writer.flush();
+                            outcome
+                        })?;
+
+                    terminal::enable_raw_mode()?;
+                    let key_result = (|| -> Result<(), Box<dyn Error>> {
+                        loop {
+                            if stream_thread.is_finished() {
+                                return Ok(());
+                            }
+                            if event::poll(PROCESS_CHECK_INTERVAL)?
+                                && matches!(
+                                    logs_stream_event_action(event::read()?),
+                                    Some(LogsStreamAction::Exit)
+                                )
+                            {
+                                return Ok(());
+                            }
                         }
-                        _ => return Err(err),
-                    },
+                    })();
+                    terminal::disable_raw_mode()?;
+                    key_result?;
+
+                    // If the stream ended on its own (not a key press), surface a
+                    // NotAvailable fallback the same way the blocking path does.
+                    // NEVER in follow mode: see `render_logs_once` below.
+                    if !follow_logs
+                        && stream_thread.is_finished()
+                        && let Ok(Err(ControlError::NotAvailable)) = stream_thread.join()
+                    {
+                        render_logs_once(true)?;
+                    }
+                } else {
+                    match stream_logs_via_supervisor(follow_logs) {
+                        Ok(()) => {}
+                        Err(err) => match err.downcast_ref::<ControlError>() {
+                            Some(ControlError::NotAvailable) if !follow_logs => {
+                                render_logs_once(true)?
+                            }
+                            // A follow that loses the supervisor must stay a
+                            // follow: the caller's retry loop reconnects. Falling
+                            // back to a static render replayed the whole grouped
+                            // snapshot — "Offline Services" and all the finished
+                            // one-shot history — into a LIVE terminal, once per
+                            // reconnect (measured: 32 replays).
+                            Some(ControlError::NotAvailable) => {}
+                            _ => return Err(err),
+                        },
+                    }
                 }
             }
         }
@@ -1299,9 +1680,59 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             }
             process::exit(if report.valid { 0 } else { 1 });
         }
-        Commands::Purge => {
-            purge_all_state()?;
-            println!("All systemg state has been purged");
+        Commands::Migrate { config, in_place } => {
+            let content = fs::read_to_string(&config)
+                .map_err(|e| io::Error::other(format!("failed to read {config}: {e}")))?;
+            let converted = systemg::config::migrate_manifest(&content)?;
+            if in_place {
+                let backup = format!("{config}.bak");
+                fs::write(&backup, &content).map_err(|e| {
+                    io::Error::other(format!("failed to write backup {backup}: {e}"))
+                })?;
+                fs::write(&config, &converted).map_err(|e| {
+                    io::Error::other(format!("failed to write {config}: {e}"))
+                })?;
+                println!("Migrated {config} (backup at {backup})");
+            } else {
+                print!("{converted}");
+            }
+        }
+        Commands::Purge {
+            config,
+            project,
+            force,
+        } => {
+            dispatch_purge(config, project, force)?;
+        }
+        Commands::UpgradeInfo => {
+            println!(
+                "{}",
+                serde_json::to_string(&systemg::upgrade::LiveUpgradeInfo::current())?
+            );
+        }
+        Commands::UpgradeSupervisor { binary } => {
+            with_progress_message("Updating", || request_live_upgrade(binary))?;
+        }
+        Commands::Supervise {
+            config,
+            service,
+            pipe_stderr,
+            verbose: _,
+            foreground,
+            handoff,
+        } => {
+            let mode = if foreground {
+                ProjectRunMode::Foreground
+            } else {
+                ProjectRunMode::Daemon
+            };
+            run_supervisor_in_process(
+                PathBuf::from(config),
+                service,
+                pipe_stderr,
+                mode,
+                handoff.map(PathBuf::from),
+            );
         }
         Commands::Spawn {
             name,
@@ -1771,7 +2202,8 @@ mod tests {
             },
         ];
 
-        let lines = status_overview_lines(&columns, &units, OverallHealth::Warn, true);
+        let lines =
+            status_overview_lines(&columns, &units, OverallHealth::Warn, true, false);
         let rendered = lines.join("\n");
 
         assert!(rendered.contains("Status: WARN"));
@@ -1784,6 +2216,12 @@ mod tests {
         assert!(rendered.contains("Lost 1"));
         assert!(rendered.contains("Intent"));
         assert!(rendered.contains("Serve 2"));
+
+        let offline =
+            status_overview_lines(&columns, &units, OverallHealth::Warn, true, true)
+                .join("\n");
+        assert!(offline.contains("Status: OFFLINE"));
+        assert!(!offline.contains("Status: WARN"));
     }
 
     #[test]
@@ -2824,7 +3262,7 @@ mod tests {
 
         for idx in 0..3 {
             let path = units_dir.join(format!("unit-{idx}.yaml"));
-            fs::write(path, "version: \"1\"\nservices: {}\n").expect("write unit file");
+            fs::write(path, "version: \"2\"\nservices: {}\n").expect("write unit file");
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -2853,7 +3291,7 @@ mod tests {
         let now = SystemTime::now();
 
         let path = units_dir.join("old.yaml");
-        fs::write(&path, "version: \"1\"\nservices: {}\n").expect("write unit file");
+        fs::write(&path, "version: \"2\"\nservices: {}\n").expect("write unit file");
 
         prune_unit_configs_with_limits(
             units_dir,
@@ -3050,53 +3488,216 @@ mod tests {
 
 include!("sysg/ui.rs");
 
-/// Handles purge all state.
-fn purge_all_state() -> Result<(), Box<dyn Error>> {
-    stop_supervisors();
+/// Resolves the purge selectors into a plan, runs preflight, and — if cleared —
+/// deletes the targeted state.
+fn dispatch_purge(
+    config: Option<String>,
+    project: Option<String>,
+    force: bool,
+) -> Result<(), Box<dyn Error>> {
+    let config_projects = match (&config, &project) {
+        (Some(path), None) => Some(purge_config_project_ids(path)?),
+        _ => None,
+    };
 
-    let runtime_dir = runtime::state_dir();
+    let plan =
+        match systemg::purge::resolve_plan(None, project.as_deref(), config_projects) {
+            Ok(plan) => plan,
+            Err(mismatch) => {
+                return Err(Box::new(DiagError(Box::new(
+                    systemg::start::project_mismatch(&mismatch.flag, &mismatch.selector),
+                ))));
+            }
+        };
 
-    if runtime_dir.exists() {
-        info!("Removing systemg runtime directory: {:?}", runtime_dir);
-        fs::remove_dir_all(&runtime_dir)?;
-        info!("Successfully purged all systemg state");
-    } else {
-        info!("No systemg runtime directory found at {:?}", runtime_dir);
+    let world = purge_world(force);
+    let plan = match systemg::purge::preflight(plan, world) {
+        systemg::purge::Preflight::Ready(plan) => plan,
+        systemg::purge::Preflight::Refused(diag) => {
+            return Err(Box::new(DiagError(diag)));
+        }
+    };
+
+    if force {
+        stop_supervisors()?;
+        wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
     }
 
+    execute_purge(plan)
+}
+
+/// A live snapshot of the world for the purge preflight.
+fn purge_world(force: bool) -> systemg::purge::World {
+    match supervisor_health() {
+        SupervisorHealth::Serving => {
+            let managed_units = try_live_status(true)
+                .map(|reading| {
+                    reading
+                        .snapshot
+                        .units
+                        .iter()
+                        .filter(|u| u.process.is_some())
+                        .count()
+                })
+                .unwrap_or(0);
+            systemg::purge::World {
+                supervisor_serving: true,
+                managed_units,
+                force,
+            }
+        }
+        SupervisorHealth::Dying => systemg::purge::World {
+            supervisor_serving: true,
+            managed_units: 1,
+            force,
+        },
+        SupervisorHealth::Down => {
+            let managed_units = tracked_unit_count();
+            systemg::purge::World {
+                supervisor_serving: managed_units > 0,
+                managed_units,
+                force,
+            }
+        }
+    }
+}
+
+fn tracked_unit_count() -> usize {
+    let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| {
+            let store = StateStore::at(entry.path());
+            match systemg::daemon::PidFile::load(store.clone()) {
+                Ok(pid_file) => pid_file
+                    .services()
+                    .keys()
+                    .chain(pid_file.service_pgids().keys())
+                    .collect::<HashSet<_>>()
+                    .len(),
+                Err(_) if store.pid_path().exists() => 1,
+                Err(_) => 0,
+            }
+        })
+        .sum()
+}
+
+/// Reads a config and returns the project ids it declares (or `__loose__`).
+fn purge_config_project_ids(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let content = fs::read_to_string(path).map_err(|err| -> Box<dyn Error> {
+        Box::new(DiagError(Box::new(config_read_diag(&err.to_string()))))
+    })?;
+    let configs = systemg::config::parse_config_projects(&content)?;
+    Ok(configs.into_iter().map(|c| c.project.id).collect())
+}
+
+/// Deletes the state a cleared [`PurgePlan`] targets.
+fn execute_purge(plan: systemg::purge::PurgePlan) -> Result<(), Box<dyn Error>> {
+    use systemg::purge::PurgePlan;
+    match plan {
+        PurgePlan::Everything => {
+            purge_state_root()?;
+            println!("All systemg state has been purged");
+        }
+        PurgePlan::Config { projects } => {
+            purge_projects(&projects)?;
+            purge_runtime_files();
+            println!("Purged state for {} project(s)", projects.len());
+        }
+        PurgePlan::Project { project } => {
+            let dir = runtime::state_dir()
+                .join(systemg::state_store::PROJECTS_DIR)
+                .join(&project);
+            if !dir.exists() {
+                return Err(Box::new(DiagError(Box::new(
+                    systemg::purge::project_not_found(&project),
+                ))));
+            }
+            remove_tree(&dir)?;
+            println!("Purged state for project '{project}'");
+        }
+    }
     Ok(())
 }
 
+/// Removes the whole state root plus the out-of-root system-mode log dir.
+fn purge_state_root() -> Result<(), Box<dyn Error>> {
+    let runtime_dir = runtime::state_dir();
+    if runtime_dir.exists() {
+        info!("Removing systemg runtime directory: {:?}", runtime_dir);
+        remove_tree(&runtime_dir)?;
+    }
+    // In system mode logs live outside the state root; take them too.
+    let log_dir = runtime::log_dir();
+    if log_dir.exists() && !log_dir.starts_with(&runtime_dir) {
+        remove_tree(&log_dir)?;
+    }
+    Ok(())
+}
+
+/// Removes each named project's state directory.
+fn purge_projects(projects: &[String]) -> Result<(), Box<dyn Error>> {
+    let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+    for project in projects {
+        let dir = root.join(project);
+        if dir.exists() {
+            remove_tree(&dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// Removes the supervisor-level runtime files (socket, pid, config hint).
+fn purge_runtime_files() {
+    cleanup_stopped_runtime();
+}
+
+/// Removes a directory tree, mapping any IO error to the partial-purge SG0402.
+fn remove_tree(dir: &Path) -> Result<(), Box<dyn Error>> {
+    fs::remove_dir_all(dir).map_err(|err| -> Box<dyn Error> {
+        Box::new(DiagError(Box::new(systemg::purge::incomplete(format!(
+            "failed to remove {}: {err}",
+            dir.display()
+        )))))
+    })
+}
+
 /// Stops supervisors.
-fn stop_supervisors() {
+fn stop_supervisors() -> Result<(), Box<dyn Error>> {
     let candidates = gather_supervisor_pids();
 
     if candidates.is_empty() {
-        return;
+        stop_tracked_projects()?;
+        cleanup_stopped_runtime();
+        return Ok(());
     }
 
     let mut survivors = HashSet::new();
     let mut fallback_targets = HashSet::new();
 
     if supervisor_running() {
-        match send_control_command(ControlCommand::Shutdown) {
-            Ok(_) => {
+        match ipc::send_command_with_timeout(
+            &ControlCommand::Shutdown,
+            SUPERVISOR_REQUEST_TIMEOUT,
+        ) {
+            Ok(ipc::CommandAck::Response(_)) => {
                 for pid in &candidates {
-                    if !wait_for_supervisor_exit(*pid, Duration::from_secs(3)) {
+                    if !wait_for_supervisor_exit(*pid, SUPERVISOR_GRACEFUL_EXIT_TIMEOUT) {
                         fallback_targets.insert(*pid);
                     }
                 }
             }
+            Ok(ipc::CommandAck::Pending) => fallback_targets.extend(&candidates),
             Err(err) => {
-                if let Some(control_err) = err.downcast_ref::<ControlError>() {
-                    match control_err {
-                        ControlError::NotAvailable => warn!(
-                            "Supervisor IPC unavailable during purge; falling back to signal-based shutdown"
-                        ),
-                        other => warn!("Failed to request supervisor shutdown: {other}"),
-                    }
-                } else {
-                    warn!("Failed to request supervisor shutdown: {err}");
+                match err {
+                    ControlError::NotAvailable => warn!(
+                        "Supervisor IPC unavailable during shutdown; falling back to its recorded identity"
+                    ),
+                    other => warn!("Failed to request supervisor shutdown: {other}"),
                 }
                 fallback_targets.extend(&candidates);
             }
@@ -3108,49 +3709,89 @@ fn stop_supervisors() {
     survivors.extend(fallback_targets);
 
     if survivors.is_empty() {
-        return;
+        stop_tracked_projects()?;
+        cleanup_stopped_runtime();
+        return Ok(());
     }
 
     for pid in gather_supervisor_pids() {
         survivors.insert(pid);
     }
 
+    let mut first_error: Option<Box<dyn Error>> = None;
     for pid in survivors {
-        force_kill(pid);
+        if let Err(err) = force_kill(pid) {
+            first_error.get_or_insert_with(|| Box::new(err));
+        }
+    }
+    if let Err(err) = stop_tracked_projects() {
+        first_error.get_or_insert_with(|| Box::new(err));
+    }
+    cleanup_stopped_runtime();
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
 
-/// Gathers supervisor pids.
-fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything(),
-    );
-
-    let mut set = HashSet::new();
-
-    if let Ok(Some(pid)) = ipc::read_supervisor_pid() {
-        set.insert(pid);
+fn cleanup_stopped_runtime() {
+    if let Ok(_lock) = ipc::lock_supervisor_runtime() {
+        let _ = ipc::cleanup_runtime();
     }
+}
 
-    let current_pid = process::id();
-
-    for (pid, process) in system.processes() {
-        if pid.as_u32() == current_pid {
+fn stop_tracked_projects() -> Result<(), systemg::error::ProcessManagerError> {
+    let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+    let Ok(entries) = fs::read_dir(root) else {
+        return Ok(());
+    };
+    let mut first_error = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
-
-        if is_supervisor(process) {
-            set.insert(pid.as_u32() as libc::pid_t);
+        if let Err(err) = Daemon::stop_tracked(StateStore::at(path.clone())) {
+            warn!(
+                "Failed to stop every tracked process in {}: {err}",
+                path.display()
+            );
+            first_error.get_or_insert(err);
         }
     }
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
 
+/// Returns the verified PID of the supervisor that owns the current runtime.
+///
+/// The control-socket peer is authoritative. A recorded PID is accepted only
+/// when it still names a session-leading `sysg` supervisor process.
+fn gather_supervisor_pids() -> HashSet<libc::pid_t> {
+    let mut system = System::new();
+    let mut set = HashSet::new();
+    if let Some(pid) = verified_supervisor_pid() {
+        set.insert(pid);
+        return set;
+    }
+    if let Ok(Some(pid)) = ipc::read_supervisor_pid() {
+        let target = SysPid::from_u32(pid as u32);
+        system.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+        let session_leader = unsafe { libc::getsid(pid) } == pid;
+        if session_leader && system.process(target).is_some_and(is_supervisor) {
+            set.insert(pid);
+        } else {
+            warn!(
+                "Refusing to signal recorded supervisor PID {pid}: it is not a sysg supervisor"
+            );
+        }
+    }
     set
 }
 
-/// Returns whether supervisor.
+/// Returns whether a process command line identifies a `sysg` supervisor.
 fn is_supervisor(process: &sysinfo::Process) -> bool {
     let cmd = process.cmd();
     if cmd.is_empty() {
@@ -3167,21 +3808,21 @@ fn is_supervisor(process: &sysinfo::Process) -> bool {
     }
 
     let mut has_supervisor_command = false;
-    let mut has_daemonize = false;
+    let mut is_reexec_supervise = false;
 
     for arg in cmd {
         let value = arg.to_string_lossy();
         if value == "start" || value == "restart" {
             has_supervisor_command = true;
-        } else if value == "--daemonize" {
-            has_daemonize = true;
+        } else if value == "supervise" {
+            is_reexec_supervise = true;
         }
     }
 
-    has_supervisor_command && has_daemonize
+    is_reexec_supervise || has_supervisor_command
 }
 
-/// Waits for for supervisor exit.
+/// Waits up to `timeout` for `pid` to disappear or become a zombie.
 fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     let target = Pid::from_raw(pid);
@@ -3192,7 +3833,7 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
                 if process_exited(pid) {
                     return true;
                 }
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(PROCESS_CHECK_INTERVAL);
             }
             Err(err) => {
                 if err == nix::Error::from(nix::errno::Errno::ESRCH) {
@@ -3201,7 +3842,7 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
                 if process_exited(pid) {
                     return true;
                 }
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(PROCESS_CHECK_INTERVAL);
             }
         }
     }
@@ -3209,10 +3850,49 @@ fn wait_for_supervisor_exit(pid: libc::pid_t, timeout: Duration) -> bool {
     false
 }
 
-/// Forcefully terminates kill.
-fn force_kill(pid: libc::pid_t) {
-    if wait_for_supervisor_exit(pid, Duration::from_millis(100)) {
-        return;
+/// Blocks until the supervisor runtime files (socket + pid) are gone, or the
+/// deadline passes.
+///
+/// A stopped daemon tears its runtime down asynchronously — service stop, monitor
+/// join, then `cleanup_runtime` — so `stop_supervisors` returning (process dead)
+/// does not mean the socket and pid file are unlinked yet. Recycling must wait
+/// for that teardown to finish before forking a successor, otherwise the old
+/// daemon's late cleanup races the new daemon's fresh files.
+fn wait_for_runtime_cleared(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let socket_gone = ipc::socket_path().map(|p| !p.exists()).unwrap_or(true);
+        let pid_gone = ipc::supervisor_pid_path()
+            .map(|p| !p.exists())
+            .unwrap_or(true);
+        if socket_gone && pid_gone {
+            return;
+        }
+        thread::sleep(SERVICE_POLL_INTERVAL);
+    }
+}
+
+/// Terminates a verified supervisor and confirms that the process exited.
+fn force_kill(pid: libc::pid_t) -> io::Result<()> {
+    if wait_for_supervisor_exit(pid, PROCESS_CHECK_INTERVAL) {
+        return Ok(());
+    }
+
+    let verified_peer = verified_supervisor_pid() == Some(pid);
+    let verified_process = if verified_peer {
+        true
+    } else {
+        let target = SysPid::from_u32(pid as u32);
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+        (unsafe { libc::getsid(pid) }) == pid
+            && system.process(target).is_some_and(is_supervisor)
+    };
+    if !verified_process {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing to force-kill unverified supervisor PID {pid}"),
+        ));
     }
 
     let pgid = unsafe { libc::getpgid(pid) };
@@ -3223,8 +3903,8 @@ fn force_kill(pid: libc::pid_t) {
         unsafe { libc::kill(pid, SIGTERM) };
     }
 
-    if wait_for_supervisor_exit(pid, Duration::from_secs(2)) {
-        return;
+    if wait_for_supervisor_exit(pid, SUPERVISOR_FORCE_EXIT_TIMEOUT) {
+        return Ok(());
     }
 
     if pgid >= 0 && pgid == pid {
@@ -3233,40 +3913,27 @@ fn force_kill(pid: libc::pid_t) {
         unsafe { libc::kill(pid, SIGKILL) };
     }
 
-    let _ = wait_for_supervisor_exit(pid, Duration::from_secs(2));
+    if wait_for_supervisor_exit(pid, SUPERVISOR_FORCE_EXIT_TIMEOUT) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("supervisor PID {pid} survived SIGKILL"),
+        ))
+    }
 }
 
-/// Handles process exited.
+/// Returns whether a process is absent, dead, or waiting to be reaped.
 fn process_exited(pid: libc::pid_t) -> bool {
-    let proc_root = PathBuf::from(format!("/proc/{pid}"));
-    if !proc_root.exists() {
-        return true;
-    }
-
-    match read_proc_state(pid) {
-        Some('Z') | Some('X') => true,
-        Some(_) => false,
-        None => false,
-    }
-}
-
-/// Reads proc state.
-fn read_proc_state(pid: libc::pid_t) -> Option<char> {
-    let stat_path = PathBuf::from(format!("/proc/{pid}/stat"));
-    let contents = fs::read_to_string(stat_path).ok()?;
-    let mut parts = contents.split_whitespace();
-    parts.next()?;
-    let mut name_part = parts.next()?;
-    if !name_part.ends_with(')') {
-        for part in parts.by_ref() {
-            name_part = part;
-            if name_part.ends_with(')') {
-                break;
-            }
-        }
-    }
-
-    parts.next()?.chars().next()
+    let target = SysPid::from_u32(pid as u32);
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+    system.process(target).is_none_or(|process| {
+        matches!(
+            process.status(),
+            ProcessStatus::Dead | ProcessStatus::Zombie
+        )
+    })
 }
 
 /// Initializes logging.
@@ -3320,6 +3987,8 @@ fn start_foreground(
 ) -> Result<(), Box<dyn Error>> {
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
     let project_id = config.project.id.clone();
+    let attach_config = config_path.clone();
+    let attach_service = service.clone();
 
     let child_pid = unsafe { libc::fork() };
     if child_pid < 0 {
@@ -3330,23 +3999,98 @@ fn start_foreground(
         unsafe {
             libc::setsid();
         }
-
-        let mut supervisor = Supervisor::new_with_mode(
-            config_path,
+        silence_stdio()?;
+        reexec_supervisor(
+            &config_path,
+            service.as_deref(),
+            pipe_stderr,
             false,
-            service,
             ProjectRunMode::Foreground,
-        )?;
-        supervisor.set_pipe_stderr(pipe_stderr);
-        if let Err(err) = supervisor.run() {
-            error!("Supervisor exited with error: {err}");
-            process::exit(1);
-        }
-        process::exit(0);
+        );
+        run_supervisor_in_process(
+            config_path,
+            service,
+            pipe_stderr,
+            ProjectRunMode::Foreground,
+            None,
+        );
     }
 
-    with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid))?;
-    wait_for_foreground_attachment(project_id)
+    if let Err(err) =
+        with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid))
+    {
+        unsafe {
+            libc::waitpid(child_pid, std::ptr::null_mut(), libc::WNOHANG);
+        }
+        if supervisor_running() {
+            return start_foreground_attached(attach_config, attach_service);
+        }
+        return Err(err);
+    }
+
+    println!("Starting project '{project_id}' in the foreground…");
+    println!("Streaming its services' output; press Ctrl-C to stop the project.");
+    let output = ForegroundOutput::new();
+    let boot_progress =
+        match spawn_boot_progress_reporter(project_id.clone(), output.clone()) {
+            Ok(progress) => progress,
+            Err(err) => {
+                let _ = ipc::send_command(&ControlCommand::StopProject {
+                    project: project_id,
+                });
+                return Err(err.into());
+            }
+        };
+
+    // Stream ONLY this project's service logs to the terminal via a scoped follow
+    // (the supervisor's own tracing goes to the log file, and service log writers
+    // no longer echo to the terminal), so a foreground start shows its project's
+    // output cleanly instead of every managed service + supervisor internals.
+    let streaming = Arc::new(AtomicBool::new(true));
+    let shutdown = Arc::new(std::sync::Mutex::new(None));
+    let follow_handle = match spawn_foreground_log_follow(
+        project_id.clone(),
+        streaming.clone(),
+        shutdown.clone(),
+        output,
+    ) {
+        Ok(handle) => handle,
+        Err(err) => {
+            boot_progress.stop();
+            let _ = ipc::send_command(&ControlCommand::StopProject {
+                project: project_id,
+            });
+            return Err(err.into());
+        }
+    };
+
+    let boot_report = collect_boot_report(false);
+    boot_progress.stop();
+    let boot_report = match boot_report {
+        Ok(report) => report,
+        Err(err) => {
+            stop_foreground_follow(&streaming, &shutdown);
+            let _ = ipc::send_command(&ControlCommand::StopProject {
+                project: project_id,
+            });
+            let _ = follow_handle.join();
+            return Err(err);
+        }
+    };
+    if let Some(diag) = boot_report.failures.into_iter().next() {
+        stop_foreground_follow(&streaming, &shutdown);
+        let _ = ipc::send_command(&ControlCommand::StopProject {
+            project: project_id,
+        });
+        let _ = follow_handle.join();
+        return Err(Box::new(DiagError(Box::new(diag))));
+    }
+
+    let result =
+        wait_for_foreground_attachment(project_id, streaming.clone(), shutdown.clone());
+    streaming.store(false, Ordering::SeqCst);
+    let _ = follow_handle.join();
+    result
 }
 
 /// Adds a foreground project to the resident supervisor and owns its terminal lifetime.
@@ -3361,82 +4105,592 @@ fn start_foreground_attached(
         service,
         mode: ProjectRunMode::Foreground,
     };
-    with_progress_spinner("Starting", || send_control_command(command))?;
+    let ctrlc = foreground_ctrlc()?;
+    // NO spinner here. A foreground start's whole purpose is to show the
+    // project's output, and the fork path (`start_foreground`) prints its header
+    // and streams straight away. Wrapping the attach in a spinner made the two
+    // paths look completely different for the same command: the first project
+    // started streaming, while a second project attaching to that supervisor sat
+    // on `⠹ Starting` — the boot runs on a background thread, so the spinner had
+    // nothing to report and only hid the stream that followed.
+    // Say what is happening BEFORE the boot begins. A slow project (one whose
+    // pre_start waits on a DB or tunnel) can take a minute to produce its first
+    // line, and a bare spinner left the user unable to tell working from wedged.
+    println!("Starting project '{project_id}' in the foreground…");
+    println!("Streaming its services' output; press Ctrl-C to stop the project.");
 
-    wait_for_foreground_attachment(project_id)
+    let streaming = Arc::new(AtomicBool::new(true));
+    let shutdown = Arc::new(std::sync::Mutex::new(None));
+    let output = ForegroundOutput::new();
+    let follow_handle = spawn_foreground_log_follow(
+        project_id.clone(),
+        streaming.clone(),
+        shutdown.clone(),
+        output.clone(),
+    )?;
+
+    let boot_progress = match spawn_boot_progress_reporter(project_id.clone(), output) {
+        Ok(progress) => progress,
+        Err(err) => {
+            stop_foreground_follow(&streaming, &shutdown);
+            let _ = follow_handle.join();
+            return Err(err.into());
+        }
+    };
+    let (boot_tx, boot_rx) = mpsc::sync_channel(FOREGROUND_BOOT_RESULT_CAPACITY);
+    let boot_handle = match thread::Builder::new()
+        .name(FOREGROUND_BOOT_THREAD.into())
+        .spawn(move || {
+            let result =
+                send_control_command_inner(command, false).map_err(|err| err.to_string());
+            let _ = boot_tx.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(err) => {
+            boot_progress.stop();
+            stop_foreground_follow(&streaming, &shutdown);
+            let _ = follow_handle.join();
+            return Err(err.into());
+        }
+    };
+    let boot_result = loop {
+        match boot_rx.recv_timeout(PROCESS_CHECK_INTERVAL) {
+            Ok(result) => break result,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break Err("foreground boot worker stopped".to_string());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if ctrlc.try_recv().is_ok() {
+            stop_foreground_follow(&streaming, &shutdown);
+            let stop_result = stop_foreground_project(&project_id);
+            let _ = boot_handle.join();
+            boot_progress.stop();
+            let _ = follow_handle.join();
+            return stop_result;
+        }
+    };
+    let _ = boot_handle.join();
+    boot_progress.stop();
+    if let Err(err) = boot_result {
+        stop_foreground_follow(&streaming, &shutdown);
+        let _ = follow_handle.join();
+        return Err(io::Error::other(err).into());
+    }
+
+    let result = wait_for_foreground_attachment_with_ctrlc(
+        project_id,
+        streaming.clone(),
+        shutdown.clone(),
+        ctrlc,
+    );
+    // The wait already cleared the flag and force-closed the stream on its exit
+    // path; join the (now unblocked) follow thread.
+    streaming.store(false, Ordering::SeqCst);
+    let _ = follow_handle.join();
+    result
 }
 
-/// Waits for Ctrl-C and then stops the foreground-owned project.
-fn wait_for_foreground_attachment(project_id: String) -> Result<(), Box<dyn Error>> {
+/// A running boot-progress reporter; call `stop()` to end it.
+struct BootProgressReporter {
+    /// Shared foreground terminal whose active progress row must be cleared.
+    output: ForegroundOutput,
+    /// Stop signal observed by the progress thread.
+    running: Arc<AtomicBool>,
+    /// Reporter thread joined during orderly shutdown.
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl BootProgressReporter {
+    /// Stops the reporter and waits for its final line.
+    fn stop(mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let _ = self.output.clear_progress();
+    }
+}
+
+/// Serialized owner of foreground progress and service-log terminal writes.
+#[derive(Clone)]
+struct ForegroundOutput {
+    /// Mutable terminal state shared by the progress and log threads.
+    inner: Arc<std::sync::Mutex<ForegroundOutputState>>,
+}
+
+/// State required to clear and restore one in-place terminal progress row.
+struct ForegroundOutputState {
+    /// Standard-output handle used by both foreground writers.
+    stdout: io::Stdout,
+    /// Whether standard output supports cursor-control sequences.
+    terminal: bool,
+    /// Most recent progress text, retained while service logs are written.
+    progress: Option<String>,
+    /// Whether the retained progress text is currently visible.
+    progress_visible: bool,
+}
+
+impl ForegroundOutput {
+    /// Creates an output owner configured for the current standard output.
+    fn new() -> Self {
+        let stdout = io::stdout();
+        let terminal = stdout.is_terminal();
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(ForegroundOutputState {
+                stdout,
+                terminal,
+                progress: None,
+                progress_visible: false,
+            })),
+        }
+    }
+
+    /// Whether progress can be repainted in place on this output stream.
+    fn is_terminal(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|state| state.terminal)
+            .unwrap_or(false)
+    }
+
+    /// Displays a progress update in place, or as a line for redirected output.
+    fn show_progress(&self, line: &str) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.progress = Some(line.to_string());
+        state.render_progress()
+    }
+
+    /// Removes the active progress row before foreground reporting ends.
+    fn clear_progress(&self) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.progress = None;
+        state.clear_visible_progress()
+    }
+
+    /// Writes one complete service-log fragment and restores progress below it.
+    fn write_log(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.clear_visible_progress()?;
+        state.stdout.write_all(bytes)?;
+        if state.terminal {
+            state.render_progress()
+        } else {
+            state.stdout.flush()
+        }
+    }
+
+    /// Writes a foreground stream notice without colliding with progress.
+    fn write_notice(&self, message: &str) -> io::Result<()> {
+        let mut line = message.as_bytes().to_vec();
+        line.push(b'\n');
+        self.write_log(&line)
+    }
+
+    /// Flushes the shared standard-output handle.
+    fn flush(&self) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::other(FOREGROUND_OUTPUT_LOCK_ERROR))?;
+        state.stdout.flush()
+    }
+}
+
+impl ForegroundOutputState {
+    /// Clears the cursor-controlled progress row when it is visible.
+    fn clear_visible_progress(&mut self) -> io::Result<()> {
+        if self.terminal && self.progress_visible {
+            self.stdout
+                .write_all(clear_progress_spinner_line().as_bytes())?;
+            self.progress_visible = false;
+        }
+        Ok(())
+    }
+
+    /// Renders the retained progress according to output capabilities.
+    fn render_progress(&mut self) -> io::Result<()> {
+        let Some(progress) = self.progress.as_deref() else {
+            return self.stdout.flush();
+        };
+        if self.terminal {
+            self.stdout
+                .write_all(format_foreground_progress(progress).as_bytes())?;
+            self.progress_visible = true;
+        } else {
+            writeln!(self.stdout, "{FOREGROUND_PROGRESS_PREFIX}{progress}")?;
+        }
+        self.stdout.flush()
+    }
+}
+
+/// Buffers follow-stream chunks until complete lines can be written atomically.
+struct ForegroundLogOutput {
+    /// Shared terminal owner that coordinates with progress rendering.
+    output: ForegroundOutput,
+    /// Partial log line retained across stream writes.
+    pending: Vec<u8>,
+}
+
+impl ForegroundLogOutput {
+    /// Creates a line-buffered writer for the shared foreground terminal.
+    fn new(output: ForegroundOutput) -> Self {
+        Self {
+            output,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Writes all complete buffered lines through one terminal transaction.
+    fn write_complete_lines(&mut self) -> io::Result<()> {
+        if let Some(end) = self.pending.iter().rposition(|byte| *byte == b'\n') {
+            let lines: Vec<u8> = self.pending.drain(..=end).collect();
+            self.output.write_log(&lines)?;
+        }
+        Ok(())
+    }
+}
+
+impl Write for ForegroundLogOutput {
+    /// Buffers bytes and commits every complete line to the shared terminal.
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        self.write_complete_lines()?;
+        Ok(bytes.len())
+    }
+
+    /// Commits all buffered output, terminating a final partial log line.
+    fn flush(&mut self) -> io::Result<()> {
+        self.write_complete_lines()?;
+        if !self.pending.is_empty() {
+            self.pending.push(b'\n');
+            self.write_complete_lines()?;
+        }
+        self.output.flush()
+    }
+}
+
+/// Formats one boot-progress row without allowing terminal auto-wrap.
+fn format_foreground_progress(line: &str) -> String {
+    let prefix_width = FOREGROUND_PROGRESS_PREFIX.chars().count();
+    let budget = terminal_width()
+        .saturating_sub(prefix_width)
+        .saturating_sub(TERMINAL_AUTOWRAP_MARGIN);
+    let shown = if line.chars().count() > budget {
+        let keep = budget.saturating_sub(1);
+        line.chars()
+            .take(keep)
+            .chain(std::iter::once('…'))
+            .collect::<String>()
+    } else {
+        line.to_string()
+    };
+    format!("\r{FOREGROUND_PROGRESS_PREFIX}{shown}\x1B[K")
+}
+
+/// Reports what a project's boot is DOING while it happens.
+///
+/// A foreground attach hands the boot to a background thread in the supervisor,
+/// so the terminal has nothing to show until the first service writes a log
+/// line. On a project whose `pre_start` waits on a DB or tunnel that is a minute
+/// of silence, and the spinner this replaces said only "Starting" — leaving the
+/// user unable to tell a slow boot from a wedged one. The supervisor publishes
+/// its live operation (dependency waits, health-check attempts) through the op
+/// slot; this surfaces it, printing only when the message CHANGES so a slow step
+/// does not scroll the terminal.
+fn spawn_boot_progress_reporter(
+    project_id: String,
+    output: ForegroundOutput,
+) -> io::Result<BootProgressReporter> {
+    let running = Arc::new(AtomicBool::new(true));
+    let thread_running = Arc::clone(&running);
+    let thread_output = output.clone();
+    let handle = thread::Builder::new()
+        .name(format!("boot-progress-{project_id}"))
+        .spawn(move || {
+            let terminal = thread_output.is_terminal();
+            let mut last_line = String::new();
+            let mut last_phase = None;
+            while thread_running.load(Ordering::SeqCst) {
+                if let Some(op) = ipc::current_op()
+                    && op.label.contains(&project_id)
+                {
+                    let line = op.describe();
+                    let phase = (op.label, op.detail);
+                    let changed = if terminal {
+                        line != last_line
+                    } else {
+                        last_phase.as_ref() != Some(&phase)
+                    };
+                    if changed {
+                        let _ = thread_output.show_progress(&line);
+                        last_line = line;
+                        last_phase = Some(phase);
+                    }
+                }
+                thread::sleep(BOOT_PROGRESS_INTERVAL);
+            }
+        })?;
+    Ok(BootProgressReporter {
+        output,
+        running,
+        handle: Some(handle),
+    })
+}
+
+/// Streams a foreground project's logs in-process on a supervised loop. Connects
+/// to the supervisor's follow stream and pumps it to stdout; on any drop, if the
+/// caller still wants the stream AND the project is still loaded, it announces
+/// the interruption on the shared terminal and reconnects after a short backoff.
+/// Returns when the caller clears `streaming` or the project is gone — never
+/// freezes silently.
+fn spawn_foreground_log_follow(
+    project_id: String,
+    streaming: Arc<AtomicBool>,
+    shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+    output: ForegroundOutput,
+) -> io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name(format!("fg-logs-{project_id}"))
+        .spawn(move || {
+            let mut announced_interrupt = false;
+            // Backlog is for the FIRST attach only. Every reconnect re-requested
+            // the last N lines, and the supervisor answers that with the full
+            // grouped render — "Offline Services" plus the finished output of
+            // every completed one-shot — dumped into a live terminal. Measured
+            // on a real project: 32 reconnects replayed the build/probe history
+            // 32 times. After the first attach a follow must TAIL ONLY.
+            let mut backlog_lines = FOREGROUND_BACKLOG_LINES;
+            // A project that has not registered its first unit yet is BOOTING,
+            // not gone. `supervisor_running()` goes true when the control socket
+            // appears — well before any service is spawned — so without this
+            // grace the very first follow attempt sees an unknown project and
+            // retires the stream permanently, leaving the terminal silent for
+            // the whole run. Only trust "project is gone" after it was seen.
+            let mut project_ever_seen = false;
+            let startup_grace =
+                Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
+            while streaming.load(Ordering::SeqCst) {
+                let command = ControlCommand::Logs {
+                    service: None,
+                    project: Some(project_id.clone()),
+                    lines: backlog_lines,
+                    kind: None,
+                    follow: true,
+                    since: None,
+                    until: None,
+                    grep: None,
+                    all: false,
+                    structured: false,
+                };
+                let terminal_writer = ForegroundLogOutput::new(output.clone());
+                let mut writer =
+                    LogWriter::new(terminal_writer, LogFormat::Text, false, None);
+                let outcome = ipc::stream_command_output_interruptible(
+                    &command,
+                    &mut writer,
+                    Some(&shutdown),
+                );
+                let _ = writer.flush();
+                // Subsequent attempts tail only: no backlog replay.
+                let loaded_now = project_loaded_in_supervisor(&project_id);
+                if outcome.is_ok() || project_ever_seen || loaded_now {
+                    backlog_lines = 0;
+                }
+                // Drop the connection handle now that this attempt ended, so a
+                // stale shutdown target isn't left dangling between reconnects.
+                if let Ok(mut guard) = shutdown.lock() {
+                    *guard = None;
+                }
+
+                // A clean caller-requested stop: leave quietly.
+                if !streaming.load(Ordering::SeqCst) {
+                    return;
+                }
+                // The project is genuinely gone — nothing left to follow. During
+                // the startup grace an unseen project is still booting, so keep
+                // retrying instead of retiring the stream.
+                if loaded_now {
+                    project_ever_seen = true;
+                } else if project_ever_seen || Instant::now() >= startup_grace {
+                    if announced_interrupt {
+                        let _ = output.write_notice(&format!(
+                            "• log stream ended: project '{project_id}' stopped."
+                        ));
+                    }
+                    return;
+                } else {
+                    for _ in 0..FOREGROUND_START_RETRIES {
+                        if !streaming.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        thread::sleep(FOREGROUND_POLL_INTERVAL);
+                    }
+                    continue;
+                }
+                // The stream dropped but the project lives — say so and retry.
+                match outcome {
+                    Ok(()) => {
+                        let _ = output.write_notice(&format!(
+                            "⚠ log stream ended unexpectedly; reconnecting to '{project_id}'…"
+                        ));
+                    }
+                    Err(err) => {
+                        let _ = output.write_notice(&format!(
+                            "⚠ log stream interrupted ({err}); reconnecting to '{project_id}'…"
+                        ));
+                    }
+                }
+                announced_interrupt = true;
+                for _ in 0..FOREGROUND_RECONNECT_RETRIES {
+                    if !streaming.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    thread::sleep(FOREGROUND_POLL_INTERVAL);
+                }
+            }
+        })
+}
+
+/// Stops the log-follow: clears the streaming flag and force-closes the live
+/// connection so a follow thread blocked in the copy loop unblocks immediately.
+fn stop_foreground_follow(
+    streaming: &Arc<AtomicBool>,
+    shutdown: &Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+) {
+    streaming.store(false, Ordering::SeqCst);
+    if let Ok(guard) = shutdown.lock()
+        && let Some(stream) = guard.as_ref()
+    {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// Waits for Ctrl-C and then stops the foreground-owned project. The follow
+/// stream is torn down on EVERY exit path so Ctrl-C (or a detach) stops the
+/// console logs immediately instead of leaving them streaming.
+fn wait_for_foreground_attachment(
+    project_id: String,
+    streaming: Arc<AtomicBool>,
+    shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+) -> Result<(), Box<dyn Error>> {
+    let ctrlc = foreground_ctrlc()?;
+    wait_for_foreground_attachment_with_ctrlc(project_id, streaming, shutdown, ctrlc)
+}
+
+/// Installs the foreground Ctrl-C handler and returns its notification channel.
+fn foreground_ctrlc() -> Result<mpsc::Receiver<()>, ctrlc::Error> {
     let (tx, rx) = mpsc::channel();
     ctrlc::set_handler(move || {
         let _ = tx.send(());
     })?;
-    let _ = rx.recv();
+    Ok(rx)
+}
 
-    let stop_result: Result<(), Box<dyn Error>> =
-        match ipc::send_command(&ControlCommand::StopProject {
-            project: project_id.clone(),
-        }) {
-            Ok(ControlResponse::Message(message)) => {
-                println!("{message}");
-                Ok(())
-            }
-            Ok(ControlResponse::Ok) => Ok(()),
-            Ok(ControlResponse::Error(message)) => {
-                Err(ControlError::Server(message).into())
-            }
-            Ok(other) => Err(io::Error::other(format!(
-                "unexpected supervisor response: {:?}",
-                other
-            ))
-            .into()),
-            Err(err) => Err(err.into()),
-        };
-    stop_result?;
-
-    if !supervisor_has_daemon_projects()? {
-        match ipc::send_command(&ControlCommand::Shutdown) {
-            Ok(ControlResponse::Message(message)) => {
-                println!("{message}");
-            }
-            Ok(ControlResponse::Ok) => {}
-            Ok(ControlResponse::Error(message)) => {
-                return Err(ControlError::Server(message).into());
-            }
-            Ok(other) => {
-                return Err(io::Error::other(format!(
-                    "unexpected supervisor response: {:?}",
-                    other
-                ))
-                .into());
-            }
-            Err(ControlError::NotAvailable) => {}
-            Err(err) => return Err(err.into()),
+fn wait_for_foreground_attachment_with_ctrlc(
+    project_id: String,
+    streaming: Arc<AtomicBool>,
+    shutdown: Arc<std::sync::Mutex<Option<std::os::unix::net::UnixStream>>>,
+    ctrlc: mpsc::Receiver<()>,
+) -> Result<(), Box<dyn Error>> {
+    // Wake on Ctrl-C, the supervisor disappearing, OR this project being stopped
+    // out from under us. Blocking only on Ctrl-C wedged the foreground forever
+    // when a `stop --supervisor`/crash tore the supervisor down, OR when a
+    // `stop -p <this-project>` from ANOTHER terminal removed just this project
+    // while the supervisor stayed up (hosting siblings) — the terminal never
+    // returned. In both detach cases the project is already gone; nothing to stop.
+    // A project that has not registered its first unit yet is still BOOTING.
+    // `supervisor_running()` goes true when the control socket appears — well
+    // before any service is spawned — so without this grace the very first
+    // check mistook a booting project for one stopped elsewhere and detached
+    // instantly, killing the terminal owner: no streamed output, and no process
+    // left to receive Ctrl-C. Only trust "gone" once it has actually been seen.
+    let mut project_ever_seen = false;
+    let startup_grace = Instant::now() + systemg::constants::FOREGROUND_ATTACH_GRACE;
+    loop {
+        if ctrlc.recv_timeout(FOREGROUND_POLL_INTERVAL).is_ok() {
+            break;
+        }
+        if !supervisor_running() {
+            info!("Foreground supervisor is no longer running; detaching.");
+            stop_foreground_follow(&streaming, &shutdown);
+            return Ok(());
+        }
+        if project_loaded_in_supervisor(&project_id) {
+            project_ever_seen = true;
+        } else if project_ever_seen || Instant::now() >= startup_grace {
+            info!("Foreground project '{project_id}' was stopped elsewhere; detaching.");
+            stop_foreground_follow(&streaming, &shutdown);
+            return Ok(());
         }
     }
+
+    // Ctrl-C: stop the console stream at once, then tear down the project.
+    stop_foreground_follow(&streaming, &shutdown);
+
+    stop_foreground_project(&project_id)?;
+
+    // The supervisor is impartial, warm-persistent infrastructure: it does NOT
+    // shut down just because its last project left. Ctrl-C on a foreground
+    // project deregisters that project and returns the terminal; the supervisor
+    // stays running, idle and ready for the next `sysg start`. It ends ONLY on an
+    // explicit `sysg stop --supervisor` (or `purge`).
 
     Ok(())
 }
 
+fn stop_foreground_project(project_id: &str) -> Result<(), Box<dyn Error>> {
+    match ipc::send_command(&ControlCommand::StopProject {
+        project: project_id.to_string(),
+    }) {
+        Ok(ControlResponse::Message(message)) => {
+            println!("{message}");
+            Ok(())
+        }
+        Ok(ControlResponse::Ok) => Ok(()),
+        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
+        Ok(other) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {:?}",
+            other
+        ))
+        .into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Waits for a newly forked supervisor child to publish its control socket.
 fn wait_for_supervisor_ready(child_pid: libc::pid_t) -> Result<(), Box<dyn Error>> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + SUPERVISOR_CONNECT_TIMEOUT;
     while Instant::now() < deadline {
-        if supervisor_running() {
-            return Ok(());
+        if let Some(peer) = verified_supervisor_pid() {
+            if peer == child_pid {
+                return Ok(());
+            }
+            if process_exited(child_pid) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("supervisor PID {peer} acquired the runtime first"),
+                )
+                .into());
+            }
         }
 
-        let target = Pid::from_raw(child_pid);
-        if let Err(err) = signal::kill(target, None)
-            && err == nix::Error::from(nix::errno::Errno::ESRCH)
-        {
+        if process_exited(child_pid) {
             return Err(
                 io::Error::other("foreground supervisor exited during startup").into(),
             );
         }
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(SERVICE_POLL_INTERVAL);
     }
 
     Err(io::Error::new(
@@ -3446,22 +4700,563 @@ fn wait_for_supervisor_ready(child_pid: libc::pid_t) -> Result<(), Box<dyn Error
     .into())
 }
 
-/// Returns whether the resident supervisor still owns any daemon-mode project.
-fn supervisor_has_daemon_projects() -> Result<bool, Box<dyn Error>> {
-    match ipc::send_command(&ControlCommand::Status { live: true }) {
-        Ok(ControlResponse::Status(snapshot)) => Ok(snapshot.units.iter().any(|unit| {
-            unit.project
-                .as_ref()
-                .is_some_and(|project| project.mode == ProjectRunMode::Daemon)
-        })),
-        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
-        Ok(other) => Err(io::Error::other(format!(
-            "unexpected supervisor response: {:?}",
-            other
-        ))
-        .into()),
-        Err(ControlError::NotAvailable) => Ok(false),
-        Err(err) => Err(err.into()),
+/// Dispatches a resolved (preflight-cleared) restart plan.
+fn dispatch_restart(
+    plan: systemg::restart::RestartPlan,
+    daemonize: bool,
+    verbose: bool,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::restart::RestartPlan;
+
+    if let RestartPlan::Recycle { config } = plan {
+        return recycle_supervisor_for_restart(config);
+    }
+
+    let config_path = restart_plan_config(&plan);
+
+    if !supervisor_running() {
+        if daemonize {
+            return start_supervisor_daemon(config_path, None, false, verbose);
+        }
+        warn!(
+            "No running supervisor detected; executing restart in local one-shot mode. \
+Use --daemonize in deployment scripts to ensure daemonized supervision is restored if detection fails."
+        );
+        let daemon = build_daemon(&config_path.to_string_lossy())?;
+        return with_progress_spinner("Restarting", || {
+            daemon
+                .restart_services()
+                .map_err(|err| Box::new(err) as Box<dyn Error>)
+        });
+    }
+
+    let command = match plan {
+        RestartPlan::Recycle { .. } => unreachable!("handled above"),
+        RestartPlan::Everything { config } => ControlCommand::Restart {
+            config: Some(config.to_string_lossy().to_string()),
+            service: None,
+            project: None,
+        },
+        RestartPlan::Project { config, project } => ControlCommand::Restart {
+            config: restart_scoped_config(&config),
+            service: None,
+            project: Some(project),
+        },
+        RestartPlan::Service {
+            config,
+            service,
+            project,
+        } => ControlCommand::Restart {
+            // Thread the resolved config through so a scoped `restart -c <file>
+            // -s svc` reloads the manifest and applies that service's changed
+            // config on the bounce — dropping it here silently ignored -c.
+            config: restart_scoped_config(&config),
+            service: Some(service),
+            project,
+        },
+    };
+
+    if daemonize {
+        restart_daemonized(command, config_path, false)
+    } else {
+        with_progress_message("Restarting", || send_control_message(command))
+    }
+}
+
+/// The config path a restart plan carries (for the not-running fork/one-shot).
+fn restart_plan_config(plan: &systemg::restart::RestartPlan) -> PathBuf {
+    use systemg::restart::RestartPlan;
+    match plan {
+        RestartPlan::Everything { config }
+        | RestartPlan::Recycle { config }
+        | RestartPlan::Project { config, .. }
+        | RestartPlan::Service { config, .. } => config.clone(),
+    }
+}
+
+/// The config path to hand a scoped restart, or `None` to fall back to the
+/// resident supervisor's loaded manifest. A scoped restart submits its `-c` file
+/// so the changed service is reloaded and applied; but the default
+/// `systemg.yaml` that no one actually passed must not be sent (it may not
+/// exist), so it degrades to `None` and the supervisor uses what it has.
+fn restart_scoped_config(config: &Path) -> Option<String> {
+    let is_default_name = config
+        .file_name()
+        .is_some_and(|name| name == DEFAULT_CONFIG_PATH);
+    if is_default_name && !config.exists() {
+        return None;
+    }
+    Some(config.to_string_lossy().to_string())
+}
+
+/// Renders a stop-plan resolution failure as a typed diagnostic.
+fn stop_plan_diag(err: systemg::stop::StopPlanError) -> DiagError {
+    use systemg::stop::StopPlanError;
+    let diag = match err {
+        StopPlanError::Mismatch(mismatch) => {
+            systemg::start::project_mismatch(&mismatch.flag, &mismatch.selector)
+        }
+        StopPlanError::SupervisorWithSelector => systemg::diag::Diagnostic::error(
+            systemg::diag::SgCode::ConflictingSelectors,
+            "--supervisor cannot be combined with a service or project selector",
+        )
+        .note("--supervisor shuts the whole supervisor down; drop -s/-p to use it")
+        .help_docs(),
+    };
+    DiagError(Box::new(diag))
+}
+
+/// Dispatches a resolved stop plan: shuts the supervisor down, sends the resident
+/// supervisor a scoped stop, or falls back to a local one-shot stop when no
+/// supervisor is running.
+fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
+    use systemg::stop::StopPlan;
+
+    let health = supervisor_health();
+
+    if let StopPlan::Supervisor = plan {
+        stop_supervisors()?;
+        wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
+        if supervisor_running() {
+            return Err(Box::new(DiagError(Box::new(
+                supervisor_not_responding_diag(),
+            ))));
+        }
+        return Ok(());
+    }
+
+    // Never route a unit stop into a daemon that is alive but not serving — the
+    // command would hang or be silently dropped (BUG-4). Refuse with SG0205.
+    if health == SupervisorHealth::Dying {
+        return Err(Box::new(DiagError(Box::new(
+            supervisor_not_responding_diag(),
+        ))));
+    }
+
+    if health == SupervisorHealth::Serving {
+        let command = match plan {
+            StopPlan::Supervisor => unreachable!("handled above"),
+            StopPlan::Everything { .. } => ControlCommand::Stop {
+                service: None,
+                project: None,
+            },
+            StopPlan::Project { project } => ControlCommand::Stop {
+                service: None,
+                project: Some(project),
+            },
+            StopPlan::Service { service, project } => ControlCommand::Stop {
+                service: Some(service),
+                project,
+            },
+        };
+        return with_progress_message("Stopping", || send_control_message(command));
+    }
+
+    cleanup_stopped_runtime();
+
+    // If the target names a project the resident supervisor already knows, the
+    // supervisor owns its config — route the stop there and NEVER demand a local
+    // file. This keeps `sysg stop -p <loaded-project>` working from any directory
+    // without `-c`; SG0203 is only correct when the project is genuinely unknown.
+    let plan_project = match &plan {
+        StopPlan::Project { project } => Some(project.clone()),
+        StopPlan::Service {
+            project: Some(project),
+            ..
+        } => Some(project.clone()),
+        _ => None,
+    };
+    if let Some(project) = plan_project
+        && project_loaded_in_supervisor(&project)
+    {
+        let command = match plan {
+            StopPlan::Service { service, project } => ControlCommand::Stop {
+                service: Some(service),
+                project,
+            },
+            _ => ControlCommand::Stop {
+                service: None,
+                project: Some(project),
+            },
+        };
+        return with_progress_message("Stopping", || send_control_message(command));
+    }
+
+    // A `-p <project>` with NO supervisor running has nothing to stop: there is
+    // no registry to resolve the project against, and the project's services
+    // cannot be running without a supervisor to have started them. Falling
+    // through to the local-config path here produced the circular SG0203 —
+    // "could not read a local config file … target the project by id with -p"
+    // — when `-p` is exactly what the user passed.
+    if !supervisor_running()
+        && let StopPlan::Project { project }
+        | StopPlan::Service {
+            project: Some(project),
+            ..
+        } = &plan
+    {
+        use systemg::diag::{Diagnostic, SgCode};
+        return Err(Box::new(DiagError(Box::new(
+            Diagnostic::error(
+                SgCode::TargetNotFound,
+                format!("no project '{project}' is running"),
+            )
+            .note("there is no supervisor, so nothing from that project is running")
+            .help_cmd("start it", format!("sysg start -p {project}"))
+            .help_docs(),
+        ))));
+    }
+
+    // No supervisor context for the target: run a one-shot local stop from the
+    // config on disk.
+    let config = match &plan {
+        StopPlan::Everything { config } => config.to_string_lossy().to_string(),
+        _ => resolve_config_path(DEFAULT_CONFIG_PATH)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
+    };
+    let daemon = build_daemon(&config)?;
+    match plan {
+        StopPlan::Service { service, .. } => daemon.stop_service(&service)?,
+        _ => daemon.stop_services()?,
+    }
+    Ok(())
+}
+
+/// Dispatches a `--daemonize` start plan: routes to the resident supervisor
+/// when one is running, otherwise forks a fresh supervisor from the plan's
+/// config.
+fn dispatch_start_daemonize(
+    plan: systemg::start::StartPlan,
+    stderr: bool,
+    verbose: bool,
+    drop_privileges: bool,
+) -> Result<(), Box<dyn Error>> {
+    match supervisor_health() {
+        SupervisorHealth::Serving => {
+            if drop_privileges {
+                warn!(
+                    "--drop-privileges is managed by the running supervisor and has no effect for this start request"
+                );
+            }
+            match dispatch_start_resident(plan.clone()) {
+                Ok(()) => return Ok(()),
+                Err(err) if error_is_supervisor_shutting_down(err.as_ref()) => {
+                    wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
+                    if supervisor_running() {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        SupervisorHealth::Dying => {
+            return Err(Box::new(DiagError(Box::new(
+                supervisor_not_responding_diag(),
+            ))));
+        }
+        SupervisorHealth::Down => {}
+    }
+
+    // No usable supervisor: fork one from the plan's config. An ad-hoc unit
+    // is started the same way — its staged config becomes the new supervisor's.
+    let service = plan_service_name(&plan);
+    // `-p <project>` only names a project a RUNNING supervisor already knows.
+    // With no supervisor there is no registry to resolve it against, so if the
+    // plan's config does not exist we would fork a supervisor that dies on a
+    // missing file (a bare os error 2). Say what the user actually has to do.
+    if let systemg::start::StartPlan::Project { config, project } = &plan
+        && !config.exists()
+    {
+        use systemg::diag::{Diagnostic, SgCode};
+        return Err(Box::new(DiagError(Box::new(
+            Diagnostic::error(
+                SgCode::ConfigFileUnreadable,
+                format!("no running supervisor knows project `{project}`"),
+            )
+            .note(
+                "`-p` targets a project that a running supervisor already has \
+                 loaded; with no supervisor there is nothing to target",
+            )
+            .note(format!(
+                "cold-starting an unregistered project needs its manifest: {} does not exist",
+                config.display()
+            ))
+            .help_cmd(
+                "start it from its config",
+                "sysg start -c <config>.yaml --daemonize",
+            )
+            .help_cmd("see what is loaded", "sysg status")
+            .help_docs(),
+        ))));
+    }
+    let config = plan_config(plan);
+    info!("Starting systemg supervisor with config {:?}", config);
+    start_supervisor_daemon(config, service, stderr, verbose)
+}
+
+/// The config path a plan carries.
+fn plan_config(plan: systemg::start::StartPlan) -> PathBuf {
+    use systemg::start::StartPlan;
+    match plan {
+        StartPlan::WholeConfig { config }
+        | StartPlan::Project { config, .. }
+        | StartPlan::Service { config, .. }
+        | StartPlan::StageAdHoc { config } => config,
+    }
+}
+
+/// Sends a resident supervisor the control command for `plan`.
+fn dispatch_start_resident(
+    plan: systemg::start::StartPlan,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::start::StartPlan;
+
+    let command = match plan {
+        StartPlan::StageAdHoc { config } => {
+            info!(
+                "Staged unit config at {config:?}. Running supervisor was left unchanged."
+            );
+            println!(
+                "Unit staged at {}. Run `sysg restart --daemonize --config {}` to apply it.",
+                config.display(),
+                config.display()
+            );
+            return Ok(());
+        }
+        StartPlan::WholeConfig { config } => ControlCommand::AddProject {
+            config: config.to_string_lossy().to_string(),
+            service: None,
+            mode: ProjectRunMode::Daemon,
+        },
+        StartPlan::Project { project, .. } => ControlCommand::Start {
+            service: None,
+            project: Some(project),
+        },
+        StartPlan::Service {
+            service, project, ..
+        } => ControlCommand::Start {
+            service: Some(service),
+            project,
+        },
+    };
+    // An `AddProject` returns as soon as the supervisor QUEUES the boot onto a
+    // background thread — deliberately, so a slow project cannot block its
+    // single-writer owner thread. But returning "loaded" at that point reports
+    // success for work that has not happened: health checks, dependency waits
+    // and startup failures all land after the user is back at the prompt.
+    // Attach must behave like the fork path — show the boot's progress and
+    // report its real outcome.
+    let awaited_project = match &command {
+        ControlCommand::AddProject { config, .. } => {
+            load_config(Some(config)).ok().map(|c| c.project.id)
+        }
+        _ => None,
+    };
+    let failed = with_progress_spinner("Starting", || {
+        send_control_command(command)?;
+        Ok(match &awaited_project {
+            Some(project) => await_queued_boot(project),
+            None => Vec::new(),
+        })
+    })?;
+
+    // The supervisor logged the real cause (SG0103 pre-start failure, a health
+    // check that never passed, ...). Without this the CLI printed "loaded" and
+    // exited 0 while the project had comprehensively failed to start — a script
+    // or CI job would read that as a clean start.
+    if !failed.is_empty() {
+        use systemg::diag::{Diagnostic, SgCode};
+        let project = awaited_project.as_deref().unwrap_or("<project>");
+        let mut diag = Diagnostic::error(
+            SgCode::ProjectServicesNotUp,
+            format!("{} service(s) did not come up", failed.len()),
+        )
+        .note(format!("did not start: {}", failed.join(", ")));
+        for service in failed.iter().take(3) {
+            diag = diag.help_cmd(
+                format!("why '{service}' failed"),
+                format!("sysg logs -p {project} -s {service}"),
+            );
+        }
+        return Err(Box::new(DiagError(Box::new(
+            diag.help_cmd("supervisor detail", "sysg logs --supervisor")
+                .help_docs(),
+        ))));
+    }
+    Ok(())
+}
+
+/// Blocks until the supervisor's background boot for `project` has settled, then
+/// reports which of its services failed to come up.
+///
+/// `AddProject` deliberately does NOT own the op slot (the supervisor keeps its
+/// owner thread free for a slow boot), so polling the op slot sees nothing —
+/// what the caller must actually track is the project's own units settling.
+///
+/// Bounded, so a genuinely slow or wedged boot cannot hang the CLI: on timeout
+/// the caller is told what is still pending rather than being left to believe
+/// the start succeeded.
+fn await_queued_boot(project: &str) -> Vec<String> {
+    let deadline = Instant::now() + systemg::constants::START_SETTLE_GRACE;
+    // Units left behind by a previous stop are ALREADY `stopped` — not
+    // `starting` — so judging the snapshot immediately reads stale state from
+    // before this boot and reports failure in ~1s, before a single service has
+    // been launched. Correct only by luck when the project really is broken; on
+    // a slow but successful boot it is a false failure. Wait for evidence the
+    // boot has actually begun (a unit running, or one freshly completed) before
+    // any verdict.
+    let mut boot_began = false;
+    while Instant::now() < deadline {
+        thread::sleep(BOOT_PROGRESS_INTERVAL);
+        let Some(units) = project_service_units(project) else {
+            continue;
+        };
+        if units.is_empty() {
+            continue;
+        }
+        // A unit is still working while it is starting; anything else has
+        // reached a state worth reporting.
+        let pending = units
+            .iter()
+            .any(|(_, state)| matches!(state, UnitState::Unknown));
+        if pending {
+            boot_began = true;
+            continue;
+        }
+        let bind_failed = units.iter().any(|(service, state)| {
+            *state == UnitState::Failed
+                && systemg::daemon::output_indicates_port_conflict(
+                    &systemg::logs::tail_service_log(
+                        project,
+                        service,
+                        PORT_DIAGNOSTIC_TAIL_LINES,
+                    ),
+                )
+        });
+        if !boot_began {
+            if units
+                .iter()
+                .any(|(_, state)| matches!(state, UnitState::Running | UnitState::Done))
+                || bind_failed
+            {
+                boot_began = true;
+            } else {
+                // Nothing has moved yet: this is the pre-boot snapshot.
+                continue;
+            }
+        }
+        let down: Vec<String> = units
+            .iter()
+            .filter(|(_, state)| {
+                matches!(
+                    state,
+                    UnitState::Stopped | UnitState::Failed | UnitState::Lost
+                )
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        // Everything is up: return AT ONCE. The long grace exists only to give a
+        // slow pre-start room to finish, so a healthy project must never pay it.
+        if down.is_empty() {
+            return Vec::new();
+        }
+
+        if bind_failed {
+            return down;
+        }
+
+        // Something is down. It may still be retrying — a service whose
+        // `pre_start` waits on a DB cycles through stopped between attempts —
+        // so keep waiting out the grace and only report what is STILL down when
+        // it expires. Reporting the first down poll blamed services that went on
+        // to run healthily.
+    }
+    // Grace expired with services still down: report the last known offenders.
+    project_service_units(project)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, state)| {
+            matches!(
+                state,
+                UnitState::Unknown
+                    | UnitState::Stopped
+                    | UnitState::Failed
+                    | UnitState::Lost
+            )
+        })
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Returns `(unit name, state)` for every SERVICE unit in `project`, or `None`
+/// when no snapshot is available. Cron units are excluded: they register
+/// synchronously and are `queued` by design, so they never indicate whether the
+/// project's services actually booted.
+fn project_service_units(project: &str) -> Option<Vec<(String, UnitState)>> {
+    let ControlResponse::Status(snapshot) =
+        ipc::send_command(&ControlCommand::Status { live: false }).ok()?
+    else {
+        return None;
+    };
+    Some(
+        snapshot
+            .units
+            .iter()
+            .filter(|unit| {
+                unit.kind == UnitKind::Service
+                    && unit
+                        .project
+                        .as_ref()
+                        .is_some_and(|owner| owner.id == project)
+            })
+            .map(|unit| (unit.name.clone(), unit.state))
+            .collect(),
+    )
+}
+
+/// Whether an error means the resident supervisor was tearing down as the
+/// command arrived, so its owner thread dropped the request. Distinct from a
+/// real failure: the caller should fork a fresh supervisor rather than surface
+/// it. Matches the two shutdown-window signatures the supervisor emits.
+fn error_is_supervisor_shutting_down(err: &(dyn Error + 'static)) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("dropped the command before replying")
+        || message.contains("supervisor is shutting down")
+}
+
+/// Dispatches a foreground (non-daemonize) start plan.
+fn dispatch_start_foreground(
+    plan: systemg::start::StartPlan,
+    stderr: bool,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::start::StartPlan;
+
+    if supervisor_running() {
+        // A targeted service/project routes to the resident supervisor; a whole
+        // foreground config attaches to it and owns the terminal lifetime.
+        return match plan {
+            StartPlan::WholeConfig { config } => start_foreground_attached(config, None),
+            other => dispatch_start_resident(other),
+        };
+    }
+
+    match plan {
+        StartPlan::StageAdHoc { config }
+        | StartPlan::WholeConfig { config }
+        | StartPlan::Project { config, .. } => start_foreground(config, None, stderr),
+        StartPlan::Service {
+            config, service, ..
+        } => start_foreground(config, Some(service), stderr),
+    }
+}
+
+/// The service name a plan targets, if it targets a single service.
+fn plan_service_name(plan: &systemg::start::StartPlan) -> Option<String> {
+    match plan {
+        systemg::start::StartPlan::Service { service, .. } => Some(service.clone()),
+        _ => None,
     }
 }
 
@@ -3470,6 +5265,7 @@ fn start_supervisor_daemon(
     config_path: PathBuf,
     service: Option<String>,
     pipe_stderr: bool,
+    verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
     let child_pid = unsafe { libc::fork() };
     if child_pid < 0 {
@@ -3478,31 +5274,187 @@ fn start_supervisor_daemon(
 
     if child_pid == 0 {
         detach_daemon()?;
+        reexec_supervisor(
+            &config_path,
+            service.as_deref(),
+            pipe_stderr,
+            verbose,
+            ProjectRunMode::Daemon,
+        );
+        run_supervisor_in_process(
+            config_path,
+            service,
+            pipe_stderr,
+            ProjectRunMode::Daemon,
+            None,
+        );
+    }
 
-        let mut supervisor = match Supervisor::new(config_path, false, service) {
-            Ok(supervisor) => supervisor,
-            Err(err) => {
-                error!("Supervisor failed to initialize: {err}");
-                process::exit(1);
+    // Wait for the child to publish its socket, then follow the boot stream so
+    // the parent reports the truth of what came up — not just "socket is live".
+    if let Err(err) = wait_for_supervisor_ready(child_pid) {
+        unsafe {
+            libc::waitpid(child_pid, std::ptr::null_mut(), libc::WNOHANG);
+        }
+        if supervisor_running() {
+            return send_control_command(ControlCommand::AddProject {
+                config: config_path.to_string_lossy().to_string(),
+                service,
+                mode: ProjectRunMode::Daemon,
+            });
+        }
+        use systemg::diag::{Diagnostic, SgCode};
+        return Err(Box::new(DiagError(Box::new(
+            Diagnostic::error(SgCode::Catchall, "the supervisor did not come up in time")
+                .note(err.to_string())
+                .help_cmd("read the supervisor log", "sysg logs --supervisor")
+                .help_docs(),
+        ))));
+    }
+
+    let report = follow_boot(verbose)?;
+    if let Some(diag) = report.failures.into_iter().next() {
+        return Err(Box::new(DiagError(Box::new(diag))));
+    }
+    Ok(())
+}
+
+/// Re-execs this binary into the internal `supervise` subcommand so a new
+/// supervisor starts from a clean, single-threaded process image.
+///
+/// `fork()` in a multithreaded process is a trap: only the forking thread
+/// survives in the child, and any mutex a vanished thread held stays locked
+/// forever. A recycle forks the daemon *after* `stop_supervisors` and the
+/// version probe have already spun up IPC / sysinfo / spinner threads, so the
+/// forked daemon inherited those poisoned locks and wedged — silent, and
+/// suppressing its own services' restarts. `execv` replaces the image wholesale,
+/// dropping every inherited thread and lock, so the daemon always boots pristine.
+/// On success this never returns; on failure it falls through to the in-process
+/// boot so a daemon still comes up.
+fn reexec_supervisor(
+    config: &Path,
+    service: Option<&str>,
+    pipe_stderr: bool,
+    verbose: bool,
+    mode: ProjectRunMode,
+) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut args: Vec<CString> = Vec::new();
+    let push = |args: &mut Vec<CString>, s: &str| {
+        if let Ok(c) = CString::new(s) {
+            args.push(c);
+        }
+    };
+    push(&mut args, &exe.to_string_lossy());
+    push(&mut args, "supervise");
+    push(&mut args, "--config");
+    push(&mut args, &config.to_string_lossy());
+    if let Some(service) = service {
+        push(&mut args, "--service");
+        push(&mut args, service);
+    }
+    if pipe_stderr {
+        push(&mut args, "--pipe-stderr");
+    }
+    if verbose {
+        push(&mut args, "--verbose");
+    }
+    if mode == ProjectRunMode::Foreground {
+        push(&mut args, "--foreground");
+    }
+    let _ = nix::unistd::execv(&args[0], &args);
+}
+
+/// Boots the supervisor in the current process and exits. Reached post-`execv`
+/// via the `supervise` subcommand, or as the fallback when re-exec fails.
+fn run_supervisor_in_process(
+    config_path: PathBuf,
+    service: Option<String>,
+    pipe_stderr: bool,
+    mode: ProjectRunMode,
+    handoff: Option<PathBuf>,
+) -> ! {
+    install_supervisor_panic_hook();
+    let handed_off = handoff.is_some();
+    let handoff_path = handoff.clone();
+    let supervisor = match handoff {
+        Some(path) => Supervisor::from_handoff(path),
+        None => Supervisor::new_with_mode(config_path, false, service, mode),
+    };
+    let mut supervisor = match supervisor {
+        Ok(supervisor) => supervisor,
+        Err(err) => {
+            error!("Supervisor failed to initialize: {err}");
+            if let Some(path) = handoff_path
+                && let Err(rollback_err) =
+                    systemg::upgrade::rollback_handoff(&path, err.to_string())
+            {
+                error!("Supervisor rollback failed: {rollback_err}");
             }
-        };
+            process::exit(1);
+        }
+    };
+    if !handed_off {
         supervisor.set_pipe_stderr(pipe_stderr);
-        if let Err(err) = supervisor.run() {
+    }
+    exit_supervisor(supervisor.run());
+}
+
+fn exit_supervisor(result: Result<(), SupervisorError>) -> ! {
+    match result {
+        Ok(()) => process::exit(0),
+        Err(SupervisorError::Control(ControlError::RuntimeBusy)) => {
+            info!("Another supervisor acquired the runtime first");
+            process::exit(0);
+        }
+        Err(err) => {
             error!("Supervisor exited with error: {err}");
             process::exit(1);
         }
-        process::exit(0);
     }
+}
 
-    with_progress_spinner("Starting", || wait_for_supervisor_ready(child_pid)).map_err(
-        |err| {
-            io::Error::other(format!(
-                "supervisor failed to start; see {}: {err}",
-                supervisor_log_path().display()
-            ))
-            .into()
-        },
-    )
+fn install_supervisor_panic_hook() {
+    std::panic::set_hook(Box::new(|panic| {
+        error!("Supervisor panicked: {panic}");
+    }));
+}
+
+/// Subscribes to the supervisor's boot stream and renders it, returning the
+/// report. In quiet mode a spinner is the feedback; in verbose mode each unit
+/// prints a line to stderr as it comes up.
+///
+/// A freshly forked supervisor may not be answering the control socket the
+/// instant its PID appears, so the subscription is retried briefly.
+fn follow_boot(verbose: bool) -> Result<systemg::start::BootReport, Box<dyn Error>> {
+    let report = if verbose {
+        collect_boot_report(true)?
+    } else {
+        with_progress_spinner("Starting", || collect_boot_report(false))?
+    };
+    Ok(report)
+}
+
+/// Reads the supervisor's complete boot journal and converts it into the CLI
+/// report used to decide startup success.
+fn collect_boot_report(
+    verbose: bool,
+) -> Result<systemg::start::BootReport, Box<dyn Error>> {
+    let deadline = Instant::now() + SUPERVISOR_CONNECT_TIMEOUT;
+    loop {
+        let mut frames = Vec::new();
+        match ipc::stream_boot_frames(|frame| frames.push(frame)) {
+            Ok(()) => {
+                return Ok(systemg::start::render_boot(frames, verbose, io::stderr()));
+            }
+            Err(_) if Instant::now() < deadline => {
+                thread::sleep(SERVICE_POLL_INTERVAL);
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
 }
 
 /// Builds daemon.
@@ -3516,7 +5468,6 @@ fn build_daemon(config_path: &str) -> Result<Daemon, Box<dyn Error>> {
 struct StartTarget {
     config_path: PathBuf,
     service: Option<String>,
-    project_id: Option<String>,
     ad_hoc: bool,
 }
 
@@ -3612,15 +5563,9 @@ fn resolve_start_target(
             .into());
         }
         let config_path = resolve_config_path(config)?;
-        let project_id = Some(
-            load_config(Some(config_path.to_string_lossy().as_ref()))?
-                .project
-                .id,
-        );
         return Ok(StartTarget {
             config_path,
             service,
-            project_id,
             ad_hoc: false,
         });
     }
@@ -3637,7 +5582,6 @@ fn resolve_start_target(
     Ok(StartTarget {
         config_path,
         service: None,
-        project_id: None,
         ad_hoc: true,
     })
 }
@@ -3666,7 +5610,8 @@ fn write_ad_hoc_config(
 
     let config_path = units_dir.join(format!("{service_name}-{hash}.yaml"));
     let yaml = format!(
-        "version: \"1\"\nservices:\n  {name}:\n    command: {command}\n",
+        "version: \"{version}\"\nservices:\n  {name}:\n    command: {command}\n",
+        version = systemg::config::CURRENT_MANIFEST_VERSION,
         name = service_name,
         command = yaml_single_quoted(&shell_command)
     );
@@ -3810,21 +5755,28 @@ fn service_selector_name(selector: &str) -> &str {
         .unwrap_or(selector)
 }
 
-/// Resolves the project represented by a required config-backed command context.
-fn resolve_project_context_from_config(
-    config_arg: &str,
-) -> Result<String, Box<dyn Error>> {
-    let config_path = resolve_config_path(config_arg)?;
-    let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
-    Ok(config.project.id)
-}
-
 /// Renders the project-mismatch diagnostic and exits: the requested project is
 /// not the one the resolved config defines, which usually means the CLI picked
 /// up a different config than the user expects. Lists what the running
 /// supervisor actually has loaded so the user can retarget without guessing.
+/// Whether `project_id` is currently loaded in the running supervisor. Used to
+/// let an explicit `-p <loaded-project>` be authoritative for read commands
+/// (logs/inspect/status) even when the config resolved from disk is a different
+/// project's — the supervisor already knows the loaded project's config.
+fn project_loaded_in_supervisor(project_id: &str) -> bool {
+    matches!(
+        ipc::send_command(&ControlCommand::Status { live: false }),
+        Ok(ControlResponse::Status(snapshot))
+            if snapshot.units.iter().any(|unit| {
+                unit.project
+                    .as_ref()
+                    .is_some_and(|project| project.id == project_id)
+            })
+    )
+}
+
 fn fail_project_mismatch(requested: &str, config_project: &str) -> ! {
-    use systemg::diag::Diagnostic;
+    use systemg::diag::{Diagnostic, SgCode};
 
     let loaded: Vec<String> =
         match ipc::send_command(&ControlCommand::Status { live: false }) {
@@ -3842,7 +5794,7 @@ fn fail_project_mismatch(requested: &str, config_project: &str) -> ! {
         };
 
     let mut diag = Diagnostic::error(
-        "SG0201",
+        SgCode::TargetConfigMismatch,
         format!("project `{requested}` does not match the resolved config"),
     )
     .note(format!(
@@ -3884,12 +5836,23 @@ fn resolve_status_project_filter(
             Ok(Some(project))
         }
         (Some(config_arg), None) => {
+            // `-c <file>` targets EVERY project the file declares, not just the
+            // first. Validate the file is loadable, then apply no project filter
+            // so the aggregate snapshot surfaces all of its projects.
             let config_path = resolve_config_path(config_arg)?;
-            let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
-            Ok(Some(config.project.id))
+            load_config(Some(config_path.to_string_lossy().as_ref()))?;
+            Ok(None)
         }
         (None, project) => Ok(project),
     }
+}
+
+/// Returns every project id a config file declares (one for a single-project or
+/// loose config, N for a multi-project config).
+fn config_declared_projects(config_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
+    let content = fs::read_to_string(config_path)?;
+    let configs = systemg::config::parse_config_projects(&content)?;
+    Ok(configs.into_iter().map(|c| c.project.id).collect())
 }
 
 /// Resolves the project a command should target from an explicit project flag and config.
@@ -3898,15 +5861,44 @@ fn resolve_command_project(
     explicit_project: Option<String>,
     service: Option<&str>,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    let config_path = resolve_config_path(config_arg)?;
+    // An explicit `-p` names the target outright, so a missing/unreadable local
+    // config must not sink the command before the selector is even consulted.
+    // Reading logs after the supervisor is gone — the usual post-mortem — runs
+    // from a directory with no manifest, and failing there sent the user in a
+    // circle: "target the project with -p" when -p was exactly what they passed.
+    let config_path = match resolve_config_path(config_arg) {
+        Ok(path) => path,
+        Err(err) => {
+            if let Some(project) = explicit_project {
+                return Ok(Some(project));
+            }
+            return Err(err);
+        }
+    };
     let config_value = load_config(Some(config_path.to_string_lossy().as_ref())).ok();
 
     if let Some(project) = explicit_project {
+        // A `-p` that names a project ALREADY LOADED in the running supervisor is
+        // authoritative — sysg knows that project's registered config, so the
+        // command targets it regardless of whatever config was resolved from the
+        // cwd/default. This is what lets `logs -p other-project` (and the status
+        // TUI's Logs key) work without pointing -c at the right file.
+        if project_loaded_in_supervisor(&project) {
+            return Ok(Some(project));
+        }
+        // A multi-project config declares several projects; `-p` may name any of
+        // them, not just the primary. Only reject when the config genuinely does
+        // not declare the requested project.
         if config_arg != DEFAULT_CONFIG_PATH
-            && let Some(config) = config_value.as_ref()
-            && config.project.id != project
+            && let Ok(declared) = config_declared_projects(&config_path)
+            && !declared.is_empty()
+            && !declared.iter().any(|id| id == &project)
         {
-            fail_project_mismatch(&project, &config.project.id);
+            let primary = config_value
+                .as_ref()
+                .map(|c| c.project.id.clone())
+                .unwrap_or_else(|| declared.join(", "));
+            fail_project_mismatch(&project, &primary);
         }
         return Ok(Some(project));
     }
@@ -3952,52 +5944,190 @@ fn resolve_config_path(path: &str) -> Result<PathBuf, Box<dyn Error>> {
 
 /// Handles supervisor running.
 fn supervisor_running() -> bool {
-    match ipc::read_supervisor_pid() {
-        Ok(Some(pid)) => {
-            let target = Pid::from_raw(pid);
-            match signal::kill(target, None) {
-                Ok(_) => true,
-                Err(err) => {
-                    if err == nix::Error::from(nix::errno::Errno::ESRCH) {
-                        let _ = ipc::cleanup_runtime();
-                        false
-                    } else {
-                        warn!("Failed to query supervisor pid {pid}: {err}");
-                        false
-                    }
-                }
-            }
-        }
-        Ok(None) | Err(_) => {
-            if let Ok(path) = ipc::socket_path()
-                && path.exists()
-            {
-                match ipc::send_command(&ControlCommand::Status { live: false }) {
-                    Ok(_) => {
-                        warn!("Found running systemg supervisor socket without PID file");
-                        return true;
-                    }
-                    Err(ControlError::NotAvailable) => {
-                        warn!("Found stale socket without PID file, cleaning up");
-                        let _ = ipc::cleanup_runtime();
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Failed to query supervisor socket without PID file: {err}"
-                        );
-                    }
-                }
-            }
-            false
+    verified_supervisor_pid().is_some()
+}
+
+fn verified_supervisor_pid() -> Option<libc::pid_t> {
+    let peer = ipc::supervisor_peer_pid().ok()? as libc::pid_t;
+    if ipc::read_supervisor_pid().ok().flatten() != Some(peer) {
+        warn!("Repairing supervisor PID file from control-socket peer {peer}");
+        if let Err(err) = ipc::write_supervisor_pid(peer) {
+            warn!("Failed to repair supervisor PID file: {err}");
         }
     }
+    Some(peer)
+}
+
+/// How much of a running supervisor is actually usable, distinguishing a healthy
+/// daemon from one whose process is alive but no longer answering — the stale /
+/// dying case that `supervisor_running()`'s bare liveness check cannot see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorHealth {
+    /// Process alive and answering its control socket. Safe to route commands to.
+    Serving,
+    /// Process alive but not answering the socket within the probe window. A
+    /// command routed here would hang or be dropped — treat as unusable.
+    Dying,
+    /// No usable supervisor: no pid and no live socket (stale runtime cleaned).
+    Down,
+}
+
+const SUPERVISOR_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const SUPERVISOR_PROBE_DEADLINE: Duration = Duration::from_millis(1500);
+const SUPERVISOR_PROBE_ATTEMPTS: usize = 3;
+
+/// Probes the resident supervisor's health. Liveness alone is a lie during
+/// shutdown — a frozen or mid-teardown daemon keeps its pid but stops serving —
+/// so a live pid is confirmed with a bounded `Status` ping over the socket.
+fn supervisor_health() -> SupervisorHealth {
+    if verified_supervisor_pid().is_some() {
+        probe_serving_supervisor()
+    } else if !gather_supervisor_pids().is_empty() {
+        SupervisorHealth::Dying
+    } else {
+        SupervisorHealth::Down
+    }
+}
+
+/// Classifies a live-pid supervisor as Serving or Dying by pinging its control
+/// socket. A single busy tick is not death: under load a healthy daemon whose
+/// op-slot is momentarily occupied answers `Pending` rather than a response, so
+/// each attempt runs on its own hard-deadline thread and a `Pending` retries
+/// within the remaining budget. Only when every attempt fails to draw a real
+/// response — timeout, `Pending`, or error to the last try — is the daemon
+/// declared Dying. A real response at any point is Serving.
+fn probe_serving_supervisor() -> SupervisorHealth {
+    for _ in 0..SUPERVISOR_PROBE_ATTEMPTS {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if thread::Builder::new()
+            .name(SUPERVISOR_PROBE_THREAD.into())
+            .spawn(move || {
+                let ack = ipc::send_command_with_timeout(
+                    &ControlCommand::Status { live: false },
+                    SUPERVISOR_PROBE_TIMEOUT,
+                );
+                let _ = tx.send(matches!(ack, Ok(ipc::CommandAck::Response(_))));
+            })
+            .is_err()
+        {
+            continue;
+        }
+        match rx.recv_timeout(SUPERVISOR_PROBE_DEADLINE) {
+            Ok(true) => return SupervisorHealth::Serving,
+            Ok(false) | Err(_) => continue,
+        }
+    }
+    SupervisorHealth::Dying
+}
+
+/// Diagnostic for a command refused because the supervisor is alive but not
+/// answering — the caller must not route a command into a dying daemon.
+fn supervisor_not_responding_diag() -> systemg::diag::Diagnostic {
+    systemg::diag::Diagnostic::error(
+        systemg::diag::SgCode::SupervisorNotResponding,
+        "the supervisor is running but not answering its control socket",
+    )
+    .note("its process is alive but did not reply within the probe window; it may be shutting down or wedged")
+    .help_cmd("force it down", "sysg stop --supervisor")
+    .help_cmd("then restart", "sysg start --daemonize")
+    .help_docs()
 }
 
 /// Sends control command.
 fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
+    send_control_command_inner(command, true)
+}
+
+/// Requests a live supervisor replacement and waits until the same PID reports
+/// the staged version or the previous binary confirms rollback.
+fn request_live_upgrade(binary: String) -> Result<String, Box<dyn Error>> {
+    let target = systemg::upgrade::LiveUpgradeInfo::current();
+    match supervisor_health() {
+        SupervisorHealth::Down => {
+            return Ok("No running supervisor; activation is safe".into());
+        }
+        SupervisorHealth::Dying => {
+            return Err(Box::new(DiagError(Box::new(
+                systemg::upgrade::environment_unsafe(
+                    "the resident supervisor is alive but is not answering its control socket",
+                ),
+            ))));
+        }
+        SupervisorHealth::Serving => {}
+    }
+    let resident = match ipc::send_command(&ControlCommand::Version) {
+        Ok(ControlResponse::DaemonVersion(version)) => version,
+        Ok(ControlResponse::Diag(diag)) => return Err(Box::new(DiagError(diag))),
+        Ok(other) => {
+            return Err(io::Error::other(format!(
+                "unexpected supervisor version response: {other:?}"
+            ))
+            .into());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if resident == target.version.to_string() {
+        return Ok(format!("Supervisor is already running {resident}"));
+    }
+    systemg::upgrade::validate_resident_version(&resident, &target).map_err(DiagError)?;
+    let original_pid = ipc::supervisor_peer_pid()?;
+    let expected = match ipc::send_command(&ControlCommand::Upgrade { binary }) {
+        Ok(ControlResponse::UpgradeAccepted { version }) => version,
+        Ok(ControlResponse::Diag(diag)) => return Err(Box::new(DiagError(diag))),
+        Ok(ControlResponse::Error(message)) => {
+            return Err(ControlError::Server(message).into());
+        }
+        Ok(other) => {
+            return Err(io::Error::other(format!(
+                "unexpected supervisor upgrade response: {other:?}"
+            ))
+            .into());
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let deadline = Instant::now() + UPGRADE_CONFIRM_TIMEOUT;
+    let mut observed = resident;
+    while Instant::now() < deadline {
+        if let Ok(ipc::CommandAck::Response(ControlResponse::DaemonVersion(version))) =
+            ipc::send_command_with_timeout(
+                &ControlCommand::Version,
+                UPGRADE_PROBE_TIMEOUT,
+            )
+        {
+            observed = version;
+            if observed == expected {
+                let resumed_pid = ipc::supervisor_peer_pid()?;
+                if resumed_pid != original_pid {
+                    return Err(Box::new(DiagError(Box::new(
+                        systemg::upgrade::resume_failed(format!(
+                            "supervisor PID changed from {original_pid} to {resumed_pid}"
+                        )),
+                    ))));
+                }
+                return Ok(format!("Supervisor upgraded in place to {expected}"));
+            }
+        }
+        thread::sleep(UPGRADE_PROBE_INTERVAL);
+    }
+
+    Err(Box::new(DiagError(Box::new(
+        systemg::upgrade::resume_failed(format!(
+            "expected supervisor {expected}, but resident version is {observed}"
+        )),
+    ))))
+}
+
+/// Sends a control command and optionally renders its response message.
+fn send_control_command_inner(
+    command: ControlCommand,
+    announce: bool,
+) -> Result<(), Box<dyn Error>> {
     match ipc::send_command(&command) {
         Ok(ControlResponse::Message(message)) => {
-            println!("{message}");
+            if announce {
+                println!("{message}");
+            }
             Ok(())
         }
         Ok(ControlResponse::Ok) => Ok(()),
@@ -4011,15 +6141,66 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
             println!("{version}");
             Ok(())
         }
-        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
-        Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
-        Err(ControlError::NotAvailable) => {
-            warn!("No running systemg supervisor found; skipping command");
-            let _ = ipc::cleanup_runtime();
+        Ok(ControlResponse::UpgradeAccepted { version }) => {
+            if announce {
+                println!("Supervisor accepted live upgrade to {version}");
+            }
             Ok(())
         }
+        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
+        Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
+        Ok(ControlResponse::CurrentOp(_)) => Ok(()),
+        Err(ControlError::NotAvailable) => Err(ControlError::NotAvailable.into()),
+        Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
         Err(err) => Err(err.into()),
     }
+}
+
+/// Sends a control command whose successful response must contain a message.
+fn send_control_message(command: ControlCommand) -> Result<String, Box<dyn Error>> {
+    match ipc::send_command(&command) {
+        Ok(ControlResponse::Message(message)) => Ok(message),
+        Ok(ControlResponse::Error(message)) => Err(ControlError::Server(message).into()),
+        Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
+        Ok(other) => Err(io::Error::other(format!(
+            "unexpected supervisor response: {other:?}"
+        ))
+        .into()),
+        Err(ControlError::NotAvailable) => Err(ControlError::NotAvailable.into()),
+        Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Builds the SG0107 diagnostic for a command the supervisor refused because it
+/// was already mid-mutation.
+///
+/// This is an EXPECTED, recoverable condition — the supervisor serialises
+/// mutations through a single owner thread, so a concurrent restart is rejected
+/// rather than interleaved. Reporting it as the SG0001 catch-all ("command
+/// failed") framed correct, defensive behaviour as an unexplained error, and
+/// "command not confirmed" implied uncertainty when the outcome is definite:
+/// the command did not run, and the fix is to retry.
+fn supervisor_busy_error() -> DiagError {
+    use systemg::diag::{Diagnostic, SgCode};
+
+    let mut diag = Diagnostic::error(
+        SgCode::SupervisorBusy,
+        "the supervisor is busy with another operation",
+    );
+    diag = match ipc::current_op() {
+        Some(op) => diag
+            .note(format!("in flight: {}", op.describe()))
+            .note("this command was NOT applied; the in-flight operation is unaffected"),
+        None => diag
+            .note("the supervisor did not answer in time")
+            .note("this command was NOT applied"),
+    };
+    DiagError(Box::new(
+        diag.note("retry once the operation above finishes")
+            .help_cmd("see what it is doing", "sysg status")
+            .help_docs(),
+    ))
 }
 
 /// Sends daemonized restart and recycles the supervisor when an old IPC schema rejects it.
@@ -4114,16 +6295,37 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
         "Resident supervisor does not match this CLI (version drift or rejected IPC); recycling supervisor with config {:?}",
         config_path
     );
-    stop_supervisors();
-    let _ = ipc::cleanup_runtime();
-    start_supervisor_daemon(config_path, None, false)
+
+    // Validate the replacement config BEFORE tearing down the working supervisor.
+    // Recycling that stops the old daemon and then fails to load the new config
+    // leaves the box with no supervisor at all — never trade a running stack for
+    // an unvalidated one.
+    if let Err(err) = load_config(Some(config_path.to_string_lossy().as_ref())) {
+        return Err(Box::new(DiagError(Box::new(
+            systemg::restart::recycle_refused(&config_path, err.to_string()),
+        ))));
+    }
+
+    stop_supervisors()?;
+    wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
+    cleanup_stopped_runtime();
+    let recovery_path = config_path.clone();
+    start_supervisor_daemon(config_path, None, false, false).map_err(|err| {
+        Box::new(DiagError(Box::new(systemg::restart::recycle_failed(
+            &recovery_path,
+            err.to_string(),
+        )))) as Box<dyn Error>
+    })
 }
 
 fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {
     match err {
         ControlError::Serde(_) | ControlError::NotAvailable => true,
         ControlError::Server(message) => supervisor_error_is_protocol_mismatch(message),
-        ControlError::MissingHome | ControlError::Unauthorized(_) => false,
+        ControlError::MissingHome
+        | ControlError::Unauthorized(_)
+        | ControlError::Timeout
+        | ControlError::RuntimeBusy => false,
         ControlError::Io(err) => matches!(
             err.kind(),
             io::ErrorKind::UnexpectedEof
@@ -4159,7 +6361,15 @@ fn detach_daemon() -> std::io::Result<()> {
     }
 
     std::env::set_current_dir("/")?;
-    let devnull = std::fs::File::open("/dev/null")?;
+    silence_stdio()
+}
+
+/// Redirects inherited terminal descriptors away from a resident supervisor.
+fn silence_stdio() -> std::io::Result<()> {
+    let devnull = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")?;
     let fd = devnull.into_raw_fd();
     unsafe {
         let _ = libc::dup2(fd, libc::STDIN_FILENO);

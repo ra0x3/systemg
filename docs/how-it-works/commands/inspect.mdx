@@ -25,10 +25,13 @@ immediate runtime collection for a specific inspect request.
 | `-` | `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
 | `-c` | `--config` | Path to configuration file |
 | `-` | `--format` | Emit machine-readable output (`json` or `xml`) instead of a report; defaults to `json` when no value is provided |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Accepted globally but ignored; inspect does not spawn services |
 | `-` | `--no-color` | Disable ANSI colors in output |
+| `-` | `--plain` | Disable terminal decoration for automation |
 | `-` | `--live` | Force immediate runtime collection instead of the configured snapshot mode |
-| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
 
 ## Stream Mode Controls
 
@@ -66,6 +69,18 @@ stable project id:
 ```sh
 $ sysg inspect --project arbitration --service api
 ```
+
+`--project` may name any project the supervisor has loaded, not just the first
+one a multi-project config declares.
+
+<Note>
+Inspect refuses rather than guesses:
+- a service name that does not exist → [`SG0202`](/how-it-works/dialog/codes#sg0202),
+- a bare `-s <name>` that matches a service in more than one project →
+  [`SG0006`](/how-it-works/dialog/codes#sg0006) (pass `-p` to choose),
+- a `-p` that disagrees with a `project/service` prefix →
+  [`SG0201`](/how-it-works/dialog/codes#sg0201).
+</Note>
 
 Shows CPU and memory usage chart:
 

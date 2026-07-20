@@ -9,7 +9,21 @@ systemg uses YAML files to define services and their relationships.
 ## Complete example
 
 ```yaml
-version: "1"
+version: "2"
+projects:
+  myapp:
+    name: My App
+    services:
+      # ... service definitions (see below)
+```
+
+A single file can declare many projects under the `projects:` map, keyed by
+project id. The example below shows one project's full set of sections. Project
+entries may override `env` and `logs`; top-level `metrics` and `status` settings
+apply across the loaded projects.
+
+```yaml
+version: "2"
 project:
   id: myapp
   name: My App
@@ -45,7 +59,6 @@ services:
     restart_policy: "always"
     backoff: "10s"
     deployment:
-      strategy: "rolling"
       pre_start: "python manage.py migrate"
       health_check:
         command: "curl --fail http://localhost:8000/health"
@@ -72,20 +85,136 @@ services:
       expression: "0 0 2 * * *"
 ```
 
+## Supervisor configuration
+
+Project manifests describe workloads. Supervisor-wide defaults live separately
+in `~/.local/share/systemg/supervisor.xml`, or
+`/var/lib/systemg/supervisor.xml` with `--sys`:
+
+```xml
+<supervisor>
+  <logs>
+    <max_bytes>10485760</max_bytes>
+    <max_files>5</max_files>
+  </logs>
+  <timeouts>
+    <pre_start_secs>300</pre_start_secs>
+    <startup_stability_ms>250</startup_stability_ms>
+    <stop_verify_secs>10</stop_verify_secs>
+  </timeouts>
+</supervisor>
+```
+
+- `pre_start_secs`: default execution budget for deployment `pre_start` commands.
+- `startup_stability_ms`: survival window for services without a health check.
+- `stop_verify_secs`: time allowed to confirm that a terminated process is gone.
+
+The file is created on first supervisor start. Existing compact XML remains
+compatible and is rewritten in the indented form after it parses successfully.
+`SYSG_PRE_START_TIMEOUT_SECS` remains a higher-precedence compatibility override.
+
+<Info>
+  Health-check `attempt_timeout` and `total_timeout` remain in the project
+  manifest because readiness is workload-specific. IPC polling and live-upgrade
+  deadlines are protocol invariants and are not operator settings.
+</Info>
+
+## The config cache
+
+When you run a command with `-c <file>`, sysg hands that manifest to the resident
+supervisor and remembers the path. That memory is a **convenience**: for later
+commands, you can omit `-c` and sysg reuses the last manifest you submitted —
+handy when nothing has changed.
+
+<Warning>
+The cache is a convenience, **not** a source of truth. If you edit the manifest
+on disk and then run a command **without** `-c`, sysg would be acting on a stale
+copy — so it refuses with [`SG0018`](/how-it-works/dialog/codes#sg0018) and asks
+you to re-submit once with `-c`. Passing `-c` is always accepted; it applies the
+change and refreshes the cache, after which bare commands work again.
+</Warning>
+
+```sh
+# submit the manifest once
+$ sysg start -c stack.yaml --daemonize
+
+# later, with no edits, -c is optional
+$ sysg status
+
+# you edit stack.yaml, then forget -c:
+$ sysg restart
+error[SG0018]: the manifest on disk changed since it was last submitted
+
+# re-submit to apply + refresh the cache
+$ sysg restart -c stack.yaml
+```
+
 ## Configuration sections
 
 ### `version`
 
-**Required**. Specifies the configuration schema version.
+**Required**. Specifies the configuration schema version. The current schema is
+`2`. Older `version: "1"` manifests are no longer accepted. For a legacy
+singular-`project:` manifest, run
+[`sysg migrate`](/how-it-works/commands/migrate), which converts the shape and
+emits `version: "2"`. For a loose or existing `projects:` manifest, update the
+version field directly. When upgrading from 0.54.x or older, also follow the
+[state-layout migration](/how-it-works/state#persistence).
 
 ```yaml
-version: "1"
+version: "2"
 ```
 
-### `project`
+### `projects`
 
-Optional project metadata used to group services when one supervisor manages
-units from more than one project.
+The canonical way to declare projects. A map keyed by project id, where each
+entry carries that project's `name`, `services`, and optional `env` / `logs`
+sections. One file can hold as many projects as you like:
+
+```yaml
+version: "2"
+projects:
+  arbitration:
+    name: Arbitration
+    services:
+      worker:
+        command: "python worker.py"
+  gamecast:
+    services:
+      api:
+        command: "python api.py"
+```
+
+Each key is the `project.id`. When a `name` is omitted, the id doubles as the
+display name. Every project gets its own state directory — see
+[State](/how-it-works/state) — and you target each one by id with `-p/--project`
+at runtime.
+
+<Warning>
+  Treat the project id (the map key) as durable runtime identity. Changing it
+  does not rename a project — it creates a **new** namespace, and the old one's
+  running services become orphaned state. Rename freely via `name`; never rename
+  by editing the id.
+</Warning>
+
+#### Loose (project-less) services
+
+Top-level `services:` with no project form a **loose bundle**. They still run,
+and their state persists under `projects/__loose__/`:
+
+```yaml
+version: "2"
+services:
+  web:
+    command: "python app.py"
+```
+
+Use this for single-service or quick setups where a project id adds no value.
+
+#### Singular `project:` (deprecated)
+
+The older singular block still parses, so existing single-project manifests keep
+working — but it emits a deprecation warning. Prefer `projects:`.
 
 ```yaml
 project:
@@ -93,23 +222,9 @@ project:
   name: Arbitration
 ```
 
-Fields:
-
-- `id`: Stable project identifier. Treat this as durable runtime identity; changing it creates a different project namespace.
-- `name`: Display name used in status output. You can rename this without changing project identity.
-
-For short configs, you can use shorthand:
-
-```yaml
-project: arbitration
-```
-
-This sets both `id` and `name` to `arbitration`.
-
-Configs without `project` still load. systemg assigns a legacy project identity
-from the config directory so existing deployments continue to work after
-upgrades, but explicit `project.id` values are recommended for multi-project
-supervisors.
+The shorthand `project: arbitration` (which sets both `id` and `name`) is also
+still accepted. Convert old-shape manifests with
+[`sysg migrate`](/how-it-works/commands/migrate).
 
 See [Projects](/how-it-works/projects) for how one supervisor hosts many
 projects at once and how `-p/--project` targets them at runtime.
@@ -190,7 +305,9 @@ Fields:
 
 ### `services`
 
-**Required**. Defines the services to manage.
+Defines the services to manage. Each entry under `projects:` requires its own
+`services:` map. A top-level `services:` map is optional and defines the loose
+bundle.
 
 ```yaml
 services:
@@ -325,7 +442,9 @@ services:
       health_check:
         command: "curl --fail http://localhost:8000/health"
         interval: "5s"
-        timeout: "30s"
+        attempt_timeout: "30s"
+        total_timeout: "5m"
+        retries: 3
       grace_period: "5s"
       blue_green:
         env_var: "PORT"
@@ -336,7 +455,7 @@ services:
         switch_command: "/usr/local/bin/switch-upstream {candidate_slot}"
         switch_verify:
           command: "curl --fail http://localhost:8000/health"
-        state_path: ".state/api-slot.json"
+        state_path: ".state/api-slot.xml"
 ```
 
 Rolling deployments start the new instance, wait for health checks, then stop the old instance. For single-host zero-downtime with fixed ports, use `blue_green` so traffic can be switched between two slots. A [blue-green deployment](https://en.wikipedia.org/wiki/Blue-green_deployment) uses two identical slots, starts the new version in the idle slot, verifies it, and then switches traffic only after the candidate is ready.
@@ -408,9 +527,20 @@ Probe configuration used to determine readiness/health during deployment workflo
 |-------|------|-------------|
 | `command` | string | Check command |
 | `url` | string | HTTP endpoint (alternative to command) |
-| `interval` | string | Time between checks |
-| `timeout` | string | Check timeout |
-| `retries` | number | Attempts before marking unhealthy |
+| `interval` | string | Time between attempts (default `2s`) |
+| `attempt_timeout` | string | Maximum time for a **single** probe (default `30s`) |
+| `total_timeout` | string | Minimum total readiness window before giving up; `timeout` is accepted as a compatibility alias |
+| `retries` | number | Minimum attempts before giving up (default `3`) |
+
+<Note>
+`attempt_timeout` bounds **one** probe. `total_timeout` controls the whole
+readiness window, so connection refusals that return immediately do not exhaust
+a slow-starting service's budget. A check fails only after both `retries` and
+`total_timeout` are exhausted. The failure carries a code by cause:
+[`SG0022`](/how-it-works/dialog/codes#sg0022) (could not reach),
+[`SG0023`](/how-it-works/dialog/codes#sg0023) (a probe timed out), or
+[`SG0104`](/how-it-works/dialog/codes#sg0104) (ran but reported unhealthy).
+</Note>
 
 ### Deployment object
 
@@ -419,10 +549,17 @@ Controls how restarts are performed and what validation happens before cutover.
 | Field | Type | Description |
 |-------|------|-------------|
 | `strategy` | string | `rolling` or `immediate` |
-| `pre_start` | string | Command to run before starting |
+| `pre_start` | string | Command that must exit successfully before starting; its process tree is terminated after the configured supervisor command budget (SG0108) |
 | `health_check` | object | Health check configuration |
 | `grace_period` | string | Time before stopping old instance |
 | `blue_green` | object | Single-host blue/green rollout settings |
+
+<Note>
+  `pre_start` runs from the manifest directory with the service environment.
+  Its output is captured in the service log. A non-zero exit is SG0103; exceeding
+  the `supervisor.xml` `pre_start_secs` budget is SG0108, and the service is not
+  launched.
+</Note>
 
 ### Blue/green deployment object
 
@@ -437,12 +574,21 @@ Single-host zero-downtime options for alternating between two rollout slots (typ
 | `switch_verify` | object | Optional post-switch verification check |
 | `state_path` | string | Optional persisted active-slot state file path |
 
-::::info Manifest schema migrations
+::::info Manifest schema compatibility
 
-The top-level `version` field declares the manifest schema version. systemg accepts the current version as either a string or integer, so `version: "1"` and `version: 1` are equivalent.
+The top-level `version` field declares the manifest schema version. The current schema is `2`, accepted as either a string or integer, so `version: "2"` and `version: 2` are equivalent. `version: "1"` is no longer accepted.
 
-When upgrading systemg, the binary reads the declared manifest version first, then migrates supported older manifest schemas into the current runtime configuration before starting services. This compatibility step happens in memory; systemg does not rewrite your YAML file just because it can migrate it.
+systemg reads the declared version before the rest of the manifest. Version `1`
+is rejected rather than silently reinterpreted; version `2` is the only current
+runtime schema. systemg never rewrites a manifest as a side effect of starting
+services.
 
-When downgrading systemg, the older binary can only parse and migrate manifest versions it knows about. If a manifest has been updated to a newer schema, keep a copy of the previous manifest or convert it back to a version supported by the older binary before starting that older release.
+When downgrading, the older binary can only parse versions it knows. Keep the
+previous manifest or convert it before starting an older release.
+
+Schema validation is separate from manifest *shape* conversion. To rewrite an
+old singular-`project:` manifest into the canonical
+`projects:` map, run [`sysg migrate`](/how-it-works/commands/migrate) — it prints
+the converted YAML to stdout unless `--in-place` is requested.
 
 ::::

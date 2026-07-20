@@ -14,38 +14,48 @@ CLI → Unix Socket → Supervisor → Services
            State Files
 ```
 
-When you run `sysg start`, the supervisor launches and monitors your services. Subsequent commands communicate with this supervisor via Unix socket.
+When you run `sysg start`, systemg starts or joins one resident supervisor. The
+supervisor launches and monitors the selected project; subsequent commands use
+its Unix socket.
 
 ## Process lifecycle
 
 1. **Start**: Services launch in dependency order
 2. **Monitor**: Supervisor tracks PIDs and health
-3. **Restart**: Failed services restart per policy
+3. **Restart**: Unsuccessful services restart per policy; clean exits stay done
 4. **Stop**: Services terminate in reverse order
 
 ## State location
 
-All runtime data lives in one place:
+All runtime data lives under one root, with each project's PID/state/cron files
+nested in its own `projects/{project.id}/` subdirectory:
 
 **User mode** (default):
-- `~/.local/share/systemg/` - State files
+- `~/.local/share/systemg/` - Supervisor + per-project state (under `projects/`)
 - `~/.local/share/systemg/logs/` - Service logs
 
 **System mode** (`sudo sysg --sys`):
-- `/var/lib/systemg/` - State files
+- `/var/lib/systemg/` - Supervisor + per-project state (under `projects/`)
 - `/var/log/systemg/` - Service logs
+
+See [State](/how-it-works/state) for the full layout.
 
 ## Daemon vs foreground
 
 **Foreground** (default):
-- Services run as children of your shell
-- `Ctrl+C` stops everything
-- Good for development
+- The terminal attaches to one project and streams `service | line`
+- Slow boot progress updates in place
+- `Ctrl+C` stops that project; the supervisor and sibling projects stay up
 
 **Daemon** (`--daemonize`):
-- Supervisor runs in background
-- Services survive terminal close
+- The command returns after the project reaches its target state
+- The same resident supervisor owns the project without a terminal attachment
 - Good for production
+
+<Info>
+  The resident supervisor stays warm even when it has no projects. Stop it only
+  with `sysg stop --supervisor`.
+</Info>
 
 ## Topics
 

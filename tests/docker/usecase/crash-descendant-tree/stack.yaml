@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      forker:
+        command: "sh -c 'sleep 4000 & sleep 4000 & wait'"
+        restart_policy: "always"

@@ -15,7 +15,7 @@ $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ## Create a configuration
 
 ```yaml
-version: "1"
+version: "2"
 services:
   hello:
     command: "python -m http.server 8080"
@@ -26,7 +26,7 @@ Save as `systemg.yaml`.
 ## Start your service
 
 ```bash
-$ sysg start
+$ sysg start --daemonize
 ```
 
 Your web server is now running at http://localhost:8080.
@@ -37,10 +37,7 @@ Your web server is now running at http://localhost:8080.
 $ sysg status
 ```
 
-```
-SERVICE  STATUS   PID    UPTIME
-hello    running  42309  3s
-```
+`status` opens the project-aware unit table. Use `--format json` for scripts.
 
 ## View logs
 
@@ -54,8 +51,11 @@ $ sysg logs --service hello
 $ sysg stop
 ```
 
+This stops the project while leaving the resident supervisor ready for another
+start. Use `sysg stop --supervisor` to shut down the supervisor itself.
+
 ## What's next
 
 - [Configure multiple services](how-it-works/configuration) with dependencies
 - [Run services in the background](how-it-works/commands/start#daemon-mode) with `--daemonize`
-- [Set up automatic restarts](how-it-works/configuration#restart-policies) for production
+- [Set up automatic restarts](how-it-works/configuration#restart_policy) for production

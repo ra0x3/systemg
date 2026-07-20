@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  beta:
+    name: Beta
+    services:
+      betasvc:
+        command: "sh -c 'while true; do echo BETA_MARKER_LINE; sleep 1; done'"
+        restart_policy: always

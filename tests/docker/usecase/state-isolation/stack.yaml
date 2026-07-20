@@ -1,0 +1,14 @@
+version: "2"
+projects:
+  alpha:
+    name: "Alpha"
+    services:
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"
+  beta:
+    name: "Beta"
+    services:
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"

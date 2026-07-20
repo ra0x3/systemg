@@ -11,8 +11,8 @@ $ sysg start                     # Launch services
 $ sysg stop                      # Stop the current project
 $ sysg restart                   # Restart services
 $ sysg status                    # Check supervisor health
-$ sysg logs                      # View output
-$ sysg inspect -s api             # View metrics
+$ sysg logs -p myapp             # View one project's output
+$ sysg inspect -s api            # View metrics
 $ sysg validate -c sysg.yaml     # Check a config before running it
 $ sysg start --parent-pid 123 --name w1 -- cmd   # Create child
 $ sysg purge                     # Clear all state
@@ -28,9 +28,11 @@ Every command accepts:
 
 | Flag | Description |
 |------|-------------|
-| `--log-level` | Set verbosity for this invocation (`debug`, `info`, `warn`, `error`) |
-| `--plain` | Agent-friendly output: disable color, banners, paging, and log following |
+| `--log-level` | Set verbosity for this invocation (`trace`, `debug`, `info`, `warn`, `error`, `off`, or 5-0) |
+| `-v`, `--verbose` | Print live operation progress |
+| `--plain` | Agent-friendly output: disable color, banners, paging, and implicit log following |
 | `--sys` | Opt into privileged system mode (requires root) |
+| `--drop-privileges` | Drop child privileges during `start`/`restart`; accepted but ignored by commands that do not spawn services |
 
 `--plain` is equivalent to setting `SYSTEMG_AGENT=1`, and is also implied when
 `SYSTEMG_AGENT` or `NO_COLOR` is set in the environment. Use it for scripts,

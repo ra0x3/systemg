@@ -11,7 +11,7 @@ An agent-friendly general process composer.
 Suppose you're building an API that needs PostgreSQL, Redis, and a background worker. Instead of starting each service manually in different terminals, you define them once in a YAML file. systemg starts everything in the right order, restarts crashed services, and provides unified logging.
 
 ```yaml
-version: "1"
+version: "2"
 services:
   postgres:
     command: "postgres -D /var/lib/postgresql/data"
@@ -36,8 +36,13 @@ services:
           command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
 ```
 
-Run `sysg start` and your entire stack is running. Run `sysg stop` and the
-services in that project shut down cleanly.
+Run `sysg start` to attach in the foreground and stream every service with a
+per-service prefix. Ctrl-C stops that project and returns the terminal. Add
+`--daemonize` when you want the command to return immediately.
+
+This example is a single loose bundle — services with no project. To run several
+independent stacks under one resident supervisor, group them under a
+`projects:` map; see [Projects](/how-it-works/projects).
 
 ## Built for production
 

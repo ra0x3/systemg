@@ -1,0 +1,18 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      a:
+        command: "sleep 3000"
+        restart_policy: "always"
+      b:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on:
+          - a
+      c:
+        command: "sleep 3000"
+        restart_policy: "always"
+        depends_on:
+          - b

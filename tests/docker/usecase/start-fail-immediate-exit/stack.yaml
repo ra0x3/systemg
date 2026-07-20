@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      crasher:
+        command: "sh -c 'exit 1'"
+        restart_policy: "never"

@@ -21,6 +21,13 @@ you do not provide `--config`, it reports `No running supervisor`. Use
 `--config` only when you want to scope status to a specific config/project or
 when you explicitly want the no-supervisor disk fallback for that config.
 
+<Info>
+  `No units being supervised` means the resident supervisor is healthy but has
+  no loaded projects. `No running supervisor` means no resident supervisor is
+  available. `No matching units found` is reserved for a selector or filter
+  that matched nothing.
+</Info>
+
 ## Interactive Mode
 
 By default, `sysg status` displays an interactive table where you can:
@@ -94,13 +101,16 @@ on smaller terminals. Press any key to return to the status table.
 | `-s` | `--service` | Show a specific service/unit |
 | `-p` | `--project` | Filter by stable project id |
 | `-` | `--all` | Show all services including orphaned state outside the selected project/config set |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Accepted globally but ignored; status does not spawn services |
 | `-` | `--format` | Emit machine-readable output (`json` or `xml`) instead of a table; defaults to `json` when no value is provided (disables interactive mode) |
 | `-` | `--no-color` | Disable ANSI colors in output |
 | `-` | `--plain` | Agent-friendly output: disable color and print full, un-truncated unit names |
+| `-` | `--full-cmd` | Show complete command lines instead of table truncation |
 | `-` | `--live` | Force immediate runtime collection instead of the configured snapshot mode |
 | `-` | `--stream` | Continuously refresh status at the provided interval (e.g., `5`, `1s`, `2m`) (disables interactive mode) |
-| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
 
 ## Examples
 

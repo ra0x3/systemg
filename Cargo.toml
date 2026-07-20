@@ -1,6 +1,6 @@
 [package]
 name = "systemg"
-version = "0.54.2"
+version = "0.56.3"
 edition = "2024"
 license = "MIT"
 description = "An agent-friendly general process composer."
@@ -36,6 +36,7 @@ nix = { version = "0.29", features = ["process", "signal", "user", "sched", "res
 quick-xml = { version = "0.41", features = ["serialize"] }
 regex = "1.7"
 reqwest = { version = "0.12", features = ["blocking"] }
+semver = { version = "1.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
@@ -61,18 +62,6 @@ predicates = { version = "2.1" }
 tempfile = { version = "3.14.0" }
 
 [[test]]
-name = "hooks"
-path = "tests/integration/hooks.rs"
-
-[[test]]
-name = "service_control"
-path = "tests/integration/service_control.rs"
-
-[[test]]
-name = "process"
-path = "tests/integration/process.rs"
-
-[[test]]
 name = "service_control_regression"
 path = "tests/integration/service_control_regression.rs"
 
@@ -93,16 +82,8 @@ name = "cron"
 path = "tests/integration/cron.rs"
 
 [[test]]
-name = "cron_pid_race"
-path = "tests/integration/cron_pid_race.rs"
-
-[[test]]
 name = "supervisor"
 path = "tests/integration/supervisor.rs"
-
-[[test]]
-name = "deployment"
-path = "tests/integration/deployment.rs"
 
 [[test]]
 name = "cli"

@@ -330,10 +330,20 @@ impl PrivilegeContext {
         }
 
         if self.capabilities.is_empty() {
-            for set in [CapSet::Effective, CapSet::Permitted, CapSet::Inheritable] {
-                caps::clear(None, set).map_err(caps_err)?;
+            // When switching to an unprivileged user, do NOT strip the Effective
+            // or Permitted sets here: they still hold CAP_SETGID/CAP_SETUID, which
+            // the pending setgroups/setgid/setuid switch needs. Clearing them
+            // first makes the identity switch EPERM (every `user:`-dropped service
+            // failed to spawn under Docker). The `setuid` to a non-root user
+            // clears the process capabilities per POSIX anyway. We only shed the
+            // sets that do not gate the switch, and best-effort so a restricted
+            // container (no CAP_SETPCAP, trimmed bounding set) cannot abort spawn.
+            let switching_user = self.user.uid.is_some() || self.user.gid.is_some();
+            if !switching_user {
+                clear_cap_set_best_effort(CapSet::Effective);
+                clear_cap_set_best_effort(CapSet::Permitted);
             }
-
+            clear_cap_set_best_effort(CapSet::Inheritable);
             clear_cap_set_best_effort(CapSet::Bounding);
             clear_cap_set_best_effort(CapSet::Ambient);
             return Ok(());

@@ -1,0 +1,13 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      unhealthy:
+        command: "sleep 3000"
+        deployment:
+          health_check:
+            command: "sh -c 'exit 1'"
+            interval: "1s"
+            attempt_timeout: "5s"
+            retries: 3

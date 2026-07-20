@@ -71,8 +71,13 @@ pub enum DaemonLock {
     RestartSuppressed = 6,
 
     /// Lock for tracking services with an in-flight reconcile-triggered restart.
-    /// Priority: 7 (must be acquired last)
+    /// Priority: 7
     RestartInFlight = 7,
+
+    /// Lock for tracking dependents stopped as casualties of a crashed dependency,
+    /// so they can be revived once every felling dependency recovers.
+    /// Priority: 8 (must be acquired last)
+    StoppedForDependency = 8,
 }
 
 impl DaemonLock {
@@ -92,6 +97,7 @@ impl DaemonLock {
             Self::ManualStopFlags => "manual_stop_flags",
             Self::RestartSuppressed => "restart_suppressed",
             Self::RestartInFlight => "restart_in_flight",
+            Self::StoppedForDependency => "stopped_for_dependency",
         }
     }
 
@@ -160,6 +166,65 @@ pub const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// Maximum time to wait for a service to start before timing out.
 /// Applied during service initialization and health checks.
 pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Minimum continuous survival time required before a process without a health
+/// check is reported ready. This prevents immediate bind and startup failures
+/// from being mistaken for a successful launch between process probes.
+pub const SERVICE_START_STABILITY: Duration = Duration::from_millis(250);
+
+/// Default maximum duration of one health-check probe.
+pub const DEFAULT_HEALTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default delay between health-check probes.
+pub const DEFAULT_HEALTH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Default minimum number of health-check probes before readiness fails.
+pub const DEFAULT_HEALTH_RETRIES: u32 = 3;
+
+/// Maximum time a `pre_start` command may run before it is killed and the start
+/// fails. Pre-starts run inside the supervisor's single-writer owner thread, so
+/// an UNBOUNDED pre-start that hangs (e.g. a network/proxy call that never
+/// returns) would freeze EVERY subsequent mutation across ALL projects. Generous
+/// enough for real migrations/DB-waits, but finite so one hung op cannot wedge
+/// the whole supervisor.
+pub const PRE_START_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long a foreground log-follow keeps retrying a project it has not seen
+/// yet. The control socket (and so `supervisor_running()`) goes live before any
+/// service is spawned, so a project absent from the first status snapshot is
+/// still booting rather than gone. Must outlast a slow project's first unit
+/// registration, including `pre_start` work such as builds and DB waits.
+pub const FOREGROUND_ATTACH_GRACE: Duration = Duration::from_secs(120);
+
+/// How long an attaching `start` waits for a queued project boot to settle
+/// before reporting which services never came up.
+///
+/// Must exceed a realistic pre-start budget: a service whose `pre_start` waits
+/// on a DB/tunnel can legitimately take minutes, and cutting across that window
+/// reports a FALSE failure for a service that was still coming up. Observed
+/// live: a 60s `wait-for-db.sh` plus a 5s restart backoff made a 120s grace
+/// straddle the retry cycle, blaming a service that then ran healthily. Sized
+/// against [`PRE_START_TIMEOUT`] plus room for one retry.
+pub const START_SETTLE_GRACE: Duration = Duration::from_secs(360);
+
+/// How long a synchronous project attach waits for the freshly-booted project
+/// to record its first PID before seeding the status cache. Bounded so a project
+/// whose services exit immediately cannot wedge the attaching caller.
+pub const PROJECT_PID_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a stop waits to CONFIRM a signalled process actually died before
+/// reporting failure. A stop that records `stopped` without verifying death is
+/// how a project came to report itself down while its services still held their
+/// ports; the wait covers a slow shutdown without hiding a failed kill.
+pub const STOP_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Narrowest terminal width the progress spinner will believe. Anything smaller
+/// is treated as a failed probe rather than a real terminal, so a zero/unset
+/// winsize cannot truncate the status line down to a useless stub.
+pub const MIN_SPINNER_WIDTH: usize = 40;
+
+/// Terminal width assumed when the real width cannot be determined.
+pub const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
 /// Polling interval when waiting for service state changes.
 pub const SERVICE_POLL_INTERVAL: Duration = Duration::from_millis(50);

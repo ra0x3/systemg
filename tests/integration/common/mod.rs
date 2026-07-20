@@ -7,8 +7,28 @@ use std::{
     time::{Duration, Instant},
 };
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
-use systemg::daemon::PidFile;
+use sysinfo::{Pid, ProcessStatus, ProcessesToUpdate, System};
+use systemg::{daemon::PidFile, state_store::StateStore};
+
+/// Looks up a service's PID across every project directory.
+///
+/// The legacy in-process integration configs are single-project, so scanning
+/// all `projects/*/` dirs and returning the first match keeps these helpers
+/// project-agnostic without threading a project id through 30+ call sites.
+fn pid_for_service_anywhere(service: &str) -> Option<u32> {
+    let projects_dir = systemg::runtime::state_dir().join("projects");
+    let entries = fs::read_dir(&projects_dir).ok()?;
+    for entry in entries.flatten() {
+        let id = entry.file_name();
+        let store = StateStore::for_project(&id.to_string_lossy());
+        if let Ok(pid_file) = PidFile::load(store)
+            && let Some(pid) = pid_file.pid_for(service)
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
 
 pub struct HomeEnvGuard {
     previous: Option<String>,
@@ -84,9 +104,7 @@ pub fn wait_for_file_value(path: &Path, expected: &str) {
 pub fn wait_for_pid(service: &str) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(pid_file) = PidFile::load()
-            && let Some(pid) = pid_file.pid_for(service)
-        {
+        if let Some(pid) = pid_for_service_anywhere(service) {
             return pid;
         }
 
@@ -112,9 +130,7 @@ pub fn wait_for_path(path: &Path) {
 pub fn wait_for_pid_removed(service: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(pid_file) = PidFile::load()
-            && pid_file.pid_for(service).is_none()
-        {
+        if pid_for_service_anywhere(service).is_none() {
             return;
         }
 
@@ -126,43 +142,29 @@ pub fn wait_for_pid_removed(service: &str) {
     }
 }
 
-#[cfg(target_os = "linux")]
+/// Waits until a process is absent or has reached a terminal process state.
 pub fn wait_for_process_exit(pid: u32) {
-    use std::path::PathBuf;
-
     let deadline = Instant::now() + Duration::from_secs(10);
-    let proc_path = PathBuf::from(format!("/proc/{}", pid));
-    let stat_path = PathBuf::from(format!("/proc/{}/stat", pid));
-
     while Instant::now() < deadline {
-        if !proc_path.exists() {
+        if !is_process_alive(pid) {
             return;
         }
-
-        // Check if process is a zombie (killed but not yet reaped)
-        if let Ok(stat) = fs::read_to_string(&stat_path) {
-            // The third field in /proc/{pid}/stat is the state character
-            // Z = zombie, X = dead
-            if let Some(state_start) = stat.rfind(')') {
-                let state_part = &stat[state_start + 1..].trim();
-                if let Some(state_char) = state_part.chars().next()
-                    && (state_char == 'Z' || state_char == 'X')
-                {
-                    return; // Process is dead/zombie, consider it exited
-                }
-            }
-        }
-
         thread::sleep(Duration::from_millis(100));
     }
 
     panic!("Timed out waiting for PID {} to exit", pid);
 }
 
+/// Returns whether a process exists in a non-terminal state.
 pub fn is_process_alive(pid: u32) -> bool {
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All, true);
-    system.process(Pid::from_u32(pid)).is_some()
+    system.process(Pid::from_u32(pid)).is_some_and(|process| {
+        !matches!(
+            process.status(),
+            ProcessStatus::Dead | ProcessStatus::Zombie
+        )
+    })
 }
 
 pub fn wait_for_latest_pid(pid_dir: &Path, min_runs: usize) -> u32 {

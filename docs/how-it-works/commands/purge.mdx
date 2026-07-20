@@ -4,29 +4,65 @@ title: purge
 
 # purge
 
-Remove all systemg state and start fresh.
+Remove systemg state and start fresh.
 
 ```sh
 $ sysg purge
 ```
 
-**Warning Warning**: Permanently deletes all service history, logs, and runtime files.
+<Warning>
+`purge` permanently deletes service history, logs, and runtime files. With no
+selector it wipes the **entire** state root. There is no undo.
+</Warning>
+
+<Note>
+`purge` refuses to run while a live supervisor is still managing processes —
+wiping its state out from under it would strand those processes and corrupt the
+supervisor's view of the world. Stop the supervisor first, or pass `--force`.
+
+```
+error[SG0401]: refused to purge: a supervisor is still managing processes
+
+  2 unit(s) are live under the running supervisor; purging its state now would strand them
+
+  help:
+    stop the supervisor first  sysg stop --supervisor
+    then purge                 sysg purge
+    or force it (stops + wipes) sysg purge --force
+```
+</Note>
 
 ## Options
 
 | Short | Long | Description |
 |-------|------|-------------|
+| `-c` | `--config` | Purge only the projects this config declares (or `__loose__` if it is project-less). Omit to wipe the whole state root |
+| `-p` | `--project` | Purge only this project's state |
+| `-` | `--force` | Purge even while a supervisor is managing processes — stops it first, then wipes |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
-| `-` | `--log-level` | Set verbosity (`debug`, `info`, `warn`, `error`) |
+| `-` | `--drop-privileges` | Accepted globally but ignored; purge does not spawn services |
+| `-` | `--plain` | Disable terminal decoration for automation |
+| `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
+
+## Scope
+
+Purge is deliberately explicit about what it deletes:
+
+- **`sysg purge`** — the whole state root: every project, the `__loose__` bundle,
+  logs, and the supervisor runtime files (socket, pid, config hint).
+- **`sysg purge -c <config>`** — only the projects that config declares. An
+  unrelated project registered separately is left untouched.
+- **`sysg purge -p <project>`** — only that one project's state directory.
 
 ## What gets removed
 
 - Service status history
 - Cron execution history
-- All log files
+- Log files (including system-mode logs at `/var/log/systemg`)
 - PID tracking files
 - Supervisor state
-- Socket files
+- Socket and runtime files
 
 ## When to use
 
@@ -35,14 +71,37 @@ $ sysg purge
 - Before uninstalling systemg
 - To free disk space
 
-## Example
+## Examples
+
+### Wipe everything
 
 ```sh
 $ sysg purge
-$ All systemg state has been purged
+All systemg state has been purged
 ```
+
+### Purge one project
+
+```sh
+$ sysg purge -p arbitration
+Purged state for project 'arbitration'
+```
+
+A `-p` naming a project with no state on disk refuses with
+[`SG0403`](/how-it-works/dialog/codes#sg0403) and deletes nothing.
+
+### Force a purge while services are running
+
+```sh
+$ sysg purge --force
+All systemg state has been purged
+```
+
+`--force` is the explicit "I accept the teardown" signal: it stops the live
+supervisor, kills its services, and removes the state.
 
 ## See also
 
 - [`stop`](/how-it-works/commands/stop) - Stop services without removing state
 - [`start`](/how-it-works/commands/start) - Start fresh after purging
+- [Diagnostics](/how-it-works/dialog) - [`SG0401`](/how-it-works/dialog/codes#sg0401), [`SG0402`](/how-it-works/dialog/codes#sg0402), [`SG0403`](/how-it-works/dialog/codes#sg0403)

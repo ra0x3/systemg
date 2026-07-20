@@ -1,11 +1,18 @@
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    ffi::CString,
+    fs::File,
     io,
     io::Write,
+    os::fd::{AsRawFd, FromRawFd},
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime},
 };
@@ -16,8 +23,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::{
-        Config, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
-        load_config, load_config_from_file,
+        Config, LogSink, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
+        load_config_from_file, load_projects_from_file, supervisor::SupervisorTimeouts,
     },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
@@ -30,15 +37,28 @@ use crate::{
         LogManager, LogSection, get_service_log_path, resolve_log_path,
         spawn_dynamic_child_log_writer, write_log_section_header,
     },
-    metrics::{self, MetricsCollector, MetricsHandle},
+    metrics::{self, MetricSample, MetricsCollector, MetricsHandle},
+    opslot::OpSlot,
     runtime,
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
+    start::{self, BootFrame, BootJournal},
     status::{
         ProjectRunMode, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
         collect_runtime_snapshot, collect_runtime_snapshot_with_cron_hashes,
         compute_overall_health, cron_hashes_for_config,
     },
+    upgrade::{
+        HANDOFF_SCHEMA_VERSION, HandoffProject, LIVE_REEXEC_PROTOCOL, LiveUpgradeInfo,
+        SupervisorHandoff, UpgradeTarget,
+    },
 };
+
+/// Interval between cron scheduler scans.
+const CRON_TICK_INTERVAL: Duration = Duration::from_secs(1);
+/// Delay before retrying a failed control-socket accept.
+const CONTROL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// Maximum time allowed for a live-upgrade acceptance response to reach its client.
+const UPGRADE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Supervisor errors.
 #[derive(Debug, Error)]
@@ -70,26 +90,79 @@ fn error_response(err: &SupervisorError) -> ControlResponse {
         SupervisorError::Process(ProcessManagerError::Diag(diag)) => {
             ControlResponse::Diag(diag.clone())
         }
+        SupervisorError::Process(ProcessManagerError::ServicesNotRunning {
+            services,
+        }) => {
+            let diag = crate::diag::Diagnostic::error(
+                crate::diag::SgCode::ProjectServicesNotUp,
+                "one or more services did not reach their target state",
+            )
+            .note(format!("did not start: {}", services.join(", ")))
+            .help_cmd("check status", "sysg status")
+            .help_docs();
+            ControlResponse::Diag(Box::new(diag))
+        }
         other => ControlResponse::Error(other.to_string()),
     }
 }
 
 /// Daemon supervisor that handles CLI commands.
 pub struct Supervisor {
+    /// Canonical path associated with the primary project manifest.
     config_path: PathBuf,
+    /// Primary project's process daemon.
     daemon: Daemon,
+    /// Operator-controlled lifecycle timeout policy.
+    timeouts: SupervisorTimeouts,
+    /// Whether newly spawned services use legacy detached behavior.
     detach_children: bool,
+    /// Scheduler shared by all registered projects.
     cron_manager: CronManager,
+    /// Optional single-service filter applied to the primary boot.
     service_filter: Option<String>,
+    /// Latest aggregate status snapshot.
     status_cache: StatusCache,
+    /// Periodic status snapshot worker.
     status_refresher: Option<StatusRefresher>,
+    /// Shared metrics history.
     metrics_store: MetricsHandle,
+    /// Periodic metrics collection worker.
     metrics_collector: Option<MetricsCollector>,
+    /// Dynamic child-process ownership and limits.
     spawn_manager: DynamicSpawnManager,
+    /// Whether service stderr is forwarded to supervisor stdout.
     pipe_stderr: bool,
+    /// Attachment mode of the primary project.
     primary_project_mode: ProjectRunMode,
+    /// Whether the primary project remains registered.
+    primary_active: bool,
+    /// Additional registered project runtimes.
     extra_projects: BTreeMap<String, ProjectRuntime>,
+    /// Scheduler routing snapshot for all cron-capable projects.
     cron_projects: Arc<RwLock<Vec<CronProjectRuntime>>>,
+    /// Single mutable operation currently reported to clients.
+    op_slot: OpSlot,
+    /// Additional projects declared in the primary config file (a multi-project
+    /// manifest), registered as extra projects once the primary has booted.
+    pending_projects: Vec<Config>,
+    /// Race-free record of the initial boot, streamed to a `BootStream` client.
+    boot_journal: BootJournal,
+    /// Daemons visible to cancellation-aware boot requests.
+    boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
+    /// Whether the control plane is quiescing for live re-execution.
+    upgrading: Arc<AtomicBool>,
+    /// Serializes cron due-state mutation with upgrade preflight.
+    cron_gate: Arc<std::sync::Mutex<()>>,
+    /// Inherited runtime state awaiting activation in a replacement image.
+    handoff: Option<LoadedHandoff>,
+}
+
+/// Handoff record loaded by the replacement binary before its event loop starts.
+struct LoadedHandoff {
+    /// Private serialized handoff path removed after successful resume.
+    path: PathBuf,
+    /// Validated runtime state and inherited descriptor numbers.
+    state: SupervisorHandoff,
 }
 
 /// Runtime state for an additional project managed by the resident supervisor.
@@ -105,6 +178,7 @@ struct CronProjectRuntime {
     project_id: String,
     daemon: Daemon,
     config: Arc<Config>,
+    mode: ProjectRunMode,
 }
 
 /// Parameters for spawning a child process.
@@ -120,8 +194,6 @@ struct SpawnParams {
 struct SupervisorLogRequest<'a> {
     /// Latest status snapshot used to resolve service/project targets.
     snapshot: crate::status::StatusSnapshot,
-    /// Shared PID file handle used by the log manager.
-    pid_file: std::sync::Arc<std::sync::Mutex<crate::daemon::PidFile>>,
     /// Optional service name, hash, or `project/service` selector.
     service: Option<String>,
     /// Optional stable project id used to filter log targets.
@@ -148,6 +220,81 @@ struct CronCompletionOutcome {
     exit_code: Option<i32>,
 }
 
+/// Units left down by one project boot and the first concrete cause observed.
+#[derive(Debug, Default)]
+struct BootFailures {
+    /// Sorted names of units that did not reach their declared boot target.
+    services: Vec<String>,
+    /// First concrete unit diagnostic, retained as the project's root cause.
+    cause: Option<crate::diag::Diagnostic>,
+}
+
+impl BootFailures {
+    /// Creates a stable, sorted failure report from the boot accumulator.
+    fn new(mut services: Vec<String>, cause: Option<crate::diag::Diagnostic>) -> Self {
+        services.sort_unstable();
+        Self { services, cause }
+    }
+
+    /// Whether every requested unit reached its target boot state.
+    fn is_empty(&self) -> bool {
+        self.services.is_empty()
+    }
+
+    /// Unit names suitable for reconcile diagnostics and logs.
+    fn services(&self) -> &[String] {
+        &self.services
+    }
+
+    /// Converts the project result without discarding the originating diagnosis.
+    fn into_error(self, project: &str) -> ProcessManagerError {
+        let Self { services, cause } = self;
+        let mut diag = cause
+            .unwrap_or_else(|| crate::start::project_services_not_up(project, &services));
+        if !services.is_empty() {
+            diag = diag.note(format!(
+                "project `{project}` also left these units down: {}",
+                services.join(", ")
+            ));
+        }
+        ProcessManagerError::Diag(Box::new(diag))
+    }
+}
+
+/// Cheap-to-clone handles the acceptor uses to answer read commands without
+/// touching the supervisor's mutation state.
+#[derive(Clone)]
+struct ReadContext {
+    status_cache: StatusCache,
+    op_slot: OpSlot,
+    version: String,
+    boot_journal: BootJournal,
+    boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
+    /// Whether mutations are refused while a live upgrade is committing.
+    upgrading: Arc<AtomicBool>,
+}
+
+/// A mutation command routed from the acceptor to the single-writer owner thread,
+/// paired with a channel to return the owner's response to the waiting connection.
+struct MutationRequest {
+    /// Mutation routed to the supervisor owner thread.
+    command: ControlCommand,
+    /// Response returned to the connection worker.
+    reply: mpsc::Sender<ControlResponse>,
+    /// Acknowledges that the response reached the client socket.
+    delivered: mpsc::Receiver<bool>,
+}
+
+/// Validated handoff ready to execute after the client receives acceptance.
+struct PreparedUpgrade {
+    /// Replacement executable.
+    target: UpgradeTarget,
+    /// Private serialized handoff record.
+    path: PathBuf,
+    /// Primary manifest path required by the internal supervisor command.
+    config: PathBuf,
+}
+
 /// Handles fallback cron user.
 fn fallback_cron_user(service_config: &crate::config::ServiceConfig) -> Option<String> {
     if let Some(user) = service_config.user.as_ref().filter(|user| !user.is_empty()) {
@@ -158,6 +305,49 @@ fn fallback_cron_user(service_config: &crate::config::ServiceConfig) -> Option<S
         .ok()
         .flatten()
         .map(|user| user.name)
+}
+
+/// Returns metric samples collected during one cron execution.
+fn cron_run_metrics(
+    metrics_store: &MetricsHandle,
+    service_hash: &str,
+    started_at: SystemTime,
+) -> Vec<MetricSample> {
+    let started_at: chrono::DateTime<chrono::Utc> = started_at.into();
+    metrics_store
+        .try_read()
+        .ok()
+        .and_then(|store| store.snapshot_unit(service_hash))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|sample| sample.timestamp >= started_at)
+        .collect()
+}
+
+/// Persists the final lifecycle state for one cron execution.
+fn persist_cron_state(
+    daemon: &Daemon,
+    service_hash: &str,
+    service_name: &str,
+    status: ServiceLifecycleStatus,
+    exit_code: Option<i32>,
+) {
+    if let Ok(mut state_file) = ServiceStateFile::load(daemon.store())
+        && let Err(err) = state_file.set(service_hash, status, None, exit_code, None)
+    {
+        warn!("Failed to persist cron job '{service_name}' exit state: {err}");
+    }
+}
+
+/// Clears the PID owned by a completed cron execution without removing a newer run.
+fn clear_cron_pid(daemon: &Daemon, service_name: &str, expected_pid: u32) {
+    let pid_file = daemon.pid_file_handle();
+    let mut pid_file = pid_file
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Err(err) = pid_file.clear_pid_if_matches(service_name, expected_pid) {
+        debug!("Failed to clear cron job '{service_name}' PID: {err}");
+    }
 }
 
 /// Rejects direct control of a cron unit. `verb` is the past-tense action
@@ -190,6 +380,81 @@ fn split_project_selector(selector: &str) -> Option<(&str, &str)> {
     } else {
         Some((project, service))
     }
+}
+
+/// Loads the project named `project_id` from a file that may declare many
+/// projects. The single-project loader collapses a `projects:` map to one
+/// arbitrary project, so a per-project reload must fan out and pick the match.
+/// Falls back to the sole project for a single-project file.
+fn load_named_project(
+    path: &Path,
+    project_id: &str,
+) -> Result<Option<Config>, SupervisorError> {
+    let file = runtime::open_trusted_config(path)?;
+    let mut projects = load_projects_from_file(file, path)?;
+    if let Some(idx) = projects
+        .iter()
+        .position(|config| config.project.id == project_id)
+    {
+        return Ok(Some(projects.swap_remove(idx)));
+    }
+    if projects.len() == 1 {
+        return Ok(Some(projects.swap_remove(0)));
+    }
+    Ok(None)
+}
+
+/// Picks the sub-config for the targeted service from a file that may declare
+/// many projects. Prefers the project the user named (`-p`/prefix) that also
+/// declares the service, then any project declaring it, then the sole project
+/// for a single-project file. Returns `None` if nothing matches.
+fn select_override_project(
+    mut projects: Vec<Config>,
+    service_name: &str,
+    requested_project: Option<&str>,
+) -> Option<Config> {
+    if let Some(requested) = requested_project
+        && let Some(idx) = projects.iter().position(|config| {
+            config.project.id == requested && config.services.contains_key(service_name)
+        })
+    {
+        return Some(projects.swap_remove(idx));
+    }
+    if let Some(idx) = projects
+        .iter()
+        .position(|config| config.services.contains_key(service_name))
+    {
+        return Some(projects.swap_remove(idx));
+    }
+    if projects.len() == 1 {
+        return Some(projects.swap_remove(0));
+    }
+    None
+}
+
+/// Orders `root` and its transitive dependents so a dependency is always
+/// restarted before anything that depends on it. `restart -s A` must bounce A
+/// and everything that depends on A, because a dependent needs to re-handshake
+/// the freshly-restarted A; a stale dependent left pointing at the old A is the
+/// leaky state this cascade exists to prevent.
+fn cascade_restart_order(config: &Config, root: &str) -> Vec<String> {
+    let reverse = config.reverse_dependencies();
+    let mut order: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(root.to_string());
+    seen.insert(root.to_string());
+    while let Some(service) = queue.pop_front() {
+        order.push(service.clone());
+        if let Some(dependents) = reverse.get(&service) {
+            for dependent in dependents {
+                if seen.insert(dependent.clone()) {
+                    queue.push_back(dependent.clone());
+                }
+            }
+        }
+    }
+    order
 }
 
 /// Returns whether a status unit belongs to the requested project id.
@@ -280,6 +545,7 @@ impl Supervisor {
         }
     }
 
+    /// Resolves dependency order and applies an optional single-unit filter.
     fn startup_service_order(
         config: &Config,
         service_filter: Option<&str>,
@@ -308,19 +574,35 @@ impl Supervisor {
     }
 
     /// Starts services for a project daemon without blocking the supervisor control loop.
+    ///
+    /// `boot_journal` is `Some` only during the initial boot, so per-unit
+    /// outcomes stream to a `BootStream` client; live project adds pass `None`.
     fn start_project_services(
         daemon: &Daemon,
         config: &Config,
         service_filter: Option<&str>,
         spawn_manager: &DynamicSpawnManager,
-    ) -> Result<(), SupervisorError> {
+        boot_journal: Option<&BootJournal>,
+    ) -> Result<BootFailures, SupervisorError> {
+        let project_id = &config.project.id;
+        let boot_epoch = daemon.begin_boot();
         let service_order = Self::startup_service_order(config, service_filter)?;
-        for service_name in service_order {
+        let mut healthy = HashSet::new();
+        let mut completed = HashSet::new();
+        let mut failed = HashSet::new();
+        let mut skipped = HashSet::new();
+        let mut cause = None;
+        'services: for service_name in service_order {
+            if !daemon.boot_active(boot_epoch) {
+                break;
+            }
             let Some(service_config) = config.services.get(&service_name) else {
                 continue;
             };
 
             if service_config.cron.is_some() {
+                healthy.insert(service_name.clone());
+                completed.insert(service_name.clone());
                 continue;
             }
 
@@ -329,6 +611,7 @@ impl Supervisor {
                     SkipConfig::Flag(true) => {
                         info!("Skipping service '{service_name}' due to skip flag");
                         daemon.mark_service_skipped(&service_name)?;
+                        skipped.insert(service_name.clone());
                         continue;
                     }
                     SkipConfig::Flag(false) => {}
@@ -340,23 +623,163 @@ impl Supervisor {
                                     "Skipping service '{service_name}' due to skip condition"
                                 );
                                 daemon.mark_service_skipped(&service_name)?;
+                                skipped.insert(service_name.clone());
                                 continue;
                             }
                             Ok(false) => {}
                             Err(err) => {
-                                warn!(
+                                error!(
                                     "Failed to evaluate skip condition for '{service_name}': {err}"
                                 );
+                                failed.insert(service_name.clone());
+                                let diag = start::unit_start_failed(
+                                    &service_name,
+                                    err.to_string(),
+                                );
+                                cause.get_or_insert_with(|| diag.clone());
+                                if let Some(journal) = boot_journal {
+                                    journal.push(BootFrame::UnitStarting {
+                                        project: project_id.clone(),
+                                        service: service_name.clone(),
+                                    });
+                                    journal.record(
+                                        project_id,
+                                        &service_name,
+                                        start::Outcome::Failed(diag),
+                                    );
+                                }
+                                continue 'services;
                             }
                         }
                     }
                 }
             }
 
-            if let Err(err) = daemon.start_service(&service_name, service_config) {
+            if service_filter.is_none()
+                && let Some(dependencies) = &service_config.depends_on
+            {
+                for dependency in dependencies {
+                    let dependency_name = dependency.service();
+                    if skipped.contains(dependency_name) {
+                        info!(
+                            "Skipping service '{service_name}' because dependency '{dependency_name}' was skipped"
+                        );
+                        daemon.mark_service_skipped(&service_name)?;
+                        skipped.insert(service_name.clone());
+                        continue 'services;
+                    }
+                    if failed.contains(dependency_name)
+                        || !healthy.contains(dependency_name)
+                    {
+                        error!(
+                            "Skipping service '{service_name}' because dependency '{dependency_name}' did not start"
+                        );
+                        failed.insert(service_name.clone());
+                        let diag = start::dependency_unavailable(
+                            &service_name,
+                            dependency_name,
+                            format!(
+                                "dependency `{dependency_name}` did not reach its required state"
+                            ),
+                        );
+                        cause.get_or_insert_with(|| diag.clone());
+                        if let Some(journal) = boot_journal {
+                            journal.push(BootFrame::UnitStarting {
+                                project: project_id.clone(),
+                                service: service_name.clone(),
+                            });
+                            journal.record(
+                                project_id,
+                                &service_name,
+                                start::Outcome::Failed(diag),
+                            );
+                        }
+                        continue 'services;
+                    }
+                    if dependency.condition()
+                        == crate::config::DependsOnCondition::Completed
+                        && !completed.contains(dependency_name)
+                    {
+                        if let Err(err) = daemon.wait_for_dependency_completion(
+                            &service_name,
+                            dependency_name,
+                        ) {
+                            error!(
+                                "Skipping service '{service_name}' because dependency '{dependency_name}' did not complete: {err}"
+                            );
+                            failed.insert(service_name.clone());
+                            let diag = start::dependency_unavailable(
+                                &service_name,
+                                dependency_name,
+                                err.to_string(),
+                            );
+                            cause.get_or_insert_with(|| diag.clone());
+                            if let Some(journal) = boot_journal {
+                                journal.push(BootFrame::UnitStarting {
+                                    project: project_id.clone(),
+                                    service: service_name.clone(),
+                                });
+                                journal.record(
+                                    project_id,
+                                    &service_name,
+                                    start::Outcome::Failed(diag),
+                                );
+                            }
+                            continue 'services;
+                        }
+                        completed.insert(dependency_name.to_string());
+                    }
+                }
+            }
+
+            if let Some(journal) = boot_journal {
+                journal.push(BootFrame::UnitStarting {
+                    project: project_id.clone(),
+                    service: service_name.clone(),
+                });
+            }
+            let mut service_to_start = service_config.clone();
+            service_to_start.skip = None;
+            let result = daemon.start_service(&service_name, &service_to_start);
+            if !daemon.boot_active(boot_epoch) {
+                if let Err(err) = daemon.stop_service(&service_name) {
+                    error!(
+                        "Failed to stop '{service_name}' after project boot cancellation: {err}"
+                    );
+                }
+                failed.insert(service_name.clone());
+                break;
+            }
+            match &result {
+                Ok(ServiceReadyState::Running) => {
+                    healthy.insert(service_name.clone());
+                }
+                Ok(ServiceReadyState::CompletedSuccess) => {
+                    healthy.insert(service_name.clone());
+                    completed.insert(service_name.clone());
+                }
+                Err(_) => {
+                    failed.insert(service_name.clone());
+                }
+            }
+            let pid = daemon
+                .pid_file_handle()
+                .lock()
+                .ok()
+                .and_then(|pid_file| pid_file.services().get(&service_name).copied());
+            let outcome = start::outcome_of(&service_name, result, pid);
+            if let Some(diag) = outcome.diagnostic() {
+                cause.get_or_insert_with(|| diag.clone());
                 error!(
-                    "Service '{service_name}' failed to start: {err}. Continuing; monitor will retry per its restart policy."
+                    "Service '{service_name}' failed to start [{}]: {}.",
+                    diag.code_str(),
+                    diag.title
                 );
+            }
+            if let Some(journal) = boot_journal {
+                journal.record(project_id, &service_name, outcome);
+            }
+            if failed.contains(&service_name) {
                 continue;
             }
 
@@ -369,8 +792,10 @@ impl Supervisor {
             }
         }
 
-        daemon.ensure_monitoring()?;
-        Ok(())
+        if daemon.boot_active(boot_epoch) {
+            daemon.ensure_monitoring()?;
+        }
+        Ok(BootFailures::new(failed.into_iter().collect(), cause))
     }
 
     /// Combines per-project snapshots into the supervisor status view.
@@ -442,9 +867,66 @@ impl Supervisor {
         Ok(snapshot)
     }
 
+    /// Builds an aggregate status snapshot across every managed project from the
+    /// shared project list, so the background refresher reflects extra projects
+    /// (including those a multi-project file fanned out) without holding `&self`.
+    fn collect_projects_snapshot(
+        projects: &Arc<RwLock<Vec<CronProjectRuntime>>>,
+        metrics_store: &MetricsHandle,
+        spawn_manager: &DynamicSpawnManager,
+        mode: StatusSnapshotMode,
+    ) -> Result<StatusSnapshot, StatusError> {
+        let runtimes = match projects.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return Ok(StatusSnapshot::empty()),
+        };
+
+        let mut valid_cron_hashes = HashSet::new();
+        for runtime in &runtimes {
+            valid_cron_hashes.extend(cron_hashes_for_config(runtime.config.as_ref()));
+        }
+
+        let mut snapshots = Vec::with_capacity(runtimes.len());
+        for runtime in &runtimes {
+            let config_path = runtime
+                .config
+                .project_dir
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            // Best-effort per project: a single project momentarily failing to
+            // collect (e.g. it is still recording PIDs from an async boot, or a
+            // state file is being rewritten) must NOT discard the whole aggregate.
+            // Aborting the tick would freeze the served cache for EVERY project —
+            // making status lie that healthy processes are stopped — until the one
+            // straggler recovered. Skip the straggler this tick; it converges on
+            // the next one while its 119 healthy siblings stay honest.
+            match Self::collect_daemon_snapshot(
+                &runtime.daemon,
+                metrics_store,
+                spawn_manager,
+                mode,
+                runtime.mode,
+                &config_path,
+                Some(&valid_cron_hashes),
+            ) {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(err) => error!(
+                    "status refresh skipped project '{}' this tick: {err}",
+                    runtime.project_id
+                ),
+            }
+        }
+
+        Ok(Self::aggregate_snapshots(snapshots))
+    }
+
     /// Returns cron hashes for all projects currently managed by the supervisor.
     fn managed_cron_hashes(&self) -> HashSet<String> {
-        let mut hashes = cron_hashes_for_config(self.daemon.config().as_ref());
+        let mut hashes = HashSet::new();
+        if self.primary_active {
+            hashes.extend(cron_hashes_for_config(self.daemon.config().as_ref()));
+        }
         for project in self.extra_projects.values() {
             hashes.extend(cron_hashes_for_config(project.daemon.config().as_ref()));
         }
@@ -463,15 +945,18 @@ impl Supervisor {
             Self::status_snapshot_mode(primary_config.as_ref())
         };
         let valid_cron_hashes = self.managed_cron_hashes();
-        let mut snapshots = vec![Self::collect_daemon_snapshot(
-            &self.daemon,
-            &self.metrics_store,
-            &self.spawn_manager,
-            primary_mode,
-            self.primary_project_mode,
-            &self.config_path,
-            Some(&valid_cron_hashes),
-        )?];
+        let mut snapshots = Vec::with_capacity(self.extra_projects.len() + 1);
+        if self.primary_active {
+            snapshots.push(Self::collect_daemon_snapshot(
+                &self.daemon,
+                &self.metrics_store,
+                &self.spawn_manager,
+                primary_mode,
+                self.primary_project_mode,
+                &self.config_path,
+                Some(&valid_cron_hashes),
+            )?);
+        }
 
         for project in self.extra_projects.values() {
             let config = project.daemon.config();
@@ -511,6 +996,46 @@ impl Supervisor {
         projects
     }
 
+    /// Clears captured logs for a service (or all services) inside the
+    /// supervisor: truncates the on-disk files AND drops the in-memory live-log
+    /// buffer the log reader serves from. Doing this CLI-side would leave the
+    /// buffer intact, so the reader would keep replaying "cleared" lines.
+    fn clear_logs(
+        &self,
+        service: Option<&str>,
+        _project: Option<&str>,
+    ) -> Result<(), SupervisorError> {
+        let manager = LogManager::new();
+        let mut targets: Vec<(String, String)> = Vec::new();
+        match service {
+            Some(name) => {
+                let project = _project
+                    .map(str::to_string)
+                    .unwrap_or_else(|| self.daemon.config().project.id.clone());
+                targets.push((project, name.to_string()));
+            }
+            None => {
+                let primary = self.daemon.config();
+                for name in primary.services.keys() {
+                    targets.push((primary.project.id.clone(), name.clone()));
+                }
+                for project in self.extra_projects.values() {
+                    let config = project.daemon.config();
+                    for name in config.services.keys() {
+                        targets.push((config.project.id.clone(), name.clone()));
+                    }
+                }
+            }
+        }
+        for (project, name) in targets {
+            manager
+                .clear_service_logs(&project, &name)
+                .map_err(SupervisorError::from)?;
+            crate::logs::clear_live_log(&project, &name);
+        }
+        Ok(())
+    }
+
     /// Resolves the target project for a service request, rejecting ambiguous selectors.
     fn resolve_service_target_project(
         &self,
@@ -522,44 +1047,45 @@ impl Supervisor {
         if let (Some(flag), Some(selector_project)) = (project, selector_project)
             && flag != selector_project
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project flag '{flag}' does not match service selector project '{selector_project}'"
-                ),
-            )
+            return Err(ProcessManagerError::Diag(Box::new(start::project_mismatch(
+                flag,
+                selector_project,
+            )))
             .into());
         }
 
         let requested_project = project.or(selector_project);
-        if let (Some(requested), Some(config_project)) =
-            (requested_project, config_project)
-            && requested != config_project
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "project '{requested}' does not match config project '{config_project}'"
-                ),
-            )
-            .into());
-        }
-
-        if let Some(target_project) = requested_project.or(config_project) {
-            return Ok(target_project.to_string());
-        }
-
         let matching_projects = self.projects_containing_service(service_name);
+
+        if let Some(requested) = requested_project {
+            // A requested project is valid as long as it actually declares the
+            // service. For a multi-project config the loaded config id is only
+            // ONE of several projects, so comparing against it would wrongly
+            // reject sibling projects — validate against the real membership.
+            if matching_projects.iter().any(|p| p == requested) {
+                return Ok(requested.to_string());
+            }
+            if let Some(config_project) = config_project
+                && requested != config_project
+            {
+                return Err(ProcessManagerError::Diag(Box::new(
+                    start::project_mismatch(requested, config_project),
+                ))
+                .into());
+            }
+            return Ok(requested.to_string());
+        }
+
+        if let Some(config_project) = config_project {
+            return Ok(config_project.to_string());
+        }
+
         match matching_projects.as_slice() {
             [project_id] => Ok(project_id.clone()),
             [] => Ok(self.daemon.config().project.id.clone()),
-            projects => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "service '{service_name}' exists in multiple projects ({}); pass --project to choose one",
-                    projects.join(", ")
-                ),
-            )
+            projects => Err(ProcessManagerError::Diag(Box::new(
+                start::ambiguous_service(service_name, projects),
+            ))
             .into()),
         }
     }
@@ -623,7 +1149,15 @@ impl Supervisor {
             "schedule",
         )?;
 
+        // Explicitly naming a service is a direct order to run THIS one, so it
+        // overrides a `skip` default — a skipped service you ask for by name must
+        // actually start, not silently no-op.
+        let mut service_config = service_config;
+        service_config.skip = None;
+
+        daemon.begin_boot();
         daemon.start_service(service_name, &service_config)?;
+        daemon.ensure_monitoring()?;
 
         if let Some(ref spawn) = service_config.spawn
             && let Some(SpawnMode::Dynamic) = spawn.mode
@@ -638,10 +1172,25 @@ impl Supervisor {
     }
 
     /// Starts all non-cron services in one managed project.
-    fn start_project_target(&self, project_id: &str) -> Result<(), SupervisorError> {
+    fn start_project_target(&mut self, project_id: &str) -> Result<(), SupervisorError> {
         let primary_project = self.daemon.config().project.id.clone();
         if project_id == primary_project {
-            self.daemon.start_services_blocking()?;
+            if self.primary_active && !self.daemon.needs_start() {
+                self.sync_cron_projects()?;
+                return Ok(());
+            }
+            self.primary_active = true;
+            let failed = Self::start_project_services(
+                &self.daemon,
+                self.daemon.config().as_ref(),
+                None,
+                &self.spawn_manager,
+                None,
+            )?;
+            self.sync_cron_projects()?;
+            if !failed.is_empty() {
+                return Err(failed.into_error(project_id).into());
+            }
             return Ok(());
         }
 
@@ -653,12 +1202,20 @@ impl Supervisor {
             .into());
         };
 
-        Self::start_project_services(
+        if !project_runtime.daemon.needs_start() {
+            return Ok(());
+        }
+
+        let failed = Self::start_project_services(
             &project_runtime.daemon,
             project_runtime.daemon.config().as_ref(),
             None,
             &self.spawn_manager,
+            None,
         )?;
+        if !failed.is_empty() {
+            return Err(failed.into_error(project_id).into());
+        }
         Ok(())
     }
 
@@ -675,22 +1232,24 @@ impl Supervisor {
                 std::env::current_dir()?.join(config_path)
             };
             let resolved = resolved.canonicalize().unwrap_or(resolved);
-            let trusted = runtime::open_trusted_config(&resolved)?;
-            let config = load_config_from_file(trusted, &resolved)?;
-            if config.project.id != project_id {
+            let Some(config) = load_named_project(&resolved, project_id)? else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!(
-                        "project '{project_id}' does not match config project '{}'",
-                        config.project.id
-                    ),
+                    format!("project '{project_id}' is not declared by the config"),
                 )
                 .into());
-            }
+            };
 
             let primary_project = self.daemon.config().project.id.clone();
             if project_id == primary_project {
-                self.reload_config(&resolved)?;
+                // Restart ONLY the primary project's own services. Do NOT
+                // reload_config the whole (possibly multi-project) file — that
+                // would tear down sibling projects. Reconcile the primary in
+                // place against its new manifest.
+                self.reconcile_primary_project(config)?;
+                self.config_path = resolved;
+                let _ = ipc::write_config_hint(&self.config_path);
+                self.respawn_status_refresher()?;
                 return Ok(());
             }
 
@@ -700,34 +1259,192 @@ impl Supervisor {
 
         let primary_project = self.daemon.config().project.id.clone();
         if project_id == primary_project {
+            // Reload the primary project's stored manifest and reconcile it,
+            // isolated from any sibling. A multi-project file is fanned out and
+            // the primary's own entry selected, so siblings are never touched.
             let stored = self.config_path.clone();
-            self.reload_config(&stored)?;
+            let config = match load_named_project(&stored, &primary_project) {
+                Ok(Some(config)) => config,
+                _ => (*self.daemon.config()).clone(),
+            };
+            self.reconcile_primary_project(config)?;
             return Ok(());
         }
 
         let Some(project_runtime) = self.extra_projects.get(project_id) else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("project '{project_id}' is not managed by this supervisor"),
-            )
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::stop::project_not_found(project_id),
+            ))
             .into());
         };
 
         let stored = project_runtime.config_path.clone();
-        let trusted = runtime::open_trusted_config(&stored)?;
-        let config = load_config_from_file(trusted, &stored)?;
-        if config.project.id != project_id {
+        let Some(config) = load_named_project(&stored, project_id)? else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "project '{project_id}' stored config now declares project '{}'",
-                    config.project.id
+                    "project '{project_id}' is no longer declared by its stored config"
                 ),
             )
             .into());
-        }
+        };
         self.replace_extra_project_runtime(config, stored)?;
         Ok(())
+    }
+
+    /// Reconciles the primary project's services in place without touching any
+    /// sibling project or unchanged service.
+    fn reconcile_primary_project(
+        &mut self,
+        new_config: Config,
+    ) -> Result<(), SupervisorError> {
+        let old_config = self.daemon.config();
+        let old_metrics = self.metrics_store.clone();
+        let metrics_settings = new_config
+            .metrics
+            .to_settings(new_config.project_dir.as_deref().map(Path::new));
+        let metrics_store = metrics::shared_store(metrics_settings)?;
+        let diff =
+            crate::restart::ManifestDiff::compute(old_config.as_ref(), &new_config);
+        let affected = Self::reconcile_targets(&new_config, &diff)?;
+
+        self.stop_primary_workers();
+        let mut stop_error = None;
+        for name in &diff.removed {
+            if let Err(err) = self.daemon.stop_service(name) {
+                error!("Failed to stop removed service '{name}': {err}");
+                stop_error.get_or_insert(err);
+            }
+        }
+        if let Some(err) = stop_error {
+            if let Err(restore_err) =
+                self.restore_primary_project(old_config, old_metrics)
+            {
+                error!(
+                    "Failed to restore primary project after stop failure: {restore_err}"
+                );
+            }
+            return Err(err.into());
+        }
+
+        self.daemon.set_config(new_config);
+        self.primary_active = true;
+        self.daemon.begin_boot();
+        let restart_result = self.daemon.restart_services_subset(&affected);
+        let sync_result = self.sync_cron_projects();
+        self.metrics_store = metrics_store;
+        let workers_result = self.start_primary_workers();
+        if let Err(err) = restart_result {
+            error!("Project reconcile did not complete: {err}");
+            let failed = Self::reconcile_failures(&err, &affected);
+            sync_result?;
+            workers_result?;
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(&failed),
+            ))
+            .into());
+        }
+        sync_result?;
+        workers_result?;
+        Ok(())
+    }
+
+    /// Stops primary-project background workers before its daemon state changes.
+    fn stop_primary_workers(&mut self) {
+        if let Some(collector) = self.metrics_collector.take() {
+            collector.stop();
+        }
+        if let Some(refresher) = self.status_refresher.take() {
+            refresher.stop();
+        }
+        self.daemon.shutdown_monitor();
+    }
+
+    /// Refreshes primary status and starts its status and metrics workers.
+    fn start_primary_workers(&mut self) -> Result<(), SupervisorError> {
+        self.refresh_status_cache();
+        self.respawn_status_refresher()?;
+        self.metrics_collector = Some(MetricsCollector::spawn(
+            self.metrics_store.clone(),
+            self.daemon.config(),
+            self.daemon.pid_file_handle(),
+            self.daemon.service_state_handle(),
+        )?);
+        Ok(())
+    }
+
+    /// Restores the previous primary manifest and workloads after a teardown
+    /// failure prevents the new manifest from being applied safely.
+    fn restore_primary_project(
+        &mut self,
+        config: Arc<Config>,
+        metrics_store: MetricsHandle,
+    ) -> Result<(), SupervisorError> {
+        self.daemon.cancel_boot();
+        self.daemon.shutdown_monitor();
+        let _ = self.daemon.stop_services();
+        self.daemon.set_config((*config).clone());
+        self.primary_active = true;
+        let failed = Self::start_project_services(
+            &self.daemon,
+            config.as_ref(),
+            None,
+            &self.spawn_manager,
+            None,
+        )?;
+        let sync_result = self.sync_cron_projects();
+        self.metrics_store = metrics_store;
+        self.start_primary_workers()?;
+        sync_result?;
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(failed.services()),
+            ))
+            .into())
+        }
+    }
+
+    /// Returns services directly changed by a manifest plus every transitive
+    /// dependent whose lifecycle must be reevaluated.
+    fn reconcile_targets(
+        config: &Config,
+        diff: &crate::restart::ManifestDiff,
+    ) -> Result<HashSet<String>, ProcessManagerError> {
+        let order = config.service_start_order()?;
+        let mut affected: HashSet<String> = if diff.is_empty() {
+            config.services.keys().cloned().collect()
+        } else {
+            diff.added.union(&diff.changed).cloned().collect()
+        };
+        for name in order {
+            if config.services.get(&name).is_some_and(|service| {
+                service.depends_on.as_ref().is_some_and(|dependencies| {
+                    dependencies
+                        .iter()
+                        .any(|dependency| affected.contains(dependency.service()))
+                })
+            }) {
+                affected.insert(name);
+            }
+        }
+        Ok(affected)
+    }
+
+    /// Extracts stable failed-unit names from a reconcile error, falling back to
+    /// every affected unit when the originating error carries no unit list.
+    fn reconcile_failures(
+        error: &ProcessManagerError,
+        affected: &HashSet<String>,
+    ) -> Vec<String> {
+        let mut failed = match error {
+            ProcessManagerError::ServicesNotRunning { services } => services.clone(),
+            _ => affected.iter().cloned().collect(),
+        };
+        failed.sort_unstable();
+        failed.dedup();
+        failed
     }
 
     /// Replaces an extra project with a freshly loaded runtime and starts it.
@@ -745,48 +1462,116 @@ impl Supervisor {
             .into());
         };
         let mode = existing.mode;
-        let own_services: Vec<String> =
-            existing.daemon.config().services.keys().cloned().collect();
-        for service in &own_services {
-            if let Err(err) = existing.daemon.stop_service(service) {
-                warn!(
-                    "Failed to stop '{service}' while restarting project '{project_id}': {err}"
+        let old_daemon = existing.daemon.clone();
+        let old_path = existing.config_path.clone();
+        Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
+        let mut replacement = Daemon::from_config(config, self.detach_children)?;
+        replacement.set_timeouts(self.timeouts.clone());
+        replacement.set_pipe_stderr(self.pipe_stderr);
+        replacement.set_op_slot(self.op_slot.clone());
+
+        old_daemon.cancel_boot();
+        old_daemon.shutdown_monitor();
+        if let Err(err) = old_daemon.stop_services() {
+            if let Err(restore_err) = self.restore_extra_project(&project_id, &old_daemon)
+            {
+                error!(
+                    "Failed to restore project '{project_id}' after stop failure: {restore_err}"
                 );
             }
+            return Err(err.into());
         }
-        existing.daemon.shutdown_monitor();
+        if let Ok(mut projects) = self.boot_projects.write() {
+            projects.insert(project_id.clone(), replacement.clone());
+        }
 
-        Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
-        let mut daemon = Daemon::new(
-            config,
-            self.daemon.pid_file_handle(),
-            self.daemon.service_state_handle(),
-            self.detach_children,
+        let start_result = Self::start_project_services(
+            &replacement,
+            replacement.config().as_ref(),
+            None,
+            &self.spawn_manager,
+            None,
         );
-        daemon.set_pipe_stderr(self.pipe_stderr);
+        let start_result = start_result.and_then(|failed| {
+            if failed.is_empty() {
+                Ok(())
+            } else {
+                Err(ProcessManagerError::Diag(Box::new(
+                    crate::restart::reconcile_incomplete(failed.services()),
+                ))
+                .into())
+            }
+        });
+        if let Err(err) = start_result {
+            replacement.cancel_boot();
+            replacement.shutdown_monitor();
+            let _ = replacement.stop_services();
+            if let Err(restore_err) = self.restore_extra_project(&project_id, &old_daemon)
+            {
+                error!(
+                    "Failed to restore project '{project_id}' after replacement failure: {restore_err}"
+                );
+            }
+            return Err(err);
+        }
+
         self.extra_projects.insert(
             project_id.clone(),
             ProjectRuntime {
-                daemon,
+                daemon: replacement,
                 mode,
                 config_path,
             },
         );
+        if let Err(err) = self.sync_cron_projects() {
+            if let Some(failed) = self.extra_projects.remove(&project_id) {
+                failed.daemon.cancel_boot();
+                failed.daemon.shutdown_monitor();
+                let _ = failed.daemon.stop_services();
+            }
+            self.extra_projects.insert(
+                project_id.clone(),
+                ProjectRuntime {
+                    daemon: old_daemon.clone(),
+                    mode,
+                    config_path: old_path,
+                },
+            );
+            if let Err(restore_err) = self.restore_extra_project(&project_id, &old_daemon)
+            {
+                error!(
+                    "Failed to restore project '{project_id}' after scheduler failure: {restore_err}"
+                );
+            }
+            return Err(err);
+        }
+        Ok(())
+    }
 
-        let project = self.extra_projects.get(&project_id).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("project '{project_id}' was not registered"),
-            )
-        })?;
-        Self::start_project_services(
-            &project.daemon,
-            project.daemon.config().as_ref(),
+    fn restore_extra_project(
+        &self,
+        project_id: &str,
+        daemon: &Daemon,
+    ) -> Result<(), SupervisorError> {
+        if let Ok(mut projects) = self.boot_projects.write() {
+            projects.insert(project_id.to_string(), daemon.clone());
+        }
+        let failed = Self::start_project_services(
+            daemon,
+            daemon.config().as_ref(),
             None,
             &self.spawn_manager,
+            None,
         )?;
         self.sync_cron_projects()?;
-        Ok(())
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(failed.services()),
+            ))
+            .into())
+        }
     }
 
     /// Creates supervisor with config.
@@ -816,16 +1601,50 @@ impl Supervisor {
             std::env::current_dir()?.join(config_path)
         };
         let config_path = config_path.canonicalize().unwrap_or(config_path);
-        let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+        let mut projects = {
+            let trusted = runtime::open_trusted_config(&config_path)?;
+            load_projects_from_file(trusted, &config_path)?
+        };
+        if projects.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("config at {} declared no projects", config_path.display()),
+            )
+            .into());
+        }
+        let config = projects.remove(0);
+        Self::from_primary_config(
+            config_path,
+            config,
+            projects,
+            detach_children,
+            service_filter,
+            primary_project_mode,
+        )
+    }
+
+    /// Builds a supervisor from an already parsed primary project and optional
+    /// projects awaiting the normal initial boot.
+    fn from_primary_config(
+        config_path: PathBuf,
+        config: Config,
+        pending_projects: Vec<Config>,
+        detach_children: bool,
+        service_filter: Option<String>,
+        primary_project_mode: ProjectRunMode,
+    ) -> Result<Self, SupervisorError> {
         let cron_manager = CronManager::new();
         cron_manager.sync_from_config(&config)?;
 
-        let daemon = Daemon::from_config(config.clone(), detach_children)?;
+        let op_slot = OpSlot::new();
+        let mut daemon = Daemon::from_config(config.clone(), detach_children)?;
+        daemon.set_op_slot(op_slot.clone());
         let config_arc = daemon.config();
         let cron_projects = Arc::new(RwLock::new(vec![CronProjectRuntime {
             project_id: config_arc.project.id.clone(),
             daemon: daemon.clone(),
             config: Arc::clone(&config_arc),
+            mode: primary_project_mode,
         }]));
         let metrics_settings = config_arc
             .metrics
@@ -842,10 +1661,15 @@ impl Supervisor {
                 spawn_manager.register_service(service_name.clone(), limits)?;
             }
         }
+        let boot_projects = Arc::new(RwLock::new(HashMap::from([(
+            config_arc.project.id.clone(),
+            daemon.clone(),
+        )])));
 
         Ok(Self {
             config_path,
             daemon,
+            timeouts: SupervisorTimeouts::default(),
             detach_children,
             cron_manager,
             service_filter,
@@ -856,9 +1680,120 @@ impl Supervisor {
             spawn_manager,
             pipe_stderr: false,
             primary_project_mode,
+            primary_active: true,
             extra_projects: BTreeMap::new(),
             cron_projects,
+            op_slot,
+            pending_projects,
+            boot_journal: BootJournal::new(),
+            boot_projects,
+            upgrading: Arc::new(AtomicBool::new(false)),
+            cron_gate: Arc::new(std::sync::Mutex::new(())),
+            handoff: None,
         })
+    }
+
+    /// Loads the exact project named by a handoff record and verifies that its
+    /// manifest did not change while the supervisor image was replaced.
+    fn load_handoff_project(project: &HandoffProject) -> Result<Config, SupervisorError> {
+        let actual_hash =
+            ipc::manifest_content_hash(&project.config_path).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "could not hash handed-off manifest {}",
+                        project.config_path.display()
+                    ),
+                )
+            })?;
+        if actual_hash != project.config_hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "manifest {} changed during supervisor handoff",
+                    project.config_path.display()
+                ),
+            )
+            .into());
+        }
+        let trusted = runtime::open_trusted_config(&project.config_path)?;
+        load_projects_from_file(trusted, &project.config_path)?
+            .into_iter()
+            .find(|config| config.project.id == project.project_id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "project `{}` is absent from handed-off manifest {}",
+                        project.project_id,
+                        project.config_path.display()
+                    ),
+                )
+                .into()
+            })
+    }
+
+    /// Reconstructs a supervisor from a private state record created immediately
+    /// before same-PID live re-execution.
+    pub fn from_handoff(path: PathBuf) -> Result<Self, SupervisorError> {
+        let state = SupervisorHandoff::load(&path)?;
+        let current = LiveUpgradeInfo::current();
+        if state.target_version != current.version {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "handoff targets {}, but replacement binary is {}",
+                    state.target_version, current.version
+                ),
+            )
+            .into());
+        }
+        let primary = state.primary.clone();
+        let primary_config = Self::load_handoff_project(&primary)?;
+        let mut supervisor = Self::from_primary_config(
+            primary.config_path.clone(),
+            primary_config,
+            Vec::new(),
+            false,
+            state.service_filter.clone(),
+            primary.mode,
+        )?;
+        supervisor.primary_active = primary.active;
+        supervisor.pipe_stderr = state.pipe_stderr;
+        supervisor.daemon.set_pipe_stderr(state.pipe_stderr);
+        supervisor.daemon.adopt_handoff_state(&primary.daemon)?;
+        if !primary.active
+            && let Ok(mut projects) = supervisor.boot_projects.write()
+        {
+            projects.remove(&supervisor.daemon.config().project.id);
+        }
+
+        for (project_id, project) in &state.projects {
+            let config = Self::load_handoff_project(project)?;
+            Self::register_spawn_limits_for_config(&supervisor.spawn_manager, &config)?;
+            let mut daemon = Daemon::from_config(config, false)?;
+            daemon.set_timeouts(supervisor.timeouts.clone());
+            daemon.set_op_slot(supervisor.op_slot.clone());
+            daemon.set_pipe_stderr(state.pipe_stderr);
+            daemon.adopt_handoff_state(&project.daemon)?;
+            if project.active
+                && let Ok(mut projects) = supervisor.boot_projects.write()
+            {
+                projects.insert(project_id.clone(), daemon.clone());
+            }
+            supervisor.extra_projects.insert(
+                project_id.clone(),
+                ProjectRuntime {
+                    daemon,
+                    mode: project.mode,
+                    config_path: project.config_path.clone(),
+                },
+            );
+        }
+        supervisor.sync_cron_projects()?;
+        crate::logs::resume_log_pipe_handoff(&state.log_pipes)?;
+        supervisor.handoff = Some(LoadedHandoff { path, state });
+        Ok(supervisor)
     }
 
     /// Sets whether to pipe stderr from services to stdout.
@@ -872,17 +1807,22 @@ impl Supervisor {
 
     /// Returns the project runtimes that own cron-capable configs.
     fn cron_project_runtimes(&self) -> Vec<CronProjectRuntime> {
-        let mut projects = vec![CronProjectRuntime {
-            project_id: self.daemon.config().project.id.clone(),
-            daemon: self.daemon.clone(),
-            config: self.daemon.config(),
-        }];
+        let mut projects = Vec::new();
+        if self.primary_active {
+            projects.push(CronProjectRuntime {
+                project_id: self.daemon.config().project.id.clone(),
+                daemon: self.daemon.clone(),
+                config: self.daemon.config(),
+                mode: self.primary_project_mode,
+            });
+        }
 
         projects.extend(self.extra_projects.iter().map(|(project_id, project)| {
             CronProjectRuntime {
                 project_id: project_id.clone(),
                 daemon: project.daemon.clone(),
                 config: project.daemon.config(),
+                mode: project.mode,
             }
         }));
 
@@ -892,13 +1832,14 @@ impl Supervisor {
     /// Synchronizes cron registration and scheduler routing for all managed projects.
     fn sync_cron_projects(&self) -> Result<(), SupervisorError> {
         let projects = self.cron_project_runtimes();
-        self.cron_manager
-            .sync_from_configs(projects.iter().map(|project| project.config.as_ref()))?;
 
         match self.cron_projects.write() {
-            Ok(mut guard) => *guard = projects,
+            Ok(mut guard) => *guard = projects.clone(),
             Err(err) => warn!("Failed to update cron project routing: {}", err),
         }
+
+        self.cron_manager
+            .sync_from_configs(projects.iter().map(|project| project.config.as_ref()))?;
 
         Ok(())
     }
@@ -921,145 +1862,808 @@ impl Supervisor {
         }
     }
 
-    /// Runs the supervisor event loop.
-    fn run_internal(&mut self) -> Result<(), SupervisorError> {
-        ipc::cleanup_runtime()?;
-        ipc::write_config_hint(&self.config_path)?;
-        let listener = ipc::bind_control_socket()?;
-        ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
-        let config = load_config(Some(self.config_path.to_string_lossy().as_ref()))?;
-        let service_order =
-            Self::startup_service_order(&config, self.service_filter.as_deref())?;
-        for service_name in service_order {
-            let Some(service_config) = config.services.get(&service_name) else {
-                continue;
-            };
+    /// Starts the primary project's services in dependency order, tolerating
+    /// per-unit failures so one bad unit cannot abort the whole boot.
+    fn boot_primary_services(&mut self) -> Result<(), SupervisorError> {
+        let _op = self.op_slot.guard(format!(
+            "starting project '{}'",
+            self.daemon.config().project.id
+        ));
+        let config = self.daemon.config();
+        Self::start_project_services(
+            &self.daemon,
+            &config,
+            self.service_filter.as_deref(),
+            &self.spawn_manager,
+            Some(&self.boot_journal),
+        )?;
 
-            if service_config.cron.is_none() {
-                if let Some(skip_config) = &service_config.skip {
-                    match skip_config {
-                        SkipConfig::Flag(true) => {
-                            info!("Skipping service '{service_name}' due to skip flag");
-                            if let Err(err) =
-                                self.daemon.mark_service_skipped(&service_name)
+        if self.daemon.boot_cancelled() {
+            self.pending_projects.clear();
+        }
+
+        let pending = std::mem::take(&mut self.pending_projects);
+        let config_path = self.config_path.clone();
+        if !pending.is_empty() {
+            info!(
+                "Booting {} additional project(s) from multi-project config",
+                pending.len()
+            );
+        }
+        for extra in pending {
+            let project_id = extra.project.id.clone();
+            if let Err(err) = self.boot_extra_project(extra, &config_path) {
+                error!(
+                    "Failed to boot project '{project_id}' from multi-project config: {err}. Continuing with remaining projects."
+                );
+            }
+        }
+
+        let (started, failed) = self.boot_journal.snapshot().iter().fold(
+            (0usize, 0usize),
+            |(up, down), frame| match frame {
+                BootFrame::Unit { outcome, .. } if outcome.succeeded() => (up + 1, down),
+                BootFrame::Unit { .. } => (up, down + 1),
+                _ => (up, down),
+            },
+        );
+        self.boot_journal.push(BootFrame::Done { started, failed });
+
+        Ok(())
+    }
+
+    /// Registers and synchronously starts one additional project from a
+    /// multi-project manifest during boot. Unlike the live AddProject path this
+    /// does not spawn a background boot thread — boot must be deterministic, and
+    /// a failure here is isolated to this project by the caller.
+    fn boot_extra_project(
+        &mut self,
+        config: Config,
+        config_path: &Path,
+    ) -> Result<(), SupervisorError> {
+        let project_id = config.project.id.clone();
+        if project_id == self.daemon.config().project.id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate project id '{project_id}' in multi-project config"),
+            )
+            .into());
+        }
+        if self.extra_projects.contains_key(&project_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate project id '{project_id}' in multi-project config"),
+            )
+            .into());
+        }
+
+        self.op_slot
+            .begin(format!("starting project '{project_id}'"));
+        Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
+        // Each project gets its OWN pid/state handles bound to its own store, so
+        // one project's services never land in a sibling's pid.xml.
+        let mut daemon = Daemon::from_config(config, self.detach_children)?;
+        daemon.set_timeouts(self.timeouts.clone());
+        daemon.set_pipe_stderr(self.pipe_stderr);
+        daemon.set_op_slot(self.op_slot.clone());
+        if let Ok(mut projects) = self.boot_projects.write() {
+            projects.insert(project_id.clone(), daemon.clone());
+        }
+
+        let start_result = Self::start_project_services(
+            &daemon,
+            daemon.config().as_ref(),
+            self.service_filter.as_deref(),
+            &self.spawn_manager,
+            Some(&self.boot_journal),
+        );
+        if let Err(err) = start_result {
+            if let Ok(mut projects) = self.boot_projects.write() {
+                projects.remove(&project_id);
+            }
+            return Err(err);
+        }
+
+        self.extra_projects.insert(
+            project_id.clone(),
+            ProjectRuntime {
+                daemon,
+                mode: ProjectRunMode::Daemon,
+                config_path: config_path.to_path_buf(),
+            },
+        );
+        self.sync_cron_projects()?;
+        info!("Project '{project_id}' booted from multi-project config");
+        Ok(())
+    }
+
+    /// Spawns the acceptor thread that owns the control socket. Each connection
+    /// runs on its own worker so a slow client, a streaming log follow, or a
+    /// long-running mutation cannot mute the socket for everyone else.
+    fn spawn_acceptor(
+        listener: std::os::unix::net::UnixListener,
+        read_ctx: ReadContext,
+        mutation_tx: mpsc::Sender<MutationRequest>,
+    ) -> io::Result<()> {
+        thread::Builder::new()
+            .name("sysg-control".to_string())
+            .spawn(move || {
+                let _ = listener.set_nonblocking(false);
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _addr)) => {
+                            let read_ctx = read_ctx.clone();
+                            let mutation_tx = mutation_tx.clone();
+                            if let Err(err) = thread::Builder::new()
+                                .name("sysg-request".to_string())
+                                .spawn(move || {
+                                    Self::serve_connection(stream, read_ctx, mutation_tx);
+                                })
                             {
-                                warn!(
-                                    "Failed to record skipped state for '{service_name}': {err}"
+                                error!(
+                                    "Failed to start supervisor request worker: {err}"
                                 );
                             }
-                            continue;
                         }
-                        SkipConfig::Flag(false) => {
-                            debug!(
-                                "Skip flag for '{service_name}' disabled; starting service"
-                            );
-                        }
-                        SkipConfig::Command(skip_command) => {
-                            match self
-                                .daemon
-                                .evaluate_skip_condition(&service_name, skip_command)
-                            {
-                                Ok(true) => {
-                                    info!(
-                                        "Skipping service '{service_name}' due to skip condition"
-                                    );
-                                    if let Err(err) =
-                                        self.daemon.mark_service_skipped(&service_name)
-                                    {
-                                        warn!(
-                                            "Failed to record skipped state for '{service_name}': {err}"
-                                        );
-                                    }
-                                    continue;
-                                }
-                                Ok(false) => {
-                                    debug!(
-                                        "Skip condition for '{service_name}' evaluated to false, starting service"
-                                    );
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        "Failed to evaluate skip condition for '{service_name}': {err}"
-                                    );
-                                }
-                            }
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(err) => {
+                            error!("Supervisor listener error: {err}");
+                            thread::sleep(CONTROL_ACCEPT_RETRY_DELAY);
                         }
                     }
                 }
-                if let Err(err) = self.daemon.start_service(&service_name, service_config)
-                {
-                    error!(
-                        "Service '{service_name}' failed to start during boot: {err}. Continuing; monitor will retry per its restart policy."
-                    );
-                    continue;
-                }
+            })?;
+        Ok(())
+    }
 
-                if let Some(ref spawn) = service_config.spawn
-                    && let Some(SpawnMode::Dynamic) = spawn.mode
-                    && let Ok(pid_file) = self.daemon.pid_file_handle().lock()
-                    && let Some(&pid) = pid_file.services().get(&service_name)
+    /// Handles a single control connection: authenticates, reads one command, and
+    /// dispatches it. Reads answer from the shared cache; mutations serialize
+    /// through the owner thread.
+    fn serve_connection(
+        mut stream: std::os::unix::net::UnixStream,
+        read_ctx: ReadContext,
+        mutation_tx: mpsc::Sender<MutationRequest>,
+    ) {
+        if let Err(err) = ipc::authenticate_peer(&stream) {
+            warn!("Rejected unauthorized control connection: {err}");
+            let _ = ipc::write_response(
+                &mut stream,
+                &ControlResponse::Error(err.to_string()),
+            );
+            return;
+        }
+
+        let command = match ipc::read_command(&mut stream) {
+            Ok(command) => command,
+            Err(ipc::ControlError::Io(err))
+                if err.kind() == io::ErrorKind::UnexpectedEof =>
+            {
+                return;
+            }
+            Err(err) => {
+                warn!("Invalid supervisor command: {err}");
+                let _ = ipc::write_response(
+                    &mut stream,
+                    &ControlResponse::Error(err.to_string()),
+                );
+                return;
+            }
+        };
+        debug!("Supervisor received command: {:?}", command);
+        match &command {
+            ControlCommand::StopProject { project }
+            | ControlCommand::Stop {
+                service: None,
+                project: Some(project),
+            } => {
+                if let Ok(projects) = read_ctx.boot_projects.read()
+                    && let Some(daemon) = projects.get(project)
                 {
-                    self.spawn_manager
-                        .register_service_pid(service_name.clone(), pid);
+                    daemon.cancel_boot();
+                }
+            }
+            ControlCommand::Shutdown
+            | ControlCommand::Stop {
+                service: None,
+                project: None,
+            } => {
+                if let Ok(projects) = read_ctx.boot_projects.read() {
+                    for daemon in projects.values() {
+                        daemon.cancel_boot();
+                    }
+                }
+            }
+            _ => {}
+        }
+        if matches!(&command, ControlCommand::Shutdown) {
+            match ipc::peer_pid(&stream) {
+                Ok(pid) => info!("Supervisor shutdown requested by client PID {pid}"),
+                Err(err) => {
+                    warn!("Supervisor shutdown requested by unknown client: {err}")
                 }
             }
         }
-        self.daemon.ensure_monitoring()?;
+
+        if let ControlCommand::Logs { .. } = command {
+            Self::serve_logs(stream, command, &read_ctx);
+            return;
+        }
+
+        if let ControlCommand::BootStream = command {
+            Self::serve_boot_stream(stream, &read_ctx);
+            return;
+        }
+
+        if let Some(response) = Self::answer_read(&command, &read_ctx) {
+            let _ = ipc::write_response(&mut stream, &response);
+            return;
+        }
+
+        if read_ctx.upgrading.load(Ordering::Acquire) {
+            let response =
+                ControlResponse::Diag(Box::new(crate::upgrade::environment_unsafe(
+                    "the supervisor is committing another live upgrade",
+                )));
+            let _ = ipc::write_response(&mut stream, &response);
+            return;
+        }
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let (delivered_tx, delivered_rx) = mpsc::channel();
+        let request = MutationRequest {
+            command,
+            reply: reply_tx,
+            delivered: delivered_rx,
+        };
+        if mutation_tx.send(request).is_err() {
+            let _ = ipc::write_response(
+                &mut stream,
+                &ControlResponse::Error("supervisor is shutting down".into()),
+            );
+            return;
+        }
+        match reply_rx.recv() {
+            Ok(response) => {
+                let delivered = ipc::write_response(&mut stream, &response).is_ok();
+                let _ = delivered_tx.send(delivered);
+            }
+            Err(_) => {
+                let delivered = ipc::write_response(
+                    &mut stream,
+                    &ControlResponse::Error(
+                        "supervisor dropped the command before replying".into(),
+                    ),
+                )
+                .is_ok();
+                let _ = delivered_tx.send(delivered);
+            }
+        }
+    }
+
+    /// Answers read-only commands directly from shared state, or returns `None`
+    /// when the command must go through the single-writer owner thread.
+    fn answer_read(
+        command: &ControlCommand,
+        read_ctx: &ReadContext,
+    ) -> Option<ControlResponse> {
+        match command {
+            ControlCommand::Status { live: false } => {
+                Some(ControlResponse::Status(read_ctx.status_cache.snapshot()))
+            }
+            ControlCommand::Version => {
+                Some(ControlResponse::DaemonVersion(read_ctx.version.clone()))
+            }
+            ControlCommand::CurrentOp => {
+                Some(ControlResponse::CurrentOp(read_ctx.op_slot.report()))
+            }
+            ControlCommand::Inspect {
+                unit,
+                project,
+                live: false,
+                ..
+            } => Some(Self::inspect_from_cache(unit, project.as_deref(), read_ctx)),
+            _ => None,
+        }
+    }
+
+    /// Builds an inspect response from the cached snapshot without touching
+    /// mutation state or the metrics store.
+    fn inspect_from_cache(
+        unit: &str,
+        project: Option<&str>,
+        read_ctx: &ReadContext,
+    ) -> ControlResponse {
+        let snapshot = read_ctx.status_cache.snapshot();
+        let matching: Vec<_> = snapshot
+            .units
+            .iter()
+            .filter(|status| unit_matches_selector(status, unit, project))
+            .cloned()
+            .collect();
+        if project.is_none() && matching.len() > 1 {
+            let projects = matching
+                .iter()
+                .filter_map(|unit| {
+                    unit.project.as_ref().map(|project| project.id.as_str())
+                })
+                .collect::<BTreeSet<_>>();
+            if projects.len() > 1 {
+                return ControlResponse::Error(format!(
+                    "service '{unit}' exists in multiple projects ({}); pass --project to choose one",
+                    projects.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
+        ControlResponse::Inspect(Box::new(InspectPayload {
+            unit: matching.into_iter().next(),
+            samples: Vec::new(),
+        }))
+    }
+
+    /// Streams logs on the connection worker using the cached snapshot for target
+    /// resolution, so a wedged mutation never blocks a `logs` request.
+    /// Streams boot progress to a subscriber: replays every frame recorded so
+    /// far, then follows live frames until the terminal `Done`. Race-free — a
+    /// client that connects after boot still receives the whole journal.
+    fn serve_boot_stream(
+        mut stream: std::os::unix::net::UnixStream,
+        read_ctx: &ReadContext,
+    ) {
+        let journal = &read_ctx.boot_journal;
+        let mut seen = 0usize;
+        loop {
+            let batch = journal.wait_from(seen);
+            if batch.is_empty() {
+                break;
+            }
+            seen += batch.len();
+            let mut done = false;
+            for frame in batch {
+                done |= frame.is_done();
+                let Ok(line) = serde_json::to_string(&frame) else {
+                    return;
+                };
+                if writeln!(stream, "{line}").is_err() {
+                    return;
+                }
+            }
+            let _ = stream.flush();
+            if done {
+                break;
+            }
+        }
+    }
+
+    fn serve_logs(
+        mut stream: std::os::unix::net::UnixStream,
+        command: ControlCommand,
+        read_ctx: &ReadContext,
+    ) {
+        let ControlCommand::Logs {
+            service,
+            project,
+            lines,
+            kind,
+            follow,
+            since,
+            until,
+            grep,
+            all,
+            structured,
+        } = command
+        else {
+            return;
+        };
+
+        let filter = match crate::logs::LogFilter::from_parts(
+            since.as_deref(),
+            until.as_deref(),
+            grep.as_deref(),
+            all,
+            chrono::Utc::now(),
+        ) {
+            Ok(filter) => filter,
+            Err(err) => {
+                let _ = writeln!(stream, "{err}");
+                return;
+            }
+        };
+
+        let request = SupervisorLogRequest {
+            snapshot: read_ctx.status_cache.snapshot(),
+            service,
+            project,
+            lines,
+            kind: kind.as_deref(),
+            follow,
+            filter,
+            structured,
+            stream: &stream,
+        };
+        if let Err(err) = Supervisor::handle_logs_command(request) {
+            error!("Supervisor logs command failed: {err}");
+            let _ = writeln!(stream, "{err}");
+        }
+    }
+
+    /// Sets or clears close-on-exec for one supervisor-owned descriptor.
+    fn set_descriptor_cloexec(fd: libc::c_int, enabled: bool) -> io::Result<()> {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let next = if enabled {
+            flags | libc::FD_CLOEXEC
+        } else {
+            flags & !libc::FD_CLOEXEC
+        };
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Captures one project's parsed manifest and quiesced daemon state.
+    fn project_handoff(
+        daemon: &Daemon,
+        config_path: &Path,
+        mode: ProjectRunMode,
+        active: bool,
+    ) -> Result<HandoffProject, ProcessManagerError> {
+        let state = daemon.handoff_state()?;
+        let config = daemon.config();
+        for process in &state.processes {
+            let Some(service) = config.services.get(&process.service) else {
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: process.service.clone(),
+                    source: io::Error::other(
+                        "managed process is absent from the active manifest",
+                    ),
+                });
+            };
+            if service.effective_logs(&config.logs).sink == LogSink::File
+                && !crate::logs::service_log_handoff_ready(
+                    &config.project.id,
+                    &process.service,
+                )
+            {
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: process.service.clone(),
+                    source: io::Error::other(
+                        "managed stdout or stderr pipe is unavailable for handoff",
+                    ),
+                });
+            }
+        }
+        Ok(HandoffProject {
+            project_id: config.project.id.clone(),
+            config_path: config_path.to_path_buf(),
+            config_hash: ipc::manifest_content_hash(config_path).ok_or_else(|| {
+                ProcessManagerError::ServiceStartError {
+                    service: config.project.id.clone(),
+                    source: io::Error::other("could not hash the active manifest"),
+                }
+            })?,
+            mode,
+            active,
+            daemon: state,
+        })
+    }
+
+    /// Stops monitor threads so process identity and restart bookkeeping cannot
+    /// change while a handoff record is being built.
+    fn quiesce_project_monitors(&self) {
+        self.daemon.shutdown_monitor();
+        for project in self.extra_projects.values() {
+            project.daemon.shutdown_monitor();
+        }
+    }
+
+    /// Restarts project monitors after a handoff attempt is cancelled.
+    fn resume_project_monitors(&self) {
+        if self.primary_active
+            && let Err(err) = self.daemon.ensure_monitoring()
+        {
+            error!("Failed to resume primary monitor after upgrade cancellation: {err}");
+        }
+        for (project_id, project) in &self.extra_projects {
+            if let Err(err) = project.daemon.ensure_monitoring() {
+                error!(
+                    "Failed to resume monitor for project '{project_id}' after upgrade cancellation: {err}"
+                );
+            }
+        }
+    }
+
+    /// Validates runtime suitability, quiesces mutable ownership, and persists a
+    /// complete descriptor-backed supervisor handoff.
+    fn prepare_upgrade(
+        &self,
+        binary: &Path,
+        runtime_lock: &File,
+        listener: &std::os::unix::net::UnixListener,
+    ) -> Result<PreparedUpgrade, Box<crate::diag::Diagnostic>> {
+        let target = UpgradeTarget::inspect(binary, &LiveUpgradeInfo::current())?;
+        if self.pipe_stderr {
+            return Err(Box::new(crate::upgrade::environment_unsafe(
+                "service stderr is attached to supervisor stdout; restart without `--stderr` before upgrading",
+            )));
+        }
+        let cron_gate = self
+            .cron_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self
+            .upgrading
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(Box::new(crate::upgrade::environment_unsafe(
+                "another live upgrade is already committing",
+            )));
+        }
+        if let Some(job) = self
+            .cron_manager
+            .get_all_jobs()
+            .into_iter()
+            .find(|job| job.currently_running)
+        {
+            self.upgrading.store(false, Ordering::Release);
+            return Err(Box::new(crate::upgrade::environment_unsafe(format!(
+                "cron unit `{}` is currently running",
+                job.service_name
+            ))));
+        }
+        let active_children = self.spawn_manager.active_child_count();
+        if active_children > 0 {
+            self.upgrading.store(false, Ordering::Release);
+            return Err(Box::new(crate::upgrade::environment_unsafe(format!(
+                "{active_children} dynamic child process(es) are still active"
+            ))));
+        }
+        drop(cron_gate);
+
+        self.quiesce_project_monitors();
+        let prepared = (|| {
+            let primary = Self::project_handoff(
+                &self.daemon,
+                &self.config_path,
+                self.primary_project_mode,
+                self.primary_active,
+            )
+            .map_err(|err| {
+                Box::new(crate::upgrade::environment_unsafe(err.to_string()))
+            })?;
+            let mut projects = BTreeMap::new();
+            for (project_id, project) in &self.extra_projects {
+                let handoff = Self::project_handoff(
+                    &project.daemon,
+                    &project.config_path,
+                    project.mode,
+                    true,
+                )
+                .map_err(|err| {
+                    Box::new(crate::upgrade::environment_unsafe(err.to_string()))
+                })?;
+                projects.insert(project_id.clone(), handoff);
+            }
+            let log_pipes = crate::logs::prepare_log_pipe_handoff().map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(err.to_string()))
+            })?;
+            Self::set_descriptor_cloexec(runtime_lock.as_raw_fd(), false).map_err(
+                |err| Box::new(crate::upgrade::handoff_failed(err.to_string())),
+            )?;
+            Self::set_descriptor_cloexec(listener.as_raw_fd(), false).map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(err.to_string()))
+            })?;
+            let source_binary = std::env::current_exe()
+                .and_then(std::fs::canonicalize)
+                .map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(format!(
+                    "could not resolve the resident binary for rollback: {err}"
+                )))
+            })?;
+            let state = SupervisorHandoff {
+                schema: HANDOFF_SCHEMA_VERSION,
+                protocol: LIVE_REEXEC_PROTOCOL,
+                source_binary,
+                source_version: LiveUpgradeInfo::current().version,
+                target_version: target.info.version.clone(),
+                rollback_reason: None,
+                lock_fd: runtime_lock.as_raw_fd(),
+                listener_fd: listener.as_raw_fd(),
+                service_filter: self.service_filter.clone(),
+                pipe_stderr: self.pipe_stderr,
+                primary,
+                projects,
+                log_pipes,
+            };
+            let path = state.persist().map_err(|err| {
+                Box::new(crate::upgrade::handoff_failed(err.to_string()))
+            })?;
+            Ok(PreparedUpgrade {
+                target,
+                path,
+                config: self.config_path.clone(),
+            })
+        })();
+        if prepared.is_err() {
+            crate::logs::cancel_log_pipe_handoff();
+            let _ = Self::set_descriptor_cloexec(runtime_lock.as_raw_fd(), true);
+            let _ = Self::set_descriptor_cloexec(listener.as_raw_fd(), true);
+            self.resume_project_monitors();
+            self.upgrading.store(false, Ordering::Release);
+        }
+        prepared
+    }
+
+    /// Executes the validated replacement binary in the current supervisor PID.
+    fn execute_upgrade(prepared: &PreparedUpgrade) -> io::Result<()> {
+        let values = [
+            prepared.target.path.to_string_lossy().to_string(),
+            "supervise".to_string(),
+            "--config".to_string(),
+            prepared.config.to_string_lossy().to_string(),
+            "--handoff".to_string(),
+            prepared.path.to_string_lossy().to_string(),
+        ];
+        let args = values
+            .iter()
+            .map(|value| {
+                CString::new(value.as_str()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "upgrade argument contains a NUL byte",
+                    )
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        nix::unistd::execv(&args[0], &args)
+            .map(|_| ())
+            .map_err(io::Error::other)
+    }
+
+    /// Restores the resident image after its final `exec` call failed.
+    fn recover_upgrade(
+        &self,
+        prepared: &PreparedUpgrade,
+        runtime_lock: &File,
+        listener: &std::os::unix::net::UnixListener,
+    ) {
+        if let Err(err) = std::fs::remove_file(&prepared.path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            warn!(
+                "Failed to remove cancelled handoff {:?}: {err}",
+                prepared.path
+            );
+        }
+        crate::logs::cancel_log_pipe_handoff();
+        let _ = Self::set_descriptor_cloexec(runtime_lock.as_raw_fd(), true);
+        let _ = Self::set_descriptor_cloexec(listener.as_raw_fd(), true);
+        self.resume_project_monitors();
+        self.upgrading.store(false, Ordering::Release);
+    }
+
+    /// Applies one lifecycle timeout policy to every managed project daemon.
+    fn apply_timeouts(&mut self, timeouts: SupervisorTimeouts) {
+        self.daemon.set_timeouts(timeouts.clone());
+        for project in self.extra_projects.values() {
+            project.daemon.set_timeouts(timeouts.clone());
+        }
+        self.timeouts = timeouts;
+    }
+
+    /// Runs the supervisor event loop.
+    fn run_internal(&mut self) -> Result<(), SupervisorError> {
+        let loaded = self.handoff.take();
+        let resumed = loaded.is_some();
+        let (runtime_lock, listener, handoff_path) = match loaded {
+            Some(LoadedHandoff { path, state }) => {
+                if let Some(reason) = &state.rollback_reason {
+                    error!(
+                        "Replacement supervisor failed; resumed {} after rollback: {reason}",
+                        state.source_version
+                    );
+                }
+                let lock = unsafe { File::from_raw_fd(state.lock_fd) };
+                let listener = unsafe {
+                    std::os::unix::net::UnixListener::from_raw_fd(state.listener_fd)
+                };
+                Self::set_descriptor_cloexec(lock.as_raw_fd(), true)?;
+                Self::set_descriptor_cloexec(listener.as_raw_fd(), true)?;
+                (lock, listener, Some(path))
+            }
+            None => {
+                let lock = ipc::lock_supervisor_runtime()?;
+                ipc::cleanup_runtime()?;
+                let listener = ipc::bind_control_socket()?;
+                (lock, listener, None)
+            }
+        };
+
+        // Load (or create with defaults) the supervisor's OWN config — distinct
+        // from any project manifest — and apply its log-rotation defaults as the
+        // process-wide fallback beneath per-service/per-project `logs` blocks,
+        // before any service launches and opens its log files.
+        let supervisor_config =
+            crate::config::supervisor::SupervisorConfig::load_or_create();
+        self.apply_timeouts(supervisor_config.timeouts.clone());
+        crate::config::set_log_defaults(
+            supervisor_config.logs.max_bytes,
+            supervisor_config.logs.max_files,
+        );
+
+        ipc::write_config_hint(&self.config_path)?;
+        ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
+
+        match self.collect_aggregate_snapshot(false) {
+            Ok(snapshot) => self.status_cache.replace(snapshot),
+            Err(err) => error!("failed to build pre-boot status snapshot: {err}"),
+        }
+
+        let (mutation_tx, mutation_rx) = mpsc::channel::<MutationRequest>();
+        let read_ctx = ReadContext {
+            status_cache: self.status_cache.clone(),
+            op_slot: self.op_slot.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            boot_journal: self.boot_journal.clone(),
+            boot_projects: Arc::clone(&self.boot_projects),
+            upgrading: Arc::clone(&self.upgrading),
+        };
+        Self::spawn_acceptor(listener.try_clone()?, read_ctx, mutation_tx)?;
+
+        if let Ok(socket_path) = ipc::socket_path() {
+            info!("systemg supervisor listening on {:?}", socket_path);
+        }
+
+        if resumed {
+            if self.primary_active {
+                self.daemon.ensure_monitoring()?;
+            }
+            for project in self.extra_projects.values() {
+                project.daemon.ensure_monitoring()?;
+            }
+            self.boot_journal.push(BootFrame::Done {
+                started: 0,
+                failed: 0,
+            });
+        } else {
+            self.boot_primary_services()?;
+            self.daemon.ensure_monitoring()?;
+        }
 
         let config_handle = self.daemon.config();
         let pid_handle = self.daemon.pid_file_handle();
         let state_handle = self.daemon.service_state_handle();
 
-        match collect_runtime_snapshot(
-            Arc::clone(&config_handle),
-            &pid_handle,
-            &state_handle,
-            Some(&self.metrics_store),
-            Some(&self.spawn_manager),
-            Self::status_snapshot_mode(config_handle.as_ref()),
-        ) {
-            Ok(mut snapshot) => {
-                Self::apply_project_metadata(
-                    &mut snapshot,
-                    self.primary_project_mode,
-                    &self.config_path,
-                );
-                self.status_cache.replace(snapshot);
-            }
+        // Seed the cache from ALL managed projects, not just the primary, so a
+        // multi-project boot (which registers extra projects before this point)
+        // is reflected in status from the first read.
+        match self.collect_aggregate_snapshot(false) {
+            Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to build initial status snapshot: {err}"),
         }
 
         let cache_clone = self.status_cache.clone();
-        let config_for_refresh = Arc::clone(&config_handle);
-        let pid_for_refresh = Arc::clone(&pid_handle);
-        let state_for_refresh = Arc::clone(&state_handle);
-        let metrics_for_refresh = self.metrics_store.clone();
-        let spawn_manager_for_refresh = self.spawn_manager.clone();
         let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
         let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
-        let refresh_project_mode = self.primary_project_mode;
-        let refresh_config_path = self.config_path.clone();
+        let refresh_projects = Arc::clone(&self.cron_projects);
+        let refresh_metrics = self.metrics_store.clone();
+        let refresh_spawn = self.spawn_manager.clone();
         if !matches!(refresh_mode, StatusSnapshotMode::Off) {
             self.status_refresher = Some(StatusRefresher::spawn(
                 cache_clone,
                 refresh_interval,
                 move || {
-                    let mut snapshot = collect_runtime_snapshot(
-                        Arc::clone(&config_for_refresh),
-                        &pid_for_refresh,
-                        &state_for_refresh,
-                        Some(&metrics_for_refresh),
-                        Some(&spawn_manager_for_refresh),
+                    Supervisor::collect_projects_snapshot(
+                        &refresh_projects,
+                        &refresh_metrics,
+                        &refresh_spawn,
                         refresh_mode,
-                    )?;
-                    Supervisor::apply_project_metadata(
-                        &mut snapshot,
-                        refresh_project_mode,
-                        &refresh_config_path,
-                    );
-                    Ok(snapshot)
+                    )
                 },
-            ));
+            )?);
         }
 
         let metrics_handle = self.metrics_store.clone();
@@ -1068,14 +2672,24 @@ impl Supervisor {
             Arc::clone(&config_handle),
             pid_handle,
             state_handle,
-        ));
+        )?);
+
         let cron_manager = self.cron_manager.clone();
         let cron_projects = Arc::clone(&self.cron_projects);
         let metrics_store = self.metrics_store.clone();
+        let upgrading = Arc::clone(&self.upgrading);
+        let cron_gate = Arc::clone(&self.cron_gate);
 
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_secs(1));
+        thread::Builder::new()
+            .name("sysg-cron".to_string())
+            .spawn(move || loop {
+                thread::sleep(CRON_TICK_INTERVAL);
+                let _gate = cron_gate
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if upgrading.load(Ordering::Acquire) {
+                    continue;
+                }
 
                 let due_jobs = cron_manager.get_due_job_refs();
                 if !due_jobs.is_empty() {
@@ -1089,22 +2703,22 @@ impl Supervisor {
 
                     for due_job in due_jobs {
                         let project = projects.iter().find(|project| {
-                            project
-                                .config
-                                .services
-                                .get(&due_job.service_name)
-                                .is_some_and(|service_config| {
-                                    service_config.compute_hash() == due_job.service_hash
-                                })
+                            project.config.services.contains_key(&due_job.service_name)
+                                && project.config.state_key(&due_job.service_name)
+                                    == due_job.service_hash
                         });
 
                         let Some(project) = project else {
+                            if !cron_manager.contains_job_hash(&due_job.service_hash) {
+                                continue;
+                            }
                             error!(
                                 "Failed to resolve cron job '{}' ({}) to a managed project",
                                 due_job.service_name, due_job.service_hash
                             );
-                            cron_manager.mark_job_completed_by_hash(
+                            cron_manager.complete_job_run(
                                 &due_job.service_hash,
+                                due_job.started_at,
                                 CronExecutionStatus::Failed(
                                     "Cron job project is not managed".to_string(),
                                 ),
@@ -1113,6 +2727,12 @@ impl Supervisor {
                             );
                             continue;
                         };
+
+                        if project.daemon.boot_cancelled()
+                            || !cron_manager.contains_job_hash(&due_job.service_hash)
+                        {
+                            continue;
+                        }
 
                         if let Some(service_config) =
                             project.config.services.get(&due_job.service_name).cloned()
@@ -1129,15 +2749,20 @@ impl Supervisor {
                             let daemon = project.daemon.clone();
                             let metrics_store_clone = metrics_store.clone();
                             let service_hash = due_job.service_hash.clone();
+                            let run_started_at = due_job.started_at;
 
-                            thread::spawn(move || {
-                                use crate::daemon::PidFile;
+                            let failed_manager = cron_manager_clone.clone();
+                            let failed_hash = service_hash.clone();
+                            if let Err(err) = thread::Builder::new()
+                                .name(format!("sysg-cron-{job_name_clone}"))
+                                .spawn(move || {
                                 match daemon
                                     .start_service(&job_name_clone, &service_config)
                                 {
                                     Ok(ServiceReadyState::CompletedSuccess) => {
-                                        cron_manager_clone.annotate_job_execution(
-                                            &job_name_clone,
+                                        cron_manager_clone.annotate_job_run(
+                                            &service_hash,
+                                            run_started_at,
                                             None,
                                             user.clone(),
                                             command.clone(),
@@ -1147,45 +2772,37 @@ impl Supervisor {
                                             job_name_clone
                                         );
 
-                                        let metrics = if let Ok(guard) =
-                                            metrics_store_clone.try_read()
-                                        {
-                                            guard
-                                                .snapshot_unit(&service_hash)
-                                                .unwrap_or_default()
-                                        } else {
-                                            vec![]
-                                        };
-
-                                        cron_manager_clone.mark_job_completed_by_hash(
+                                        let metrics = cron_run_metrics(
+                                            &metrics_store_clone,
                                             &service_hash,
+                                            run_started_at,
+                                        );
+                                        persist_cron_state(
+                                            &daemon,
+                                            &service_hash,
+                                            &job_name_clone,
+                                            ServiceLifecycleStatus::ExitedSuccessfully,
+                                            Some(0),
+                                        );
+                                        cron_manager_clone.complete_job_run(
+                                            &service_hash,
+                                            run_started_at,
                                             CronExecutionStatus::Success,
                                             Some(0),
                                             metrics,
                                         );
-                                        if let Ok(mut state_file) =
-                                                        ServiceStateFile::load()
-                                                        && let Err(err) = state_file.set(
-                                                            &service_hash,
-                                                            ServiceLifecycleStatus::ExitedSuccessfully,
-                                                            None,
-                                                            Some(0),
-                                                            None,
-                                                        )
-                                                    {
-                                                        warn!("Failed to persist cron job '{}' exit state: {}", job_name_clone, err);
-                                                    }
                                     }
                                     Ok(ServiceReadyState::Running) => {
-                                        thread::sleep(Duration::from_millis(50));
-                                        match PidFile::reload() {
-                                            Ok(pid_file) => {
-                                                if let Some(pid) =
-                                                    pid_file.get(&job_name_clone)
-                                                {
+                                        let pid = daemon
+                                            .pid_file_handle()
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .pid_for(&job_name_clone);
+                                        if let Some(pid) = pid {
                                                     cron_manager_clone
-                                                        .annotate_job_execution_by_hash(
+                                                        .annotate_job_run(
                                                             &service_hash,
+                                                            run_started_at,
                                                             Some(pid),
                                                             user.clone(),
                                                             command.clone(),
@@ -1212,111 +2829,86 @@ impl Supervisor {
                                                                                 "Cron job '{}' failed: {}",
                                                                                 job_name_clone, reason
                                                                             ),
+                                                                            CronExecutionStatus::Interrupted(reason) => warn!(
+                                                                                "Cron job '{}' was interrupted: {}",
+                                                                                job_name_clone, reason
+                                                                            ),
                                                                             CronExecutionStatus::OverlapError => warn!(
                                                                                 "Cron job '{}' reported overlap state unexpectedly",
                                                                                 job_name_clone
                                                                             ),
                                                                         }
 
-                                                            let metrics =
-                                                                if let Ok(guard) =
-                                                                    metrics_store_clone
-                                                                        .try_read()
-                                                                {
-                                                                    guard
-                                                                    .snapshot_unit(
-                                                                        &service_hash,
-                                                                    )
-                                                                    .unwrap_or_default()
-                                                                } else {
-                                                                    vec![]
-                                                                };
-
-                                                            cron_manager_clone.mark_job_completed_by_hash(
-                                                                            &service_hash,
-                                                                            status.clone(),
-                                                                            exit_code,
-                                                                            metrics,
-                                                                        );
-                                                            if let Ok(mut state_file) =
-                                                                ServiceStateFile::load()
-                                                            {
-                                                                let lifecycle_status = match status {
-                                                                                CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
-                                                                                CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
-                                                                            };
-                                                                if let Err(err) =
-                                                                    state_file.set(
-                                                                        &service_hash,
-                                                                        lifecycle_status,
-                                                                        None,
-                                                                        exit_code,
-                                                                        None,
-                                                                    )
-                                                                {
-                                                                    warn!(
-                                                                        "Failed to persist cron job '{}' exit state: {}",
-                                                                        job_name_clone,
-                                                                        err
-                                                                    );
-                                                                }
-                                                            }
+                                                            let metrics = cron_run_metrics(
+                                                                &metrics_store_clone,
+                                                                &service_hash,
+                                                                run_started_at,
+                                                            );
+                                                            let lifecycle_status = match status {
+                                                                CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
+                                                                CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
+                                                                CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
+                                                            };
+                                                            persist_cron_state(
+                                                                &daemon,
+                                                                &service_hash,
+                                                                &job_name_clone,
+                                                                lifecycle_status,
+                                                                exit_code,
+                                                            );
+                                                            clear_cron_pid(
+                                                                &daemon,
+                                                                &job_name_clone,
+                                                                pid,
+                                                            );
+                                                            cron_manager_clone.complete_job_run(
+                                                                &service_hash,
+                                                                run_started_at,
+                                                                status,
+                                                                exit_code,
+                                                                metrics,
+                                                            );
                                                         }
                                                         Err(e) => {
                                                             error!(
                                                                 "Error waiting for cron job '{}': {}",
                                                                 job_name_clone, e
                                                             );
-                                                            let metrics =
-                                                                if let Ok(guard) =
-                                                                    metrics_store_clone
-                                                                        .try_read()
-                                                                {
-                                                                    guard
-                                                                    .snapshot_unit(
-                                                                        &service_hash,
-                                                                    )
-                                                                    .unwrap_or_default()
-                                                                } else {
-                                                                    vec![]
-                                                                };
-
-                                                            cron_manager_clone.mark_job_completed_by_hash(
-                                                                            &service_hash,
-                                                                            CronExecutionStatus::Failed(
-                                                                                e.to_string(),
-                                                                            ),
-                                                                            None,
-                                                                            metrics,
-                                                                        );
-                                                            if let Ok(mut state_file) = ServiceStateFile::load()
-                                                                            && let Err(err) = state_file.set(
-                                                                                &service_hash,
-                                                                                ServiceLifecycleStatus::ExitedWithError,
-                                                                                None,
-                                                                                None,
-                                                                                None,
-                                                                            )
-                                                                        {
-                                                                            warn!("Failed to persist cron job '{}' error state: {}", job_name_clone, err);
-                                                                        }
+                                                            let metrics = cron_run_metrics(
+                                                                &metrics_store_clone,
+                                                                &service_hash,
+                                                                run_started_at,
+                                                            );
+                                                            persist_cron_state(
+                                                                &daemon,
+                                                                &service_hash,
+                                                                &job_name_clone,
+                                                                ServiceLifecycleStatus::ExitedWithError,
+                                                                None,
+                                                            );
+                                                            clear_cron_pid(
+                                                                &daemon,
+                                                                &job_name_clone,
+                                                                pid,
+                                                            );
+                                                            cron_manager_clone.complete_job_run(
+                                                                &service_hash,
+                                                                run_started_at,
+                                                                CronExecutionStatus::Failed(
+                                                                    e.to_string(),
+                                                                ),
+                                                                None,
+                                                                metrics,
+                                                            );
                                                         }
-                                                    }
-                                                    if let Ok(mut pid_file) =
-                                                        PidFile::load()
-                                                        && let Err(err) = pid_file
-                                                            .remove(&job_name_clone)
-                                                    {
-                                                        debug!(
-                                                            "Failed to remove cron job '{}' from PID file: {}",
-                                                            job_name_clone, err
-                                                        );
                                                     }
                                                 } else {
                                                     let already_completed = if let Ok(
                                                         state_file,
                                                     ) =
-                                                        ServiceStateFile::load()
+                                                        ServiceStateFile::load(
+                                                            daemon.store(),
+                                                        )
                                                         && let Some(entry) =
                                                             state_file.get(&service_hash)
                                                     {
@@ -1332,27 +2924,23 @@ impl Supervisor {
                                                             job_name_clone
                                                         );
                                                         cron_manager_clone
-                                                                        .annotate_job_execution_by_hash(
+                                                                        .annotate_job_run(
                                                                             &service_hash,
+                                                                            run_started_at,
                                                                             None,
                                                                             user.clone(),
                                                                             command.clone(),
                                                                         );
-                                                        let metrics = if let Ok(guard) =
-                                                            metrics_store_clone.try_read()
-                                                        {
-                                                            guard
-                                                                .snapshot_unit(
-                                                                    &service_hash,
-                                                                )
-                                                                .unwrap_or_default()
-                                                        } else {
-                                                            vec![]
-                                                        };
+                                                        let metrics = cron_run_metrics(
+                                                            &metrics_store_clone,
+                                                            &service_hash,
+                                                            run_started_at,
+                                                        );
 
                                                         cron_manager_clone
-                                                            .mark_job_completed_by_hash(
+                                                            .complete_job_run(
                                                             &service_hash,
+                                                            run_started_at,
                                                             CronExecutionStatus::Success,
                                                             Some(0),
                                                             metrics,
@@ -1363,54 +2951,24 @@ impl Supervisor {
                                                             job_name_clone,
                                                             project_id_clone
                                                         );
-                                                        cron_manager_clone.mark_job_completed_by_hash(
-                                                                        &service_hash,
-                                                                        CronExecutionStatus::Failed(
-                                                                            "Failed to get PID from PID file"
-                                                                                .to_string(),
-                                                                        ),
-                                                                        None,
-                                                                        vec![],
-                                                                    );
-                                                        if let Ok(mut state_file) =
-                                                                        ServiceStateFile::load()
-                                                                        && let Err(err) = state_file.set(
-                                                                            &service_hash,
-                                                                            ServiceLifecycleStatus::ExitedWithError,
-                                                                            None,
-                                                                            None,
-                                                                            None,
-                                                                        )
-                                                                    {
-                                                                        warn!("Failed to persist cron job '{}' error state: {}", job_name_clone, err);
-                                                                    }
+                                                        persist_cron_state(
+                                                            &daemon,
+                                                            &service_hash,
+                                                            &job_name_clone,
+                                                            ServiceLifecycleStatus::ExitedWithError,
+                                                            None,
+                                                        );
+                                                        cron_manager_clone.complete_job_run(
+                                                            &service_hash,
+                                                            run_started_at,
+                                                            CronExecutionStatus::Failed(
+                                                                "Failed to get PID from PID file"
+                                                                    .to_string(),
+                                                            ),
+                                                            None,
+                                                            vec![],
+                                                        );
                                                     }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                error!(
-                                                    "Failed to reload PID file for cron job '{}': {}",
-                                                    job_name_clone, e
-                                                );
-                                                cron_manager_clone
-                                                    .annotate_job_execution_by_hash(
-                                                        &service_hash,
-                                                        None,
-                                                        user.clone(),
-                                                        command.clone(),
-                                                    );
-                                                cron_manager_clone.mark_job_completed_by_hash(
-                                                                &service_hash,
-                                                                CronExecutionStatus::Failed(
-                                                                    format!(
-                                                                        "Failed to reload PID file: {}",
-                                                                        e
-                                                                    ),
-                                                                ),
-                                                                None,
-                                                                vec![],
-                                                            );
-                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -1419,167 +2977,152 @@ impl Supervisor {
                                             job_name_clone, project_id_clone, e
                                         );
                                         cron_manager_clone
-                                            .annotate_job_execution_by_hash(
+                                            .annotate_job_run(
                                                 &service_hash,
+                                                run_started_at,
                                                 None,
                                                 user.clone(),
                                                 command.clone(),
                                             );
-                                        cron_manager_clone.mark_job_completed_by_hash(
+                                        cron_manager_clone.complete_job_run(
                                             &service_hash,
+                                            run_started_at,
                                             CronExecutionStatus::Failed(e.to_string()),
                                             None,
                                             vec![],
                                         );
                                     }
                                 }
-                            });
-                        }
-                    }
-                }
-            }
-        });
-
-        if let Ok(socket_path) = ipc::socket_path() {
-            info!("systemg supervisor listening on {:?}", socket_path);
-        }
-
-        let mut shutdown_requested = false;
-        listener.set_nonblocking(false)?;
-
-        while !shutdown_requested {
-            match listener.accept() {
-                Ok((mut stream, _addr)) => {
-                    if let Err(err) = ipc::authenticate_peer(&stream) {
-                        warn!("Rejected unauthorized control connection: {err}");
-                        let _ = ipc::write_response(
-                            &mut stream,
-                            &ControlResponse::Error(err.to_string()),
-                        );
-                        continue;
-                    }
-                    match ipc::read_command(&mut stream) {
-                        Ok(command) => {
-                            let should_shutdown =
-                                matches!(command, ControlCommand::Shutdown);
-                            debug!("Supervisor received command: {:?}", command);
-                            if let ControlCommand::Logs {
-                                service,
-                                project,
-                                lines,
-                                kind,
-                                follow,
-                                since,
-                                until,
-                                grep,
-                                all,
-                                structured,
-                            } = command
+                                })
                             {
-                                let filter = match crate::logs::LogFilter::from_parts(
-                                    since.as_deref(),
-                                    until.as_deref(),
-                                    grep.as_deref(),
-                                    all,
-                                    chrono::Utc::now(),
-                                ) {
-                                    Ok(filter) => filter,
-                                    Err(err) => {
-                                        let _ = writeln!(stream, "{err}");
-                                        continue;
-                                    }
-                                };
-                                let snapshot = match self.collect_configured_snapshot() {
-                                    Ok(snapshot) => {
-                                        self.status_cache.replace(snapshot.clone());
-                                        snapshot
-                                    }
-                                    Err(err) => {
-                                        error!("Supervisor logs command failed: {err}");
-                                        let _ = writeln!(stream, "{err}");
-                                        continue;
-                                    }
-                                };
-                                let pid_file = self.daemon.pid_file_handle();
-                                let mut log_stream = match stream.try_clone() {
-                                    Ok(stream) => stream,
-                                    Err(err) => {
-                                        error!(
-                                            "Failed to clone supervisor log stream: {err}"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                thread::spawn(move || {
-                                    let request = SupervisorLogRequest {
-                                        snapshot,
-                                        pid_file,
-                                        service,
-                                        project,
-                                        lines,
-                                        kind: kind.as_deref(),
-                                        follow,
-                                        filter,
-                                        structured,
-                                        stream: &log_stream,
-                                    };
-                                    if let Err(err) =
-                                        Supervisor::handle_logs_command(request)
-                                    {
-                                        error!("Supervisor logs command failed: {err}");
-                                        let _ = writeln!(log_stream, "{err}");
-                                    }
-                                });
-                                continue;
+                                error!("Failed to start cron worker: {err}");
+                                failed_manager.complete_job_run(
+                                    &failed_hash,
+                                    run_started_at,
+                                    CronExecutionStatus::Failed(format!(
+                                        "Failed to start cron worker: {err}"
+                                    )),
+                                    None,
+                                    vec![],
+                                );
                             }
-                            match self.handle_command(command) {
-                                Ok(response) => {
-                                    if let Err(err) =
-                                        ipc::write_response(&mut stream, &response)
-                                    {
-                                        error!(
-                                            "Failed to write supervisor response: {err}"
-                                        );
-                                    }
-                                    if should_shutdown {
-                                        shutdown_requested = true;
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("Supervisor command failed: {err}");
-                                    let _ = ipc::write_response(
-                                        &mut stream,
-                                        &error_response(&err),
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            warn!("Invalid supervisor command: {err}");
-                            let _ = ipc::write_response(
-                                &mut stream,
-                                &ControlResponse::Error(err.to_string()),
-                            );
                         }
                     }
                 }
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            })?;
+
+        if let Some(path) = handoff_path
+            && let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != io::ErrorKind::NotFound
+        {
+            warn!("Failed to remove completed supervisor handoff {path:?}: {err}");
+        }
+
+        loop {
+            let request = match mutation_rx.recv() {
+                Ok(request) => request,
                 Err(err) => {
-                    error!("Supervisor listener error: {err}");
-                    shutdown_requested = true;
+                    error!("Supervisor control plane ended unexpectedly: {err}");
+                    break;
                 }
+            };
+            let MutationRequest {
+                command,
+                reply,
+                delivered,
+            } = request;
+            if let ControlCommand::Upgrade { binary } = command {
+                let _op = self.op_slot.guard("upgrading supervisor");
+                match self.prepare_upgrade(Path::new(&binary), &runtime_lock, &listener) {
+                    Ok(prepared) => {
+                        let version = prepared.target.info.version.to_string();
+                        let _ = reply.send(ControlResponse::UpgradeAccepted { version });
+                        let accepted = delivered
+                            .recv_timeout(UPGRADE_ACCEPT_TIMEOUT)
+                            .unwrap_or(false);
+                        if accepted {
+                            if let Err(err) = Self::execute_upgrade(&prepared) {
+                                error!(
+                                    "Failed to execute live supervisor upgrade: {err}"
+                                );
+                                self.recover_upgrade(&prepared, &runtime_lock, &listener);
+                            }
+                        } else {
+                            warn!(
+                                "Upgrade client disconnected before acceptance was delivered"
+                            );
+                            self.recover_upgrade(&prepared, &runtime_lock, &listener);
+                        }
+                    }
+                    Err(diag) => {
+                        let _ = reply.send(ControlResponse::Diag(diag));
+                    }
+                }
+                continue;
+            }
+            let should_shutdown = matches!(command, ControlCommand::Shutdown);
+            let owns_slot = !matches!(command, ControlCommand::AddProject { .. });
+            let _op =
+                owns_slot.then(|| self.op_slot.guard(Self::mutation_label(&command)));
+            let response = match self.handle_command(command) {
+                Ok(response) => response,
+                Err(err) => {
+                    error!("Supervisor command failed: {err}");
+                    error_response(&err)
+                }
+            };
+            let _ = reply.send(response);
+            if should_shutdown {
+                info!("Supervisor shutdown request completed; ending event loop");
+                break;
             }
         }
 
+        info!("Supervisor event loop ended; stopping managed projects");
         self.shutdown_runtime()?;
         Ok(())
+    }
+
+    /// Short label describing a mutation, shown by `sysg` when the supervisor is
+    /// busy so a slow command names itself instead of spinning opaquely.
+    fn mutation_label(command: &ControlCommand) -> String {
+        match command {
+            ControlCommand::Start { service, project } => {
+                Self::target_label("starting", service.as_deref(), project.as_deref())
+            }
+            ControlCommand::Stop { service, project } => {
+                Self::target_label("stopping", service.as_deref(), project.as_deref())
+            }
+            ControlCommand::Restart {
+                service, project, ..
+            } => Self::target_label("restarting", service.as_deref(), project.as_deref()),
+            ControlCommand::StopProject { project } => {
+                format!("stopping project '{project}'")
+            }
+            ControlCommand::Spawn { name, .. } => format!("spawning '{name}'"),
+            ControlCommand::Upgrade { .. } => "upgrading supervisor".to_string(),
+            ControlCommand::Shutdown => "shutting down".to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    /// Builds a "<verb> <service|all services>[ in project '<p>']" label.
+    fn target_label(verb: &str, service: Option<&str>, project: Option<&str>) -> String {
+        let subject = match service {
+            Some(service) => format!("'{service}'"),
+            None => "all services".to_string(),
+        };
+        match project {
+            Some(project) => format!("{verb} {subject} in project '{project}'"),
+            None => format!("{verb} {subject}"),
+        }
     }
 
     /// Streams logs through the supervisor-owned control socket.
     fn handle_logs_command(
         request: SupervisorLogRequest<'_>,
     ) -> Result<(), SupervisorError> {
-        let manager = LogManager::new(request.pid_file);
+        let manager = LogManager::new();
         let requested_kind = request.kind;
 
         if let Some(service_name) = request.service {
@@ -1621,8 +3164,14 @@ impl Supervisor {
                         None
                     }
                 });
+                let unit_project = unit
+                    .project
+                    .as_ref()
+                    .map(|project| project.id.clone())
+                    .unwrap_or_else(|| crate::state_store::LOOSE_PROJECT_ID.to_string());
                 return manager
                     .stream_log_to_socket(
+                        &unit_project,
                         &unit.name,
                         pid,
                         request.lines,
@@ -1642,12 +3191,14 @@ impl Supervisor {
                 .into());
             }
 
-            let combined_exists = get_service_log_path(&service_name).exists();
-            let stdout_exists = resolve_log_path(&service_name, "stdout").exists();
-            let stderr_exists = resolve_log_path(&service_name, "stderr").exists();
+            let loose = crate::state_store::LOOSE_PROJECT_ID;
+            let combined_exists = get_service_log_path(loose, &service_name).exists();
+            let stdout_exists = resolve_log_path(loose, &service_name, "stdout").exists();
+            let stderr_exists = resolve_log_path(loose, &service_name, "stderr").exists();
             if combined_exists || stdout_exists || stderr_exists {
                 return manager
                     .stream_log_to_socket(
+                        loose,
                         &service_name,
                         None,
                         request.lines,
@@ -1668,6 +3219,47 @@ impl Supervisor {
 
         let project_groups =
             log_project_groups(&request.snapshot, request.project.as_deref());
+        if request.follow {
+            let mut projects: Vec<String> = request.project.clone().into_iter().collect();
+            let mut backlog_services = std::collections::HashSet::new();
+            for (_, units) in &project_groups {
+                for unit in units {
+                    let running = unit.process.as_ref().is_some_and(|process| {
+                        process.state == crate::status::ProcessState::Running
+                    });
+                    let project = unit
+                        .project
+                        .as_ref()
+                        .map(|project| project.id.clone())
+                        .unwrap_or_else(|| {
+                            crate::state_store::LOOSE_PROJECT_ID.to_string()
+                        });
+                    if !projects.contains(&project) {
+                        projects.push(project.clone());
+                    }
+                    if running || request.lines > 0 {
+                        backlog_services.insert((project, unit.name.clone()));
+                    }
+                }
+            }
+            projects.sort_unstable();
+            projects.dedup();
+            if projects.is_empty() {
+                return Ok(());
+            }
+            return manager
+                .stream_project_logs_to_socket(
+                    &projects,
+                    &backlog_services,
+                    request.lines,
+                    requested_kind,
+                    true,
+                    &request.filter,
+                    request.stream,
+                    request.structured,
+                )
+                .map_err(SupervisorError::from);
+        }
         let render_project_groups = project_groups.len() > 1
             || project_groups
                 .iter()
@@ -1698,17 +3290,23 @@ impl Supervisor {
                     }
                 });
 
+                let unit_project = unit
+                    .project
+                    .as_ref()
+                    .map(|project| project.id.clone())
+                    .unwrap_or_else(|| crate::state_store::LOOSE_PROJECT_ID.to_string());
+
                 if pid.is_some() {
-                    running_units.push((unit.name.clone(), pid));
+                    running_units.push((unit_project, unit.name.clone(), pid));
                 } else {
-                    offline_units.push((unit.name.clone(), pid));
+                    offline_units.push((unit_project, unit.name.clone(), pid));
                 }
             }
 
-            running_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            running_units.dedup_by(|left, right| left.0 == right.0);
-            offline_units.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-            offline_units.dedup_by(|left, right| left.0 == right.0);
+            running_units.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+            running_units.dedup_by(|left, right| left.1 == right.1);
+            offline_units.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+            offline_units.dedup_by(|left, right| left.1 == right.1);
 
             for (section, units) in [
                 (LogSection::Running, running_units),
@@ -1720,13 +3318,14 @@ impl Supervisor {
 
                 write_log_section_header(request.stream.try_clone()?, section)?;
 
-                for (service_name, pid) in units {
+                for (unit_project, service_name, pid) in units {
                     if request.structured {
                         request.stream.try_clone()?.write_all(
                             &crate::logs::service_marker_line(&service_name),
                         )?;
                     }
                     manager.stream_log_to_socket(
+                        &unit_project,
                         &service_name,
                         pid,
                         request.lines,
@@ -1772,8 +3371,19 @@ impl Supervisor {
                             "Project '{project_id}' started"
                         )));
                     }
-                    self.daemon.start_services_blocking()?;
+                    let mut projects = vec![self.daemon.config().project.id.clone()];
+                    projects.extend(self.extra_projects.keys().cloned());
+                    let mut first_error = None;
+                    for project_id in projects {
+                        if let Err(err) = self.start_project_target(&project_id) {
+                            error!("Failed to start project '{project_id}': {err}");
+                            first_error.get_or_insert(err);
+                        }
+                    }
                     self.refresh_status_cache();
+                    if let Some(err) = first_error {
+                        return Err(err);
+                    }
                     Ok(ControlResponse::Message("All services started".into()))
                 }
             }
@@ -1840,21 +3450,6 @@ impl Supervisor {
                         "Service '{service}' restarted"
                     )))
                 } else if let Some(project_id) = project.as_deref() {
-                    if let Some(config_path) = config.as_deref() {
-                        let path = Path::new(config_path);
-                        let trusted = runtime::open_trusted_config(path)?;
-                        let config = load_config_from_file(trusted, path)?;
-                        if config.project.id != project_id {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!(
-                                    "project '{project_id}' does not match config project '{}'",
-                                    config.project.id
-                                ),
-                            )
-                            .into());
-                        }
-                    }
                     self.restart_project_target(
                         project_id,
                         config.as_deref().map(Path::new),
@@ -1932,6 +3527,16 @@ impl Supervisor {
             ControlCommand::Logs { .. } => Ok(ControlResponse::Error(
                 "logs command is streamed separately".into(),
             )),
+            ControlCommand::ClearLogs { service, project } => {
+                self.clear_logs(service.as_deref(), project.as_deref())?;
+                Ok(ControlResponse::Message(match service {
+                    Some(name) => format!("Cleared logs for '{name}'"),
+                    None => "Cleared logs for all services".into(),
+                }))
+            }
+            ControlCommand::BootStream => Ok(ControlResponse::Error(
+                "boot stream is served separately".into(),
+            )),
             ControlCommand::Spawn {
                 parent_pid,
                 name,
@@ -1952,12 +3557,6 @@ impl Supervisor {
                 }
             }
             ControlCommand::Shutdown => {
-                for project in self.extra_projects.values() {
-                    project.daemon.stop_services()?;
-                    project.daemon.shutdown_monitor();
-                }
-                self.daemon.stop_services()?;
-                self.refresh_status_cache();
                 Ok(ControlResponse::Message("Supervisor shutting down".into()))
             }
             ControlCommand::Status { live } => {
@@ -1972,6 +3571,12 @@ impl Supervisor {
             ControlCommand::Version => Ok(ControlResponse::DaemonVersion(
                 env!("CARGO_PKG_VERSION").to_string(),
             )),
+            ControlCommand::Upgrade { .. } => Ok(ControlResponse::Error(
+                "upgrade command must be handled by the supervisor owner loop".into(),
+            )),
+            ControlCommand::CurrentOp => {
+                Ok(ControlResponse::CurrentOp(self.op_slot.report()))
+            }
         }
     }
 
@@ -2103,26 +3708,34 @@ impl Supervisor {
         let effective_root = root_service.or(spawn_auth.root_service);
 
         let echo_to_console = !self.detach_children;
-        if let Some(stdout) = child.stdout.take() {
-            spawn_dynamic_child_log_writer(
-                effective_root.as_deref(),
-                &child_name,
-                child_pid,
-                stdout,
-                "stdout",
-                echo_to_console,
-            );
-        }
-
-        if let Some(stderr) = child.stderr.take() {
-            spawn_dynamic_child_log_writer(
-                effective_root.as_deref(),
-                &child_name,
-                child_pid,
-                stderr,
-                "stderr",
-                echo_to_console,
-            );
+        let log_result = (|| -> io::Result<()> {
+            if let Some(stdout) = child.stdout.take() {
+                spawn_dynamic_child_log_writer(
+                    effective_root.as_deref(),
+                    &child_name,
+                    child_pid,
+                    stdout,
+                    "stdout",
+                    echo_to_console,
+                )?;
+            }
+            if let Some(stderr) = child.stderr.take() {
+                spawn_dynamic_child_log_writer(
+                    effective_root.as_deref(),
+                    &child_name,
+                    child_pid,
+                    stderr,
+                    "stderr",
+                    echo_to_console,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(err) = log_result {
+            let _ = Daemon::terminate_process_tree(&child_name, child_pid, None);
+            let _ = child.wait();
+            self.spawn_manager.remove_subtree(child_pid);
+            return Err(err.into());
         }
 
         let pid_file_handle = self.daemon.pid_file_handle();
@@ -2149,61 +3762,71 @@ impl Supervisor {
         let spawn_manager_for_exit = self.spawn_manager.clone();
         let pid_file_for_exit = Arc::clone(&pid_file_handle);
         let child_name_for_exit = child_name.clone();
-        thread::spawn(move || match child.wait() {
-            Ok(status) => {
-                let exit = SpawnedExit {
-                    exit_code: status.code(),
-                    #[cfg(unix)]
-                    signal: status.signal(),
-                    #[cfg(not(unix))]
-                    signal: None,
-                    finished_at: Some(SystemTime::now()),
-                };
+        if let Err(err) = thread::Builder::new()
+            .name(format!("sysg-child-{child_pid}"))
+            .spawn(move || match child.wait() {
+                Ok(status) => {
+                    let exit = SpawnedExit {
+                        exit_code: status.code(),
+                        #[cfg(unix)]
+                        signal: status.signal(),
+                        #[cfg(not(unix))]
+                        signal: None,
+                        finished_at: Some(SystemTime::now()),
+                    };
 
-                spawn_manager_for_exit.record_spawn_exit(child_pid, exit.clone());
+                    spawn_manager_for_exit.record_spawn_exit(child_pid, exit.clone());
 
-                let termination_policy = spawn_manager_for_exit
-                    .termination_policy_for(child_pid)
-                    .unwrap_or(TerminationPolicy::Cascade);
+                    let termination_policy = spawn_manager_for_exit
+                        .termination_policy_for(child_pid)
+                        .unwrap_or(TerminationPolicy::Cascade);
 
-                if matches!(termination_policy, TerminationPolicy::Cascade) {
-                    let removed = spawn_manager_for_exit.remove_subtree(child_pid);
+                    if matches!(termination_policy, TerminationPolicy::Cascade) {
+                        let removed = spawn_manager_for_exit.remove_subtree(child_pid);
 
-                    if let Ok(mut pid_file) = pid_file_for_exit.lock()
-                        && let Err(err) = pid_file.remove_spawn_subtree(child_pid)
+                        if let Ok(mut pid_file) = pid_file_for_exit.lock()
+                            && let Err(err) = pid_file.remove_spawn_subtree(child_pid)
+                        {
+                            warn!(
+                                "Failed to remove spawn subtree rooted at {} from pid file: {}",
+                                child_pid, err
+                            );
+                        }
+
+                        for descendant in removed.iter().filter(|c| c.parent_pid == child_pid)
+                        {
+                            if let Err(err) = Daemon::terminate_process_tree(
+                                &descendant.name,
+                                descendant.pid,
+                                None,
+                            ) {
+                                warn!(
+                                    "Failed to terminate descendant {} (pid {}) of '{}' after cascade: {}",
+                                    descendant.name, descendant.pid, child_name_for_exit, err
+                                );
+                            }
+                        }
+                    } else if let Ok(mut pid_file) = pid_file_for_exit.lock()
+                        && let Err(err) = pid_file.record_spawn_exit(child_pid, exit.clone())
                     {
                         warn!(
-                            "Failed to remove spawn subtree rooted at {} from pid file: {}",
+                            "Failed to record spawn exit for {} in pid file: {}",
                             child_pid, err
                         );
                     }
-
-                    for descendant in removed.iter().filter(|c| c.parent_pid == child_pid)
-                    {
-                        if let Err(err) = Daemon::terminate_process_tree(
-                            &descendant.name,
-                            descendant.pid,
-                            None,
-                        ) {
-                            warn!(
-                                "Failed to terminate descendant {} (pid {}) of '{}' after cascade: {}",
-                                descendant.name, descendant.pid, child_name_for_exit, err
-                            );
-                        }
-                    }
-                } else if let Ok(mut pid_file) = pid_file_for_exit.lock()
-                    && let Err(err) = pid_file.record_spawn_exit(child_pid, exit.clone())
-                {
-                    warn!(
-                        "Failed to record spawn exit for {} in pid file: {}",
-                        child_pid, err
-                    );
                 }
+                Err(err) => {
+                    error!("Failed to wait for spawned child {child_pid}: {err}");
+                }
+            })
+        {
+            let _ = Daemon::terminate_process_tree(&child_name, child_pid, None);
+            let _ = self.spawn_manager.remove_subtree(child_pid);
+            if let Ok(mut pid_file) = pid_file_handle.lock() {
+                let _ = pid_file.remove_spawn_subtree(child_pid);
             }
-            Err(err) => {
-                error!("Failed to wait for spawned child {child_pid}: {err}");
-            }
-        });
+            return Err(err.into());
+        }
 
         info!(
             "Spawned child '{}' (PID: {}) from parent {}",
@@ -2213,7 +3836,11 @@ impl Supervisor {
         Ok(child_pid)
     }
 
-    /// Reloads config.
+    /// Validates and surgically reconciles the primary project against `path`.
+    ///
+    /// Unchanged services retain their process identity. A valid manifest that
+    /// contains a failing target remains active and returns SG0302 without
+    /// tearing down workloads that already reached their target.
     fn reload_config(&mut self, path: &Path) -> Result<(), SupervisorError> {
         let resolved = if path.is_absolute() {
             path.to_path_buf()
@@ -2225,92 +3852,72 @@ impl Supervisor {
         };
 
         info!("Reloading configuration from {:?}", resolved);
-        let trusted = runtime::open_trusted_config(&resolved)?;
-        let config = load_config_from_file(trusted, &resolved)?;
-
-        if let Some(collector) = self.metrics_collector.take() {
-            collector.stop();
-        }
-        if let Some(refresher) = self.status_refresher.take() {
-            refresher.stop();
-        }
-
-        self.daemon.stop_services()?;
-        self.daemon.shutdown_monitor();
+        // DEFENSIVE: validate the entire new manifest BEFORE tearing anything
+        // down. A bad manifest refuses the whole restart (SG0301) and leaves the
+        // running services exactly as they were — never a half-applied migration.
+        let config = match runtime::open_trusted_config(&resolved)
+            .map_err(SupervisorError::from)
+            .and_then(|trusted| {
+                load_config_from_file(trusted, &resolved).map_err(SupervisorError::from)
+            }) {
+            Ok(config) => config,
+            Err(err) => {
+                return Err(ProcessManagerError::Diag(Box::new(
+                    crate::restart::manifest_rejected(err.to_string()),
+                ))
+                .into());
+            }
+        };
 
         let metrics_settings = config
             .metrics
             .to_settings(config.project_dir.as_deref().map(Path::new));
-        self.daemon = Daemon::from_config(config.clone(), self.detach_children)?;
+        let metrics_store = metrics::shared_store(metrics_settings)?;
+        let old_config = self.daemon.config();
+        let old_metrics = self.metrics_store.clone();
+        let diff = crate::restart::ManifestDiff::compute(old_config.as_ref(), &config);
+        let affected = Self::reconcile_targets(&config, &diff)?;
+
+        self.stop_primary_workers();
+        let mut stop_error = None;
+        for name in &diff.removed {
+            if let Err(err) = self.daemon.stop_service(name) {
+                error!("Failed to stop removed service '{name}' during reconcile: {err}");
+                stop_error.get_or_insert(err);
+            }
+        }
+        if let Some(err) = stop_error {
+            if let Err(restore_err) =
+                self.restore_primary_project(old_config, old_metrics)
+            {
+                error!(
+                    "Failed to restore primary project after stop failure: {restore_err}"
+                );
+            }
+            return Err(err.into());
+        }
+
+        self.daemon.set_config(config.clone());
+        self.primary_active = true;
+        self.daemon.begin_boot();
+        let restart_result = self.daemon.restart_services_subset(&affected);
+        let sync_result = self.sync_cron_projects();
         self.config_path = resolved;
-
-        self.sync_cron_projects()?;
-
-        self.daemon.start_services()?;
-        self.daemon.ensure_monitoring()?;
-
-        self.metrics_store = metrics::shared_store(metrics_settings)?;
-        let metrics_handle = self.metrics_store.clone();
-
-        let config_handle = self.daemon.config();
-        let pid_handle = self.daemon.pid_file_handle();
-        let state_handle = self.daemon.service_state_handle();
-
-        if let Ok(mut snapshot) = collect_runtime_snapshot(
-            Arc::clone(&config_handle),
-            &pid_handle,
-            &state_handle,
-            Some(&self.metrics_store),
-            Some(&self.spawn_manager),
-            Self::status_snapshot_mode(config_handle.as_ref()),
-        ) {
-            Self::apply_project_metadata(
-                &mut snapshot,
-                self.primary_project_mode,
-                &self.config_path,
-            );
-            self.status_cache.replace(snapshot);
+        let _ = ipc::write_config_hint(&self.config_path);
+        self.metrics_store = metrics_store;
+        let workers_result = self.start_primary_workers();
+        if let Err(err) = restart_result {
+            error!("Project reconcile did not complete: {err}");
+            let failed = Self::reconcile_failures(&err, &affected);
+            sync_result?;
+            workers_result?;
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::reconcile_incomplete(&failed),
+            ))
+            .into());
         }
-
-        let cache_clone = self.status_cache.clone();
-        let refresh_config = Arc::clone(&config_handle);
-        let refresh_pid = Arc::clone(&pid_handle);
-        let refresh_state = Arc::clone(&state_handle);
-        let refresh_metrics = self.metrics_store.clone();
-        let refresh_spawn_manager = self.spawn_manager.clone();
-        let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
-        let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
-        let refresh_project_mode = self.primary_project_mode;
-        let refresh_config_path = self.config_path.clone();
-        if !matches!(refresh_mode, StatusSnapshotMode::Off) {
-            self.status_refresher = Some(StatusRefresher::spawn(
-                cache_clone,
-                refresh_interval,
-                move || {
-                    let mut snapshot = collect_runtime_snapshot(
-                        Arc::clone(&refresh_config),
-                        &refresh_pid,
-                        &refresh_state,
-                        Some(&refresh_metrics),
-                        Some(&refresh_spawn_manager),
-                        refresh_mode,
-                    )?;
-                    Supervisor::apply_project_metadata(
-                        &mut snapshot,
-                        refresh_project_mode,
-                        &refresh_config_path,
-                    );
-                    Ok(snapshot)
-                },
-            ));
-        }
-
-        self.metrics_collector = Some(MetricsCollector::spawn(
-            metrics_handle,
-            config_handle,
-            pid_handle,
-            state_handle,
-        ));
+        sync_result?;
+        workers_result?;
         Ok(())
     }
 
@@ -2328,36 +3935,99 @@ impl Supervisor {
         };
         let resolved = resolved.canonicalize().unwrap_or(resolved);
         let trusted = runtime::open_trusted_config(&resolved)?;
-        let config = load_config_from_file(trusted, &resolved)?;
+        let configs = load_projects_from_file(trusted, &resolved)?;
+
+        let mut last_id = None;
+        for config in configs {
+            last_id = Some(self.register_one_project(
+                config,
+                &resolved,
+                &service_filter,
+                mode,
+            )?);
+        }
+        last_id.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("config at {} declared no projects", resolved.display()),
+            )
+            .into()
+        })
+    }
+
+    /// Registers and starts a single already-parsed project config, the unit of
+    /// work `add_project_config` loops over once per project a file declares.
+    fn register_one_project(
+        &mut self,
+        config: Config,
+        resolved: &Path,
+        service_filter: &Option<String>,
+        mode: ProjectRunMode,
+    ) -> Result<String, SupervisorError> {
+        let service_filter = service_filter.clone();
+        let resolved = resolved.to_path_buf();
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
 
         if project_id == primary_project {
-            self.primary_project_mode = mode;
-            if service_filter.is_none() {
-                self.reload_config(&resolved)?;
+            let unchanged = crate::restart::ManifestDiff::compute(
+                self.daemon.config().as_ref(),
+                &config,
+            )
+            .is_empty();
+            if self.primary_active
+                && service_filter.is_none()
+                && unchanged
+                && !self.daemon.needs_start()
+            {
+                self.sync_cron_projects()?;
+                self.primary_project_mode = mode;
+                self.config_path = resolved;
+                let _ = ipc::write_config_hint(&self.config_path);
+                self.refresh_status_cache();
                 return Ok(project_id);
             }
-            Self::start_project_services(
+            if !unchanged {
+                self.reconcile_primary_project(config)?;
+                self.primary_project_mode = mode;
+                self.config_path = resolved;
+                let _ = ipc::write_config_hint(&self.config_path);
+                return Ok(project_id);
+            }
+            self.primary_active = true;
+            let failed = Self::start_project_services(
                 &self.daemon,
                 self.daemon.config().as_ref(),
                 service_filter.as_deref(),
                 &self.spawn_manager,
+                None,
             )?;
             self.sync_cron_projects()?;
             self.refresh_status_cache();
+            if self.daemon.boot_cancelled() {
+                return Ok(project_id);
+            }
+            if !failed.is_empty() {
+                return Err(failed.into_error(&project_id).into());
+            }
+            self.primary_project_mode = mode;
+            self.config_path = resolved;
+            let _ = ipc::write_config_hint(&self.config_path);
             return Ok(project_id);
         }
 
         if !self.extra_projects.contains_key(&project_id) {
             Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
-            let mut daemon = Daemon::new(
-                config.clone(),
-                self.daemon.pid_file_handle(),
-                self.daemon.service_state_handle(),
-                self.detach_children,
-            );
+            // Own pid/state handles bound to this project's store, so a
+            // separately-added project never leaks services into a sibling's
+            // pid.xml.
+            let mut daemon = Daemon::from_config(config.clone(), self.detach_children)?;
+            daemon.set_timeouts(self.timeouts.clone());
             daemon.set_pipe_stderr(self.pipe_stderr);
+            daemon.set_op_slot(self.op_slot.clone());
+            if let Ok(mut projects) = self.boot_projects.write() {
+                projects.insert(project_id.clone(), daemon.clone());
+            }
             self.extra_projects.insert(
                 project_id.clone(),
                 ProjectRuntime {
@@ -2367,8 +4037,26 @@ impl Supervisor {
                 },
             );
         } else if let Some(project) = self.extra_projects.get_mut(&project_id) {
+            // Idempotent re-registration of an already-managed extra project: if
+            // its manifest is unchanged, update routing metadata and return
+            // without re-booting the services that are already running.
+            let unchanged = crate::restart::ManifestDiff::compute(
+                project.daemon.config().as_ref(),
+                &config,
+            )
+            .is_empty();
             project.mode = mode;
             project.config_path = resolved.clone();
+            if unchanged && !project.daemon.needs_start() {
+                self.sync_cron_projects()?;
+                self.refresh_status_cache();
+                self.respawn_status_refresher()?;
+                return Ok(project_id);
+            }
+            self.replace_extra_project_runtime(config, resolved)?;
+            self.refresh_status_cache();
+            self.respawn_status_refresher()?;
+            return Ok(project_id);
         }
 
         let project = self.extra_projects.get(&project_id).ok_or_else(|| {
@@ -2377,22 +4065,163 @@ impl Supervisor {
                 format!("project '{project_id}' was not registered"),
             )
         })?;
-        Self::start_project_services(
+
+        if matches!(mode, ProjectRunMode::Daemon) {
+            let daemon = project.daemon.clone();
+            let spawn_manager = self.spawn_manager.clone();
+            let op_slot = self.op_slot.clone();
+            let boot_project = project_id.clone();
+            let boot_filter = service_filter.clone();
+            // The refresher's periodic ticks will eventually reflect this project,
+            // but the boot records PIDs AFTER this method returns and re-seeds the
+            // cache — so the served snapshot would report this project's services
+            // as `stopped` until the next tick. For the LAST project added there is
+            // no subsequent synchronous refresh to mask that gap, so the boot itself
+            // must re-seed the cache once its PIDs are on disk. These handles are the
+            // same live Arcs the refresher uses, so this converges the served cache
+            // to truth the instant the boot finishes.
+            let boot_cache = self.status_cache.clone();
+            let boot_projects = Arc::clone(&self.cron_projects);
+            let boot_metrics = self.metrics_store.clone();
+            let boot_spawn = self.spawn_manager.clone();
+            let boot_mode = Self::status_snapshot_mode(self.daemon.config().as_ref());
+            if let Err(err) = thread::Builder::new()
+                .name(format!("sysg-boot-{project_id}"))
+                .spawn(move || {
+                    let _op = op_slot.guard(format!("starting project '{boot_project}'"));
+                    match Self::start_project_services(
+                        &daemon,
+                        daemon.config().as_ref(),
+                        boot_filter.as_deref(),
+                        &spawn_manager,
+                        None,
+                    ) {
+                        Ok(failed) if !failed.is_empty() => error!(
+                            "Background boot of project '{boot_project}' left services down: {}",
+                            failed.services().join(", ")
+                        ),
+                        Err(err) => {
+                            error!("Background boot of project '{boot_project}' failed: {err}")
+                        }
+                        _ => {}
+                    }
+                    if !matches!(boot_mode, StatusSnapshotMode::Off)
+                        && let Ok(snapshot) = Self::collect_projects_snapshot(
+                            &boot_projects,
+                            &boot_metrics,
+                            &boot_spawn,
+                            boot_mode,
+                        )
+                    {
+                        boot_cache.replace(snapshot);
+                    }
+                })
+            {
+                self.extra_projects.remove(&project_id);
+                self.boot_projects
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&project_id);
+                self.sync_cron_projects()?;
+                return Err(err.into());
+            }
+            self.sync_cron_projects()?;
+            self.refresh_status_cache();
+            self.respawn_status_refresher()?;
+            return Ok(project_id);
+        }
+
+        let _op = self
+            .op_slot
+            .guard(format!("starting project '{project_id}'"));
+        let start_result = Self::start_project_services(
             &project.daemon,
             project.daemon.config().as_ref(),
             service_filter.as_deref(),
             &self.spawn_manager,
-        )?;
+            None,
+        );
+        let failed = start_result?;
+        let boot_cancelled = project.daemon.boot_cancelled();
         self.sync_cron_projects()?;
-
-        if let Some(refresher) = self.status_refresher.take() {
-            refresher.stop();
+        // Seed the cache only AFTER this project's PIDs are on disk. Refreshing
+        // before the boot settles served a snapshot with no units for it, so a
+        // caller polling status right after an attach saw the project as absent
+        // — which reads as the wrong run mode, or as a project that never
+        // started, rather than one still recording its PIDs.
+        if failed.is_empty() {
+            self.await_project_pids(&project_id);
         }
         self.refresh_status_cache();
+        self.respawn_status_refresher()?;
+        if boot_cancelled {
+            return Ok(project_id);
+        }
+        if !failed.is_empty() {
+            return Err(failed.into_error(&project_id).into());
+        }
         Ok(project_id)
     }
 
+    /// Blocks briefly until a freshly-booted project has recorded at least one
+    /// PID, so a status snapshot taken right after registration reflects it.
+    /// Bounded: a project whose services all exit immediately never records one,
+    /// and must not wedge the caller.
+    fn await_project_pids(&self, project_id: &str) {
+        let Some(project) = self.extra_projects.get(project_id) else {
+            return;
+        };
+        let deadline =
+            std::time::Instant::now() + crate::constants::PROJECT_PID_SETTLE_TIMEOUT;
+        while std::time::Instant::now() < deadline {
+            if project.daemon.boot_cancelled() {
+                return;
+            }
+            let recorded = project
+                .daemon
+                .pid_file_handle()
+                .lock()
+                .map(|guard| !guard.services().is_empty())
+                .unwrap_or(false);
+            if recorded {
+                return;
+            }
+            thread::sleep(crate::constants::SERVICE_POLL_INTERVAL);
+        }
+    }
+
     /// Restarts one service in the selected project without reloading unrelated projects.
+    /// Restarts `root` and its transitive dependents in dependency order.
+    /// A dependent must re-handshake the freshly-restarted dependency, so
+    /// `restart -s A` bounces A then everything that depends on A. A dependent
+    /// carrying `skip: true` is honored — it is not launched by the cascade.
+    fn cascade_restart(
+        daemon: &Daemon,
+        config: &Config,
+        root: &str,
+        target_project: &str,
+    ) -> Result<(), SupervisorError> {
+        daemon.begin_boot();
+        for name in cascade_restart_order(config, root) {
+            let Some(service_config) = config.services.get(&name) else {
+                continue;
+            };
+            if matches!(service_config.skip, Some(SkipConfig::Flag(true))) {
+                info!("Skipping dependent '{name}' during cascade restart (skip flag)");
+                continue;
+            }
+            reject_direct_cron_control(
+                service_config,
+                &name,
+                target_project,
+                "restarted",
+                "reschedule",
+            )?;
+            daemon.restart_service(&name, service_config)?;
+        }
+        Ok(())
+    }
+
     fn restart_single_service_target(
         &mut self,
         selector: &str,
@@ -2403,15 +4232,54 @@ impl Supervisor {
             .map(|(project_id, service_name)| (Some(project_id), service_name))
             .unwrap_or((None, selector));
 
+        // A single config FILE may declare MANY projects. The single-project
+        // loader collapses it to one arbitrary project, which for a `-p other`
+        // targeting a sibling project hands the wrong sub-config downstream.
+        // Load every project and pick the one owning the targeted service,
+        // preferring the requested project when one is named.
+        let requested_project = project.or(selector_project);
         let override_config = if let Some(path) = config_path {
             runtime::ensure_trusted_config(path)?;
-            Some(load_config(Some(path.to_string_lossy().as_ref()))?)
+            let file = runtime::open_trusted_config(path)?;
+            let projects = load_projects_from_file(file, path)?;
+            select_override_project(projects, service_name, requested_project)
         } else {
             None
         };
         let config_project = override_config
             .as_ref()
             .map(|config| config.project.id.as_str());
+
+        // A restart that names a service no project declares is a false success
+        // waiting to happen — refuse it with a typed diagnostic (SG0202) before
+        // resolving a target, exactly as the stop path does.
+        let known = match project.or(selector_project) {
+            Some(project_id) => {
+                let in_override = override_config
+                    .as_ref()
+                    .is_some_and(|config| config.services.contains_key(service_name));
+                let in_primary = self.daemon.config().project.id == project_id
+                    && self.daemon.config().services.contains_key(service_name);
+                let in_extra =
+                    self.extra_projects.get(project_id).is_some_and(|runtime| {
+                        runtime.daemon.config().services.contains_key(service_name)
+                    });
+                in_override || in_primary || in_extra
+            }
+            None => {
+                let in_override = override_config
+                    .as_ref()
+                    .is_some_and(|config| config.services.contains_key(service_name));
+                in_override || !self.projects_containing_service(service_name).is_empty()
+            }
+        };
+        if !known {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::stop::service_not_found(service_name),
+            ))
+            .into());
+        }
+
         let target_project = self.resolve_service_target_project(
             service_name,
             project,
@@ -2438,22 +4306,16 @@ impl Supervisor {
             }
 
             let config_handle = self.daemon.config();
-            let service_config = override_config
-                .as_ref()
-                .and_then(|config| config.services.get(service_name))
-                .or_else(|| config_handle.services.get(service_name))
-                .ok_or_else(|| ProcessManagerError::DependencyError {
-                    service: service_name.into(),
-                    dependency: "service not defined".into(),
-                })?;
-            reject_direct_cron_control(
-                service_config,
+            let resolved_config: &Config = match override_config.as_ref() {
+                Some(config) => config,
+                None => &config_handle,
+            };
+            Self::cascade_restart(
+                &self.daemon,
+                resolved_config,
                 service_name,
                 &target_project,
-                "restarted",
-                "reschedule",
             )?;
-            self.daemon.restart_service(service_name, service_config)?;
             return Ok(());
         }
 
@@ -2487,24 +4349,16 @@ impl Supervisor {
             }
         }
 
-        let service_config = override_config
-            .as_ref()
-            .and_then(|config| config.services.get(service_name))
-            .or_else(|| config_handle.services.get(service_name))
-            .ok_or_else(|| ProcessManagerError::DependencyError {
-                service: service_name.into(),
-                dependency: "service not defined".into(),
-            })?;
-        reject_direct_cron_control(
-            service_config,
+        let resolved_config: &Config = match override_config.as_ref() {
+            Some(config) => config,
+            None => &config_handle,
+        };
+        Self::cascade_restart(
+            &project_runtime.daemon,
+            resolved_config,
             service_name,
             &target_project,
-            "restarted",
-            "reschedule",
         )?;
-        project_runtime
-            .daemon
-            .restart_service(service_name, service_config)?;
         Ok(())
     }
 
@@ -2517,6 +4371,27 @@ impl Supervisor {
         let (selector_project, service_name) = split_project_selector(selector)
             .map(|(project_id, service_name)| (Some(project_id), service_name))
             .unwrap_or((None, selector));
+
+        // A stop that names a service no project declares is a false success
+        // waiting to happen — refuse it with a typed diagnostic (SG0202).
+        let known = match project.or(selector_project) {
+            Some(project_id) => {
+                let in_primary = self.daemon.config().project.id == project_id
+                    && self.daemon.config().services.contains_key(service_name);
+                let in_extra =
+                    self.extra_projects.get(project_id).is_some_and(|runtime| {
+                        runtime.daemon.config().services.contains_key(service_name)
+                    });
+                in_primary || in_extra
+            }
+            None => !self.projects_containing_service(service_name).is_empty(),
+        };
+        if !known {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::stop::service_not_found(service_name),
+            ))
+            .into());
+        }
 
         let target_project = self.resolve_service_target_project(
             service_name,
@@ -2564,15 +4439,59 @@ impl Supervisor {
         }
     }
 
+    /// (Re)starts the background status refresher over EVERY managed project.
+    ///
+    /// The refresher is what keeps the served (cached) snapshot honest: without a
+    /// live loop, a cache seeded before an async project boot recorded its PIDs
+    /// would report running services as `stopped` forever. Adding a project or
+    /// reloading the config must therefore re-spawn this — never leave it dead.
+    fn respawn_status_refresher(&mut self) -> Result<(), SupervisorError> {
+        if let Some(refresher) = self.status_refresher.take() {
+            refresher.stop();
+        }
+
+        let refresh_mode = Self::status_snapshot_mode(self.daemon.config().as_ref());
+        if matches!(refresh_mode, StatusSnapshotMode::Off) {
+            return Ok(());
+        }
+
+        let cache_clone = self.status_cache.clone();
+        let refresh_interval =
+            Self::status_snapshot_interval(self.daemon.config().as_ref());
+        let refresh_projects = Arc::clone(&self.cron_projects);
+        let refresh_metrics = self.metrics_store.clone();
+        let refresh_spawn = self.spawn_manager.clone();
+        self.status_refresher = Some(StatusRefresher::spawn(
+            cache_clone,
+            refresh_interval,
+            move || {
+                Supervisor::collect_projects_snapshot(
+                    &refresh_projects,
+                    &refresh_metrics,
+                    &refresh_spawn,
+                    refresh_mode,
+                )
+            },
+        )?);
+        Ok(())
+    }
+
     /// Stops every service in one managed project.
     fn stop_project(&mut self, project_id: &str) -> Result<(), SupervisorError> {
         let primary_project = self.daemon.config().project.id.clone();
         if project_id == primary_project {
-            let services: Vec<String> =
-                self.daemon.config().services.keys().cloned().collect();
-            for service in services {
-                self.daemon.stop_service(&service)?;
+            self.daemon.cancel_boot();
+            self.cron_manager.remove_project_jobs(project_id);
+            self.daemon.shutdown_monitor();
+            let stop_result = self.daemon.stop_services();
+            if let Err(err) = stop_result {
+                self.daemon.begin_boot();
+                let _ = self.daemon.ensure_monitoring();
+                let _ = self.sync_cron_projects();
+                return Err(err.into());
             }
+            self.primary_active = false;
+            self.sync_cron_projects()?;
             return Ok(());
         }
 
@@ -2583,26 +4502,47 @@ impl Supervisor {
             )
             .into());
         };
-        let services: Vec<String> =
-            project.daemon.config().services.keys().cloned().collect();
-        for service in services {
-            project.daemon.stop_service(&service)?;
-        }
+        project.daemon.cancel_boot();
+        self.cron_manager.remove_project_jobs(project_id);
         project.daemon.shutdown_monitor();
+        if let Err(err) = project.daemon.stop_services() {
+            project.daemon.begin_boot();
+            let _ = project.daemon.ensure_monitoring();
+            let _ = self.sync_cron_projects();
+            return Err(err.into());
+        }
         self.extra_projects.remove(project_id);
+        if let Ok(mut projects) = self.boot_projects.write() {
+            projects.remove(project_id);
+        }
         self.sync_cron_projects()?;
         Ok(())
     }
 
     /// Stops every service in every project managed by the supervisor.
     fn stop_all_projects(&mut self) -> Result<(), SupervisorError> {
+        // Best-effort, for the same reason as `shutdown_runtime`: one project
+        // that fails to stop must not leave every project after it — and the
+        // primary — still running while the command reports it stopped
+        // everything.
         let extra_projects: Vec<String> = self.extra_projects.keys().cloned().collect();
+        let mut first_error: Option<SupervisorError> = None;
         for project_id in extra_projects {
-            self.stop_project(&project_id)?;
+            if let Err(err) = self.stop_project(&project_id) {
+                error!("Failed to stop project '{project_id}': {err}");
+                first_error.get_or_insert(err);
+            }
         }
 
-        self.daemon.stop_services()?;
-        Ok(())
+        let primary_project = self.daemon.config().project.id.clone();
+        if let Err(err) = self.stop_project(&primary_project) {
+            error!("Failed to stop the primary project's services: {err}");
+            first_error.get_or_insert(err);
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Collects a fresh status snapshot using each project's configured snapshot mode.
@@ -2625,13 +4565,35 @@ impl Supervisor {
         if let Some(refresher) = self.status_refresher.take() {
             refresher.stop();
         }
+        self.cron_manager.clear_all_jobs();
         for project in self.extra_projects.values() {
-            project.daemon.stop_services()?;
+            project.daemon.cancel_boot();
             project.daemon.shutdown_monitor();
         }
-        self.daemon.stop_services()?;
+        self.daemon.cancel_boot();
         self.daemon.shutdown_monitor();
-        ipc::cleanup_runtime()?;
+        // Shutdown is BEST-EFFORT across every project. A `?` here aborted the
+        // whole teardown on the first project that failed to stop cleanly —
+        // which is exactly what a concurrent restart provokes, since the pid
+        // file is being rewritten underneath. Every project after it, AND the
+        // primary, were then never stopped: `stop --supervisor` reported
+        // "Supervisor shutting down" with rc=0 while leaving orphaned service
+        // processes running. Reap everything first, then surface the failure.
+        let mut teardown_error: Option<SupervisorError> = None;
+        for (project_id, project) in &self.extra_projects {
+            if let Err(err) = project.daemon.stop_services() {
+                error!("Failed to stop services in project '{project_id}': {err}");
+                teardown_error.get_or_insert(err.into());
+            }
+        }
+        if let Err(err) = self.daemon.stop_services() {
+            error!("Failed to stop the primary project's services: {err}");
+            teardown_error.get_or_insert(err.into());
+        }
+        ipc::cleanup_runtime_owned(std::process::id() as libc::pid_t)?;
+        if let Some(err) = teardown_error {
+            return Err(err);
+        }
         std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
@@ -2817,7 +4779,7 @@ mod tests {
         services.insert("beacon".into(), test_service(&[]));
 
         let config = Config {
-            version: Version::V1,
+            version: Version::V2,
             project: ProjectConfig::default(),
             services,
             project_dir: None,
@@ -2839,7 +4801,7 @@ mod tests {
         services.insert("beacon".into(), test_service(&[]));
 
         let config = Config {
-            version: Version::V1,
+            version: Version::V2,
             project: ProjectConfig::default(),
             services,
             project_dir: None,
@@ -2909,7 +4871,7 @@ mod tests {
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 services:
   api:
     command: "/bin/true"
@@ -2956,7 +4918,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 status:
   snapshot_mode: summary
 services:
@@ -3072,7 +5034,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -3085,7 +5047,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -3102,7 +5064,7 @@ services:
         fs::write(
             &beta_updated_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta Updated
@@ -3335,7 +5297,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -3353,7 +5315,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -3416,6 +5378,111 @@ services:
     }
 
     #[test]
+    /// Verifies a failed added unit leaves unchanged primary processes intact.
+    fn primary_reconcile_failure_preserves_unchanged_processes() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("primary.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "2"
+project:
+  id: primary
+services:
+  web:
+    command: "/bin/sleep 45"
+  api:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write config");
+
+        let mut supervisor =
+            Supervisor::new(config_path.clone(), false, None).expect("create supervisor");
+        supervisor
+            .daemon
+            .start_services()
+            .expect("start primary services");
+        let before = supervisor
+            .daemon
+            .pid_file_handle()
+            .lock()
+            .expect("pid file lock")
+            .services()
+            .clone();
+
+        fs::write(
+            &config_path,
+            r#"
+version: "2"
+project:
+  id: primary
+services:
+  web:
+    command: "/bin/sleep 45"
+  api:
+    command: "/bin/sleep 45"
+  bad:
+    command: "/bin/sh -c 'exit 1'"
+"#,
+        )
+        .expect("rewrite config");
+
+        let error = supervisor
+            .handle_command(ControlCommand::Restart {
+                config: Some(config_path.to_string_lossy().to_string()),
+                service: None,
+                project: Some("primary".into()),
+            })
+            .expect_err("failing added service should make reconcile incomplete");
+        assert!(
+            error.to_string().contains("SG0302"),
+            "unexpected reconcile error: {error}"
+        );
+
+        let after = supervisor
+            .daemon
+            .pid_file_handle()
+            .lock()
+            .expect("pid file lock")
+            .services()
+            .clone();
+        for service in ["web", "api"] {
+            let pid = before.get(service).copied().expect("original service pid");
+            assert_eq!(after.get(service), Some(&pid));
+            assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+        }
+        assert!(supervisor.daemon.config().services.contains_key("bad"));
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
     fn restart_extra_project_without_config_reloads_stored_manifest() {
         let _guard = crate::test_utils::env_lock();
 
@@ -3437,7 +5504,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
 services:
@@ -3451,7 +5518,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
 services:
@@ -3476,7 +5543,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
 services:
@@ -3546,6 +5613,94 @@ services:
     }
 
     #[test]
+    /// Verifies redundant primary registration preserves every service process.
+    fn repro_redundant_add_project_bounces_primary() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let config_path = temp.path().join("demo.yaml");
+        fs::write(
+            &config_path,
+            r#"
+version: "2"
+project:
+  id: demo
+services:
+  one:
+    command: "/bin/sleep 45"
+  two:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write config");
+
+        let mut supervisor =
+            Supervisor::new(config_path.clone(), false, None).expect("create supervisor");
+
+        supervisor
+            .daemon
+            .start_services()
+            .expect("boot primary services");
+
+        let pids_before: Vec<(String, u32)> = {
+            let guard = supervisor.daemon.pid_file_handle();
+            let locked = guard.lock().unwrap();
+            locked
+                .services()
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect()
+        };
+
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: config_path.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+            })
+            .expect("redundant add of same primary config");
+        let pids_after: Vec<(String, u32)> = {
+            let guard = supervisor.daemon.pid_file_handle();
+            let locked = guard.lock().unwrap();
+            locked
+                .services()
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect()
+        };
+
+        assert_eq!(
+            pids_before, pids_after,
+            "redundant AddProject bounced the primary services"
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
     fn add_project_for_primary_reloads_manifest_after_stop() {
         let _guard = crate::test_utils::env_lock();
 
@@ -3567,7 +5722,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -3590,7 +5745,7 @@ services:
         fs::write(
             &config_path,
             r#"
-version: "1"
+version: "2"
 project:
   id: primary
 services:
@@ -3671,7 +5826,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -3684,7 +5839,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -3717,7 +5872,7 @@ services:
         let beta_hash = supervisor
             .extra_projects
             .get("beta")
-            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .map(|project| project.daemon.config().state_key("beta_cron"))
             .expect("beta cron hash");
         assert!(
             jobs.iter().any(|job| job.service_hash == beta_hash),
@@ -3732,11 +5887,8 @@ services:
         assert!(
             cron_projects.iter().any(|project| {
                 project.project_id == "beta"
-                    && project
-                        .config
-                        .services
-                        .get("beta_cron")
-                        .is_some_and(|service| service.compute_hash() == beta_hash)
+                    && project.config.services.contains_key("beta_cron")
+                    && project.config.state_key("beta_cron") == beta_hash
             }),
             "extra project cron job should be routable to its project"
         );
@@ -3777,7 +5929,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -3793,7 +5945,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -3817,23 +5969,30 @@ services:
             })
             .expect("add beta project");
 
-        let alpha_hash = supervisor
-            .daemon
-            .get_service_hash("alpha_cron")
-            .expect("alpha cron hash");
+        let alpha_hash = supervisor.daemon.config().state_key("alpha_cron");
         let beta_hash = supervisor
             .extra_projects
             .get("beta")
-            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .map(|project| project.daemon.config().state_key("beta_cron"))
             .expect("beta cron hash");
 
-        let cron_state = crate::cron::CronStateFile::load().expect("load cron state");
+        let alpha_store = supervisor.daemon.store();
+        let beta_store = supervisor
+            .extra_projects
+            .get("beta")
+            .expect("beta project")
+            .daemon
+            .store();
+        let alpha_cron = crate::cron::CronStateFile::load(alpha_store.clone())
+            .expect("load alpha cron");
+        let beta_cron =
+            crate::cron::CronStateFile::load(beta_store.clone()).expect("load beta cron");
         assert!(
-            cron_state.jobs().contains_key(&alpha_hash),
+            alpha_cron.jobs().contains_key(&alpha_hash),
             "alpha cron should be persisted before aggregate status"
         );
         assert!(
-            cron_state.jobs().contains_key(&beta_hash),
+            beta_cron.jobs().contains_key(&beta_hash),
             "beta cron should be persisted before aggregate status"
         );
 
@@ -3864,14 +6023,16 @@ services:
             other => panic!("expected status response, got {other:?}"),
         }
 
-        let cron_state = crate::cron::CronStateFile::load()
-            .expect("load cron state after aggregate status");
+        let alpha_cron = crate::cron::CronStateFile::load(alpha_store)
+            .expect("load alpha cron after aggregate status");
+        let beta_cron = crate::cron::CronStateFile::load(beta_store)
+            .expect("load beta cron after aggregate status");
         assert!(
-            cron_state.jobs().contains_key(&alpha_hash),
+            alpha_cron.jobs().contains_key(&alpha_hash),
             "aggregate status should not prune primary project cron state"
         );
         assert!(
-            cron_state.jobs().contains_key(&beta_hash),
+            beta_cron.jobs().contains_key(&beta_hash),
             "aggregate status should not prune extra project cron state"
         );
 
@@ -3911,7 +6072,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -3924,7 +6085,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -4048,7 +6209,7 @@ services:
         fs::write(
             &alpha_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: alpha
   name: Alpha
@@ -4061,7 +6222,7 @@ services:
         fs::write(
             &beta_config,
             r#"
-version: "1"
+version: "2"
 project:
   id: beta
   name: Beta
@@ -4088,7 +6249,7 @@ services:
         let beta_hash = supervisor
             .extra_projects
             .get("beta")
-            .and_then(|project| project.daemon.get_service_hash("beta_cron"))
+            .map(|project| project.daemon.config().state_key("beta_cron"))
             .expect("beta cron hash");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -4172,8 +6333,14 @@ services:
             other => panic!("expected inspect response, got {other:?}"),
         }
 
-        let cron_state =
-            crate::cron::CronStateFile::load().expect("load cron state before stop");
+        let beta_store = supervisor
+            .extra_projects
+            .get("beta")
+            .expect("beta project")
+            .daemon
+            .store();
+        let cron_state = crate::cron::CronStateFile::load(beta_store.clone())
+            .expect("load cron state before stop");
         assert_eq!(
             cron_state
                 .jobs()
@@ -4199,8 +6366,8 @@ services:
                 .any(|job| job.service_name == "beta_cron"),
             "stopped beta cron should leave active scheduler routing"
         );
-        let cron_state =
-            crate::cron::CronStateFile::load().expect("load cron state after stop");
+        let cron_state = crate::cron::CronStateFile::load(beta_store)
+            .expect("load cron state after stop");
         assert_eq!(
             cron_state
                 .jobs()
@@ -4280,10 +6447,8 @@ services:
         use std::io::Read as _;
 
         let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
-        let pid_file = Arc::new(std::sync::Mutex::new(crate::daemon::PidFile::default()));
         let request = SupervisorLogRequest {
             snapshot,
-            pid_file,
             service: None,
             project: Some("arb".into()),
             lines: 50,
@@ -4320,7 +6485,7 @@ services:
         runtime::init(runtime::RuntimeMode::User);
         runtime::set_drop_privileges(false);
 
-        let log_dir = runtime::log_dir();
+        let log_dir = runtime::log_dir().join("arb");
         fs::create_dir_all(&log_dir).expect("make log dir");
         fs::write(
             log_dir.join("arb_rs__server.log"),
@@ -4397,7 +6562,7 @@ services:
         runtime::init(runtime::RuntimeMode::User);
         runtime::set_drop_privileges(false);
 
-        let log_dir = runtime::log_dir();
+        let log_dir = runtime::log_dir().join("arb");
         fs::create_dir_all(&log_dir).expect("make log dir");
         fs::write(
             log_dir.join("arb_rs__server.log"),
@@ -4416,6 +6581,78 @@ services:
 
         assert!(out.contains("plain line"), "{out}");
         assert!(!out.contains(crate::logs::SERVICE_MARKER_PREFIX), "{out}");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn repro_project_follow_beta_leak() {
+        let _guard = crate::test_utils::env_lock();
+        let base = std::env::current_dir().unwrap().join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempdir_in(&base).unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let alpha_dir = runtime::log_dir().join("alpha");
+        let beta_dir = runtime::log_dir().join("beta");
+        fs::create_dir_all(&alpha_dir).unwrap();
+        fs::create_dir_all(&beta_dir).unwrap();
+        fs::write(
+            alpha_dir.join("alphasvc.log"),
+            "2026-07-08T09:00:00Z stdout ALPHA_MARKER_LINE\n",
+        )
+        .unwrap();
+        fs::write(
+            beta_dir.join("betasvc.log"),
+            "2026-07-08T09:00:00Z stdout BETA_MARKER_LINE\n",
+        )
+        .unwrap();
+
+        let snapshot = StatusSnapshot {
+            schema_version: crate::status::STATUS_SCHEMA_VERSION.into(),
+            captured_at: Utc::now(),
+            overall_health: OverallHealth::Healthy,
+            units: vec![
+                offline_unit("alphasvc", "alpha"),
+                offline_unit("betasvc", "beta"),
+            ],
+        };
+
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let request = SupervisorLogRequest {
+            snapshot,
+            service: None,
+            project: Some("alpha".into()),
+            lines: 50,
+            kind: None,
+            follow: false,
+            filter: crate::logs::LogFilter::default(),
+            structured: false,
+            stream: &server,
+        };
+        Supervisor::handle_logs_command(request).expect("logs command");
+        drop(server);
+        use std::io::Read as _;
+        let mut client = client;
+        let mut out = Vec::new();
+        client.read_to_end(&mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        eprintln!("=== OUT ===\n{out}\n=== END ===");
+        assert!(out.contains("ALPHA_MARKER_LINE"), "alpha present: {out}");
+        assert!(!out.contains("BETA_MARKER_LINE"), "BETA LEAKED: {out}");
 
         unsafe {
             if let Some(home) = original_home {

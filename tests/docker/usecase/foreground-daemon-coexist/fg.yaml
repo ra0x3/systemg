@@ -1,0 +1,7 @@
+version: "2"
+projects:
+  fgproj:
+    services:
+      fgsvc:
+        command: "sh -c 'while true; do echo FG_LINE; sleep 1; done'"
+        restart_policy: always

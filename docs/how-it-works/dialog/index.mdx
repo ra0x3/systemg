@@ -1,0 +1,75 @@
+---
+title: Dialog
+---
+
+# Dialog
+
+When something fails, sysg answers like a compiler: what happened, the evidence
+it captured while it happened, and the exact next commands to run. Every
+user-facing failure is a structured diagnostic with a stable error code.
+
+```text
+error[SG0104]: service `gamecast_api` failed to become healthy
+
+  the health check against http://127.0.0.1:8080/api/v1/health ran but reported
+  the service is not healthy after 10 attempts over 45s (configured total
+  readiness budget: 45s)
+  the process is not running — it exited before it could become healthy
+
+  last output from `gamecast_api`:
+  │ Error: error returned from database: password authentication failed for user "postgres"
+
+  help:
+    view logs     sysg logs -s gamecast_api -p gamecast-api-dev
+    check status  sysg status -p gamecast-api-dev
+    docs          https://sysg.dev/how-it-works/dialog/codes#sg0104
+```
+
+## Anatomy
+
+Every diagnostic has the same shape:
+
+| Part | What it tells you |
+| --- | --- |
+| `error[SG0104]` | Severity and a stable code you can search or look up |
+| Title | One sentence stating what happened |
+| `-->` location | The config file and key the problem originates from, when known |
+| Notes | Plain-sentence facts sysg observed (exit codes, timing, liveness) |
+| Evidence | Output sysg captured — usually your service's own last log lines |
+| `help:` | Runnable commands and a docs link for this exact code |
+
+## Colors
+
+On a terminal, diagnostics are colored: red for errors, yellow for warnings,
+cyan for notes and locations, green for the help section, bold for runnable
+commands, and underlined blue for docs links. Piped or redirected output is
+plain text with no escape codes, and `NO_COLOR` is respected.
+
+<div style={{background:"#10151b",borderRadius:"8px",border:"1px solid rgba(255,255,255,0.06)",overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.25)",margin:"20px 0"}}>
+  <div style={{background:"#1a212a",padding:"8px 12px",display:"flex",alignItems:"center",gap:"8px"}}>
+    <span style={{width:"10px",height:"10px",borderRadius:"50%",background:"#3a434e"}}></span>
+    <span style={{width:"10px",height:"10px",borderRadius:"50%",background:"#3a434e"}}></span>
+    <span style={{width:"10px",height:"10px",borderRadius:"50%",background:"#3a434e"}}></span>
+    <span style={{color:"#768390",font:'11.5px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace',marginLeft:"6px"}}>gamecast — zsh</span>
+  </div>
+  <pre style={{margin:0,padding:"18px 20px 20px",overflowX:"auto",font:'13px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace',color:"#c9d1d9"}}><span style={{color:"#57ab5a"}}>➜  gamecast</span> <span style={{color:"#e6edf3",fontWeight:700}}>sysg start -c sysg.api.yaml --daemonize</span>{"\n"}<span style={{color:"#f26d6d",fontWeight:700}}>error[SG0104]</span><span style={{color:"#e6edf3",fontWeight:700}}>: service `gamecast_api` failed to become healthy</span>{"\n\n"}{"  the health check against http://127.0.0.1:8080/api/v1/health ran but reported\n"}{"  the service is not healthy after 10 attempts over 45s (configured total\n"}{"  readiness budget: 45s)\n"}{"  the process is not running — it exited before it could become healthy\n\n"}<span style={{color:"#768390"}}>{"  last output from `gamecast_api`:"}</span>{"\n"}<span style={{color:"#768390"}}>  │</span>{' Error: error returned from database: password authentication failed for user "postgres"\n'}<span style={{color:"#768390"}}>  │</span>{" Caused by:\n"}<span style={{color:"#768390"}}>  │</span>{'     password authentication failed for user "postgres"\n\n'}<span style={{color:"#57ab5a"}}>{"  help:"}</span>{"\n"}{"    view logs     "}<span style={{color:"#e6edf3",fontWeight:700}}>sysg logs -s gamecast_api -p gamecast-api-dev</span>{"\n"}{"    check status  "}<span style={{color:"#e6edf3",fontWeight:700}}>sysg status -p gamecast-api-dev</span>{"\n"}{"    docs          "}<span style={{color:"#539bf5",textDecoration:"underline"}}>https://sysg.dev/how-it-works/dialog/codes#sg0104</span></pre>
+</div>
+
+This is the real `SG0104` renderer output — the same bytes `diag.rs` writes to a
+tty, shown here with its colors.
+
+## Error codes
+
+Every diagnostic carries a stable `SGXXXX` code you can search, script against,
+or look up. The full list, with a description of each, lives on the
+[Codes](/how-it-works/dialog/codes) page — every code has its own anchor (e.g.
+[`SG0104`](/how-it-works/dialog/codes#sg0104)) that the diagnostic's docs link
+points at.
+
+## Where evidence comes from
+
+sysg already captures every service's stdout and stderr (see
+[Logs](/how-it-works/logs)). Diagnostics quote the last lines of that capture
+at the moment of failure, so the reason a service died — a bad database
+password, a port conflict, a missing binary — arrives inside the error itself
+instead of behind a `sysg logs` round-trip.

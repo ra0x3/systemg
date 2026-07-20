@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -14,6 +15,14 @@ use crate::{
     runtime,
     status::{ProjectRunMode, StatusSnapshot, UnitStatus},
 };
+
+/// Upper bound on how long a CLI command waits for the supervisor to reply
+/// before giving up, so a wedged supervisor surfaces as an error instead of an
+/// unbounded spinner.
+const COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Short bound for the diagnostic current-op probe, which must never itself hang.
+const CURRENT_OP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Directory under `$HOME` where runtime artifacts (PID/socket files) are stored.
 fn runtime_dir() -> Result<PathBuf, ControlError> {
@@ -50,6 +59,33 @@ pub fn bind_control_socket() -> Result<std::os::unix::net::UnixListener, Control
     }
 
     Ok(listener)
+}
+
+/// Acquires exclusive ownership of the supervisor runtime for this process lifetime.
+pub fn lock_supervisor_runtime() -> Result<fs::File, ControlError> {
+    let path = runtime_dir()?.join("supervisor.lock");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+            return Err(ControlError::RuntimeBusy);
+        }
+        Err(err) => return Err(ControlError::Io(err)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(crate::constants::PRIVATE_FILE_MODE),
+        )?;
+    }
+    Ok(file)
 }
 
 /// Returns the path where the supervisor PID is recorded.
@@ -164,8 +200,27 @@ pub enum ControlCommand {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         structured: bool,
     },
+    /// Clear captured logs for one or all services, inside the supervisor, so
+    /// both the on-disk files and the supervisor's in-memory live-log buffer are
+    /// dropped together (a CLI-side truncate leaves the reader serving stale
+    /// buffered lines).
+    ClearLogs {
+        /// Optional service name to clear. None clears all managed services.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+        /// Optional project id to scope the clear.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
     /// Report the version of the resident supervisor binary.
     Version,
+    /// Replace the resident supervisor binary without restarting its workloads.
+    Upgrade {
+        /// Canonical or resolvable path to the staged replacement binary.
+        binary: String,
+    },
+    /// Report the operation the supervisor is currently blocked on, if any.
+    CurrentOp,
     /// Spawn a dynamic child process.
     Spawn {
         /// Parent process PID (from Unix socket peer credentials).
@@ -181,6 +236,10 @@ pub enum ControlCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         log_level: Option<String>,
     },
+    /// Subscribe to the supervisor's initial-boot progress. The supervisor
+    /// replays every boot frame recorded so far, then streams live frames as
+    /// line-delimited JSON until the terminal `Done` frame.
+    BootStream,
 }
 
 /// Response sent by the supervisor.
@@ -205,6 +264,13 @@ pub enum ControlResponse {
     },
     /// Version of the resident supervisor binary.
     DaemonVersion(String),
+    /// Resident supervisor accepted a live upgrade to this version.
+    UpgradeAccepted {
+        /// Replacement version the installer should wait to observe.
+        version: String,
+    },
+    /// The operation the supervisor is currently working on, if any.
+    CurrentOp(Option<crate::opslot::OpReport>),
 }
 
 /// Result of sending a command with a short acknowledgement window.
@@ -244,6 +310,12 @@ pub enum ControlError {
     /// Control socket not available or supervisor not running.
     #[error("control socket not available")]
     NotAvailable,
+    /// The supervisor accepted the command but did not reply in time.
+    #[error("supervisor did not respond in time")]
+    Timeout,
+    /// Another supervisor owns the runtime.
+    #[error("another supervisor owns the runtime")]
+    RuntimeBusy,
     /// The connecting peer is not authorized to use the control socket.
     #[error("unauthorized control socket peer (uid {0})")]
     Unauthorized(u32),
@@ -273,6 +345,54 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         return Err(io::Error::last_os_error());
     }
     Ok(ucred.uid)
+}
+
+/// Returns the PID of the peer connected on `stream`.
+#[cfg(target_os = "linux")]
+pub fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut ucred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let res = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(ucred.pid as u32)
+}
+
+/// Returns the PID of the peer connected on `stream`.
+#[cfg(target_os = "macos")]
+pub fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut pid: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let res = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            0,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut libc::c_int as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if res != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(pid as u32)
 }
 
 /// Returns the UID of the peer connected on `stream`.
@@ -307,12 +427,25 @@ pub fn authenticate_peer(stream: &UnixStream) -> Result<(), ControlError> {
 
 /// Sends a command to the supervisor and waits for a response.
 pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, ControlError> {
-    let mut stream = connect_stream()?;
+    let stream = connect_stream()?;
+    stream.set_read_timeout(Some(COMMAND_READ_TIMEOUT))?;
+    let mut stream = stream;
     write_command(&mut stream, command)?;
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    reader.read_line(&mut response_line)?;
+    match reader.read_line(&mut response_line) {
+        Ok(_) => {}
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Err(ControlError::Timeout);
+        }
+        Err(err) => return Err(err.into()),
+    }
 
     if response_line.trim().is_empty() {
         return Err(ControlError::NotAvailable);
@@ -324,6 +457,22 @@ pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, Control
     }
 
     Ok(response)
+}
+
+/// Fetches the supervisor's current operation without disturbing an in-flight
+/// command. Returns `None` when the supervisor is idle or unreachable.
+pub fn current_op() -> Option<crate::opslot::OpReport> {
+    let stream = connect_stream().ok()?;
+    stream.set_read_timeout(Some(CURRENT_OP_TIMEOUT)).ok()?;
+    let mut stream = stream;
+    write_command(&mut stream, &ControlCommand::CurrentOp).ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    match serde_json::from_str(line.trim()).ok()? {
+        ControlResponse::CurrentOp(report) => report,
+        _ => None,
+    }
 }
 
 /// Sends a command to the supervisor without waiting for a response.
@@ -338,6 +487,7 @@ pub fn send_command_with_timeout(
     timeout: Duration,
 ) -> Result<CommandAck, ControlError> {
     let mut stream = connect_stream()?;
+    stream.set_write_timeout(Some(timeout))?;
     write_command(&mut stream, command)?;
     stream.set_read_timeout(Some(timeout))?;
 
@@ -377,6 +527,13 @@ fn connect_stream() -> Result<UnixStream, ControlError> {
     }
 }
 
+/// Returns the PID that owns the live supervisor socket.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn supervisor_peer_pid() -> Result<u32, ControlError> {
+    let stream = connect_stream()?;
+    peer_pid(&stream).map_err(ControlError::Io)
+}
+
 fn write_command(
     stream: &mut UnixStream,
     command: &ControlCommand,
@@ -391,7 +548,19 @@ fn write_command(
 /// Sends a command to the supervisor and copies the raw response bytes into the provided writer.
 pub fn stream_command_output(
     command: &ControlCommand,
+    writer: impl Write,
+) -> Result<(), ControlError> {
+    stream_command_output_interruptible(command, writer, None)
+}
+
+/// Like [`stream_command_output`], but publishes a clone of the live connection
+/// into `shutdown_slot` so another thread can `shutdown(Both)` it to unblock the
+/// copy loop immediately (e.g. on Ctrl-C). Without a slot this is identical to
+/// [`stream_command_output`].
+pub fn stream_command_output_interruptible(
+    command: &ControlCommand,
     mut writer: impl Write,
+    shutdown_slot: Option<&std::sync::Mutex<Option<UnixStream>>>,
 ) -> Result<(), ControlError> {
     let path = socket_path()?;
     if !path.exists() {
@@ -410,10 +579,65 @@ pub fn stream_command_output(
     stream.write_all(b"\n")?;
     stream.flush()?;
 
+    // Hand a clone of the connection to the caller so it can force-close the read
+    // side from another thread; a shutdown() unblocks the io::copy below at once.
+    if let Some(slot) = shutdown_slot
+        && let Ok(clone) = stream.try_clone()
+        && let Ok(mut guard) = slot.lock()
+    {
+        *guard = Some(clone);
+    }
+
     let mut reader = BufReader::new(stream);
     io::copy(&mut reader, &mut writer)?;
     writer.flush()?;
     Ok(())
+}
+
+/// Subscribes to boot progress and invokes `on_frame` for each frame the
+/// supervisor streams, returning once the terminal `Done` frame arrives (or the
+/// stream closes). Frames are line-delimited JSON.
+pub fn stream_boot_frames(
+    mut on_frame: impl FnMut(crate::start::BootFrame),
+) -> Result<(), ControlError> {
+    let path = socket_path()?;
+    if !path.exists() {
+        return Err(ControlError::NotAvailable);
+    }
+
+    let mut stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+            return Err(ControlError::NotAvailable);
+        }
+        Err(e) => return Err(e.into()),
+    };
+    write_command(&mut stream, &ControlCommand::BootStream)?;
+
+    let reader = BufReader::new(stream);
+    let mut completed = false;
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let frame: crate::start::BootFrame = serde_json::from_str(line.trim())?;
+        let done = frame.is_done();
+        on_frame(frame);
+        if done {
+            completed = true;
+            break;
+        }
+    }
+    if completed {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "boot stream ended before its terminal frame",
+        )
+        .into())
+    }
 }
 
 /// Utility to read a command from a `UnixStream`. Used by the supervisor event loop.
@@ -465,7 +689,15 @@ pub fn write_supervisor_pid(pid: libc::pid_t) -> Result<(), ControlError> {
     Ok(())
 }
 
-/// Persists the resolved config path to assist CLI fallbacks.
+/// Path holding the content hash of the last-submitted manifest, beside the
+/// config-path hint. Lets a bare command (no `-c`) detect that the on-disk file
+/// drifted from what the supervisor loaded.
+fn config_hint_hash_path() -> Result<PathBuf, ControlError> {
+    Ok(runtime_dir()?.join("config_hint_hash"))
+}
+
+/// Persists the resolved config path — and a hash of its current content — to
+/// assist CLI fallbacks and detect a dirtied manifest.
 pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
     let hint_path = config_hint_path()?;
     if let Some(parent) = hint_path.parent() {
@@ -473,7 +705,51 @@ pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
     }
     let config_str = config.to_string_lossy();
     runtime::write_private_file(&hint_path, config_str.as_bytes())?;
+
+    if let Some(hash) = manifest_content_hash(config) {
+        let hash_path = config_hint_hash_path()?;
+        runtime::write_private_file(&hash_path, hash.as_bytes())?;
+    }
     Ok(())
+}
+
+/// Hashes a manifest file by its parsed, canonicalized content so cosmetic edits
+/// (whitespace, comments, key order) don't read as a change, but any real
+/// manifest change does. Returns `None` if the file cannot be read or parsed.
+pub fn manifest_content_hash(config: &Path) -> Option<String> {
+    let content = fs::read_to_string(config).ok()?;
+    let configs = crate::config::parse_config_projects(&content).ok()?;
+    let mut fingerprints: Vec<String> = Vec::new();
+    for config in &configs {
+        let mut svc: Vec<String> = config
+            .services
+            .iter()
+            .map(|(name, service)| format!("{name}={}", service.compute_hash()))
+            .collect();
+        svc.sort();
+        fingerprints.push(format!("{}:{}", config.project.id, svc.join(",")));
+    }
+    fingerprints.sort();
+    Some(fingerprints.join("\n"))
+}
+
+/// Whether the on-disk manifest at the recorded hint path drifted from the hash
+/// the supervisor last loaded. `false` when there is no hint, no recorded hash,
+/// or the file is unreadable — the cache is used as-is in those cases.
+pub fn manifest_is_dirty() -> bool {
+    let Ok(Some(hint)) = read_config_hint() else {
+        return false;
+    };
+    let Ok(hash_path) = config_hint_hash_path() else {
+        return false;
+    };
+    let Ok(recorded) = fs::read_to_string(&hash_path) else {
+        return false;
+    };
+    match manifest_content_hash(&hint) {
+        Some(current) => current != recorded.trim(),
+        None => false,
+    }
 }
 
 /// Reads the supervisor PID if present.
@@ -526,7 +802,34 @@ pub fn cleanup_runtime() -> Result<(), ControlError> {
         let _ = fs::remove_file(config_path);
     }
 
+    if let Ok(hash_path) = config_hint_hash_path()
+        && hash_path.exists()
+    {
+        let _ = fs::remove_file(hash_path);
+    }
+
     Ok(())
+}
+
+/// Clears runtime files only if they still belong to `owner_pid`.
+///
+/// A daemon shutting down must not delete a successor's runtime files. During a
+/// recycle the CLI stops the old daemon and immediately forks a new one that
+/// binds a fresh socket and writes its own pid; the old daemon's teardown runs
+/// ~2s behind, so a path-only `cleanup_runtime` would unlink the live
+/// successor's socket and pid file, leaving it alive but undiscoverable. This
+/// variant no-ops when the on-disk pid no longer names `owner_pid`, so a dying
+/// predecessor can never clobber whoever took over.
+pub fn cleanup_runtime_owned(owner_pid: libc::pid_t) -> Result<(), ControlError> {
+    let still_ours = match read_supervisor_pid() {
+        Ok(Some(pid)) => pid == owner_pid,
+        Ok(None) => true,
+        Err(_) => false,
+    };
+    if !still_ours {
+        return Ok(());
+    }
+    cleanup_runtime()
 }
 
 #[cfg(test)]

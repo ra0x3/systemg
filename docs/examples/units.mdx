@@ -75,6 +75,10 @@ Generated unit configs are saved under:
 
 systemg automatically prunes this folder to prevent unbounded growth.
 
+Generated units are project-less, so their runtime state (PIDs, service state)
+persists under `~/.local/share/systemg/projects/__loose__/`. See
+[State](/how-it-works/state).
+
 ## Applying a newly staged unit
 
 If a supervisor is already running, `sysg start --daemonize -- <command...>` stages

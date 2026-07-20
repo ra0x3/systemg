@@ -1,19 +1,23 @@
 //! rustc-style diagnostics for sysg.
 //!
-//! Every user-facing failure renders as a [`Diagnostic`]: what happened, the
+//! Every user-facing failure renders as a [`crate::diag::Diagnostic`]: what happened, the
 //! evidence sysg captured while it happened, and the exact next commands to
 //! run — colored on a terminal, plain when piped, structured over IPC. The
 //! design goal is the Rust compiler's: assume the user made an honest mistake
 //! and hand it back with a map, not a dead end.
+//!
+//! Every diagnostic carries a typed [`crate::diag::SgCode`]. The enum *is* the error
+//! taxonomy: a code that isn't a variant cannot be constructed, and adding a
+//! failure mode means adding a variant. There is no stringly-typed seam.
 
 use std::{fmt, io::IsTerminal};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Base URL for per-code documentation pages.
-pub const DOCS_BASE: &str = "https://docs.sysg.dev/errors";
+pub const DOCS_BASE: &str = "https://sysg.dev/how-it-works/dialog/codes";
 
-const RED: &str = "\x1b[1;31m";
+const RED: &str = "\x1b[1;91m";
 const YELLOW: &str = "\x1b[1;33m";
 const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
@@ -21,6 +25,291 @@ const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
 const UNDERLINE: &str = "\x1b[4;34m";
 const RESET: &str = "\x1b[0m";
+
+/// The stable sysg error taxonomy. Each variant owns its `SG####` string, a
+/// canonical one-line title, and its docs slug; the wire form is the code
+/// string so scripts and IPC stay stable across renames of the Rust variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SgCode {
+    /// SG0001 — a failure with no more specific diagnosis yet.
+    Catchall,
+    /// SG0002 — cron history/active state could not be restored.
+    CronStateRecoveryFailed,
+    /// SG0003 — a cron unit could not be safely registered.
+    CronRegistrationConflict,
+    /// SG0004 — a finite unit that exited cleanly was misclassified as failed.
+    FiniteUnitMisclassified,
+    /// SG0005 — the supervisor is using an outdated or wrong manifest.
+    StaleProjectConfiguration,
+    /// SG0006 — a command resolves ambiguously between projects/services.
+    TargetScopeAmbiguous,
+    /// SG0007 — the supervisor cannot safely restart or transfer ownership.
+    SupervisorRestartConflict,
+    /// SG0008 — a service or `pre_start` failed during boot or restart.
+    UnitStartFailed,
+    /// SG0009 — status/inspect disagrees with live process state.
+    StatusStateInconsistent,
+    /// SG0010 — expected service logs are unavailable or misrouted.
+    LogSourceUnavailable,
+    /// SG0011 — a live log-follow session is stale or cannot reconnect.
+    LogStreamDesynchronized,
+    /// SG0012 — log output exceeded safe storage/display bounds.
+    LogLimitExceeded,
+    /// SG0013 — a daemonized service inherited an invalid environment.
+    DaemonEnvironmentInvalid,
+    /// SG0014 — the installer cannot obtain the expected binary.
+    ReleaseArtifactUnavailable,
+    /// SG0015 — IPC/PID/tracking disagrees with the running processes.
+    SupervisorStateDesynchronized,
+    /// SG0016 — a rolling deployment failed without a useful error.
+    RollingDeploymentFailed,
+    /// SG0017 — `logs --prune` was run without a `--max-size` or `--max-age`
+    /// bound, so there is nothing to prune against.
+    PruneBoundMissing,
+    /// SG0018 — the manifest on disk changed since it was last submitted, but the
+    /// command ran without `-c`, so it would act on a stale cached manifest.
+    DirtyManifest,
+    /// SG0019 — `logs` ran with no `-s`/`-p`/`--supervisor` selector, so there is
+    /// no target to read.
+    LogsTargetRequired,
+    /// SG0020 — `logs --supervisor` was combined with a `-s`/`-p` selector.
+    LogsSupervisorConflict,
+    /// SG0021 — `logs -s <service>` (with no `-p`) named a service that is not in
+    /// the loose bundle.
+    LooseServiceNotFound,
+    /// SG0022 — every health check probe failed to connect; the endpoint was
+    /// never reached (wrong address, or nothing listening).
+    HealthCheckUnreachable,
+    /// SG0023 — no health check probe completed within the per-attempt budget.
+    HealthCheckTimeout,
+    /// SG0102 — a service exited immediately at start, before it came up.
+    UnitImmediateExit,
+    /// SG0103 — a service's `pre_start` failed, so it was not started.
+    PreStartFailed,
+    /// SG0104 — a service never passed its configured health check.
+    HealthUnmet,
+    /// SG0105 — a service could not bind its port because it is already in use.
+    PortInUse,
+    /// SG0107 — the supervisor was busy with another mutation and rejected this
+    /// command. Expected and recoverable: the supervisor serialises mutations
+    /// through one owner thread, so a concurrent restart/start/stop is refused
+    /// rather than interleaved. Distinct from a real failure — retrying once the
+    /// in-flight operation finishes is the correct response.
+    SupervisorBusy,
+    /// SG0106 — a project was registered but one or more of its services never
+    /// came up. Reported by an attaching `start`, which returns as soon as the
+    /// supervisor QUEUES the boot: without this the CLI printed "loaded" and
+    /// exited 0 while the project had comprehensively failed to start.
+    ProjectServicesNotUp,
+    /// SG0108 - a service's `pre_start` command exceeded its execution budget
+    /// and was terminated before the service could launch.
+    PreStartTimeout,
+    /// SG0109 - a service was not started because one of its declared
+    /// dependencies did not reach the condition required by the manifest.
+    DependencyUnavailable,
+    /// SG0201 — the `-p` project does not match the resolved config.
+    TargetConfigMismatch,
+    /// SG0202 — the command names a service or project that does not exist.
+    TargetNotFound,
+    /// SG0203 — a config file could not be found or read.
+    ConfigFileUnreadable,
+    /// SG0204 — mutually exclusive selectors were combined (e.g. --supervisor
+    /// with a service/project selector).
+    ConflictingSelectors,
+    /// SG0205 — the resident supervisor's process is alive but it is not
+    /// answering its control socket, so the command was refused rather than
+    /// routed into a dying daemon.
+    SupervisorNotResponding,
+    /// SG0206 — no supervisor is running, so the reported state is off disk and
+    /// unsupervised; any surviving processes are orphaned.
+    SupervisorOffline,
+    /// SG0301 — a restart's new manifest is invalid; nothing was changed.
+    ManifestRejected,
+    /// SG0302 — a reconcile ran but left units short of their manifest target.
+    ReconcileIncomplete,
+    /// SG0303 — a supervisor recycle stopped the old daemon but the new one did
+    /// not come up.
+    SupervisorRecycleFailed,
+    /// SG0401 — a purge was refused because a live supervisor is still managing
+    /// processes; stop it (or pass `--force`) before wiping its state.
+    PurgeSupervisorActive,
+    /// SG0402 — a purge removed some state but hit an IO error before finishing,
+    /// so the on-disk state may be partial.
+    PurgeIncomplete,
+    /// SG0403 — a scoped purge named a project that has no state on disk.
+    PurgeProjectNotFound,
+    /// SG0501 — the proposed live-upgrade binary is missing, malformed, or
+    /// unsafe for the supervisor to execute.
+    UpgradeTargetInvalid,
+    /// SG0502 — the proposed binary does not support a compatible live-reexec
+    /// protocol or is outside the supported patch-release line.
+    UpgradeIncompatible,
+    /// SG0503 — live runtime activity prevents the supervisor from reaching a
+    /// stable handoff point without risking workload ownership.
+    UpgradeEnvironmentUnsafe,
+    /// SG0504 — the resident supervisor could not serialize or execute its
+    /// validated handoff.
+    UpgradeHandoffFailed,
+    /// SG0505 — the replacement supervisor could not restore the handed-off
+    /// runtime and returned control to the previous binary.
+    UpgradeResumeFailed,
+}
+
+impl SgCode {
+    /// The stable `SG####` string. This is the wire and docs identity.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SgCode::Catchall => "SG0001",
+            SgCode::CronStateRecoveryFailed => "SG0002",
+            SgCode::CronRegistrationConflict => "SG0003",
+            SgCode::FiniteUnitMisclassified => "SG0004",
+            SgCode::StaleProjectConfiguration => "SG0005",
+            SgCode::TargetScopeAmbiguous => "SG0006",
+            SgCode::SupervisorRestartConflict => "SG0007",
+            SgCode::UnitStartFailed => "SG0008",
+            SgCode::StatusStateInconsistent => "SG0009",
+            SgCode::LogSourceUnavailable => "SG0010",
+            SgCode::LogStreamDesynchronized => "SG0011",
+            SgCode::LogLimitExceeded => "SG0012",
+            SgCode::DaemonEnvironmentInvalid => "SG0013",
+            SgCode::ReleaseArtifactUnavailable => "SG0014",
+            SgCode::SupervisorStateDesynchronized => "SG0015",
+            SgCode::RollingDeploymentFailed => "SG0016",
+            SgCode::PruneBoundMissing => "SG0017",
+            SgCode::DirtyManifest => "SG0018",
+            SgCode::LogsTargetRequired => "SG0019",
+            SgCode::LogsSupervisorConflict => "SG0020",
+            SgCode::LooseServiceNotFound => "SG0021",
+            SgCode::HealthCheckUnreachable => "SG0022",
+            SgCode::HealthCheckTimeout => "SG0023",
+            SgCode::UnitImmediateExit => "SG0102",
+            SgCode::PreStartFailed => "SG0103",
+            SgCode::HealthUnmet => "SG0104",
+            SgCode::PortInUse => "SG0105",
+            SgCode::ProjectServicesNotUp => "SG0106",
+            SgCode::SupervisorBusy => "SG0107",
+            SgCode::PreStartTimeout => "SG0108",
+            SgCode::DependencyUnavailable => "SG0109",
+            SgCode::TargetConfigMismatch => "SG0201",
+            SgCode::TargetNotFound => "SG0202",
+            SgCode::ConfigFileUnreadable => "SG0203",
+            SgCode::ConflictingSelectors => "SG0204",
+            SgCode::SupervisorNotResponding => "SG0205",
+            SgCode::SupervisorOffline => "SG0206",
+            SgCode::ManifestRejected => "SG0301",
+            SgCode::ReconcileIncomplete => "SG0302",
+            SgCode::SupervisorRecycleFailed => "SG0303",
+            SgCode::PurgeSupervisorActive => "SG0401",
+            SgCode::PurgeIncomplete => "SG0402",
+            SgCode::PurgeProjectNotFound => "SG0403",
+            SgCode::UpgradeTargetInvalid => "SG0501",
+            SgCode::UpgradeIncompatible => "SG0502",
+            SgCode::UpgradeEnvironmentUnsafe => "SG0503",
+            SgCode::UpgradeHandoffFailed => "SG0504",
+            SgCode::UpgradeResumeFailed => "SG0505",
+        }
+    }
+
+    /// The docs URL for this code.
+    pub fn docs_url(self) -> String {
+        format!("{DOCS_BASE}#{}", self.as_str().to_lowercase())
+    }
+
+    /// Every code, so callers can enumerate or round-trip the taxonomy.
+    pub const ALL: [SgCode; 48] = [
+        SgCode::Catchall,
+        SgCode::CronStateRecoveryFailed,
+        SgCode::CronRegistrationConflict,
+        SgCode::FiniteUnitMisclassified,
+        SgCode::StaleProjectConfiguration,
+        SgCode::TargetScopeAmbiguous,
+        SgCode::SupervisorRestartConflict,
+        SgCode::UnitStartFailed,
+        SgCode::StatusStateInconsistent,
+        SgCode::LogSourceUnavailable,
+        SgCode::LogStreamDesynchronized,
+        SgCode::LogLimitExceeded,
+        SgCode::DaemonEnvironmentInvalid,
+        SgCode::ReleaseArtifactUnavailable,
+        SgCode::SupervisorStateDesynchronized,
+        SgCode::RollingDeploymentFailed,
+        SgCode::PruneBoundMissing,
+        SgCode::DirtyManifest,
+        SgCode::LogsTargetRequired,
+        SgCode::LogsSupervisorConflict,
+        SgCode::LooseServiceNotFound,
+        SgCode::HealthCheckUnreachable,
+        SgCode::HealthCheckTimeout,
+        SgCode::UnitImmediateExit,
+        SgCode::PreStartFailed,
+        SgCode::HealthUnmet,
+        SgCode::PortInUse,
+        SgCode::ProjectServicesNotUp,
+        SgCode::SupervisorBusy,
+        SgCode::PreStartTimeout,
+        SgCode::DependencyUnavailable,
+        SgCode::TargetConfigMismatch,
+        SgCode::TargetNotFound,
+        SgCode::ConfigFileUnreadable,
+        SgCode::ConflictingSelectors,
+        SgCode::SupervisorNotResponding,
+        SgCode::SupervisorOffline,
+        SgCode::ManifestRejected,
+        SgCode::ReconcileIncomplete,
+        SgCode::SupervisorRecycleFailed,
+        SgCode::PurgeSupervisorActive,
+        SgCode::PurgeIncomplete,
+        SgCode::PurgeProjectNotFound,
+        SgCode::UpgradeTargetInvalid,
+        SgCode::UpgradeIncompatible,
+        SgCode::UpgradeEnvironmentUnsafe,
+        SgCode::UpgradeHandoffFailed,
+        SgCode::UpgradeResumeFailed,
+    ];
+}
+
+impl fmt::Display for SgCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The wire form does not resolve to a known code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSgCode(pub String);
+
+impl fmt::Display for UnknownSgCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown sysg code `{}`", self.0)
+    }
+}
+
+impl std::error::Error for UnknownSgCode {}
+
+impl std::str::FromStr for SgCode {
+    type Err = UnknownSgCode;
+
+    fn from_str(code: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|c| c.as_str() == code)
+            .ok_or_else(|| UnknownSgCode(code.to_string()))
+    }
+}
+
+impl Serialize for SgCode {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SgCode {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
 
 /// How severe a diagnostic is; controls the header color and label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +341,7 @@ impl Severity {
 }
 
 /// Where in the user's world the problem originates, e.g. a config file key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Origin {
     /// Path to the file, as the user knows it.
     pub file: String,
@@ -63,7 +352,7 @@ pub struct Origin {
 }
 
 /// A labeled block of captured facts, e.g. the service's last output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
     /// Short label, e.g. `last output`.
     pub label: String,
@@ -72,7 +361,7 @@ pub struct Evidence {
 }
 
 /// An actionable next step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Help {
     /// A command the user can run, with a short reason.
     Command {
@@ -89,12 +378,12 @@ pub enum Help {
 }
 
 /// A structured, renderable failure report.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
     /// Severity of the report.
     pub severity: Severity,
-    /// Stable sysg error code, e.g. `SG0104`.
-    pub code: String,
+    /// Stable sysg error code.
+    pub code: SgCode,
     /// One-line statement of what happened.
     pub title: String,
     /// Where the problem originates, when known.
@@ -109,16 +398,35 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     /// Starts an error-severity diagnostic with the given code and title.
-    pub fn error(code: &str, title: impl Into<String>) -> Self {
+    pub fn error(code: SgCode, title: impl Into<String>) -> Self {
         Self {
             severity: Severity::Error,
-            code: code.to_string(),
+            code,
             title: title.into(),
             origin: None,
             notes: Vec::new(),
             evidence: Vec::new(),
             help: Vec::new(),
         }
+    }
+
+    /// Starts a warning-severity diagnostic — a degraded but non-fatal reading,
+    /// such as a status shown off disk while the supervisor is offline.
+    pub fn warn(code: SgCode, title: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            code,
+            title: title.into(),
+            origin: None,
+            notes: Vec::new(),
+            evidence: Vec::new(),
+            help: Vec::new(),
+        }
+    }
+
+    /// The stable `SG####` string for this diagnostic's code.
+    pub fn code_str(&self) -> &'static str {
+        self.code.as_str()
     }
 
     /// Attaches the originating file/key.
@@ -164,8 +472,9 @@ impl Diagnostic {
 
     /// Adds the documentation link for this diagnostic's code.
     pub fn help_docs(mut self) -> Self {
-        let url = format!("{DOCS_BASE}/{}", self.code);
-        self.help.push(Help::Link { url });
+        self.help.push(Help::Link {
+            url: self.code.docs_url(),
+        });
         self
     }
 
@@ -186,7 +495,7 @@ impl Diagnostic {
             "{}{}[{}]{}{}: {}{}\n",
             paint(self.severity.color()),
             self.severity.label(),
-            self.code,
+            self.code.as_str(),
             reset,
             paint(BOLD),
             self.title,
@@ -269,19 +578,22 @@ mod tests {
     use super::*;
 
     fn sample() -> Diagnostic {
-        Diagnostic::error("SG0104", "service `api` failed to become healthy")
-            .origin(
-                "sysg.yaml",
-                Some(31),
-                Some("services.api.health_check".into()),
-            )
-            .note("5 health checks failed over 45s")
-            .evidence(
-                "last output",
-                vec!["password authentication failed".to_string()],
-            )
-            .help_cmd("view logs", "sysg logs -s api")
-            .help_docs()
+        Diagnostic::error(
+            SgCode::HealthUnmet,
+            "service `api` failed to become healthy",
+        )
+        .origin(
+            "sysg.yaml",
+            Some(31),
+            Some("services.api.health_check".into()),
+        )
+        .note("5 health checks failed over 45s")
+        .evidence(
+            "last output",
+            vec!["password authentication failed".to_string()],
+        )
+        .help_cmd("view logs", "sysg logs -s api")
+        .help_docs()
     }
 
     #[test]
@@ -292,7 +604,7 @@ mod tests {
         assert!(text.contains("--> sysg.yaml:31 (services.api.health_check)"));
         assert!(text.contains("password authentication failed"));
         assert!(text.contains("sysg logs -s api"));
-        assert!(text.contains(&format!("{DOCS_BASE}/SG0104")));
+        assert!(text.contains(&format!("{DOCS_BASE}#sg0104")));
         assert!(!text.contains('\x1b'));
     }
 
@@ -302,7 +614,25 @@ mod tests {
         assert!(text.contains(RED));
         let json = serde_json::to_string(&sample()).unwrap();
         let back: Diagnostic = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.code, "SG0104");
+        assert_eq!(back.code, SgCode::HealthUnmet);
         assert_eq!(back.render(false), sample().render(false));
+    }
+
+    #[test]
+    fn code_strings_are_unique_and_round_trip() {
+        let mut seen = std::collections::HashSet::new();
+        for code in SgCode::ALL {
+            assert!(
+                seen.insert(code.as_str()),
+                "duplicate code {}",
+                code.as_str()
+            );
+            assert_eq!(code.as_str().parse(), Ok(code));
+        }
+    }
+
+    #[test]
+    fn unknown_code_fails_to_deserialize() {
+        assert!(serde_json::from_str::<SgCode>("\"SG9999\"").is_err());
     }
 }

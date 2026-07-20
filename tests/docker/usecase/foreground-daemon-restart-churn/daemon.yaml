@@ -1,0 +1,7 @@
+version: "2"
+projects:
+  dmproj:
+    services:
+      dmsvc:
+        command: "sh -c 'while true; do echo DAEMON_LINE; sleep 1; done'"
+        restart_policy: always

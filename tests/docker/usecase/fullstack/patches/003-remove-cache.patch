@@ -1,0 +1,40 @@
+diff --git a/app/web.py b/app/web.py
+index 8777ff2..f14b4aa 100644
+--- a/app/web.py
++++ b/app/web.py
+@@ -43,7 +43,7 @@ class Handler(BaseHTTPRequestHandler):
+ 
+     def do_GET(self):
+         if self.path == "/health":
+-            ok = db_now() and cache_ping()
++            ok = db_now()
+             self._send(200 if ok else 503, "ok" if ok else "unhealthy")
+         elif self.path == "/":
+             self._send(200, f"{GREETING} from shop (db+cache up)")
+diff --git a/stack.yaml b/stack.yaml
+index 1d77ab5..81e546d 100644
+--- a/stack.yaml
++++ b/stack.yaml
+@@ -13,22 +13,11 @@ projects:
+             command: "pg_isready -h 127.0.0.1 -p 5433 -q"
+             interval: "2s"
+             retries: 15
+-      cache:
+-        command: "redis-server --port 6380 --save '' --appendonly no"
+-        restart_policy: always
+-        deployment:
+-          strategy: immediate
+-          health_check:
+-            command: "redis-cli -p 6380 ping"
+-            interval: "2s"
+-            retries: 15
+       web:
+         command: "python3 /usecase/app/web.py"
+         depends_on:
+           - service: db
+             condition: started
+-          - service: cache
+-            condition: started
+         restart_policy: always
+         env:
+           GREETING: "howdy"

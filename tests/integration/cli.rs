@@ -14,7 +14,7 @@ use assert_cmd::Command;
 use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
 use common::{is_process_alive, wait_for_path};
-use systemg::daemon::PidFile;
+use systemg::{daemon::PidFile, state_store::StateStore};
 use tempfile::tempdir;
 
 #[test]
@@ -30,6 +30,7 @@ fn logs_help_reports_combined_default() {
 
 #[cfg(unix)]
 #[test]
+/// Verifies stale supervisor endpoints do not block local stop commands.
 fn stale_socket_doesnt_block_commands() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
@@ -40,7 +41,7 @@ fn stale_socket_doesnt_block_commands() {
     let config_path = dir.join("systemg.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 5"
@@ -98,7 +99,7 @@ fn purge_removes_all_state() {
     let config_path = dir.join("systemg.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 2"
@@ -125,15 +126,21 @@ services:
     thread::sleep(Duration::from_millis(500));
 
     let runtime_dir = home.join(".local/share/systemg");
-    let state_file = runtime_dir.join("state.xml");
-    let pid_file = runtime_dir.join("pid.xml");
-    let lock_file = runtime_dir.join("pid.xml.lock");
+    let projects_dir = runtime_dir.join("projects");
     let supervisor_log = runtime_dir.join("logs/supervisor.log");
 
-    assert!(state_file.exists(), "state.xml should exist before purge");
+    // The service's state persists under its own project directory. Scan for the
+    // state.xml wherever `start` placed it rather than assuming a fixed id.
+    let state_file = fs::read_dir(&projects_dir)
+        .expect("projects dir should exist before purge")
+        .flatten()
+        .map(|e| e.path().join("state.xml"))
+        .find(|p| p.exists())
+        .expect("a project state.xml should exist before purge");
+
     assert!(
-        pid_file.exists() || lock_file.exists() || supervisor_log.exists(),
-        "At least one runtime file should exist before purge"
+        supervisor_log.exists(),
+        "supervisor.log should exist before purge"
     );
 
     Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
@@ -144,11 +151,6 @@ services:
     assert!(
         !state_file.exists(),
         "state.xml should be removed after purge"
-    );
-    assert!(!pid_file.exists(), "pid.xml should be removed after purge");
-    assert!(
-        !lock_file.exists(),
-        "pid.xml.lock should be removed after purge"
     );
     assert!(
         !supervisor_log.exists(),
@@ -256,7 +258,7 @@ fn restart_daemonize_returns_without_waiting_for_supervisor_restart() {
     let config_path = dir.join("systemg.yaml");
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 30"
@@ -276,7 +278,7 @@ services:
 
     fs::write(
         &config_path,
-        r#"version: "1"
+        r#"version: "2"
 services:
   test_service:
     command: "sleep 30"
@@ -323,6 +325,7 @@ services:
 
 #[cfg(unix)]
 #[test]
+/// Verifies rolling restart retires the old process after its grace period.
 fn rolling_restart_cli_does_not_leave_duplicate_long_lived_processes() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -355,14 +358,14 @@ while true; do sleep 1; done\n",
     fs::write(
         &config_path,
         format!(
-            r#"version: "1"
+            r#"version: "2"
 services:
   long_lived:
     command: "{}"
     restart_policy: "always"
     deployment:
       strategy: "rolling"
-      grace_period: "100ms"
+      grace_period: "1s"
 "#,
             service_script.display()
         ),
@@ -403,7 +406,8 @@ services:
         .parse()
         .expect("latest service pid should parse");
 
-    thread::sleep(Duration::from_secs(1));
+    assert_ne!(first_pid, latest_pid, "restart should launch a replacement");
+    common::wait_for_process_exit(first_pid);
 
     let alive: Vec<u32> = restarted_pids
         .iter()
@@ -427,6 +431,7 @@ services:
 
 #[cfg(unix)]
 #[test]
+/// Verifies a missing PID file cannot fork a second live supervisor.
 fn restart_daemonize_does_not_start_second_supervisor_when_pidfile_is_missing() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -459,14 +464,14 @@ while true; do sleep 1; done\n",
     fs::write(
         &config_path,
         format!(
-            r#"version: "1"
+            r#"version: "2"
 services:
   long_lived:
     command: "{}"
     restart_policy: "always"
     deployment:
       strategy: "rolling"
-      grace_period: "100ms"
+      grace_period: "1s"
 "#,
             service_script.display()
         ),
@@ -505,8 +510,16 @@ services:
         .assert()
         .success();
 
+    let current_supervisor_pid = systemg::ipc::supervisor_peer_pid()
+        .expect("read supervisor socket peer after restart")
+        as libc::pid_t;
+    assert_eq!(
+        current_supervisor_pid, old_supervisor_pid,
+        "restart should remain routed to the original supervisor"
+    );
+
     let restarted_pids = common::wait_for_lines(&pid_log, 2);
-    thread::sleep(Duration::from_secs(1));
+    common::wait_for_process_exit(first_pid);
     let alive: Vec<u32> = restarted_pids
         .iter()
         .filter_map(|line| line.trim().parse::<u32>().ok())
@@ -573,7 +586,16 @@ fn start_daemonize_accepts_unit_command_without_config() {
         generated_yaml
     );
 
-    let pid_file = PidFile::load().expect("pid file should load");
+    let projects_dir = systemg::runtime::state_dir().join("projects");
+    let pid_file = fs::read_dir(&projects_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            PidFile::load(StateStore::for_project(&e.file_name().to_string_lossy())).ok()
+        })
+        .find(|p| !p.services().is_empty())
+        .expect("pid file should load with services");
     assert!(
         !pid_file.services().is_empty(),
         "expected at least one supervised service in pid file"

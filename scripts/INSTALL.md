@@ -7,6 +7,7 @@ The installation script at `scripts/index.sh` supports both latest and version-s
 - **Version Management**: Install multiple versions of systemg and switch between them
 - **Latest Installation**: Install the latest release by default
 - **Version Switching**: Switch to already-installed versions without re-downloading
+- **Live Re-execution**: Upgrade a compatible resident supervisor without restarting workloads
 - **Platform Detection**: Automatic detection of OS and architecture
 - **PATH Management**: Automatic PATH configuration for bash/zsh
 
@@ -15,9 +16,9 @@ The installation script at `scripts/index.sh` supports both latest and version-s
 After installation, systemg uses the following directory structure:
 
 ```
+~/.local/bin/
+└── sysg               # Symlink to active version
 ~/.sysg/
-├── bin/
-│   └── sysg           # Symlink to active version
 ├── versions/
 │   ├── 0.50.0/
 │   │   └── sysg       # Version 0.50.0 binary
@@ -54,15 +55,27 @@ If a version is already installed, running the install command for that version 
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.50.0
 ```
 
+### Upgrade a Running Supervisor
+
+Run the normal installer. Compatible releases re-execute the supervisor in the
+same PID, preserve its workloads, verify the resident target version, and only
+then update the active symlink:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+```
+
+Live re-execution starts with `0.56.0` and currently applies to newer patch
+releases on the same major/minor line. Installing `0.56.0` over a running
+`0.55.x` supervisor requires `sysg stop --supervisor` first. An incompatible or
+unsafe handoff leaves the active version unchanged and reports `SG0501` through
+`SG0505`.
+
 ### Show Help
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --help
 ```
-
-## Environment Variables
-
-- `SYSG_INSTALL_ALLOW_VERSION_MISMATCH=1` - Allow installation even if the downloaded binary reports a different version than expected
 
 ## Platform Support
 
@@ -109,7 +122,9 @@ To see all installed versions and switch between them, you can:
 
 ## Security
 
-The installer uses HTTPS with TLS 1.2+ for all downloads and verifies that the downloaded binary reports the expected version before installation.
+The installer uses HTTPS with TLS 1.2+ for all downloads and requires the
+downloaded binary to report the expected version. It validates executable
+ownership and permissions before a live handoff.
 
 ## Development
 

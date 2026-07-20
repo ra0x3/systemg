@@ -4,11 +4,11 @@ title: Projects
 
 # Projects
 
-A **project** is a durable namespace that groups the services declared in one
-config. Its identity is the `project.id` field in your manifest. Because a
-single resident supervisor can host many projects at once, projects are how
-systemg keeps unrelated (or related) workloads cleanly separated inside one
-running daemon.
+A **project** is a durable namespace that groups a set of services. Its identity
+is its id — the key under the `projects:` map in your manifest. Because a single
+resident supervisor can host many projects at once — and a single config file
+can declare many projects — projects are how systemg keeps unrelated (or
+related) workloads cleanly separated inside one running daemon.
 
 <Info>
   One supervisor, many projects. You can run a database stack, a web API, and a
@@ -19,34 +19,40 @@ running daemon.
 
 ## Declaring a project
 
-Set a stable id in your config:
+Projects live under the `projects:` map, keyed by id. One file can declare many:
 
 ```yaml
-project:
-  id: arbitration
-  name: Arbitration
+version: "2"
+projects:
+  arbitration:
+    name: Arbitration
+    services:
+      worker:
+        command: "python worker.py"
+  gamecast:
+    services:
+      api:
+        command: "python api.py"
 ```
 
-Or the shorthand, which sets both `id` and `name`:
-
-```yaml
-project: arbitration
-```
-
-See [Configuration](/how-it-works/configuration) for the full `project` block.
+Each key is the project id. Start the whole file and all its projects boot; the
+first project becomes the primary and the rest register behind it. See
+[Configuration](/how-it-works/configuration) for the full schema.
 
 <Warning>
-  Treat `project.id` as durable runtime identity. Changing it does not rename a
+  Treat the project id as durable runtime identity. Changing it does not rename a
   project — it creates a **new** namespace, and the old one's running services
   become orphaned state (visible under `sysg status --all`). Rename freely with
-  `name`; never rename by editing `id`.
+  `name`; never rename by editing the id.
 </Warning>
 
 <Note>
-  Configs without a `project` block still load. systemg derives a legacy id from
-  the config directory so existing deployments keep working, but explicit
-  `project.id` values are strongly recommended once more than one project shares
-  a supervisor.
+  Top-level `services:` with no project form a **loose bundle** — they still run,
+  and their state persists under `projects/__loose__/`. The older singular
+  `project:` block still parses (with a deprecation warning) for existing
+  single-project manifests; convert them with
+  [`sysg migrate`](/how-it-works/commands/migrate). Prefer the `projects:` map
+  once more than one project shares a supervisor.
 </Note>
 
 ## `-p/--project` vs `-c/--config`
@@ -56,11 +62,17 @@ the single most useful thing about projects.
 
 | Flag | What it does |
 |------|--------------|
-| `-c` / `--config` | **Loads and registers** a project from a config file on disk. Use it the first time you start a project, or when you want to reload the manifest from a specific path. |
-| `-p` / `--project` | **Targets a project already registered** with the running supervisor, by its `project.id`. No file path required. |
+| `-c` / `--config` | **Loads and registers** the config file on disk — **every project it declares**, plus any loose bundle. Use it the first time you start, or when you want to reload the manifest from a specific path. |
+| `-p` / `--project` | **Targets a single project already registered** with the running supervisor, by its id. No file path required. |
 
-The mental model: `-c` is *bring this project into the supervisor from disk*;
-`-p` is *act on a project the supervisor already knows about*.
+The mental model: `-c` is *bring this file's projects into the supervisor from
+disk*; `-p` is *act on one project the supervisor already knows about*.
+
+<Info>
+  `-c <file>` operates on the file as a whole. `sysg status -c stack.yaml` shows
+  every project the file declares, not just the first — the file identifies
+  "everything here," and `-p` narrows to one.
+</Info>
 
 ```sh
 # First start: register the project from its config
@@ -112,8 +124,8 @@ Anywhere you name a service, you can qualify it with its project using
 `project_id/service_name`:
 
 ```sh
-$ sysg restart arbitration/worker
-$ sysg logs gamecast-dev/api
+$ sysg restart -s arbitration/worker
+$ sysg logs -s gamecast-dev/api
 ```
 
 This is equivalent to passing `-p` plus the bare service name. If you supply

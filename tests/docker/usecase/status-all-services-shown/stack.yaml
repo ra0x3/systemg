@@ -1,0 +1,15 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      alpha:
+        command: "sleep 3000"
+      bravo:
+        command: "sleep 3000"
+      charlie:
+        command: "sleep 3000"
+      delta:
+        command: "sleep 3000"
+      echo:
+        command: "sleep 3000"

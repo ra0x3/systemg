@@ -1,0 +1,92 @@
+---
+title: migrate
+---
+
+# migrate
+
+Convert a legacy singular-`project:` manifest into the canonical `projects:`
+map. `migrate` reads a manifest and prints the converted YAML to stdout — it
+never touches the source file unless you ask it to.
+
+```sh
+$ sysg migrate systemg.yaml
+```
+
+Given an old-shape manifest:
+
+```yaml
+version: "1"
+project:
+  id: shop
+  name: Shop
+services:
+  api:
+    command: "sleep 3000"
+    restart_policy: always
+  worker:
+    command: "sleep 3000"
+    restart_policy: always
+```
+
+it emits the equivalent `projects:` form, bumped to the current schema version:
+
+```yaml
+version: "2"
+projects:
+  shop:
+    name: Shop
+    services:
+      api:
+        command: "sleep 3000"
+        restart_policy: always
+      worker:
+        command: "sleep 3000"
+        restart_policy: always
+```
+
+<Info>
+  `migrate` converts the shape and bumps the schema `version` to the current one
+  (`2`): the `project:` block becomes a `projects:` entry keyed by its id, and
+  the services and settings are otherwise unchanged. A manifest already in
+  `projects:` form at the current version passes through unchanged.
+</Info>
+
+## Options
+
+| Short | Long | Description |
+|-------|------|-------------|
+| `-` | `<config>` | Path to the manifest to convert (positional, required) |
+| `-` | `--in-place` | Rewrite the file in place, keeping a `.bak` copy, instead of printing to stdout |
+| `-v` | `--verbose` | Print operation progress |
+| `-` | `--sys` | Opt into privileged system mode. Requires running as root |
+| `-` | `--drop-privileges` | Accepted globally but ignored; migrate does not spawn services |
+| `-` | `--plain` | Disable terminal decoration for automation |
+| `-` | `--log-level` | Set logging verbosity for this invocation |
+
+## Usage
+
+The default prints to stdout, so you can review the diff before committing to it:
+
+```sh
+$ sysg migrate systemg.yaml > systemg.new.yaml
+$ diff systemg.yaml systemg.new.yaml
+```
+
+Or convert the file in place once you're happy — the original is preserved as
+`systemg.yaml.bak`:
+
+```sh
+$ sysg migrate systemg.yaml --in-place
+```
+
+<Note>
+  The singular `project:` block still parses (with a deprecation warning), so
+  migrating is not urgent for the manifest to keep working. It is, however, the
+  clean path off the deprecated shape before it is eventually removed.
+</Note>
+
+## See also
+
+- [Configuration](/how-it-works/configuration) - The `projects:` schema
+- [Projects](/how-it-works/projects) - How one supervisor hosts many projects
+- [`validate`](/how-it-works/commands/validate) - Check the converted manifest

@@ -4,23 +4,34 @@ title: restart
 
 # restart
 
-Restart services with zero downtime.
+Restart services or reconcile manifest changes without disturbing unrelated
+workloads.
 
 ```sh
 $ sysg restart
 ```
 
 <Warning>
-**Upgraded (or downgraded) the `sysg` binary itself?** `restart` is an IPC
-message to the resident supervisor process — services are re-spawned from
-their commands, but the supervisor does not re-execute its own binary.
+Do not use `restart` to apply a `sysg` upgrade. Run the installer again; on
+compatible releases it performs a
+[same-PID live re-execution](/installation/upgrading) without restarting
+services. Incompatible releases are refused until the supervisor is stopped.
 
-A full `sysg restart --daemonize` compares the supervisor's version against
-the CLI's and, on any difference, recycles the supervisor process onto the
-installed binary automatically. Scoped restarts (`-s`/`-p`) never recycle —
-they print a drift warning instead; run a full restart (or `sysg stop` +
-`sysg start`) to pick up the new binary.
+A manually replaced PATH binary can still leave version drift. A full
+`sysg restart --daemonize` retains the legacy stop-and-rebuild recovery path;
+scoped restarts (`-s`/`-p`) only report the drift.
 </Warning>
+
+<Note>
+**The recycle transfers supervision, not just the processes.** After a
+version-drift restart, your services stop being managed by the old supervisor
+and start being managed by the new one: the old daemon is stopped, a fresh
+daemon boots on the installed binary, and it actively supervises the
+re-spawned services — a crash after the upgrade is respawned by the new
+supervisor, exactly as before. If the replacement config fails to validate,
+the recycle is refused ([`SG0303`](/how-it-works/dialog/codes#sg0303)) and the
+working stack is left untouched.
+</Note>
 
 ## Options
 
@@ -30,8 +41,10 @@ they print a drift warning instead; run a full restart (or `sysg stop` +
 | `-s` | `--service` | Name of a specific service to restart. If not specified, all services are restarted |
 | `-p` | `--project` | Target a stable project id when restarting services |
 | `-` | `--daemonize` | Start the supervisor before restarting if it is not already running |
+| `-v` | `--verbose` | Print per-service operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--drop-privileges` | Drop child service privileges during spawn. In root/system mode, services without an explicit `user` run as `nobody` |
+| `-` | `--plain` | Disable terminal decoration for automation |
 | `-` | `--log-level` | Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0) |
 
 ## Examples
@@ -55,6 +68,16 @@ $ sysg restart --config production.yaml
 ```
 
 Reloads configuration and restarts all services.
+
+If the submitted manifest differs from the loaded one, systemg validates it
+before teardown and applies the diff surgically: added services start, removed
+services stop, changed services restart, and unchanged services retain their
+PIDs. A changed dependency also reevaluates its transitive dependents.
+
+<Info>
+  `restart -s <service>` restarts that service and its transitive dependents in
+  dependency order. It does not bounce unrelated services.
+</Info>
 
 ### Restart a project and reload its stored manifest
 
@@ -82,7 +105,8 @@ restart re-reads the manifest and reschedules every cron unit it defines.
 
 ## Deployment strategies
 
-Services configured with `deployment.strategy: rolling` get zero-downtime restarts:
+Services configured with `deployment.strategy: rolling` start the candidate
+before retiring the old instance:
 
 1. New instance starts
 2. Health checks pass
@@ -91,7 +115,9 @@ Services configured with `deployment.strategy: rolling` get zero-downtime restar
 5. Grace period allows requests to complete
 6. Old instance stops
 
-Services without rolling deployment stop then start.
+This is zero downtime only when both instances can run concurrently and traffic
+can reach the candidate. Fixed-port services need a blue-green configuration;
+services without rolling deployment stop and then start.
 
 For deployment scripts, prefer:
 

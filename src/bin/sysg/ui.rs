@@ -1,3 +1,40 @@
+/// Restores cooked terminal mode on drop.
+///
+/// Raw mode was enabled and disabled by hand at ~20 sites, every one through
+/// `?`. Any early return between an enable and its matching disable left the
+/// TERMINAL ITSELF broken: with raw mode on, `\n` moves down without returning
+/// to column 0, so every later line starts progressively further right and all
+/// output — including the next command's — stair-steps across the screen.
+///
+/// The worst path was `status` → `L` (logs): the child inherits the terminal and
+/// enables raw mode for its own key handling, so when the child was KILLED it
+/// never restored cooked mode and the parent assumed it had. A guard makes the
+/// restore unconditional — normal return, `?`, or unwind.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    /// Enters raw mode, restoring it on drop.
+    fn enter() -> Result<Self, Box<dyn Error>> {
+        terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+/// Forces the terminal back to cooked mode regardless of who left it raw.
+///
+/// Used when handing the terminal to (or taking it back from) a child process:
+/// the child may have died without restoring it, and `disable_raw_mode` is a
+/// no-op when the terminal is already cooked, so this is always safe to call.
+fn force_cooked_mode() {
+    let _ = terminal::disable_raw_mode();
+}
+
 /// Represents status render options.
 struct StatusRenderOptions<'a> {
     format: Option<OutputFormat>,
@@ -7,6 +44,9 @@ struct StatusRenderOptions<'a> {
     include_orphans: bool,
     service_filter: Option<&'a str>,
     project_filter: Option<&'a str>,
+    /// When set, the overview reads `OFFLINE` instead of a health label — no
+    /// supervisor stands behind the data, so a HEALTHY headline would lie.
+    offline: bool,
 }
 
 /// Represents inspect render options.
@@ -45,7 +85,7 @@ fn serialize_machine_output<T: serde::Serialize>(
 ) -> Result<String, Box<dyn Error>> {
     match format {
         OutputFormat::Json => Ok(serde_json::to_string_pretty(payload)?),
-        OutputFormat::Xml => Ok(quick_xml::se::to_string(payload)?),
+        OutputFormat::Xml => Ok(systemg::xml::to_string(payload)?),
     }
 }
 
@@ -79,49 +119,175 @@ type StatusProjectGroup<'a> = (String, Vec<(usize, &'a UnitStatus)>);
 /// Internal grouping state that keeps the stable project id separate from the display label.
 type WorkingStatusProjectGroup<'a> = (String, String, Vec<(usize, &'a UnitStatus)>);
 
-/// Fetches a status snapshot from the live supervisor, falling back to the
-/// persisted on-disk snapshot when no supervisor is available.
+/// Whether the state in a reading is backed by a live supervisor. A status must
+/// never present unsupervised disk state as if a supervisor were managing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorPresence {
+    /// A live supervisor answered; the snapshot is authoritative.
+    Live,
+    /// The supervisor's process is alive but did not answer in time; the reading
+    /// may be stale (SG0205).
+    NotResponding,
+    /// No supervisor is running; the snapshot was read off disk and any live
+    /// process in it is unsupervised (SG0206).
+    Offline,
+}
+
+/// A status reading plus the verdict on whether a supervisor stands behind it.
+struct StatusReading {
+    snapshot: StatusSnapshot,
+    presence: SupervisorPresence,
+}
+
+/// Fetches a status snapshot, gated on the supervisor's actual health rather
+/// than mere socket connectability. A live daemon's snapshot is authoritative; a
+/// daemon that is alive but not answering is probed within a bounded window and
+/// its disk state returned as `NotResponding`; a truly absent supervisor yields
+/// the on-disk state marked `Offline`, never dressed up as a supervised reading.
+fn fetch_status_reading(
+    config_path: Option<&str>,
+    live: bool,
+) -> Result<StatusReading, Box<dyn Error>> {
+    let health = supervisor_health();
+    if health == SupervisorHealth::Serving {
+        if let Some(reading) = try_live_status(live) {
+            return Ok(reading);
+        }
+        if live
+            && let Some(reading) = try_live_status(false)
+        {
+            return Ok(reading);
+        }
+    }
+
+    let presence = match health {
+        SupervisorHealth::Dying => SupervisorPresence::NotResponding,
+        _ => SupervisorPresence::Offline,
+    };
+
+    let Some(config_path) = config_path else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No running supervisor",
+        )
+        .into());
+    };
+    let config = load_status_config(config_path)?;
+    let snapshot =
+        collect_disk_snapshot(config).map_err(|err| Box::new(err) as Box<dyn Error>)?;
+    Ok(StatusReading { snapshot, presence })
+}
+
+/// Refuses a `-s <service>` that resolves ambiguously — the service is declared
+/// in more than one project and no `-p` narrowed it. status is read-only, but it
+/// keeps the same selector contract as the mutating commands: an ambiguous unit
+/// selector is SG0006, not a guess. Returns `None` when the selector is
+/// unambiguous, absent, or already project-scoped.
+fn status_ambiguous_service(
+    snapshot: &StatusSnapshot,
+    service_filter: Option<&str>,
+    project_filter: Option<&str>,
+) -> Option<systemg::diag::Diagnostic> {
+    let service = service_filter?;
+    if project_filter.is_some() {
+        return None;
+    }
+    let service_name = match split_status_project_selector(service) {
+        Some((_project, _service)) => return None,
+        None => service,
+    };
+
+    let mut projects: Vec<String> = snapshot
+        .units
+        .iter()
+        .filter(|unit| unit.name == service_name && unit.kind != UnitKind::Orphaned)
+        .filter_map(|unit| unit.project.as_ref().map(|project| project.id.clone()))
+        .collect();
+    projects.sort_unstable();
+    projects.dedup();
+
+    if projects.len() > 1 {
+        Some(systemg::start::ambiguous_service(service_name, &projects))
+    } else {
+        None
+    }
+}
+
+/// Prints the supervisor-presence banner to stderr for a non-`Live` reading, so
+/// an offline or wedged supervisor is never silently rendered as a supervised
+/// HEALTHY stack. Renders nothing when a live supervisor stands behind the data.
+fn print_presence_banner(presence: SupervisorPresence) {
+    let diag = match presence {
+        SupervisorPresence::Live => return,
+        SupervisorPresence::NotResponding => {
+            systemg::status::diagnostics::supervisor_not_responding()
+        }
+        SupervisorPresence::Offline => {
+            systemg::status::diagnostics::supervisor_offline()
+        }
+    };
+    eprintln!("{}", diag.render_for_terminal());
+}
+
+/// The process exit code for a status run. An unsupervised or wedged reading is
+/// never a clean `0`, even when every surviving process looks healthy — the
+/// absence of a supervisor is itself the failing condition.
+fn status_exit_code(presence: SupervisorPresence, health: OverallHealth) -> i32 {
+    match presence {
+        SupervisorPresence::Offline => 2,
+        SupervisorPresence::NotResponding => 1,
+        SupervisorPresence::Live => match health {
+            OverallHealth::Healthy => 0,
+            OverallHealth::Warn => 1,
+            OverallHealth::Failing => 2,
+        },
+    }
+}
+
+/// Fetches just the snapshot (discarding the presence verdict) for callers that
+/// only need the unit list, such as the log commands.
 fn fetch_status_snapshot(
     config_path: Option<&str>,
     live: bool,
 ) -> Result<StatusSnapshot, Box<dyn Error>> {
-    match ipc::send_command(&ControlCommand::Status { live }) {
-        Ok(ControlResponse::Status(snapshot)) => Ok(snapshot),
-        Ok(other) => Err(io::Error::other(format!(
-            "unexpected supervisor response: {:?}",
-            other
-        ))
-        .into()),
-        Err(ControlError::NotAvailable) => {
-            let Some(config_path) = config_path else {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "No running supervisor",
-                )
-                .into());
-            };
-            let config = match load_config(Some(config_path)) {
-                Ok(config) => Some(config),
-                Err(primary_err) => {
-                    if let Ok(Some(hint)) = ipc::read_config_hint() {
-                        let hint_path = hint.to_string_lossy().to_string();
-                        match load_config(Some(&hint_path)) {
-                            Ok(config) => Some(config),
-                            Err(hint_err) => {
-                                return Err(io::Error::other(format!(
-                                    "failed to load config '{config_path}' ({primary_err}); fallback config hint '{hint_path}' also failed ({hint_err})"
-                                ))
-                                .into());
-                            }
-                        }
-                    } else {
-                        return Err(primary_err.into());
-                    }
-                }
-            };
-            collect_disk_snapshot(config).map_err(|err| Box::new(err) as Box<dyn Error>)
+    fetch_status_reading(config_path, live).map(|reading| reading.snapshot)
+}
+
+/// Asks a serving supervisor for its snapshot within the probe deadline. Returns
+/// `None` if the daemon stops serving between the health check and the request.
+fn try_live_status(live: bool) -> Option<StatusReading> {
+    match ipc::send_command_with_timeout(
+        &ControlCommand::Status { live },
+        SUPERVISOR_PROBE_TIMEOUT,
+    ) {
+        Ok(ipc::CommandAck::Response(ControlResponse::Status(snapshot))) => {
+            Some(StatusReading {
+                snapshot,
+                presence: SupervisorPresence::Live,
+            })
         }
-        Err(err) => Err(Box::new(err)),
+        _ => None,
+    }
+}
+
+/// Loads the config for an offline reading, falling back to the persisted config
+/// hint the last supervisor left behind.
+fn load_status_config(config_path: &str) -> Result<Option<Config>, Box<dyn Error>> {
+    match load_config(Some(config_path)) {
+        Ok(config) => Ok(Some(config)),
+        Err(primary_err) => {
+            if let Ok(Some(hint)) = ipc::read_config_hint() {
+                let hint_path = hint.to_string_lossy().to_string();
+                load_config(Some(&hint_path)).map(Some).map_err(|hint_err| {
+                    io::Error::other(format!(
+                        "failed to load config '{config_path}' ({primary_err}); fallback config hint '{hint_path}' also failed ({hint_err})"
+                    ))
+                    .into()
+                })
+            } else {
+                Err(primary_err.into())
+            }
+        }
     }
 }
 
@@ -200,9 +366,15 @@ fn render_service_logs_from_snapshot(
         .find(|unit| status_unit_matches_selector(unit, Some(service_name), project));
 
     if let Some(unit) = unit {
+        let unit_project = unit
+            .project
+            .as_ref()
+            .map(|project| project.id.clone())
+            .unwrap_or_else(|| systemg::state_store::LOOSE_PROJECT_ID.to_string());
         if let Some(process_pid) = live_unit_pid(unit) {
             if snapshot_mode {
                 manager.show_log_snapshot(
+                    &unit_project,
                     service_name,
                     process_pid,
                     lines,
@@ -210,28 +382,59 @@ fn render_service_logs_from_snapshot(
                     filter,
                 )?;
             } else {
-                manager.show_log(service_name, process_pid, lines, kind, filter)?;
+                manager.show_log(
+                    &unit_project,
+                    service_name,
+                    process_pid,
+                    lines,
+                    kind,
+                    filter,
+                )?;
             }
             return Ok(());
         }
 
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, kind, filter)?;
+            manager.show_inactive_log_snapshot(
+                &unit_project,
+                service_name,
+                lines,
+                kind,
+                filter,
+            )?;
         } else {
-            manager.show_inactive_log(service_name, lines, kind, filter)?;
+            manager.show_inactive_log(&unit_project, service_name, lines, kind, filter)?;
         }
         return Ok(());
     }
 
-    if project.is_some() {
-        warn!("Service '{service_name}' is not present in the requested project");
+    if let Some(project_id) = project {
+        // An absent unit does not mean absent logs: with no supervisor there is
+        // no snapshot to match against, yet the captured files are still on
+        // disk. Read them before declaring the service missing, so a
+        // post-mortem `logs -p <project> -s <service>` works after a crash.
+        let bare = service_name.rsplit('/').next().unwrap_or(service_name);
+        let has_log = get_service_log_path(project_id, bare).exists()
+            || resolve_log_path(project_id, bare, "stdout").exists()
+            || resolve_log_path(project_id, bare, "stderr").exists();
+        if has_log {
+            if snapshot_mode {
+                manager
+                    .show_inactive_log_snapshot(project_id, bare, lines, kind, filter)?;
+            } else {
+                manager.show_inactive_log(project_id, bare, lines, kind, filter)?;
+            }
+        } else {
+            warn!("Service '{service_name}' is not present in the requested project");
+        }
         return Ok(());
     }
 
-    let cron_state = CronStateFile::load().unwrap_or_default();
-    let combined_exists = get_service_log_path(service_name).exists();
-    let stdout_exists = resolve_log_path(service_name, "stdout").exists();
-    let stderr_exists = resolve_log_path(service_name, "stderr").exists();
+    let loose = systemg::state_store::LOOSE_PROJECT_ID;
+    let cron_state = CronStateFile::load(StateStore::loose()).unwrap_or_default();
+    let combined_exists = get_service_log_path(loose, service_name).exists();
+    let stdout_exists = resolve_log_path(loose, service_name, "stdout").exists();
+    let stderr_exists = resolve_log_path(loose, service_name, "stderr").exists();
 
     if cron_state.jobs().contains_key(service_name)
         || combined_exists
@@ -239,9 +442,9 @@ fn render_service_logs_from_snapshot(
         || stderr_exists
     {
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(service_name, lines, kind, filter)?;
+            manager.show_inactive_log_snapshot(loose, service_name, lines, kind, filter)?;
         } else {
-            manager.show_inactive_log(service_name, lines, kind, filter)?;
+            manager.show_inactive_log(loose, service_name, lines, kind, filter)?;
         }
     } else {
         warn!("Service '{service_name}' is not currently running");
@@ -252,6 +455,32 @@ fn render_service_logs_from_snapshot(
 
 /// Renders logs for every non-orphaned unit represented in the current status
 /// snapshot.
+/// Lists the service names a project has captured logs for, read straight from
+/// the log directory. This is the only source of truth once the supervisor is
+/// gone and no snapshot can be built.
+fn captured_service_names(project_id: &str) -> Vec<String> {
+    let dir = systemg::runtime::log_dir().join(project_id);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let stem = name.strip_suffix(".log")?;
+            Some(
+                stem.strip_suffix("_stdout")
+                    .or_else(|| stem.strip_suffix("_stderr"))
+                    .unwrap_or(stem)
+                    .to_string(),
+            )
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn render_all_logs_from_snapshot(
     manager: &LogManager,
     snapshot: &StatusSnapshot,
@@ -271,6 +500,25 @@ fn render_all_logs_from_snapshot(
     let render_project_groups = should_render_project_groups(&project_groups);
 
     if project_groups.is_empty() {
+        // No snapshot units — but with the supervisor gone the captured files
+        // are still the record of what ran. Fall back to whatever this project
+        // wrote to disk instead of claiming there is nothing to show.
+        if let Some(project_id) = project {
+            let names = captured_service_names(project_id);
+            if !names.is_empty() {
+                for name in names {
+                    if snapshot_mode {
+                        manager.show_inactive_log_snapshot(
+                            project_id, &name, lines, kind, filter,
+                        )?;
+                    } else {
+                        manager
+                            .show_inactive_log(project_id, &name, lines, kind, filter)?;
+                    }
+                }
+                return Ok(());
+            }
+        }
         println!("No active services");
         return Ok(());
     }
@@ -554,6 +802,32 @@ fn compute_status_preferred_widths(
     widths
 }
 
+/// Renders the empty result set. A machine format still gets a well-formed
+/// snapshot with zero units so consumers can parse it; only humans get prose.
+fn render_empty_status(
+    snapshot: &StatusSnapshot,
+    opts: &StatusRenderOptions,
+) -> Result<OverallHealth, Box<dyn Error>> {
+    if let Some(format) = opts.format {
+        let empty = StatusSnapshot {
+            schema_version: snapshot.schema_version.clone(),
+            captured_at: snapshot.captured_at,
+            overall_health: OverallHealth::Warn,
+            units: Vec::new(),
+        };
+        println!("{}", serialize_machine_output(&empty, format)?);
+    } else if snapshot
+        .units
+        .iter()
+        .all(|unit| !opts.include_orphans && unit.kind == UnitKind::Orphaned)
+    {
+        println!("No units being supervised");
+    } else {
+        println!("No matching units found.");
+    }
+    Ok(OverallHealth::Warn)
+}
+
 /// Renders the status table in interactive mode with keyboard navigation.
 fn render_status_interactive(
     snapshot: &StatusSnapshot,
@@ -576,8 +850,7 @@ fn render_status_interactive(
     }
 
     if units.is_empty() {
-        println!("No matching units found.");
-        return Ok(OverallHealth::Warn);
+        return render_empty_status(snapshot, opts);
     }
 
     let health = compute_overall_health(&units);
@@ -599,7 +872,9 @@ fn render_status_interactive(
         health,
     )?;
 
-    terminal::enable_raw_mode()?;
+    // Guarded: the interactive loop hands the terminal to child views and back,
+    // and any `?` inside it must still leave the user in cooked mode.
+    let _raw = RawModeGuard::enter()?;
 
     let result = (|| -> Result<OverallHealth, Box<dyn Error>> {
         loop {
@@ -736,17 +1011,19 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
-                            let selected_config_path =
-                                status_unit_config_path(selected_unit, config_path);
+                            // Target by loaded project id (supervisor knows the
+                            // config); --config would ship the project DIR.
                             let mut args = vec![
                                 "inspect",
-                                "--config",
-                                selected_config_path,
                                 "--service",
                                 selected_unit.name.as_str(),
                             ];
+                            let selected_config_path =
+                                status_unit_config_path(selected_unit, config_path);
                             if let Some(project) = selected_unit.project.as_ref() {
                                 args.extend(["--project", project.id.as_str()]);
+                            } else {
+                                args.extend(["--config", selected_config_path]);
                             }
                             run_status_child_view(
                                 &args,
@@ -765,12 +1042,11 @@ fn render_status_interactive(
                     } => {
                         if !units.is_empty() {
                             let selected_unit = &units[selected_row];
-                            let selected_config_path =
-                                status_unit_config_path(selected_unit, config_path);
+                            // Target by loaded project id; the supervisor knows
+                            // its config. Passing --config would ship the project
+                            // DIR and fail "not a regular file".
                             let mut args = vec![
                                 "logs",
-                                "--config",
-                                selected_config_path,
                                 "--service",
                                 selected_unit.name.as_str(),
                                 "--lines",
@@ -778,8 +1054,12 @@ fn render_status_interactive(
                                 "--stream",
                                 "2",
                             ];
+                            let selected_config_path =
+                                status_unit_config_path(selected_unit, config_path);
                             if let Some(project) = selected_unit.project.as_ref() {
                                 args.extend(["--project", project.id.as_str()]);
+                            } else {
+                                args.extend(["--config", selected_config_path]);
                             }
                             run_status_child_view(
                                 &args,
@@ -809,17 +1089,23 @@ fn render_status_interactive(
                                     health,
                                 )?;
                             } else {
-                                let selected_config_path =
-                                    status_unit_config_path(selected_unit, config_path);
+                                // Target the unit by its LOADED project id — the
+                                // supervisor already knows that project's config.
+                                // Passing --config would ship the project's DIR
+                                // (project_dir), which restart rejects as "not a
+                                // regular file". Only fall back to --config when
+                                // the unit somehow has no project.
                                 let mut args = vec![
                                     "restart",
-                                    "--config",
-                                    selected_config_path,
                                     "--service",
                                     selected_unit.name.as_str(),
                                 ];
+                                let selected_config_path =
+                                    status_unit_config_path(selected_unit, config_path);
                                 if let Some(project) = selected_unit.project.as_ref() {
                                     args.extend(["--project", project.id.as_str()]);
+                                } else {
+                                    args.extend(["--config", selected_config_path]);
                                 }
                                 run_status_child_view(
                                     &args,
@@ -860,7 +1146,9 @@ fn render_status_interactive(
         }
     })();
 
-    terminal::disable_raw_mode()?;
+    // `_raw` restores cooked mode on drop, including on the `?` paths inside the
+    // closure above; this makes the common exit explicit and immediate.
+    force_cooked_mode();
     result
 }
 
@@ -910,7 +1198,7 @@ fn run_status_child_view(
     selected_col: usize,
     health: OverallHealth,
 ) -> Result<(), Box<dyn Error>> {
-    terminal::disable_raw_mode()?;
+    force_cooked_mode();
 
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
 
@@ -921,12 +1209,18 @@ fn run_status_child_view(
         .stderr(process::Stdio::inherit())
         .status();
 
+    // The child inherited this terminal and may have enabled raw mode for its
+    // own key handling. If it was killed (or crashed) it never restored cooked
+    // mode, and everything printed from here on would stair-step down the
+    // screen. Never trust a child to have left the terminal as it found it.
+    force_cooked_mode();
+
     if !matches!(args.first(), Some(&"logs")) {
         println!("\n\nPress any key to return to status view...");
 
-        terminal::enable_raw_mode()?;
+        let wait = RawModeGuard::enter()?;
         let _ = event::read();
-        terminal::disable_raw_mode()?;
+        drop(wait);
     }
 
     clear_terminal_output()?;
@@ -1157,7 +1451,8 @@ fn render_status_table_with_focus(
     ];
 
     let columns = &columns_array;
-    for line in status_overview_lines(columns, units, health, opts.no_color) {
+    for line in status_overview_lines(columns, units, health, opts.no_color, opts.offline)
+    {
         println!("{line}");
     }
     println!();
@@ -1247,8 +1542,7 @@ fn render_status_non_interactive(
     }
 
     if units.is_empty() {
-        println!("No matching units found.");
-        return Ok(OverallHealth::Warn);
+        return render_empty_status(snapshot, opts);
     }
 
     let health = compute_overall_health(&units);
@@ -1337,7 +1631,9 @@ fn render_status_non_interactive(
     ];
 
     let columns = &columns_array;
-    for line in status_overview_lines(columns, &units, health, opts.no_color) {
+    for line in
+        status_overview_lines(columns, &units, health, opts.no_color, opts.offline)
+    {
         println!("{line}");
     }
     println!();
@@ -1645,6 +1941,13 @@ fn format_last_exit(
                     }
                 }
             }
+            Some(CronExecutionStatus::Interrupted(_)) => {
+                if time_str.is_empty() {
+                    "interrupted".to_string()
+                } else {
+                    format!("int {time_str}")
+                }
+            }
             Some(CronExecutionStatus::OverlapError) => {
                 if time_str.is_empty() {
                     "overlap".to_string()
@@ -1685,6 +1988,7 @@ fn last_exit_color(
                     Some(RED_BOLD)
                 }
             }
+            Some(CronExecutionStatus::Interrupted(_)) => Some(YELLOW),
             Some(CronExecutionStatus::OverlapError) => Some(RED_BOLD),
             None => None,
         };
@@ -1909,6 +2213,7 @@ fn status_overview_lines(
     units: &[UnitStatus],
     health: OverallHealth,
     no_color: bool,
+    offline: bool,
 ) -> Vec<String> {
     let inner_width = total_inner_width(columns);
     let rail_width = 15usize.min(inner_width.saturating_sub(8));
@@ -1916,16 +2221,18 @@ fn status_overview_lines(
     let summary_rows = status_summary_rows(units, no_color);
     let mut lines = Vec::new();
 
+    let (label, color) = if offline {
+        ("OFFLINE".to_string(), YELLOW_BOLD)
+    } else {
+        (
+            overall_health_label(health).to_ascii_uppercase(),
+            overall_health_color(health),
+        )
+    };
+
     lines.push(make_overview_top_border(columns));
     lines.push(format_overview_line(
-        &format!(
-            " Status: {}",
-            colorize(
-                &overall_health_label(health).to_ascii_uppercase(),
-                overall_health_color(health),
-                no_color
-            )
-        ),
+        &format!(" Status: {}", colorize(&label, color, no_color)),
         columns,
     ));
     lines.push(make_overview_split_border(inner_width, rail_width));
@@ -2244,6 +2551,7 @@ fn unit_row_tint_family(unit: &UnitStatus) -> RowTintFamily {
                             RowTintFamily::Failing
                         }
                     }
+                    CronExecutionStatus::Interrupted(_) => RowTintFamily::Neutral,
                     CronExecutionStatus::OverlapError => RowTintFamily::Warning,
                 };
             }
@@ -3746,6 +4054,12 @@ fn format_inspect_cron_status(
         }
         Some(CronExecutionStatus::Failed(reason)) => {
             colorize(&format!("failed: {reason}"), RED_BOLD, no_color)
+        }
+        Some(CronExecutionStatus::Interrupted(reason)) if reason.trim().is_empty() => {
+            colorize("interrupted", YELLOW, no_color)
+        }
+        Some(CronExecutionStatus::Interrupted(reason)) => {
+            colorize(&format!("interrupted: {reason}"), YELLOW, no_color)
         }
         Some(CronExecutionStatus::OverlapError) => {
             colorize("overlap", YELLOW, no_color)

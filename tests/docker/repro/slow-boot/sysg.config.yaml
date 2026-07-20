@@ -1,4 +1,4 @@
-version: "1"
+version: "2"
 project:
   id: slow-boot-repro
 services:
@@ -29,6 +29,6 @@ services:
       pre_start: "sh /repro/build.sh"
       health_check:
         url: "http://127.0.0.1:8099/health"
-        timeout: "20s"
+        attempt_timeout: "20s"
         retries: 3
       grace_period: "3s"

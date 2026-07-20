@@ -90,7 +90,9 @@ impl RuntimeContext {
 
 /// Sets runtime mode. Can be called multiple times (e.g., supervisor forks).
 pub fn init(mode: RuntimeMode) {
-    let mut guard = context_lock().write().expect("runtime context poisoned");
+    let mut guard = context_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let drop_privileges = guard.drop_privileges;
     let activation_fds = guard.activation_fds.clone();
     let mut context = RuntimeContext::from_mode(mode);
@@ -99,9 +101,12 @@ pub fn init(mode: RuntimeMode) {
     *guard = context;
 }
 
+/// Replaces the runtime context with an isolated user home for tests.
 #[cfg(test)]
 pub fn init_with_test_home(home: &Path) {
-    let mut guard = context_lock().write().expect("runtime context poisoned");
+    let mut guard = context_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let drop_privileges = guard.drop_privileges;
     let activation_fds = guard.activation_fds.clone();
     let mut context = RuntimeContext::from_user_home(home.to_path_buf());
@@ -114,7 +119,7 @@ pub fn init_with_test_home(home: &Path) {
 pub fn mode() -> RuntimeMode {
     context_lock()
         .read()
-        .expect("runtime context poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .mode
 }
 
@@ -122,7 +127,7 @@ pub fn mode() -> RuntimeMode {
 pub fn state_dir() -> PathBuf {
     context_lock()
         .read()
-        .expect("runtime context poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .state_dir
         .clone()
 }
@@ -131,7 +136,7 @@ pub fn state_dir() -> PathBuf {
 pub fn log_dir() -> PathBuf {
     context_lock()
         .read()
-        .expect("runtime context poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .log_dir
         .clone()
 }
@@ -264,14 +269,16 @@ pub fn ensure_trusted_config(_path: &std::path::Path) -> std::io::Result<()> {
 pub fn config_dirs() -> Vec<PathBuf> {
     context_lock()
         .read()
-        .expect("runtime context poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .config_dirs
         .clone()
 }
 
 /// Sets privilege drop flag.
 pub fn set_drop_privileges(drop: bool) {
-    let mut guard = context_lock().write().expect("runtime context poisoned");
+    let mut guard = context_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.drop_privileges = drop;
 }
 
@@ -279,13 +286,15 @@ pub fn set_drop_privileges(drop: bool) {
 pub fn should_drop_privileges() -> bool {
     context_lock()
         .read()
-        .expect("runtime context poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .drop_privileges
 }
 
 /// Stores socket activation FDs (systemd LISTEN_FDS).
 pub fn set_activation_fds(fds: Vec<RawFd>) {
-    let mut guard = context_lock().write().expect("runtime context poisoned");
+    let mut guard = context_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.activation_fds = fds;
 }
 
@@ -293,14 +302,16 @@ pub fn set_activation_fds(fds: Vec<RawFd>) {
 pub fn activation_fds() -> Vec<RawFd> {
     context_lock()
         .read()
-        .expect("runtime context poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .activation_fds
         .clone()
 }
 
 /// Clears the socket activation file descriptors.
 pub fn clear_activation_fds() {
-    let mut guard = context_lock().write().expect("runtime context poisoned");
+    let mut guard = context_lock()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard.activation_fds.clear();
 }
 

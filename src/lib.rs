@@ -44,6 +44,12 @@ pub mod daemon;
 /// IPC with supervisor.
 pub mod ipc;
 
+/// Current-operation tracking for the control plane.
+pub mod opslot;
+
+/// Reconciles supervisor bookkeeping against procfs and port ownership.
+pub mod reconcile;
+
 /// Errors.
 pub mod error;
 
@@ -52,6 +58,9 @@ pub mod logs;
 
 /// Status tracking.
 pub mod status;
+
+/// Workload-preserving supervisor upgrade protocol.
+pub mod upgrade;
 
 /// Supervisor daemon.
 pub mod supervisor;
@@ -65,6 +74,33 @@ pub mod test_utils;
 
 /// Runtime paths and modes.
 pub mod runtime;
+
+/// Per-project on-disk state layout.
+pub mod state_store;
+
+/// Indented XML serialization shared by state and command output.
+pub mod xml;
+
+/// The shared command selector (`-s`/`-p`) resolution.
+pub mod selector;
+
+/// The `start` command, rebuilt from first principles.
+pub mod start;
+
+/// The `stop` command, rebuilt from first principles.
+pub mod stop;
+
+/// The `restart` command, rebuilt from first principles.
+pub mod restart;
+
+/// The `purge` command, rebuilt from first principles.
+pub mod purge;
+
+/// The `logs` command's plan layer, rebuilt from first principles.
+pub mod logs_cmd;
+
+/// The `inspect` command's plan layer, rebuilt from first principles.
+pub mod inspect;
 
 /// Privilege dropping.
 pub mod privilege;

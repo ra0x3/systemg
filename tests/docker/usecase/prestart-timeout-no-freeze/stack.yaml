@@ -1,0 +1,15 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      sibling:
+        command: "sleep 3000"
+        restart_policy: always
+      hung:
+        command: "sleep 3000"
+        restart_policy: never
+        depends_on:
+          - sibling
+        deployment:
+          pre_start: "sleep 3000"

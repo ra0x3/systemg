@@ -1,0 +1,14 @@
+version: "2"
+projects:
+  dev:
+    services:
+      a:
+        command: "sh -c 'while true; do echo A_LINE; sleep 1; done'"
+        skip: true
+      b:
+        command: "sh -c 'while true; do echo B_LINE; sleep 1; done'"
+        depends_on:
+          - a
+      c:
+        command: "sh -c 'while true; do echo C_LINE; sleep 1; done'"
+        restart_policy: always

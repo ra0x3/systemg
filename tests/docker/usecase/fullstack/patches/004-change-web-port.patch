@@ -1,0 +1,18 @@
+diff --git a/stack.yaml b/stack.yaml
+index 81e546d..62efba1 100644
+--- a/stack.yaml
++++ b/stack.yaml
+@@ -21,11 +21,11 @@ projects:
+         restart_policy: always
+         env:
+           GREETING: "howdy"
+-          WEB_PORT: "8080"
++          WEB_PORT: "8090"
+         deployment:
+           strategy: immediate
+           health_check:
+-            command: "curl -fsS http://127.0.0.1:8080/health"
++            command: "curl -fsS http://127.0.0.1:8090/health"
+             interval: "2s"
+             retries: 15
+       worker:

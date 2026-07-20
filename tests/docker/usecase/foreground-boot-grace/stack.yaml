@@ -1,0 +1,13 @@
+version: "2"
+projects:
+  slowboot:
+    name: Slow Boot
+    services:
+      warmup:
+        command: "sh -c 'sleep 6; echo WARMUP_DONE'"
+        restart_policy: never
+      talker:
+        command: "sh -c 'while true; do echo FG_MARKER_LINE; sleep 1; done'"
+        depends_on:
+          - warmup
+        restart_policy: always

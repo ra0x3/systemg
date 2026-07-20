@@ -1,0 +1,41 @@
+version: "2"
+projects:
+  pipeline:
+    name: Pipeline
+    services:
+      probe:
+        command: "sh -c 'echo PROBE_DONE'"
+      migration:
+        command: "sh -c 'echo MIGRATION_DONE'"
+        pre_start: "sleep 4"
+        depends_on:
+          - service: probe
+            condition: completed
+      api:
+        command: "python3 -m http.server 18080 --bind 127.0.0.1"
+        restart_policy: always
+        depends_on:
+          - service: migration
+            condition: completed
+        deployment:
+          health_check:
+            url: http://127.0.0.1:18080/
+            attempt_timeout: 2s
+            retries: 10
+            interval: 1s
+      emitter:
+        command: "python3 -u -c 'import itertools,time; [(print(f\"SEQ:{i}\", flush=True), time.sleep(1)) for i in itertools.count(1)]'"
+        restart_policy: always
+        depends_on:
+          - api
+      partial:
+        command: "sh -c 'while [ ! -f /tmp/release-partial ]; do sleep 1; done; printf PARTIAL_; touch /tmp/partial-ready; while [ ! -f /tmp/finish-partial ]; do sleep 1; done; echo COMPLETE; sleep 3000'"
+        restart_policy: always
+        depends_on:
+          - service: migration
+            condition: completed
+      worker:
+        command: "sleep 3000"
+        restart_policy: always
+        depends_on:
+          - emitter

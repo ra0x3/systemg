@@ -1,6 +1,6 @@
 # Documentation
 
-This directory contains the Mintlify documentation site for `docs.sysg.dev`.
+This directory contains the Mintlify documentation site for `sysg.dev`.
 
 ## Structure
 

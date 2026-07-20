@@ -1,0 +1,8 @@
+version: "2"
+project:
+  id: legacy
+  name: "Legacy Single Project"
+services:
+  worker:
+    command: "sleep 3000"
+    restart_policy: "always"

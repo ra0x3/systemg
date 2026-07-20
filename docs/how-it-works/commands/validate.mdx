@@ -22,7 +22,7 @@ $ sysg validate -c sysg.yaml
          ^
 
      why  Every manifest must declare its schema version at the top level.
-     fix  Add `version: "1"` as the first key in the file.
+     fix  Add `version: "2"` as the first key in the file.
      docs https://sysg.dev/how-it-works/configuration
 ```
 
@@ -38,17 +38,22 @@ A clean file reports success and exits `0`:
 | Short | Long | Description |
 |-------|------|-------------|
 | `-c` | `--config` | Path to the configuration file (defaults to `systemg.yaml`) |
-| `-` | `--format` | Emit machine-readable output (`json`) |
+| `-` | `--format` | Emit machine-readable output (`json` or `xml`) |
+| `-v` | `--verbose` | Print operation progress |
 | `-` | `--no-color` | Disable ANSI colors |
+| `-` | `--sys` | Opt into privileged system mode. Requires root |
+| `-` | `--drop-privileges` | Accepted globally but ignored; validate does not spawn services |
 | `-` | `--plain` | Agent-friendly output (also disables color) |
+| `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
 
 ## What it checks
 
-- **Schema** — a supported `version`, a `services` map, and a `command` per service.
+- **Schema** — version `2`, services in each declared project or loose bundle,
+  and a `command` per service.
 - **Syntax** — YAML that parses, with a caret pointing at the offending token.
 - **Health checks** — every `deployment.health_check` has a `url` or a `command`.
 - **Dependencies** — `depends_on` references exist and form no cycle.
-- **Project id** — a valid, non-empty `project.id`.
+- **Project id** — every named project has a valid, non-empty id.
 - **Environment** — `${VAR}` interpolations resolve from the environment or env file.
 
 ## Exit codes
@@ -78,7 +83,7 @@ $ sysg validate -c sysg.yaml --format json
       "kind": "missing-version",
       "message": "missing field `version`",
       "why": "Every manifest must declare its schema version at the top level.",
-      "suggestion": "Add `version: \"1\"` as the first key in the file.",
+      "suggestion": "Add `version: \"2\"` as the first key in the file.",
       "doc": "https://sysg.dev/how-it-works/configuration"
     }
   ]

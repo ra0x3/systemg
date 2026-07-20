@@ -10,14 +10,14 @@ A simple FastAPI CRUD service for testing systemg service management capabilitie
 
 - Service management with `sysg start` and `sysg stop`
 - Automatic recovery from failures
-- Zero-downtime rolling deployments
+- Controlled service restarts
 - Modern Python with FastAPI and uvicorn
 - Package management with uv
 
 ## Configuration
 
 ```yaml
-version: "1"
+version: "2"
 logs:
   sink: file
   max_bytes: 10485760
@@ -29,8 +29,6 @@ status:
 services:
   fastapi_server:
     command: "uv run uvicorn main:app --host 0.0.0.0 --port 8888"
-    deployment:
-      strategy: "rolling"
     restart_policy: "on-failure"
     max_restarts: 10
     backoff: "5s"
@@ -239,7 +237,8 @@ curl http://localhost:8888/chaos
 2. **In-memory storage** using Python dict for simplicity
 3. **Chaos endpoint** randomly fails to demonstrate recovery capabilities
 4. **Automatic restarts** when service crashes (up to 10 restarts with 5s backoff)
-5. **Rolling deployments** ensure zero downtime during updates
+5. **Restarts** replace the fixed-port instance; use blue-green slots when an
+   application requires zero-downtime updates
 
 ## Interactive API docs
 

@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      chatty:
+        command: "sh -c 'i=0; while true; do i=1; echo SUPERVISOR_CONFIG_LOG_LINE_PADDING_TO_FILL_THE_TINY_ROTATION_CAP_QUICKLY; done'"
+        restart_policy: always

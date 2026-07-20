@@ -61,7 +61,7 @@
             "href": "https://github.com/ra0x3/systemg"
           },
           {
-            "label": "docs.sysg.dev",
+            "label": "sysg.dev",
             "href": "https://sysg.dev"
           }
         ]
@@ -72,7 +72,13 @@
     "pages": [
       "index",
       "intro",
-      "installation",
+      {
+        "group": "Installation",
+        "pages": [
+          "installation",
+          "installation/upgrading"
+        ]
+      },
       "quickstart",
       {
         "group": "How It Works",
@@ -96,12 +102,19 @@
               "how-it-works/commands/status",
               "how-it-works/commands/inspect",
               "how-it-works/commands/validate",
+              "how-it-works/commands/migrate",
               "how-it-works/commands/purge",
               "how-it-works/commands/spawn",
               "how-it-works/commands/start-vs-spawn"
             ]
           },
-          "how-it-works/dialog"
+          {
+            "group": "Dialog",
+            "pages": [
+              "how-it-works/dialog/index",
+              "how-it-works/dialog/codes"
+            ]
+          }
         ]
       },
       "security",

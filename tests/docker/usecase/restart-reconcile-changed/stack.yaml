@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      worker:
+        command: "sh -c 'echo V1 > /usecase/marker.txt && exec sleep 3000'"
+        restart_policy: "always"

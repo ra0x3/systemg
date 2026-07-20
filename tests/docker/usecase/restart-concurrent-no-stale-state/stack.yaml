@@ -1,0 +1,16 @@
+version: "2"
+projects:
+  churn:
+    name: Churn
+    services:
+      build:
+        command: "sh -c 'sleep 1; echo BUILD_DONE'"
+      worker:
+        command: "sh -c 'while true; do echo WORKING; sleep 1; done'"
+        restart_policy: always
+        depends_on:
+          - service: build
+            condition: completed
+      ticker:
+        command: "sh -c 'while true; do echo TICK; sleep 1; done'"
+        restart_policy: always

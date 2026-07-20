@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  first:
+    name: First
+    services:
+      first_svc:
+        command: "sleep 3000"
+        restart_policy: "always"

@@ -82,8 +82,6 @@ pub enum LogKind {
     Stdout,
     /// Standard error logs
     Stderr,
-    /// Supervisor logs
-    Supervisor,
 }
 
 impl LogKind {
@@ -92,7 +90,6 @@ impl LogKind {
         match self {
             LogKind::Stdout => "stdout",
             LogKind::Stderr => "stderr",
-            LogKind::Supervisor => "supervisor",
         }
     }
 }
@@ -112,9 +109,8 @@ impl FromStr for LogKind {
         match s.trim().to_lowercase().as_str() {
             "stdout" => Ok(LogKind::Stdout),
             "stderr" => Ok(LogKind::Stderr),
-            "supervisor" => Ok(LogKind::Supervisor),
             _ => Err(format!(
-                "invalid log kind '{}', must be one of: stdout, stderr, supervisor",
+                "invalid log kind '{}', must be one of: stdout, stderr",
                 s
             )),
         }
@@ -139,6 +135,11 @@ pub struct Cli {
     /// Override the logging verbosity for this invocation only.
     #[arg(long, value_name = "LEVEL", global = true)]
     pub log_level: Option<LogLevelArg>,
+
+    /// Print live per-service progress to the terminal (e.g. `Starting web...`)
+    /// as the supervisor boots, independent of the supervisor log.
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
 
     /// Opt into privileged system mode. Requires running as root.
     #[arg(long = "sys", global = true)]
@@ -368,18 +369,25 @@ pub enum Commands {
         #[arg(short = 'p', long)]
         project: Option<String>,
 
-        /// Number of lines to show (default: 50).
-        #[arg(short, long, default_value = "50")]
+        /// Number of trailing lines to show. Omit to show the FULL captured log;
+        /// pass `-l N` to limit to the last N lines.
+        #[arg(short, long, default_value_t = usize::MAX)]
         lines: usize,
 
-        /// Kind of logs to show: stdout, stderr, or supervisor. Defaults to stdout+stderr.
+        /// Kind of logs to show: stdout or stderr. Defaults to stdout+stderr.
         #[arg(short = 'k', long)]
         kind: Option<LogKind>,
 
+        /// Show the supervisor's own log instead of any service's logs.
+        #[arg(long)]
+        supervisor: bool,
+
         /// Follow the log stream until interrupted (like `tail -F`).
         ///
-        /// When neither `--follow` nor `--no-follow` is given, systemg follows only
-        /// when stdout is an interactive terminal and `SYSTEMG_AGENT` is unset;
+        /// Stays attached and prints new lines as they arrive. Press Esc or
+        /// Ctrl-C to stop following and return to the shell. When neither
+        /// `--follow` nor `--no-follow` is given, systemg follows only when
+        /// stdout is an interactive terminal and `SYSTEMG_AGENT` is unset;
         /// otherwise it prints a one-shot snapshot and exits. This keeps
         /// non-interactive callers (agents, pipes, SSH) from wedging.
         #[arg(short = 'f', long, conflicts_with = "no_follow")]
@@ -461,8 +469,78 @@ pub enum Commands {
         no_color: bool,
     },
 
-    /// Purge all systemg state and runtime files.
-    Purge,
+    /// Convert a legacy `project:` manifest to the canonical `projects:` form.
+    Migrate {
+        /// Path to the manifest to convert.
+        config: String,
+
+        /// Overwrite the file in place (a `.bak` copy is kept) instead of
+        /// printing the converted manifest to stdout.
+        #[arg(long)]
+        in_place: bool,
+    },
+
+    /// Purge systemg state and runtime files.
+    ///
+    /// With no selector, wipes the entire state root. `-c` scopes to every
+    /// project a config declares; `-p` scopes to one project. Refuses to run
+    /// while a live supervisor is managing processes unless `--force` is given.
+    Purge {
+        /// Purge only the projects this config declares (or `__loose__` if it is
+        /// project-less). Omit to wipe the whole state root.
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Purge only this project's state.
+        #[arg(short = 'p', long)]
+        project: Option<String>,
+
+        /// Purge even while a supervisor is managing processes (stops it first).
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// INTERNAL: report live-upgrade protocol metadata for installer preflight.
+    #[command(hide = true)]
+    UpgradeInfo,
+
+    /// INTERNAL: ask the resident supervisor to execute a staged binary.
+    #[command(hide = true)]
+    UpgradeSupervisor {
+        /// Path to the staged replacement binary.
+        #[arg(long)]
+        binary: String,
+    },
+
+    /// INTERNAL: boot the resident supervisor. Not for direct use — the daemon
+    /// re-execs into this after forking so it starts from a clean, single-threaded
+    /// process image (no mutexes inherited-locked from the launching CLI's threads).
+    #[command(hide = true)]
+    Supervise {
+        /// Path to the manifest the supervisor boots from.
+        #[arg(long)]
+        config: String,
+
+        /// Boot only this single service instead of the whole config.
+        #[arg(long)]
+        service: Option<String>,
+
+        /// Pipe service stderr through the supervisor.
+        #[arg(long)]
+        pipe_stderr: bool,
+
+        /// Verbose boot reporting.
+        #[arg(long)]
+        verbose: bool,
+
+        /// Record the primary project as terminal-attached rather than daemonized.
+        #[arg(long)]
+        foreground: bool,
+
+        /// Private state record inherited from a live supervisor re-exec.
+        #[arg(long)]
+        handoff: Option<String>,
+    },
 
     /// DEPRECATED: Spawn a dynamic child process from a parent service.
     #[command(hide = true)]
@@ -487,6 +565,29 @@ pub enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
     },
+}
+
+impl Commands {
+    /// The subcommand's canonical name, used to attach command-appropriate help
+    /// and docs to an otherwise-generic failure (so a `status` error points at
+    /// status docs, not `sysg logs`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Commands::Start { .. } => "start",
+            Commands::Stop { .. } => "stop",
+            Commands::Restart { .. } => "restart",
+            Commands::Status { .. } => "status",
+            Commands::Inspect { .. } => "inspect",
+            Commands::Logs { .. } => "logs",
+            Commands::Validate { .. } => "validate",
+            Commands::Migrate { .. } => "migrate",
+            Commands::Purge { .. } => "purge",
+            Commands::UpgradeInfo => "upgrade-info",
+            Commands::UpgradeSupervisor { .. } => "upgrade-supervisor",
+            Commands::Supervise { .. } => "supervise",
+            Commands::Spawn { .. } => "spawn",
+        }
+    }
 }
 
 /// Parses command-line arguments and returns a `Cli` struct.

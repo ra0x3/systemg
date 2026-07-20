@@ -1,0 +1,22 @@
+version: "2"
+project:
+  id: orphan-ghost-repro
+services:
+  # Binds :8100 and answers a health check. When the supervisor is killed -9,
+  # this process survives as an orphan holding :8100. A fresh supervisor must
+  # detect + reclaim the port so a new instance can bind, instead of the new
+  # instance dying on address-in-use forever.
+  api:
+    command: "python3 /repro/server.py 8100 api"
+    restart_policy: "always"
+    backoff: "1s"
+    deployment:
+      strategy: "immediate"
+      health_check:
+        url: "http://127.0.0.1:8100/health"
+        attempt_timeout: "10s"
+        retries: 5
+        interval: "1s"
+  anchor:
+    command: "sleep 3000"
+    restart_policy: "always"

@@ -1,0 +1,5 @@
+version: "2"
+services:
+  job:
+    command: "sleep 3000"
+    restart_policy: "always"
