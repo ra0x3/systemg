@@ -13,7 +13,8 @@ when a unit fails to start. But the resident paths never got that fix:
   `add_project_config` → `start_project_services`, where
   `daemon.start_service(...)?` propagates the first failure. Every unit ordered
   after the bad one is never started, and the CLI gets
-  `error[SG0001]: Failed to start service '<bad>': process exited with status 1`.
+  error[[`SG0001`](https://sysg.dev/how-it-works/dialog/codes#sg0001)]:
+  `Failed to start service '<bad>': process exited with status 1`.
 - `sysg restart -p <project>` goes through `replace_extra_project_runtime` →
   the same `start_project_services`, so a restart aborts the same way.
 - Worse: `replace_extra_project_runtime` called `Daemon::stop_services()`, which

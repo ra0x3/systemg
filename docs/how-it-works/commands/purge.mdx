@@ -20,16 +20,11 @@ selector it wipes the **entire** state root. There is no undo.
 wiping its state out from under it would strand those processes and corrupt the
 supervisor's view of the world. Stop the supervisor first, or pass `--force`.
 
-```
-error[SG0401]: refused to purge: a supervisor is still managing processes
-
-  2 unit(s) are live under the running supervisor; purging its state now would strand them
-
-  help:
-    stop the supervisor first  sysg stop --supervisor
-    then purge                 sysg purge
-    or force it (stops + wipes) sysg purge --force
-```
+<pre>
+  <code>
+    {"error["}<a href="/how-it-works/dialog/codes#sg0401">SG0401</a>{"]: refused to purge: a supervisor is still managing processes\n\n  2 unit(s) are live under the running supervisor; purging its state now would strand them\n\n  help:\n    stop the supervisor first  sysg stop --supervisor\n    then purge                 sysg purge\n    or force it (stops + wipes) sysg purge --force\n"}
+  </code>
+</pre>
 </Note>
 
 ## Options

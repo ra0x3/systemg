@@ -89,6 +89,11 @@ run_labeled \
   "${BLUE}" \
   "cd \"${REPO_ROOT}/docs\" && mintlify broken-links"
 
+run_labeled \
+  "docs:sg-links" \
+  "${BLUE}" \
+  "cd \"${REPO_ROOT}\" && bash scripts/check-sg-links.sh"
+
 printf "\n${BOLD}Waiting for all checks to complete...${RESET}\n\n"
 
 FAILED_CHECKS=()

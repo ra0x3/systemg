@@ -97,9 +97,11 @@ need to pass `--config` again if the project already has a known config path.
 not persistent services, so they cannot be restarted directly. The command
 returns [`SG0101`](/how-it-works/dialog/codes#sg0101):
 
-```
-error[SG0101]: cron unit `<name>` cannot be restarted directly
-```
+<pre>
+  <code>
+    {"error["}<a href="/how-it-works/dialog/codes#sg0101">SG0101</a>{"]: cron unit `<name>` cannot be restarted directly\n"}
+  </code>
+</pre>
 
 To reschedule cron definitions, reload or restart the whole project. A project
 restart re-reads the manifest and reschedules every cron unit it defines; it
