@@ -469,6 +469,7 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - cargo-test
+      - docker-usecase-tests
       - extract-version
       - detect-version-bump
     permissions:
