@@ -1710,8 +1710,8 @@ To confirm it did its work, check the output:\n\n    {logs}"
 still fire on its next schedule, but the failed run did not complete its work."
                         ),
                         recommended_fix: format!(
-                            "Read the run output to find the root cause, then trigger a \
-manual run once fixed:\n\n    {logs}\n    {restart}"
+                            "Read the run output, fix the root cause, then wait for the \
+next scheduled run:\n\n    {logs}"
                         ),
                     }
                 }
@@ -4001,6 +4001,12 @@ services:
         let report = explain_unit_health(&unit);
         assert_eq!(report.health, UnitHealth::Failing);
         assert!(report.description.contains("boom"));
+        assert!(
+            report
+                .recommended_fix
+                .contains("wait for the next scheduled run")
+        );
+        assert!(!report.recommended_fix.contains("sysg restart -s nightly"));
     }
 
     #[test]

@@ -121,6 +121,25 @@ pub fn supervisor_log_path() -> PathBuf {
 /// with the `<timestamp> <stream>` prefix removed, for use as diagnostic
 /// evidence. Returns an empty vec when the log is missing or unreadable.
 pub fn tail_service_log(project: &str, service: &str, n: usize) -> Vec<String> {
+    tail_service_log_after(project, service, n, None)
+}
+
+/// Returns recent diagnostic evidence captured at or after one service generation began.
+pub fn tail_service_log_since(
+    project: &str,
+    service: &str,
+    n: usize,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Vec<String> {
+    tail_service_log_after(project, service, n, Some(since))
+}
+
+fn tail_service_log_after(
+    project: &str,
+    service: &str,
+    n: usize,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let path = get_service_log_path(project, service);
@@ -139,8 +158,25 @@ pub fn tail_service_log(project: &str, service: &str, n: usize) -> Vec<String> {
     }
     let text = String::from_utf8_lossy(&strip_ansi(&buf)).into_owned();
 
+    diagnostic_log_lines(&text, n, since)
+}
+
+fn diagnostic_log_lines(
+    text: &str,
+    n: usize,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<String> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
+        .filter(|line| {
+            since.is_none_or(|since| {
+                line.split_once(' ')
+                    .and_then(|(timestamp, _)| timestamp.parse().ok())
+                    .is_some_and(|timestamp: chrono::DateTime<chrono::Utc>| {
+                        timestamp >= since
+                    })
+            })
+        })
         .map(strip_log_line_prefix)
         .collect::<Vec<_>>()
         .into_iter()
@@ -3607,6 +3643,18 @@ mod tests {
     #[test]
     fn tail_log_bytes_returns_empty_when_zero_lines_requested() {
         assert_eq!(tail_log_bytes(b"line 1\nline 2\n", 0), b"");
+    }
+
+    #[test]
+    fn diagnostic_log_lines_exclude_prior_generations() {
+        let cutoff = "2026-07-20T18:33:14.000000Z".parse().unwrap();
+        let text = "2026-07-20T18:00:00.000000Z stderr Address already in use\n\
+                    2026-07-20T18:33:14.200000Z stderr candidate failed\n";
+
+        assert_eq!(
+            diagnostic_log_lines(text, 8, Some(cutoff)),
+            vec!["candidate failed"]
+        );
     }
 
     #[test]

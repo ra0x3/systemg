@@ -1,0 +1,10 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      job:
+        command: "sh -c 'exit 7'"
+        restart_policy: never
+        cron:
+          expression: "* * * * * *"

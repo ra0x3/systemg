@@ -37,6 +37,8 @@ projects:
       worker:
         command: "sh -c 'exit 1'"
         restart_policy: "never"
+        deployment:
+          strategy: immediate
 EOF
 echo "config now bounces worker into a command that dies"
 

@@ -1,0 +1,12 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "exec python3 /usecase/server.py"
+        restart_policy: always
+        deployment:
+          strategy: rolling
+          pre_start: "sh /usecase/pre.sh"
+          grace_period: "1s"

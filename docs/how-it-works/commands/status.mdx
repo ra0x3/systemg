@@ -45,8 +45,9 @@ By default, `sysg status` displays an interactive table where you can:
 :::info Cron units
 The **R** restart control applies to service units only. Cron units are
 scheduler entries, not persistent services, so pressing **R** on a cron row is a
-no-op: systemg shows a notice that cron units cannot be restarted directly and
-that you should reload the project to reschedule them.
+no-op: systemg shows [`SG0101`](/how-it-works/dialog/codes#sg0101) and explains
+that the owning project can reload the schedule without triggering an immediate
+run.
 :::
 
 The focused cell in the selected row is drawn in reverse video, so it stands

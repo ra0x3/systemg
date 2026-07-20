@@ -4,7 +4,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{self, File},
-    io::{BufRead, BufReader, ErrorKind, Read},
+    io::{BufReader, ErrorKind, Read},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -35,10 +35,9 @@ use crate::{
     constants::{
         DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL, DEFAULT_HEALTH_RETRIES,
         DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
-        MAX_STATUS_LOG_LINES, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
-        PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
-        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
-        SHELL_COMMAND_FLAG,
+        POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY, PRE_START_TIMEOUT,
+        PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL,
+        SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_managed_service_log_writers},
@@ -1960,9 +1959,9 @@ struct DaemonContext {
     timeouts: Arc<RwLock<SupervisorTimeouts>>,
     /// Services currently being replaced through an explicit deployment strategy.
     replacements: Arc<Mutex<HashSet<String>>>,
-    /// Cancellation tokens for Linux service threads (service_name -> cancel_token)
+    /// Cancellation tokens for Linux service generations.
     #[cfg(target_os = "linux")]
-    thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    thread_cancellation_tokens: Arc<Mutex<HashMap<(String, u32), Arc<AtomicBool>>>>,
 }
 
 impl DaemonContext {
@@ -2027,27 +2026,34 @@ impl DaemonContext {
         )
     }
 
-    /// Creates a cancellation token for a Linux service thread.
+    /// Signals one Linux service generation thread to stop.
     #[cfg(target_os = "linux")]
-    fn create_cancellation_token(&self, service_name: &str) -> Arc<AtomicBool> {
-        let token = Arc::new(AtomicBool::new(false));
+    fn cancel_service_thread(&self, service_name: &str, pid: u32) {
         let mut tokens = self
             .thread_cancellation_tokens
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        tokens.insert(service_name.to_string(), Arc::clone(&token));
-        token
+        if let Some(token) = tokens.remove(&(service_name.to_string(), pid)) {
+            token.store(true, Ordering::SeqCst);
+        }
     }
 
-    /// Signals a Linux service thread to stop.
+    /// Signals every Linux service generation thread for one unit to stop.
     #[cfg(target_os = "linux")]
-    fn cancel_service_thread(&self, service_name: &str) {
+    fn cancel_service_threads(&self, service_name: &str) {
         let mut tokens = self
             .thread_cancellation_tokens
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(token) = tokens.remove(service_name) {
-            token.store(true, Ordering::SeqCst);
+        let keys: Vec<(String, u32)> = tokens
+            .keys()
+            .filter(|(name, _)| name == service_name)
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(token) = tokens.remove(&key) {
+                token.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -2095,7 +2101,7 @@ pub struct Daemon {
     stopped_for_dependency: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// Linux thread cancellation.
     #[cfg(target_os = "linux")]
-    thread_cancellation_tokens: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    thread_cancellation_tokens: Arc<Mutex<HashMap<(String, u32), Arc<AtomicBool>>>>,
     /// Pipe stderr to stdout.
     pipe_stderr: Arc<AtomicBool>,
     /// Ownership sentinel: `Drop` only tears down the shared monitor/threads when
@@ -3342,7 +3348,8 @@ impl Daemon {
     ) -> Result<u32, ProcessManagerError> {
         use std::{sync::mpsc, thread};
 
-        let cancellation_token = ctx.create_cancellation_token(&service_name);
+        let cancellation_token = Arc::new(AtomicBool::new(false));
+        let cancellation_tokens = Arc::clone(&ctx.thread_cancellation_tokens);
         let processes = Arc::clone(&ctx.processes);
         let pid_file = Arc::clone(&ctx.pid_file);
         let working_dir = ctx.project_root.clone();
@@ -3406,7 +3413,18 @@ impl Daemon {
                         return;
                     }
 
+                    let token_key = (service_name_for_thread.clone(), pid);
+                    cancellation_tokens
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(token_key.clone(), Arc::clone(&cancellation_token));
+
                     if tx.send(Ok(pid)).is_err() {
+                        cancellation_tokens
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&token_key);
+                        cancellation_token.store(true, Ordering::SeqCst);
                         return;
                     }
 
@@ -3430,12 +3448,9 @@ impl Daemon {
 
         match rx.recv() {
             Ok(Ok(pid)) => Ok(pid),
-            Ok(Err(err)) => {
-                ctx.cancel_service_thread(&service_name_for_cleanup);
-                Err(err)
-            }
+            Ok(Err(err)) => Err(err),
             Err(recv_err) => {
-                ctx.cancel_service_thread(&service_name_for_cleanup);
+                ctx.cancel_service_threads(&service_name_for_cleanup);
                 Err(ProcessManagerError::ServiceStartError {
                     service: service_name,
                     source: std::io::Error::new(
@@ -3896,6 +3911,8 @@ impl Daemon {
     fn wait_for_service_ready(
         &self,
         service_name: &str,
+        service: &ServiceConfig,
+        started_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let config = self.cfg();
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
@@ -3906,17 +3923,19 @@ impl Daemon {
             (&self.state_file, &config),
             Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
             self.timeouts().startup_stability(),
+            started_at,
         )?;
 
         if let ServiceReadyState::Running = state
-            && let Some(health_check) = config
-                .services
-                .get(service_name)
-                .and_then(|service| service.deployment.as_ref())
+            && let Some(health_check) = service
+                .deployment
+                .as_ref()
                 .and_then(|deployment| deployment.health_check.as_ref())
         {
             info!("Waiting for health check of '{service_name}' before marking it ready");
-            if let Err(err) = self.wait_for_health_check(service_name, health_check) {
+            if let Err(err) =
+                self.wait_for_health_check(service_name, health_check, started_at)
+            {
                 // The unit came up as a process but never passed its health
                 // check — it is NOT healthy, and leaving it running would let
                 // status report a live-but-never-healthy process as `healthy`
@@ -3939,6 +3958,77 @@ impl Daemon {
         Ok(state)
     }
 
+    /// Builds the typed diagnostic for a service generation that exited before readiness.
+    fn startup_exit_error(
+        service_name: &str,
+        status: ExitStatus,
+        config: &Config,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> ProcessManagerError {
+        #[cfg(unix)]
+        let signal = status.signal();
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None;
+        let exit_code = status.code();
+        warn!(
+            "Service '{service_name}' exited during startup (exit_code={exit_code:?}, signal={signal:?})."
+        );
+
+        let how = match (exit_code, signal) {
+            (Some(code), _) => format!("exited with status {code}"),
+            (None, Some(sig)) => format!("was killed by signal {sig}"),
+            (None, None) => "terminated unexpectedly".to_string(),
+        };
+        let project = &config.project.id;
+        let command = config
+            .services
+            .get(service_name)
+            .map(|service| service.command.as_str());
+        let tail =
+            crate::logs::tail_service_log_since(project, service_name, 8, started_at);
+
+        let diag = if output_indicates_port_conflict(&tail) {
+            let port = port_from_output(&tail).or_else(|| port_from_command(command));
+            let subject = match port {
+                Some(port) => format!(
+                    "service `{service_name}` could not bind port {port}: already in use"
+                ),
+                None => format!(
+                    "service `{service_name}` could not bind its port: already in use"
+                ),
+            };
+            crate::diag::Diagnostic::error(crate::diag::SgCode::PortInUse, subject)
+                .note(
+                    "another process is already listening on that port, so this service exited at start",
+                )
+                .note(
+                    "stop whatever holds the port, or change the port in this service's command",
+                )
+                .evidence(format!("last output from `{service_name}`"), tail)
+                .help_cmd("see what sysg manages", "sysg status")
+                .help_cmd(
+                    "view logs",
+                    format!("sysg logs -s {service_name} -p {project}"),
+                )
+                .help_docs()
+        } else {
+            crate::diag::Diagnostic::error(
+                crate::diag::SgCode::UnitImmediateExit,
+                format!("service `{service_name}` exited immediately at start"),
+            )
+            .note(format!("the process {how} before it finished starting"))
+            .evidence(format!("last output from `{service_name}`"), tail)
+            .help_cmd(
+                "view logs",
+                format!("sysg logs -s {service_name} -p {project}"),
+            )
+            .help_cmd("check status", format!("sysg status -p {project}"))
+            .help_docs()
+        };
+
+        ProcessManagerError::Diag(Box::new(diag))
+    }
+
     /// Polls explicit process and state handles until one service reaches a
     /// running, completed, or failed startup state.
     fn wait_for_ready(
@@ -3948,16 +4038,10 @@ impl Daemon {
         state: (&Arc<Mutex<ServiceStateFile>>, &Arc<Config>),
         epoch: Option<(&AtomicU64, u64, &AtomicBool)>,
         startup_stability: Duration,
+        started_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let mut waited = Duration::ZERO;
         let mut running_since = None;
-        let project = &state.1.project.id;
-        let command = state
-            .1
-            .services
-            .get(service_name)
-            .map(|service| service.command.as_str());
-
         while waited <= SERVICE_START_TIMEOUT {
             if epoch.is_some_and(|(current, expected, cancelled)| {
                 cancelled.load(Ordering::SeqCst)
@@ -3985,76 +4069,12 @@ impl Daemon {
                     if status.success() {
                         return Ok(ServiceReadyState::CompletedSuccess);
                     }
-
-                    #[cfg(unix)]
-                    let signal = status.signal();
-                    #[cfg(not(unix))]
-                    let signal: Option<i32> = None;
-                    let exit_code = status.code();
-                    warn!(
-                        "Service '{service_name}' exited during startup (exit_code={exit_code:?}, signal={signal:?})."
-                    );
-
-                    let how = match (exit_code, signal) {
-                        (Some(code), _) => format!("exited with status {code}"),
-                        (None, Some(sig)) => format!("was killed by signal {sig}"),
-                        (None, None) => "terminated unexpectedly".to_string(),
-                    };
-
-                    let tail = crate::logs::tail_service_log(project, service_name, 8);
-
-                    // A port collision is by far the most common immediate-exit
-                    // cause, and a bare "Address already in use (os error 48)" in
-                    // the tail tells the user nothing actionable. Classify it as
-                    // its own code so the failure names the real problem.
-                    let diag = if output_indicates_port_conflict(&tail) {
-                        let port = port_from_output(&tail)
-                            .or_else(|| port_from_command(command));
-                        let subject = match port {
-                            Some(port) => format!(
-                                "service `{service_name}` could not bind port {port}: already in use"
-                            ),
-                            None => format!(
-                                "service `{service_name}` could not bind its port: already in use"
-                            ),
-                        };
-                        crate::diag::Diagnostic::error(
-                            crate::diag::SgCode::PortInUse,
-                            subject,
-                        )
-                        .note(
-                            "another process is already listening on that port, so this \
-                             service exited at start",
-                        )
-                        .note(
-                            "stop whatever holds the port, or change the port in this \
-                             service's command",
-                        )
-                        .evidence(format!("last output from `{service_name}`"), tail)
-                        .help_cmd("see what sysg manages", "sysg status")
-                        .help_cmd(
-                            "view logs",
-                            format!("sysg logs -s {service_name} -p {project}"),
-                        )
-                        .help_docs()
-                    } else {
-                        crate::diag::Diagnostic::error(
-                            crate::diag::SgCode::UnitImmediateExit,
-                            format!(
-                                "service `{service_name}` exited immediately at start"
-                            ),
-                        )
-                        .note(format!("the process {how} before it finished starting"))
-                        .evidence(format!("last output from `{service_name}`"), tail)
-                        .help_cmd(
-                            "view logs",
-                            format!("sysg logs -s {service_name} -p {project}"),
-                        )
-                        .help_cmd("check status", format!("sysg status -p {project}"))
-                        .help_docs()
-                    };
-
-                    return Err(ProcessManagerError::Diag(Box::new(diag)));
+                    return Err(Self::startup_exit_error(
+                        service_name,
+                        status,
+                        state.1,
+                        started_at,
+                    ));
                 }
                 ServiceProbe::NotStarted => {
                     thread::sleep(SERVICE_POLL_INTERVAL);
@@ -4657,52 +4677,28 @@ impl Daemon {
             return self.blue_green_restart_service(name, service, blue_green);
         }
 
-        info!("Performing rolling restart for service: {name}");
-        let _replacement = self.replacement(name);
-
-        let mut previous = self.detach_service_handle(name)?;
-
-        if let Some(pre_start) = service
+        let grace = service
             .deployment
             .as_ref()
-            .and_then(|deployment| deployment.pre_start.as_ref())
-        {
-            info!("Running pre-start command for '{name}': {pre_start}");
-            if let Err(err) = self.run_pre_start_command(name, pre_start) {
-                if let Some(detached) = previous.take() {
-                    self.restore_detached_service(name, detached)?;
-                }
-                return Err(err);
-            }
+            .and_then(|deployment| deployment.grace_period.as_ref())
+            .map(|raw| Self::parse_duration(raw))
+            .transpose()?;
+        info!("Performing rolling restart for service: {name}");
+        let _replacement = self.replacement(name);
+        if let Some(port) = crate::reconcile::service_port(service) {
+            info!(
+                "Service '{name}' uses configured port {port}; switching to immediate restart semantics."
+            );
+            return self.immediate_restart_service(name, service);
         }
+
+        let previous = self.detach_service_handle(name)?;
+        let candidate_started_at = chrono::Utc::now();
 
         let start_state = match self.start_service(name, service) {
             Ok(state) => state,
             Err(err) => {
-                if let Err(stop_err) = self.stop_service_with_intent(name, false) {
-                    warn!(
-                        "Failed to stop new instance of '{name}' after restart error: {stop_err}"
-                    );
-                }
-
-                if previous.is_some()
-                    && Self::logs_indicate_port_conflict(&self.cfg().project.id, name)
-                {
-                    warn!(
-                        "Detected port conflict while restarting '{name}'. Falling back to immediate restart semantics."
-                    );
-
-                    if let Some(detached) = previous.take() {
-                        self.terminate_service(name, detached)?;
-                    }
-
-                    self.start_service(name, service)?
-                } else {
-                    if let Some(detached) = previous.take() {
-                        self.restore_detached_service(name, detached)?;
-                    }
-                    return Err(err);
-                }
+                return self.resolve_rolling_failure(name, previous, None, err);
             }
         };
 
@@ -4710,61 +4706,134 @@ impl Daemon {
             info!("Service '{name}' exited successfully immediately after restart.");
         }
 
-        if let Some(health_check) = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.health_check.as_ref())
-            && let Err(err) = self.wait_for_health_check(name, health_check)
-        {
-            error!("Health check failed for '{name}' during rolling restart: {err}");
-            if let Err(stop_err) = self.stop_service_with_intent(name, false) {
-                warn!(
-                    "Failed to stop new instance of '{name}' after health check failure: {stop_err}"
-                );
-            }
-            if let Some(detached) = previous.take() {
-                self.restore_detached_service(name, detached)?;
-            }
-            return Err(err);
-        }
-
-        if let Some(grace_period) = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.grace_period.as_ref())
-        {
-            let duration = match Self::parse_duration(grace_period) {
-                Ok(duration) => duration,
+        if matches!(start_state, ServiceReadyState::Running) {
+            let pid = match self.current_generation_pid(name) {
+                Ok(pid) => pid,
                 Err(err) => {
-                    error!(
-                        "Failed to parse grace period '{grace_period}' for '{name}': {err}"
-                    );
-                    if let Err(stop_err) = self.stop_service_with_intent(name, false) {
-                        warn!(
-                            "Failed to stop new instance of '{name}' after grace period parse error: {stop_err}"
-                        );
-                    }
-                    if let Some(detached) = previous.take() {
-                        self.restore_detached_service(name, detached)?;
-                    }
-                    return Err(err);
+                    return self.resolve_rolling_failure(name, previous, None, err);
                 }
             };
-
-            if !duration.is_zero() {
+            let observation = grace
+                .unwrap_or_default()
+                .max(self.timeouts().startup_stability());
+            if !observation.is_zero() {
                 info!(
-                    "Waiting {:?} before stopping previous instance of '{name}'",
-                    duration
+                    "Observing replacement for {:?} before stopping previous instance of '{name}'",
+                    observation
                 );
-                thread::sleep(duration);
+            }
+            if let Err(err) =
+                self.wait_for_generation(name, pid, observation, candidate_started_at)
+            {
+                return self.resolve_rolling_failure(name, previous, Some(pid), err);
             }
         }
 
-        if let Some(detached) = previous.take() {
+        if let Some(detached) = previous {
             self.terminate_service(name, detached)?;
         }
 
         Ok(start_state)
+    }
+
+    /// Returns the PID owned by the currently tracked service generation.
+    fn current_generation_pid(&self, name: &str) -> Result<u32, ProcessManagerError> {
+        self.processes
+            .lock()?
+            .get(name)
+            .map(ManagedChild::id)
+            .ok_or_else(|| ProcessManagerError::ServiceStartError {
+                service: name.to_string(),
+                source: std::io::Error::other(
+                    "replacement process disappeared before it could be verified",
+                ),
+            })
+    }
+
+    /// Observes one exact service generation until its replacement gate completes.
+    fn wait_for_generation(
+        &self,
+        name: &str,
+        pid: u32,
+        duration: Duration,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ProcessManagerError> {
+        let started = Instant::now();
+        loop {
+            if self.boot_cancelled() {
+                return Err(Self::interrupted(name));
+            }
+            let config = self.cfg();
+            match Self::probe_service_state_recording(
+                name,
+                &self.processes,
+                &self.pid_file,
+                Some((&self.state_file, &config)),
+            )? {
+                ServiceProbe::Running => {
+                    let current = self.processes.lock()?.get(name).map(ManagedChild::id);
+                    if current != Some(pid) {
+                        return Err(ProcessManagerError::ServiceStartError {
+                            service: name.to_string(),
+                            source: std::io::Error::other(
+                                "replacement process ownership changed during verification",
+                            ),
+                        });
+                    }
+                }
+                ServiceProbe::Exited(status) if !status.success() => {
+                    return Err(Self::startup_exit_error(
+                        name, status, &config, started_at,
+                    ));
+                }
+                ServiceProbe::Exited(_) | ServiceProbe::NotStarted => {
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: name.to_string(),
+                        source: std::io::Error::other(
+                            "replacement process exited before the old instance was retired",
+                        ),
+                    });
+                }
+            }
+            if started.elapsed() >= duration {
+                return Ok(());
+            }
+            thread::sleep(SERVICE_POLL_INTERVAL);
+        }
+    }
+
+    /// Resolves a failed rolling candidate by restoring the previous generation.
+    fn resolve_rolling_failure(
+        &self,
+        name: &str,
+        previous: Option<DetachedService>,
+        candidate_pid: Option<u32>,
+        err: ProcessManagerError,
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
+        if let Some(pid) = candidate_pid {
+            self.stop_generation_if_current(name, pid);
+        }
+
+        if let Some(detached) = previous {
+            self.restore_detached_service(name, detached)?;
+        }
+        Err(err)
+    }
+
+    /// Stops a generation only when it still owns the service's live handle.
+    fn stop_generation_if_current(&self, name: &str, pid: u32) {
+        #[cfg(target_os = "linux")]
+        self.context().cancel_service_thread(name, pid);
+        let current = self
+            .processes
+            .lock()
+            .ok()
+            .and_then(|processes| processes.get(name).map(ManagedChild::id));
+        if current == Some(pid)
+            && let Err(err) = self.stop_service_with_intent(name, false)
+        {
+            warn!("Failed to stop replacement generation of '{name}': {err}");
+        }
     }
 
     /// Performs a blue/green restart by launching a candidate on the inactive slot, switching traffic,
@@ -4782,6 +4851,17 @@ impl Daemon {
                 "blue_green.slots for '{name}' must contain exactly two entries"
             )));
         }
+        let switch_command = blue_green.switch_command.as_ref().ok_or_else(|| {
+            Self::config_error(format!(
+                "blue_green.switch_command is required for service '{name}'"
+            ))
+        })?;
+        let grace = service
+            .deployment
+            .as_ref()
+            .and_then(|deployment| deployment.grace_period.as_ref())
+            .map(|raw| Self::parse_duration(raw))
+            .transpose()?;
         let _replacement = self.replacement(name);
 
         let env_var = blue_green
@@ -4793,46 +4873,8 @@ impl Daemon {
         let active_slot = blue_green.slots[active_idx].clone();
         let candidate_slot = blue_green.slots[candidate_idx].clone();
 
-        let mut previous = self.detach_service_handle(name)?;
-
-        if let Some(pre_start) = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.pre_start.as_ref())
-        {
-            info!("Running pre-start command for '{name}': {pre_start}");
-            if let Err(err) = self.run_pre_start_command(name, pre_start) {
-                if let Some(detached) = previous.take() {
-                    self.restore_detached_service(name, detached)?;
-                }
-                return Err(err);
-            }
-        }
-
-        let candidate_service =
+        let mut candidate_service =
             Self::service_with_env_override(service, &env_var, &candidate_slot);
-
-        let start_state = match self.start_service(name, &candidate_service) {
-            Ok(state) => state,
-            Err(err) => {
-                if let Err(stop_err) = self.stop_service_with_intent(name, false) {
-                    warn!(
-                        "Failed to stop candidate instance of '{name}' after start error: {stop_err}"
-                    );
-                }
-                if let Some(detached) = previous.take() {
-                    self.restore_detached_service(name, detached)?;
-                }
-                return Err(err);
-            }
-        };
-
-        if matches!(start_state, ServiceReadyState::CompletedSuccess) {
-            info!(
-                "Candidate service '{name}' exited successfully immediately after blue/green start."
-            );
-        }
-
         if let Some(health_check) = &blue_green.candidate_health_check {
             let health_check = Self::resolve_blue_green_health_check(
                 health_check,
@@ -4840,45 +4882,62 @@ impl Daemon {
                 &active_slot,
                 &candidate_slot,
             );
-            self.wait_for_health_check(name, &health_check)?;
-        } else if let Some(health_check) = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.health_check.as_ref())
-            && let Err(err) = self.wait_for_health_check(name, health_check)
-        {
-            if let Err(stop_err) = self.stop_service_with_intent(name, false) {
-                warn!(
-                    "Failed to stop candidate instance of '{name}' after health-check failure: {stop_err}"
-                );
+            if let Some(deployment) = candidate_service.deployment.as_mut() {
+                deployment.health_check = Some(health_check);
             }
-            if let Some(detached) = previous.take() {
-                self.restore_detached_service(name, detached)?;
-            }
-            return Err(err);
         }
 
-        if let Some(command) = &blue_green.switch_command {
-            if let Err(err) = self.run_blue_green_switch_command(
-                name,
-                command,
-                &active_slot,
-                &candidate_slot,
-            ) {
-                if let Err(stop_err) = self.stop_service_with_intent(name, false) {
-                    warn!(
-                        "Failed to stop candidate instance of '{name}' after switch error: {stop_err}"
-                    );
-                }
-                if let Some(detached) = previous.take() {
+        let previous = self.detach_service_handle(name)?;
+        let candidate_started_at = chrono::Utc::now();
+
+        let start_state = match self.start_service(name, &candidate_service) {
+            Ok(state) => state,
+            Err(err) => {
+                if let Some(detached) = previous {
                     self.restore_detached_service(name, detached)?;
                 }
                 return Err(err);
             }
-        } else {
-            return Err(Self::config_error(format!(
-                "blue_green.switch_command is required for service '{name}'"
-            )));
+        };
+
+        if matches!(start_state, ServiceReadyState::CompletedSuccess) {
+            if let Some(detached) = previous {
+                self.restore_detached_service(name, detached)?;
+            }
+            return Err(ProcessManagerError::ServiceStartError {
+                service: name.to_string(),
+                source: std::io::Error::other(
+                    "blue/green candidate exited before traffic could be switched",
+                ),
+            });
+        }
+        let candidate_pid = match self.current_generation_pid(name) {
+            Ok(pid) => pid,
+            Err(err) => {
+                if let Some(detached) = previous {
+                    self.restore_detached_service(name, detached)?;
+                }
+                return Err(err);
+            }
+        };
+
+        if let Err(err) = self.run_blue_green_switch_command(
+            name,
+            switch_command,
+            &active_slot,
+            &candidate_slot,
+        ) {
+            self.rollback_blue_green_switch(
+                name,
+                switch_command,
+                &active_slot,
+                &candidate_slot,
+            );
+            self.stop_generation_if_current(name, candidate_pid);
+            if let Some(detached) = previous {
+                self.restore_detached_service(name, detached)?;
+            }
+            return Err(err);
         }
 
         if let Some(health_check) = &blue_green.switch_verify {
@@ -4888,26 +4947,66 @@ impl Daemon {
                 &active_slot,
                 &candidate_slot,
             );
-            self.wait_for_health_check(name, &health_check)?;
-        }
-
-        if let Some(grace_period) = service
-            .deployment
-            .as_ref()
-            .and_then(|deployment| deployment.grace_period.as_ref())
-        {
-            let duration = Self::parse_duration(grace_period)?;
-            if !duration.is_zero() {
-                thread::sleep(duration);
+            if let Err(err) =
+                self.wait_for_health_check(name, &health_check, candidate_started_at)
+            {
+                self.rollback_blue_green_switch(
+                    name,
+                    switch_command,
+                    &active_slot,
+                    &candidate_slot,
+                );
+                self.stop_generation_if_current(name, candidate_pid);
+                if let Some(detached) = previous {
+                    self.restore_detached_service(name, detached)?;
+                }
+                return Err(err);
             }
         }
 
-        if let Some(detached) = previous.take() {
+        let observation = grace
+            .unwrap_or_default()
+            .max(self.timeouts().startup_stability());
+        if let Err(err) = self.wait_for_generation(
+            name,
+            candidate_pid,
+            observation,
+            candidate_started_at,
+        ) {
+            self.rollback_blue_green_switch(
+                name,
+                switch_command,
+                &active_slot,
+                &candidate_slot,
+            );
+            self.stop_generation_if_current(name, candidate_pid);
+            if let Some(detached) = previous {
+                self.restore_detached_service(name, detached)?;
+            }
+            return Err(err);
+        }
+
+        if let Some(detached) = previous {
             self.terminate_service(name, detached)?;
         }
 
         self.write_blue_green_active_index(name, blue_green, candidate_idx)?;
         Ok(start_state)
+    }
+
+    /// Restores blue/green traffic to the previously active slot.
+    fn rollback_blue_green_switch(
+        &self,
+        name: &str,
+        command: &str,
+        active_slot: &str,
+        candidate_slot: &str,
+    ) {
+        if let Err(err) =
+            self.run_blue_green_switch_command(name, command, candidate_slot, active_slot)
+        {
+            warn!("Failed to restore blue/green traffic for '{name}': {err}");
+        }
     }
 
     /// Performs an immediate restart by stopping and starting the service sequentially.
@@ -5233,6 +5332,7 @@ impl Daemon {
         &self,
         service_name: &str,
         health_check: &HealthCheckConfig,
+        generation_started_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), ProcessManagerError> {
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
         let attempt_timeout = if let Some(raw) = &health_check.attempt_timeout {
@@ -5282,6 +5382,20 @@ impl Daemon {
             attempt = attempt.saturating_add(1);
             if self.boot_cancelled() || !self.boot_active(epoch) {
                 return Err(Self::interrupted(service_name));
+            }
+            let config = self.cfg();
+            if let ServiceProbe::Exited(status) = Self::probe_service_state_recording(
+                service_name,
+                &self.processes,
+                &self.pid_file,
+                Some((&self.state_file, &config)),
+            )? {
+                return Err(Self::startup_exit_error(
+                    service_name,
+                    status,
+                    &config,
+                    generation_started_at,
+                ));
             }
             let progress = match total_timeout {
                 Some(budget) => format!(
@@ -5361,6 +5475,7 @@ impl Daemon {
                     total_timeout,
                 },
                 last_outcome,
+                generation_started_at,
             ),
         )))
     }
@@ -5376,6 +5491,7 @@ impl Daemon {
         attempt_timeout: Duration,
         run: HealthRun,
         outcome: HealthProbeOutcome,
+        started_at: chrono::DateTime<chrono::Utc>,
     ) -> crate::diag::Diagnostic {
         use crate::diag::{Diagnostic, SgCode};
 
@@ -5452,7 +5568,7 @@ impl Daemon {
 
         diag = diag.evidence(
             format!("last output from `{service_name}`"),
-            crate::logs::tail_service_log(&project, service_name, 8),
+            crate::logs::tail_service_log_since(&project, service_name, 8, started_at),
         );
 
         diag.help_cmd(
@@ -5802,45 +5918,6 @@ impl Daemon {
         }
     }
 
-    /// Scans the last 50 lines of a service's stderr log for port conflict indicators. Returns
-    /// true if common port conflict messages are detected (e.g., "address already in use", EADDRINUSE).
-    fn logs_indicate_port_conflict(project: &str, service_name: &str) -> bool {
-        let path = resolve_log_path(project, service_name, "stderr");
-        if !path.exists() {
-            return false;
-        }
-
-        match File::open(&path) {
-            Ok(file) => {
-                let reader = BufReader::new(file);
-                let mut buffer: VecDeque<String> =
-                    VecDeque::with_capacity(MAX_STATUS_LOG_LINES);
-
-                for line in reader.lines().map_while(Result::ok) {
-                    if buffer.len() == MAX_STATUS_LOG_LINES {
-                        buffer.pop_front();
-                    }
-                    buffer.push_back(line);
-                }
-
-                buffer.iter().rev().any(|line| {
-                    let lower = line.to_ascii_lowercase();
-                    lower.contains("address already in use")
-                        || lower.contains("os error 48")
-                        || lower.contains("os error 98")
-                        || lower.contains("eaddrinuse")
-                })
-            }
-            Err(err) => {
-                debug!(
-                    "Unable to inspect stderr logs for '{}' while detecting port conflicts: {err}",
-                    service_name
-                );
-                false
-            }
-        }
-    }
-
     /// Determines if a service should be verified as running after a restart. Returns false for
     /// one-shot services (restart_policy=never) and cron jobs, true for long-running services.
     fn should_verify_service(service: &ServiceConfig) -> bool {
@@ -5985,6 +6062,9 @@ impl Daemon {
             detached.pid,
             detached.pgid,
         )?;
+        self.manual_stop_flags.lock()?.remove(service_name);
+        self.restart_suppressed.lock()?.remove(service_name);
+        self.mark_running(service_name, detached.pid)?;
 
         info!("Restored original instance of '{service_name}' after restart failure.");
 
@@ -6000,6 +6080,8 @@ impl Daemon {
         mut detached: DetachedService,
     ) -> Result<(), ProcessManagerError> {
         let pid = detached.pid;
+        #[cfg(target_os = "linux")]
+        self.context().cancel_service_thread(service_name, pid);
         Self::terminate_process_tree(service_name, pid, detached.pgid)?;
 
         if let Err(err) = detached.child.wait()
@@ -6030,6 +6112,7 @@ impl Daemon {
             return Ok(state);
         }
 
+        let started_at = chrono::Utc::now();
         let processes = Arc::clone(&self.processes);
         let service_config = service.clone();
         let service_name = name.to_string();
@@ -6109,7 +6192,7 @@ impl Daemon {
             }
         }
 
-        let readiness = self.wait_for_service_ready(name);
+        let readiness = self.wait_for_service_ready(name, service, started_at);
 
         match readiness {
             Ok(state) => {
@@ -6173,6 +6256,7 @@ impl Daemon {
             return Ok(state);
         }
 
+        let started_at = chrono::Utc::now();
         let ctx = self.context();
         let config = self.cfg();
         let log_settings = service.effective_logs(&config.logs);
@@ -6183,36 +6267,36 @@ impl Daemon {
             log_settings,
         );
 
-        match launch_result {
-            Ok(pid) => {
-                self.mark_running(name, pid)?;
-            }
-            Err(err) => {
-                if let Some(action) = service
-                    .hooks
-                    .as_ref()
-                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
-                {
-                    run_hook(
-                        action,
-                        &service.env,
-                        HookStage::OnStart,
-                        HookOutcome::Error,
-                        name,
-                        &self.project_root,
-                        Some((&self.boot_epoch, &self.boot_cancelled)),
-                    );
+        let pid =
+            match launch_result {
+                Ok(pid) => {
+                    self.mark_running(name, pid)?;
+                    pid
                 }
-                return Err(err);
-            }
-        }
+                Err(err) => {
+                    if let Some(action) = service.hooks.as_ref().and_then(|cfg| {
+                        cfg.action(HookStage::OnStart, HookOutcome::Error)
+                    }) {
+                        run_hook(
+                            action,
+                            &service.env,
+                            HookStage::OnStart,
+                            HookOutcome::Error,
+                            name,
+                            &self.project_root,
+                            Some((&self.boot_epoch, &self.boot_cancelled)),
+                        );
+                    }
+                    return Err(err);
+                }
+            };
 
-        let readiness = self.wait_for_service_ready(name);
+        let readiness = self.wait_for_service_ready(name, service, started_at);
 
         match readiness {
             Ok(state) => {
                 if matches!(state, ServiceReadyState::CompletedSuccess) {
-                    ctx.cancel_service_thread(name);
+                    ctx.cancel_service_thread(name, pid);
                     self.update_state(
                         name,
                         ServiceLifecycleStatus::ExitedSuccessfully,
@@ -6239,7 +6323,7 @@ impl Daemon {
                 Ok(state)
             }
             Err(err) => {
-                ctx.cancel_service_thread(name);
+                ctx.cancel_service_thread(name, pid);
                 if let Some(action) = service
                     .hooks
                     .as_ref()
@@ -6462,10 +6546,13 @@ impl Daemon {
             let mut suppressed_guard = self.restart_suppressed.lock()?;
             suppressed_guard.insert(service_name.to_string());
         }
+        let running_pid = { self.pid_file.lock()?.get(service_name) };
         #[cfg(target_os = "linux")]
-        self.context().cancel_service_thread(service_name);
+        if let Some(pid) = running_pid {
+            self.context().cancel_service_thread(service_name, pid);
+        }
 
-        let was_running = { self.pid_file.lock()?.get(service_name).is_some() };
+        let was_running = running_pid.is_some();
 
         let config = self.cfg();
         let result = Self::stop_service_with_handles(
@@ -6532,6 +6619,9 @@ impl Daemon {
 
         while let Some(service) = stack.pop() {
             warn!("Stopping dependent service '{service}' because '{root}' failed.");
+
+            #[cfg(target_os = "linux")]
+            ctx.cancel_service_threads(&service);
 
             if let Ok(mut guard) = ctx.lock_manual_stop_flags() {
                 guard.insert(service.clone());
@@ -6675,14 +6765,26 @@ impl Daemon {
         }
 
         match dependency.condition() {
-            DependsOnCondition::Started => ctx.lock_pid_file().ok().is_some_and(|pids| {
-                pids.get(dependency_name).is_some_and(|pid| {
-                    pids.start_for(dependency_name).is_some_and(|started| {
-                        Self::pid_is_alive(pid)
-                            && process_start_time(pid) == Some(started)
+            DependsOnCondition::Started => {
+                let live = ctx.lock_pid_file().ok().is_some_and(|pids| {
+                    pids.get(dependency_name).is_some_and(|pid| {
+                        pids.start_for(dependency_name).is_some_and(|started| {
+                            Self::pid_is_alive(pid)
+                                && process_start_time(pid) == Some(started)
+                        })
                     })
-                })
-            }),
+                });
+                let completed = ctx
+                    .config
+                    .services
+                    .get(dependency_name)
+                    .is_some_and(|service| !service.restarts_after_failure())
+                    && matches!(
+                        Self::recorded_status_in_context(ctx, dependency_name),
+                        Some(ServiceLifecycleStatus::ExitedSuccessfully)
+                    );
+                live || completed
+            }
             DependsOnCondition::Completed => matches!(
                 Self::recorded_status_in_context(ctx, dependency_name),
                 Some(ServiceLifecycleStatus::ExitedSuccessfully)
@@ -6961,7 +7063,7 @@ impl Daemon {
                     }
 
                     #[cfg(target_os = "linux")]
-                    ctx.cancel_service_thread(&name);
+                    ctx.cancel_service_thread(&name, exited_pid);
 
                     Self::reap_orphaned_group_before_restart(&name, recorded_pgid);
 
@@ -7715,36 +7817,6 @@ mod tests {
                     .expect("read migrated state")
                     .contains("\n  <active_slot_index>1</active_slot_index>")
             );
-        });
-    }
-
-    #[test]
-    fn logs_indicate_port_conflict_detects_common_errors() {
-        with_temp_home(|_| {
-            let log_path = resolve_log_path("demo", "web", "stderr");
-            if let Some(dir) = log_path.parent() {
-                fs::create_dir_all(dir).unwrap();
-            }
-            fs::write(
-                &log_path,
-                "Error: Server(\"Address already in use (os error 98)\")\n",
-            )
-            .unwrap();
-
-            assert!(Daemon::logs_indicate_port_conflict("demo", "web"));
-        });
-    }
-
-    #[test]
-    fn logs_indicate_port_conflict_returns_false_when_not_present() {
-        with_temp_home(|_| {
-            let log_path = resolve_log_path("demo", "api", "stderr");
-            if let Some(dir) = log_path.parent() {
-                fs::create_dir_all(dir).unwrap();
-            }
-            fs::write(&log_path, "Some other failure\n").unwrap();
-
-            assert!(!Daemon::logs_indicate_port_conflict("demo", "api"));
         });
     }
 
