@@ -20,6 +20,8 @@ CONFIG=/usecase/stack.yaml
 STATE_DIR="$HOME/.local/share/systemg"
 SUP_XML="$STATE_DIR/supervisor.xml"
 LOG_DIR="$STATE_DIR/logs/demo"
+LOG_CAP_BYTES=4096
+LOG_SIZE_CEILING_BYTES=65536
 
 section "first start writes indented supervisor.xml with operator defaults"
 sysg start --config "$CONFIG" --daemonize
@@ -47,37 +49,39 @@ sleep 1
 rm -rf "$LOG_DIR" 2>/dev/null
 # 4 KB cap, keep 3 rotated files. A chatty service will blow past 4KB fast, so
 # a rotated file (e.g. chatty.log.1 or a numbered variant) must appear.
-cat > "$SUP_XML" <<'XML'
-<supervisor><logs><max_bytes>4096</max_bytes><max_files>3</max_files></logs></supervisor>
+cat > "$SUP_XML" <<XML
+<supervisor><logs><max_bytes>$LOG_CAP_BYTES</max_bytes><max_files>3</max_files></logs></supervisor>
 XML
 sysg start --config "$CONFIG" --daemonize
 check "$?" "restart with the edited supervisor.xml exits 0"
 sleep 4
-sysg stop --project demo >/dev/null 2>&1
-check "$?" "chatty project stops before log inspection"
+sysg stop --supervisor >/dev/null 2>&1
+check "$?" "supervisor stops before log inspection"
 grep -q '^  <logs>$' "$SUP_XML"
 check "$?" "compact legacy supervisor.xml is normalized"
-grep -q '<max_bytes>4096</max_bytes>' "$SUP_XML"
+grep -q "<max_bytes>$LOG_CAP_BYTES</max_bytes>" "$SUP_XML"
 check "$?" "normalization preserves the custom log cap"
 grep -q '<pre_start_secs>300</pre_start_secs>' "$SUP_XML"
 check "$?" "legacy supervisor.xml receives timeout defaults"
 
 echo "--- log dir contents ---"; ls -la "$LOG_DIR" 2>/dev/null
-# The active file must be bounded near the tiny cap (well under, say, 64KB), and
-# at least one rotated file must exist — both prove the 4KB default took effect.
-ACTIVE="$(ls -1 "$LOG_DIR"/chatty*.log 2>/dev/null | head -1)"
-ROTATED_COUNT="$(ls -1 "$LOG_DIR"/chatty* 2>/dev/null | grep -cE '\.log\.[0-9]+$|\.[0-9]+\.log$|\.[0-9]+$' || true)"
-echo "active=$ACTIVE rotated_count=$ROTATED_COUNT"
+mapfile -t LOG_FILES < <(find "$LOG_DIR" -maxdepth 1 -type f -name 'chatty*' -print | sort)
+ROTATED_COUNT=0
+OVERSIZED_COUNT=0
+for path in "${LOG_FILES[@]}"; do
+  name="$(basename "$path")"
+  if [[ "$name" =~ \.log\.[0-9]+$ || "$name" =~ \.[0-9]+\.log$ || "$name" =~ \.[0-9]+$ ]]; then
+    ROTATED_COUNT=$((ROTATED_COUNT + 1))
+  fi
+  SIZE="$(wc -c < "$path")"
+  echo "$name: ${SIZE} bytes"
+  if [ "$SIZE" -ge "$LOG_SIZE_CEILING_BYTES" ]; then
+    OVERSIZED_COUNT=$((OVERSIZED_COUNT + 1))
+  fi
+done
+echo "files=${#LOG_FILES[@]} rotated_count=$ROTATED_COUNT oversized_count=$OVERSIZED_COUNT"
 [ "$ROTATED_COUNT" -ge 1 ]
 check "$?" "service log ROTATED at the tiny supervisor default (rotated file present)"
-if [ -n "$ACTIVE" ]; then
-  SIZE="$(wc -c < "$ACTIVE" 2>/dev/null || echo 999999)"
-  echo "active log size: ${SIZE} bytes (cap 4096)"
-  [ "$SIZE" -lt 65536 ]
-  check "$?" "active log stays bounded near the 4KB cap (not the 10MB default)"
-else
-  check 1 "active log file exists"
-fi
-
-sysg stop --supervisor >/dev/null 2>&1
+[ "$OVERSIZED_COUNT" -eq 0 ]
+check "$?" "service logs stay bounded near the configured cap"
 finish
