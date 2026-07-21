@@ -4986,9 +4986,13 @@ fn dispatch_start_resident(
         _ => None,
     };
     let failed = with_progress_spinner("Starting", || {
-        send_control_command(command)?;
+        if awaited_project.is_some() {
+            send_add_project(&command)?;
+        } else {
+            send_control_command(command)?;
+        }
         Ok(match &awaited_project {
-            Some(project) => await_queued_boot(project),
+            Some(project) => await_queued_boot(project)?,
             None => Vec::new(),
         })
     })?;
@@ -5019,6 +5023,28 @@ fn dispatch_start_resident(
     Ok(())
 }
 
+fn send_add_project(command: &ControlCommand) -> Result<(), Box<dyn Error>> {
+    match ipc::send_command_with_timeout(command, SUPERVISOR_REQUEST_TIMEOUT) {
+        Ok(ipc::CommandAck::Pending) => Ok(()),
+        Ok(ipc::CommandAck::Response(ControlResponse::Message(message))) => {
+            println!("{message}");
+            Ok(())
+        }
+        Ok(ipc::CommandAck::Response(ControlResponse::Ok)) => Ok(()),
+        Ok(ipc::CommandAck::Response(ControlResponse::Error(message))) => {
+            Err(ControlError::Server(message).into())
+        }
+        Ok(ipc::CommandAck::Response(ControlResponse::Diag(diag))) => {
+            Err(Box::new(DiagError(diag)))
+        }
+        Ok(ipc::CommandAck::Response(other)) => Err(io::Error::other(format!(
+            "unexpected add-project response: {other:?}"
+        ))
+        .into()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 /// Blocks until the supervisor's background boot for `project` has settled, then
 /// reports which of its services failed to come up.
 ///
@@ -5029,7 +5055,7 @@ fn dispatch_start_resident(
 /// Bounded, so a genuinely slow or wedged boot cannot hang the CLI: on timeout
 /// the caller is told what is still pending rather than being left to believe
 /// the start succeeded.
-fn await_queued_boot(project: &str) -> Vec<String> {
+fn await_queued_boot(project: &str) -> Result<Vec<String>, ControlError> {
     let deadline = Instant::now() + systemg::constants::START_SETTLE_GRACE;
     // Units left behind by a previous stop are ALREADY `stopped` — not
     // `starting` — so judging the snapshot immediately reads stale state from
@@ -5041,9 +5067,7 @@ fn await_queued_boot(project: &str) -> Vec<String> {
     let mut boot_began = false;
     while Instant::now() < deadline {
         thread::sleep(BOOT_PROGRESS_INTERVAL);
-        let Some(units) = project_service_units(project) else {
-            continue;
-        };
+        let units = project_service_units(project)?;
         if units.is_empty() {
             continue;
         }
@@ -5092,11 +5116,11 @@ fn await_queued_boot(project: &str) -> Vec<String> {
         // Everything is up: return AT ONCE. The long grace exists only to give a
         // slow pre-start room to finish, so a healthy project must never pay it.
         if down.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         if bind_failed {
-            return down;
+            return Ok(down);
         }
 
         // Something is down. It may still be retrying — a service whose
@@ -5106,8 +5130,7 @@ fn await_queued_boot(project: &str) -> Vec<String> {
         // to run healthily.
     }
     // Grace expired with services still down: report the last known offenders.
-    project_service_units(project)
-        .unwrap_or_default()
+    Ok(project_service_units(project)?
         .into_iter()
         .filter(|(_, state)| {
             matches!(
@@ -5119,40 +5142,53 @@ fn await_queued_boot(project: &str) -> Vec<String> {
             )
         })
         .map(|(name, _)| name)
-        .collect()
+        .collect())
 }
 
-/// Returns `(unit name, state)` for every SERVICE unit in `project`, or `None`
-/// when no snapshot is available. Cron units are excluded: they register
-/// synchronously and are `queued` by design, so they never indicate whether the
-/// project's services actually booted.
-fn project_service_units(project: &str) -> Option<Vec<(String, UnitState)>> {
-    let ControlResponse::Status(snapshot) =
-        ipc::send_command(&ControlCommand::Status { live: false }).ok()?
-    else {
-        return None;
+/// Returns `(unit name, state)` for every service in `project`. An unavailable
+/// control plane remains a typed error so the caller can recover from shutdown.
+/// Cron units are excluded because they never indicate whether services booted.
+fn project_service_units(
+    project: &str,
+) -> Result<Vec<(String, UnitState)>, ControlError> {
+    let snapshot = match ipc::send_command_with_timeout(
+        &ControlCommand::Status { live: false },
+        SUPERVISOR_REQUEST_TIMEOUT,
+    )? {
+        ipc::CommandAck::Response(ControlResponse::Status(snapshot)) => snapshot,
+        ipc::CommandAck::Pending => return Err(ControlError::Timeout),
+        ipc::CommandAck::Response(ControlResponse::Error(message)) => {
+            return Err(ControlError::Server(message));
+        }
+        ipc::CommandAck::Response(other) => {
+            return Err(ControlError::Io(io::Error::other(format!(
+                "unexpected supervisor status response: {other:?}"
+            ))));
+        }
     };
-    Some(
-        snapshot
-            .units
-            .iter()
-            .filter(|unit| {
-                unit.kind == UnitKind::Service
-                    && unit
-                        .project
-                        .as_ref()
-                        .is_some_and(|owner| owner.id == project)
-            })
-            .map(|unit| (unit.name.clone(), unit.state))
-            .collect(),
-    )
+    Ok(snapshot
+        .units
+        .iter()
+        .filter(|unit| {
+            unit.kind == UnitKind::Service
+                && unit
+                    .project
+                    .as_ref()
+                    .is_some_and(|owner| owner.id == project)
+        })
+        .map(|unit| (unit.name.clone(), unit.state))
+        .collect())
 }
 
-/// Whether an error means the resident supervisor was tearing down as the
-/// command arrived, so its owner thread dropped the request. Distinct from a
-/// real failure: the caller should fork a fresh supervisor rather than surface
-/// it. Matches the two shutdown-window signatures the supervisor emits.
+/// Whether a start lost contact with the resident supervisor. The caller waits
+/// for teardown and cold-starts only when the supervisor is actually gone.
 fn error_is_supervisor_shutting_down(err: &(dyn Error + 'static)) -> bool {
+    if matches!(
+        err.downcast_ref::<ControlError>(),
+        Some(ControlError::NotAvailable | ControlError::Timeout)
+    ) {
+        return true;
+    }
     let message = err.to_string().to_ascii_lowercase();
     message.contains("dropped the command before replying")
         || message.contains("supervisor is shutting down")
