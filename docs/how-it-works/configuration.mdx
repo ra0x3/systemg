@@ -125,6 +125,14 @@ When you run a command with `-c <file>`, the resident supervisor remembers that
 manifest's resolved path for each project it registers. Later commands can omit
 `-c` and target the registered project from any working directory.
 
+<Info>
+  Ad-hoc units use the same manifest pipeline. `sysg start -- <command...>`
+  first stages the command as a generated version 2 manifest. If a supervisor
+  is already running, that file is not registered or started until you run the
+  explicit `sysg restart --config ...` command systemg prints. See
+  [Units](/examples/units).
+</Info>
+
 `sysg restart` treats the files at those paths as the source of truth. It reads
 and validates every registered manifest before touching a process, then
 re-registers added, changed, and removed projects and services. An invalid
