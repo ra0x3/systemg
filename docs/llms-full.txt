@@ -87,10 +87,11 @@ System deployments use `scripts/install-systemg.sh` to set up `/usr/bin/sysg`,
 `/var/lib/systemg` and logs live in `/var/log/systemg`.
 
 Starting with 0.56.0, the normal installer can live-upgrade a compatible newer
-patch release on the same major/minor line. The resident supervisor keeps its
-PID and workloads while replacing its binary. SG0501-SG0505 explain validation,
-compatibility, handoff safety, and rollback failures. Minor/major upgrades,
-downgrades, and the first transition from pre-0.56 require a stopped supervisor.
+release. The resident supervisor keeps its PID and workloads while replacing
+its binary. From 0.57.1 forward, matching protocol and handoff schema—not
+major/minor boundaries—determine compatibility. Residents through 0.57.0,
+downgrades, and contract changes may require a stopped supervisor. SG0501-SG0505
+explain validation, compatibility, handoff safety, and rollback failures.
 
 ## Core Mental Model
 
