@@ -1500,16 +1500,19 @@ pub fn parse_config_manifest(content: &str) -> Result<Config, serde_yaml::Error>
 /// one-element vec; a `projects:` map yields one per entry. This is the ingest
 /// path the supervisor uses so one file can fan out into many project runtimes.
 pub fn parse_config_projects(content: &str) -> Result<Vec<Config>, serde_yaml::Error> {
+    parse_config_projects_with_legacy(content).map(|(configs, _)| configs)
+}
+
+fn parse_config_projects_with_legacy(
+    content: &str,
+) -> Result<(Vec<Config>, bool), serde_yaml::Error> {
     let header: ManifestHeader = serde_yaml::from_str(content)?;
     match header.version {
         Version::V2 => {
             let config: ConfigV1 = serde_yaml::from_str(content)?;
-            if config.projects.is_none() && uses_legacy_project_shape(&config) {
-                warn!(
-                    "'project:' is deprecated; run 'sysg migrate <file>' to convert to the 'projects:' format"
-                );
-            }
-            config.into_configs().map_err(serde_yaml::Error::custom)
+            let legacy = config.projects.is_none() && uses_legacy_project_shape(&config);
+            let configs = config.into_configs().map_err(serde_yaml::Error::custom)?;
+            Ok((configs, legacy))
         }
     }
 }
@@ -1742,8 +1745,22 @@ pub fn load_projects_from_file(
     }
 
     let expanded_content = expand_env_vars(&content)?;
-    let configs = parse_config_projects(&expanded_content)
+    let (configs, legacy) = parse_config_projects_with_legacy(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
+
+    if legacy {
+        let project = configs
+            .first()
+            .map(|config| config.project.id.as_str())
+            .filter(|id| !id.is_empty())
+            .unwrap_or(LOOSE_PROJECT_ID);
+        warn!(
+            "project '{}' uses deprecated 'project:' in '{}'; run \"sysg migrate '{}'\" to convert it to 'projects:'",
+            project,
+            config_path.display(),
+            config_path.display()
+        );
+    }
 
     let mut finalized = Vec::with_capacity(configs.len());
     for mut config in configs {
