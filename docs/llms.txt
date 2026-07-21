@@ -95,5 +95,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
 Compatible releases after 0.56.0 replace a running supervisor by same-PID live
-re-execution without restarting workloads. Minor/major changes and downgrades
-require a stopped supervisor.
+re-execution without restarting workloads. From 0.57.1 forward, compatibility
+follows the live-reexec protocol and handoff schema rather than major/minor
+version boundaries. Downgrades and contract changes require a stopped
+supervisor.

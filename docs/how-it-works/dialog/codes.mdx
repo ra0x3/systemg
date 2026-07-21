@@ -265,10 +265,23 @@ live-upgrade metadata. The resident supervisor and its workloads are unchanged.
 ### [SG0502](/how-it-works/dialog/codes#sg0502)
 
 The staged binary is not live-reexec compatible with the resident supervisor.
-Live upgrades require a newer target on the same major/minor release line and
-the same protocol. Follow the
-[stop-and-upgrade path](/installation/upgrading#compatibility) for an
-incompatible minor or major release, a downgrade, or the `0.56.0` bootstrap.
+Live upgrades require a strictly newer target with the same protocol and
+handoff schema. Residents from `0.56.0` through `0.57.0` also require the target
+to remain on their major/minor release line; earlier residents do not support
+live re-execution.
+
+The resident, its workloads, the PATH target, and the active-version record are
+left unchanged. To accept the brief interruption and activate the installed
+target:
+
+```bash
+$ sysg stop --supervisor
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+```
+
+Stopping the supervisor stops every registered project. Restart each required
+project from its manifest after installation. See the full
+[compatibility and recovery path](/installation/upgrading#compatibility).
 
 ### [SG0503](/how-it-works/dialog/codes#sg0503)
 

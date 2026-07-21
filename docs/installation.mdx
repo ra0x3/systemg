@@ -37,9 +37,13 @@ $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- -v 0.56.
 ```
 
 The installer validates the downloaded binary before changing the active
-version. On compatible releases it also upgrades a running supervisor without
-restarting its services. See [Upgrading `sysg`](/installation/upgrading) for
-compatibility rules and recovery behavior.
+version. A newer release can upgrade a running supervisor without restarting
+its services when both binaries advertise the same live-reexec protocol and
+handoff schema; major and minor version boundaries do not decide compatibility.
+Residents from `0.56.0` through `0.57.0` still enforce the original
+same-major/minor rule; earlier residents do not support live re-execution.
+See [Upgrading `sysg`](/installation/upgrading) for compatibility and
+[`SG0502`](/how-it-works/dialog/codes#sg0502) recovery.
 
 ## Next steps
 

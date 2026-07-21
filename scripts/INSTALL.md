@@ -65,12 +65,22 @@ then update the active symlink:
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
-Live re-execution starts with `0.56.0` and currently applies to newer patch
-releases on the same major/minor line. Installing `0.56.0` over a running
-`0.55.x` supervisor requires `sysg stop --supervisor` first. An incompatible or
-unsafe handoff leaves the active version unchanged and reports
+Live re-execution starts with `0.56.0`. From `0.57.1` forward, a strictly newer
+release can upgrade across version lines when its live-reexec protocol and
+handoff schema match the resident. Residents from `0.56.0` through `0.57.0`
+enforce the original same-major/minor rule; earlier residents do not support
+live re-execution. An incompatible or unsafe handoff leaves the active version
+unchanged and reports
 [`SG0501`](https://sysg.dev/how-it-works/dialog/codes#sg0501) through
 [`SG0505`](https://sysg.dev/how-it-works/dialog/codes#sg0505).
+
+For [`SG0502`](https://sysg.dev/how-it-works/dialog/codes#sg0502), stop the
+supervisor, rerun the installer, then restart each required project:
+
+```bash
+sysg stop --supervisor
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
+```
 
 ### Show Help
 

@@ -12,7 +12,7 @@ $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 
 ## Live re-execution
 
-Starting with `0.56.0`, compatible patch releases use **live re-execution**: the
+Starting with `0.56.0`, compatible releases use **live re-execution**: the
 running supervisor replaces its process image in the same PID while retaining
 its service processes, process groups, control socket, log pipes, project modes,
 and lifecycle state.
@@ -20,7 +20,7 @@ and lifecycle state.
 The installer performs the upgrade in this order:
 
 1. Download the release into its versioned slot.
-2. Verify its version, executable metadata, and live-reexec protocol.
+2. Verify its version, executable metadata, protocol, and handoff schema.
 3. Ask the resident supervisor whether its runtime is safe to transfer.
 4. Re-execute the supervisor and verify that the same PID reports the target version.
 5. Update the `sysg` symlink and `active-version` file.
@@ -31,22 +31,30 @@ processes continue running.
 
 ## Compatibility
 
-Live re-execution currently requires a newer release with the same major and
-minor version and the same handoff protocol. For example, `0.56.0` can live
-upgrade to `0.56.1`; moving from `0.55.x` to `0.56.0`, changing minor or major
-versions, and downgrading require a stopped supervisor.
+Live re-execution requires a strictly newer release with the same live-reexec
+protocol and handoff schema. Version boundaries do not determine compatibility:
+`0.57.1` can live-upgrade to `0.58.0` while both advertise the same contract.
+A downgrade or a protocol/schema change requires a stopped supervisor.
 
-`0.56.0` is the first release that understands the handoff protocol. To install
-it while a `0.55.x` supervisor is running:
+Contract-based compatibility begins with `0.57.1`. Residents from `0.56.0`
+through `0.57.0` enforce the original same-major/minor rule, while earlier
+residents do not support live re-execution. Upgrading from `0.56.x` to `0.57.x`
+therefore requires one stopped-supervisor transition:
 
 ```bash
 $ sysg stop --supervisor
-$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh -s -- --version 0.56.0
+$ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
-Restart the required projects after installation. The installer reports
-[`SG0502`](/how-it-works/dialog/codes#sg0502) and leaves the existing PATH target
-unchanged if the old supervisor is still running.
+<Warning>
+  `sysg stop --supervisor` stops every registered project. After installation,
+  restart each required project from its manifest.
+</Warning>
+
+The installer reports [`SG0502`](/how-it-works/dialog/codes#sg0502) and leaves
+the existing PATH target unchanged when the resident and target cannot hand
+off safely. The target remains installed, so stopping the supervisor and
+rerunning the same installer activates it.
 
 ## Safe handoff requirements
 

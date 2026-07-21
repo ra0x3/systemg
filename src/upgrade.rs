@@ -40,6 +40,13 @@ pub struct LiveUpgradeInfo {
     pub version: Version,
     /// Live re-execution protocol version.
     pub protocol: u16,
+    /// Serialized supervisor handoff schema.
+    #[serde(default = "handoff_schema")]
+    pub schema: u16,
+}
+
+fn handoff_schema() -> u16 {
+    HANDOFF_SCHEMA_VERSION
 }
 
 impl LiveUpgradeInfo {
@@ -49,6 +56,7 @@ impl LiveUpgradeInfo {
             version: Version::parse(env!("CARGO_PKG_VERSION"))
                 .expect("Cargo package version must be valid semver"),
             protocol: LIVE_REEXEC_PROTOCOL,
+            schema: HANDOFF_SCHEMA_VERSION,
         }
     }
 }
@@ -242,7 +250,7 @@ pub fn rollback_handoff(path: &Path, reason: impl Into<String>) -> io::Result<()
 }
 
 impl UpgradeTarget {
-    /// Validates the candidate file, probes its protocol, and checks patch-line
+    /// Validates the candidate file, probes its handoff contract, and checks
     /// compatibility with the resident supervisor.
     pub fn inspect(
         path: &Path,
@@ -302,10 +310,12 @@ pub fn validate_resident_version(
             "resident supervisor reported invalid version `{resident}`: {err}"
         ))
     })?;
-    if resident.major != target.version.major
-        || resident.minor != target.version.minor
-        || resident >= target.version
-    {
+    if resident < Version::new(0, 56, 0) {
+        return Err(incompatible(format!(
+            "resident {resident} does not support live re-execution"
+        )));
+    }
+    if resident >= target.version {
         return Err(incompatible(format!(
             "resident {resident} cannot live-upgrade to {}",
             target.version
@@ -402,7 +412,7 @@ fn probe_target(path: &Path) -> Result<LiveUpgradeInfo, Box<Diagnostic>> {
         .map_err(|err| target_invalid(format!("candidate metadata was invalid: {err}")))
 }
 
-/// Checks protocol equality and patch-line version ordering.
+/// Checks handoff-contract equality and release ordering.
 fn validate_compatibility(
     current: &LiveUpgradeInfo,
     target: &LiveUpgradeInfo,
@@ -413,12 +423,10 @@ fn validate_compatibility(
             current.protocol, target.protocol
         )));
     }
-    if target.version.major != current.version.major
-        || target.version.minor != current.version.minor
-    {
+    if target.schema != current.schema {
         return Err(incompatible(format!(
-            "live upgrade supports patch releases within {}.{}, not {}",
-            current.version.major, current.version.minor, target.version
+            "handoff schema {} cannot hand off to schema {}",
+            current.schema, target.schema
         )));
     }
     if target.version <= current.version {
@@ -442,7 +450,7 @@ fn target_invalid(reason: impl Into<String>) -> Box<Diagnostic> {
     )
 }
 
-/// Builds SG0502 for a candidate outside the live-upgrade compatibility line.
+/// Builds SG0502 for a candidate outside the live-upgrade contract.
 fn incompatible(reason: impl Into<String>) -> Box<Diagnostic> {
     Box::new(
         Diagnostic::error(
@@ -450,6 +458,90 @@ fn incompatible(reason: impl Into<String>) -> Box<Diagnostic> {
             "the upgrade target is not live-reexec compatible",
         )
         .note(reason)
+        .help_cmd("stop the supervisor", "sysg stop --supervisor")
+        .help_cmd(
+            "then rerun the installer",
+            "curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh",
+        )
         .help_docs(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(version: &str, protocol: u16, schema: u16) -> LiveUpgradeInfo {
+        LiveUpgradeInfo {
+            version: Version::parse(version).unwrap(),
+            protocol,
+            schema,
+        }
+    }
+
+    #[test]
+    fn accepts_newer_cross_minor() {
+        let current = info("0.57.1", 1, 1);
+        let target = info("0.58.0", 1, 1);
+
+        assert!(validate_compatibility(&current, &target).is_ok());
+        assert!(validate_resident_version("0.57.1", &target).is_ok());
+    }
+
+    #[test]
+    fn accepts_newer_cross_major() {
+        let current = info("0.58.0", 1, 1);
+        let target = info("1.0.0", 1, 1);
+
+        assert!(validate_compatibility(&current, &target).is_ok());
+        assert!(validate_resident_version("0.58.0", &target).is_ok());
+    }
+
+    #[test]
+    fn rejects_protocol_mismatch() {
+        let current = info("0.57.1", 1, 1);
+        let target = info("0.58.0", 2, 1);
+
+        assert!(validate_compatibility(&current, &target).is_err());
+    }
+
+    #[test]
+    fn rejects_schema_mismatch() {
+        let current = info("0.57.1", 1, 1);
+        let target = info("0.58.0", 1, 2);
+
+        assert!(validate_compatibility(&current, &target).is_err());
+    }
+
+    #[test]
+    fn rejects_older_target() {
+        let current = info("0.58.0", 1, 1);
+        let target = info("0.57.1", 1, 1);
+
+        assert!(validate_compatibility(&current, &target).is_err());
+        assert!(validate_resident_version("0.58.0", &target).is_err());
+    }
+
+    #[test]
+    fn reads_legacy_metadata() {
+        let info: LiveUpgradeInfo =
+            serde_json::from_str(r#"{"version":"0.57.0","protocol":1}"#).unwrap();
+
+        assert_eq!(info.schema, HANDOFF_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn rejects_protocol_unaware_resident() {
+        let target = info("0.57.1", 1, 1);
+
+        assert!(validate_resident_version("0.55.9", &target).is_err());
+    }
+
+    #[test]
+    fn incompatible_shows_recovery_commands() {
+        let text = incompatible("contract mismatch").render(false);
+
+        assert!(text.contains("sysg stop --supervisor"));
+        assert!(text.contains("https://sh.sysg.dev/ | sh"));
+    }
 }

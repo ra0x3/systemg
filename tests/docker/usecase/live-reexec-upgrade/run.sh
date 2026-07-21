@@ -6,11 +6,11 @@ export PATH="$HOME/.local/bin:$PATH"
 BASE_URL="file:///release"
 STATE_DIR="$HOME/.local/share/systemg"
 
-section "install the first live-reexec release"
-SYSG_DOWNLOAD_BASE_URL="$BASE_URL" sh /usecase/index.sh --version 0.56.0 >/tmp/install-0.out 2>&1
-check "$?" "0.56.0 installs through the public installer"
-[ "$(sysg --version 2>/dev/null)" = "systemg 0.56.0" ]
-check "$?" "PATH resolves to 0.56.0"
+section "install the live-reexec baseline"
+SYSG_DOWNLOAD_BASE_URL="$BASE_URL" sh /usecase/index.sh --version 0.57.1 >/tmp/install-0.out 2>&1
+check "$?" "0.57.1 installs through the public installer"
+[ "$(sysg --version 2>/dev/null)" = "systemg 0.57.1" ]
+check "$?" "PATH resolves to 0.57.1"
 
 section "boot two foreground projects with real lifecycle gates"
 python3 /usecase/fgcap.py /usecase/pipeline.yaml 120 /tmp/pipeline.out &
@@ -66,13 +66,13 @@ while [ "$i" -lt 25 ] && [ ! -f /tmp/cron-active ]; do
 done
 [ -f /tmp/cron-active ]
 check "$?" "cron entered an active run"
-SYSG_DOWNLOAD_BASE_URL="$BASE_URL" sh /usecase/index.sh --version 0.56.1 >/tmp/install-busy.out 2>&1
+SYSG_DOWNLOAD_BASE_URL="$BASE_URL" sh /usecase/index.sh --version 0.58.0 >/tmp/install-busy.out 2>&1
 BUSY_RC=$?
 [ "$BUSY_RC" -ne 0 ]
 check "$?" "installer refuses a live handoff during cron execution"
 grep -q SG0503 /tmp/install-busy.out
 check "$?" "busy handoff reports SG0503"
-[ "$(cat "$HOME/.sysg/active-version")" = "0.56.0" ] \
+[ "$(cat "$HOME/.sysg/active-version")" = "0.57.1" ] \
   && [ "$(tr -d ' ' < "$STATE_DIR/sysg.pid")" = "$SUPERVISOR_BEFORE" ]
 check "$?" "failed activation leaves version and supervisor PID unchanged"
 
@@ -95,20 +95,20 @@ while [ "$i" -lt 10 ] && [ ! -f /tmp/partial-ready ]; do
 done
 [ -f /tmp/partial-ready ]
 check "$?" "partial service has written an unterminated line"
-SYSG_DOWNLOAD_BASE_URL="$BASE_URL" sh /usecase/index.sh --version 0.56.1 >/tmp/install-1.out 2>&1
+SYSG_DOWNLOAD_BASE_URL="$BASE_URL" sh /usecase/index.sh --version 0.58.0 >/tmp/install-1.out 2>&1
 UPGRADE_RC=$?
 cat /tmp/install-1.out
-[ "$UPGRADE_RC" -eq 0 ] && grep -q "Supervisor upgraded in place to 0.56.1" /tmp/install-1.out
-check "$?" "public installer completed same-PID live re-execution"
+[ "$UPGRADE_RC" -eq 0 ] && grep -q "Supervisor upgraded in place to 0.58.0" /tmp/install-1.out
+check "$?" "public installer completed cross-minor same-PID live re-execution"
 touch /tmp/finish-partial
 sleep 5
 
 SUPERVISOR_AFTER="$(tr -d ' ' < "$STATE_DIR/sysg.pid")"
 SNAP_AFTER="$(sysg status --format json 2>/dev/null)"
 [ "$SUPERVISOR_AFTER" = "$SUPERVISOR_BEFORE" ] \
-  && [ "$(cat "$HOME/.sysg/active-version")" = "0.56.1" ] \
-  && [ "$(sysg --version 2>/dev/null)" = "systemg 0.56.1" ]
-check "$?" "supervisor PID, active slot, and PATH agree on 0.56.1"
+  && [ "$(cat "$HOME/.sysg/active-version")" = "0.58.0" ] \
+  && [ "$(sysg --version 2>/dev/null)" = "systemg 0.58.0" ]
+check "$?" "supervisor PID, active slot, and PATH agree on 0.58.0"
 
 [ "$(unit_field "$SNAP_AFTER" api pid pipeline)" = "$API_BEFORE" ] \
   && [ "$(unit_field "$SNAP_AFTER" emitter pid pipeline)" = "$EMITTER_BEFORE" ] \

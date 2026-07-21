@@ -141,7 +141,7 @@ pub enum SgCode {
     /// unsafe for the supervisor to execute.
     UpgradeTargetInvalid,
     /// SG0502 — the proposed binary does not support a compatible live-reexec
-    /// protocol or is outside the supported patch-release line.
+    /// protocol/schema contract or valid upgrade direction.
     UpgradeIncompatible,
     /// SG0503 — live runtime activity prevents the supervisor from reaching a
     /// stable handoff point without risking workload ownership.
