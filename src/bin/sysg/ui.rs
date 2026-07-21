@@ -3022,7 +3022,11 @@ fn fetch_inspect(
         samples: limit,
         live,
     }) {
-        Ok(ControlResponse::Inspect(payload)) => Ok(*payload),
+        Ok(ControlResponse::Inspect(payload)) => {
+            let mut payload = *payload;
+            set_inspect_config_path(&mut payload, config_path);
+            Ok(payload)
+        }
         Ok(other) => Err(io::Error::other(format!(
             "unexpected supervisor response: {:?}",
             other
@@ -3035,12 +3039,28 @@ fn fetch_inspect(
                 .units
                 .into_iter()
                 .find(|status| status_unit_matches_selector(status, Some(unit), project));
-            Ok(InspectPayload {
+            let mut payload = InspectPayload {
                 unit: unit_status,
                 samples: Vec::new(),
-            })
+            };
+            set_inspect_config_path(&mut payload, config_path);
+            Ok(payload)
         }
         Err(err) => Err(err.into()),
+    }
+}
+
+fn set_inspect_config_path(payload: &mut InspectPayload, config_path: &str) {
+    if let Some(project) = payload
+        .unit
+        .as_mut()
+        .and_then(|unit| unit.project.as_mut())
+        && project
+            .config_path
+            .as_deref()
+            .is_none_or(|path| path.is_empty())
+    {
+        project.config_path = Some(config_path.to_string());
     }
 }
 
@@ -3656,7 +3676,13 @@ fn collect_inspect_lines(
         ));
     }
 
-    if unit.command.is_some() || unit.runtime_command.is_some() {
+    let config_path = unit
+        .project
+        .as_ref()
+        .and_then(|project| project.config_path.as_deref())
+        .filter(|path| !path.is_empty());
+
+    if unit.command.is_some() || unit.runtime_command.is_some() || config_path.is_some() {
         if let Some(command) = &unit.command {
             let cmd_label = colorize("Command", WHITE, opts.no_color);
             let cmd_label_padded = pad_ansi_str(&cmd_label, label_width);
@@ -3706,6 +3732,28 @@ fn collect_inspect_lines(
                     "{} │ {}",
                     label,
                     pad_ansi_str(runtime_line, data_width)
+                ));
+            }
+        }
+        if let Some(config_path) = config_path {
+            overview_lines.push(format!(
+                "{} │ {}",
+                empty_label,
+                pad_ansi_str("", data_width)
+            ));
+            let config_label = colorize("Config", WHITE, opts.no_color);
+            let config_label_padded = pad_ansi_str(&config_label, label_width);
+            for (idx, path_line) in wrap_plain_text(config_path, data_width).iter().enumerate() {
+                let label = if idx == 0 {
+                    &config_label_padded
+                } else {
+                    &empty_label
+                };
+                let path = colorize(path_line, GRAY, opts.no_color);
+                overview_lines.push(format!(
+                    "{} │ {}",
+                    label,
+                    pad_ansi_str(&path, data_width)
                 ));
             }
         }

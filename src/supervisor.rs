@@ -179,6 +179,7 @@ struct CronProjectRuntime {
     daemon: Daemon,
     config: Arc<Config>,
     mode: ProjectRunMode,
+    config_path: PathBuf,
 }
 
 /// Parameters for spawning a child process.
@@ -844,12 +845,6 @@ impl Supervisor {
 
         let mut snapshots = Vec::with_capacity(runtimes.len());
         for runtime in &runtimes {
-            let config_path = runtime
-                .config
-                .project_dir
-                .as_deref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."));
             // Best-effort per project: a single project momentarily failing to
             // collect (e.g. it is still recording PIDs from an async boot, or a
             // state file is being rewritten) must NOT discard the whole aggregate.
@@ -863,7 +858,7 @@ impl Supervisor {
                 spawn_manager,
                 mode,
                 runtime.mode,
-                &config_path,
+                &runtime.config_path,
                 Some(&valid_cron_hashes),
             ) {
                 Ok(snapshot) => snapshots.push(snapshot),
@@ -1672,6 +1667,7 @@ impl Supervisor {
             daemon: daemon.clone(),
             config: Arc::clone(&config_arc),
             mode: primary_project_mode,
+            config_path: config_path.clone(),
         }]));
         let metrics_settings = config_arc
             .metrics
@@ -1841,6 +1837,7 @@ impl Supervisor {
                 daemon: self.daemon.clone(),
                 config: self.daemon.config(),
                 mode: self.primary_project_mode,
+                config_path: self.config_path.clone(),
             });
         }
 
@@ -1850,6 +1847,7 @@ impl Supervisor {
                 daemon: project.daemon.clone(),
                 config: project.daemon.config(),
                 mode: project.mode,
+                config_path: project.config_path.clone(),
             }
         }));
 
