@@ -104,13 +104,26 @@ worker | 2026-07-19T04:45:27Z stderr Warning: Queue full, retrying...
 
 ### Unit mode (no config file)
 
+Unit mode is for ad-hoc commands you want systemg to manage without writing a
+project manifest first:
+
 ```sh
-$ sysg start --daemonize -- sleep 30
+$ sysg start --daemonize --name db-tunnel -- sh db-tunnel.sh
 ```
 
-If the supervisor is already running, this command stages a unit config in
-`~/.local/share/systemg/units/` and prints an explicit restart command.
-It does not restart the supervisor implicitly.
+systemg stages the command by translating it into a generated version 2
+manifest—the common format the central supervisor understands for services and
+projects.
+
+<Info>
+  With no supervisor, the staged manifest starts a supervisor and the unit runs
+  immediately. With a resident supervisor, staging does not alter live state:
+  no process starts until you run the explicit `sysg restart --config ...`
+  command printed by systemg.
+</Info>
+
+See [Units](/examples/units) for the complete stage, apply, inspect, and stop
+workflow.
 
 ### Child mode for orchestrators (replacement for `spawn`)
 

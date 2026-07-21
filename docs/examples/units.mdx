@@ -4,23 +4,70 @@ title: Units
 
 # Units
 
-Use `sysg start -- <command...>` to create and run a single managed unit without
-writing a full project config.
+A unit is the shortest path from an ad-hoc command to systemg supervision. Use
+one when you want systemg to manage a database tunnel, development server,
+watcher, script, or other command without writing a project manifest first.
 
-When `--name` is omitted, systemg auto-generates a unit name.
+```bash
+$ sysg start --daemonize --name db-tunnel -- sh db-tunnel.sh
+```
+
+When `--name` is omitted, systemg generates a unit name from the command.
+
+<Info>
+  **Staging is translation.** systemg writes your command as a generated
+  version 2 manifest—the format its central supervisor understands for every
+  service and project. The generated unit is project-less, so the supervisor
+  manages it in the `__loose__` bundle.
+</Info>
+
+## From command to running unit
+
+`sysg start -- <command...>` always stages the command first. What happens next
+depends on whether a supervisor already exists:
+
+- **No supervisor is running:** the staged manifest starts a new supervisor and
+  the unit runs immediately.
+- **A supervisor is already running:** systemg writes the manifest but leaves
+  the live supervisor unchanged. The unit has been staged, but it is not yet
+  registered and no process has started for it.
+
+<Info>
+  The explicit apply step protects the supervisor's live topology. An ad-hoc
+  command cannot silently add work while the supervisor is managing other
+  services and projects. Applying the staged manifest gives systemg a clear
+  point to validate it and reconcile it into the live state.
+</Info>
+
+For a resident supervisor, systemg prints the exact command required to apply
+the unit:
+
+```text
+Unit staged at ~/.local/share/systemg/units/db-tunnel-<hash>.yaml.
+Run `sysg restart --daemonize --config ~/.local/share/systemg/units/db-tunnel-<hash>.yaml` to apply it.
+```
+
+Run that printed command, then inspect the unit normally:
+
+```bash
+$ sysg restart --daemonize --config ~/.local/share/systemg/units/db-tunnel-<hash>.yaml
+$ sysg status
+$ sysg logs --service db-tunnel
+$ sysg stop --service db-tunnel
+```
 
 ## Common examples
+
+Run a shell script under supervision.
+
+```bash
+$ sysg start --daemonize -- sh foo.sh
+```
 
 Keep a lightweight HTTP server alive.
 
 ```bash
 $ sysg start --daemonize -- python3 -m http.server 8080
-```
-
-Keep a one-off script running.
-
-```bash
-$ sysg start --daemonize -- ./scripts/dev-health-check.sh
 ```
 
 Tail application logs under supervision.
@@ -29,7 +76,7 @@ Tail application logs under supervision.
 $ sysg start --daemonize -- tail -F ./logs/app.log
 ```
 
-Run a frontend dev server.
+Run a frontend development server.
 
 ```bash
 $ sysg start --daemonize -- npm run dev
@@ -65,34 +112,24 @@ Run a composed multi-step local pipeline.
 $ sysg start --daemonize -- sh -lc 'pnpm db:migrate && pnpm run seed && pnpm run start:prod'
 ```
 
-## Where unit files are stored
+## Where staged units are stored
 
-Generated unit configs are saved under:
+Generated unit manifests are saved under:
 
 ```bash
 ~/.local/share/systemg/units/*.yaml
 ```
 
-systemg automatically prunes this folder to prevent unbounded growth.
+systemg prunes manifests older than 30 days and retains the newest 200 files
+when it stages new units.
 
-Generated units are project-less, so their runtime state (PIDs, service state)
-persists under `~/.local/share/systemg/projects/__loose__/`. See
+<Warning>
+  Treat this directory as staging space. For a long-lived unit, copy its
+  generated manifest to a durable path before applying it, then pass that path
+  to `sysg restart --config`. The registered path becomes the supervisor's
+  source of truth for later restarts.
+</Warning>
+
+Once applied, a unit's runtime state—PIDs and service lifecycle state—persists
+under `~/.local/share/systemg/projects/__loose__/`. See
 [State](/how-it-works/state).
-
-## Applying a newly staged unit
-
-If a supervisor is already running, `sysg start --daemonize -- <command...>` stages
-the unit YAML and prints the explicit restart command. This keeps restart decisions
-under user control.
-
-```bash
-$ sysg restart --daemonize --config ~/.local/share/systemg/units/<unit>.yaml
-```
-
-## Inspect and stop
-
-```bash
-$ sysg status
-$ sysg logs --service <unit-name>
-$ sysg stop --service <unit-name>
-```
