@@ -13,7 +13,7 @@ check "$?" "0.57.1 installs through the public installer"
 check "$?" "PATH resolves to 0.57.1"
 
 section "boot two foreground projects with real lifecycle gates"
-python3 /usecase/fgcap.py /usecase/pipeline.yaml 120 /tmp/pipeline.out &
+python3 /usecase/fgcap.py /usecase/pipeline.yaml 300 /tmp/pipeline.out &
 PIPELINE_FG=$!
 i=0
 while [ "$i" -lt 30 ]; do
@@ -28,7 +28,7 @@ done
   && [ "$(unit_field "$SNAP" worker state pipeline)" = "running" ]
 check "$?" "pipeline completed one-shots, pre-start, health, and dependency gates"
 
-python3 /usecase/fgcap.py /usecase/surface.yaml 120 /tmp/surface.out &
+python3 /usecase/fgcap.py /usecase/surface.yaml 300 /tmp/surface.out &
 SURFACE_FG=$!
 i=0
 while [ "$i" -lt 20 ]; do

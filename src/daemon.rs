@@ -1564,6 +1564,11 @@ fn port_from_command(command: Option<&str>) -> Option<u16> {
     parse_port(&captures[1])
 }
 
+fn occupied_command_port(command: Option<&str>) -> Option<u16> {
+    let port = port_from_command(command)?;
+    crate::reconcile::port_holder(port).map(|_| port)
+}
+
 fn wait_with_epoch(
     child: &mut Child,
     timeout: Duration,
@@ -3990,8 +3995,16 @@ impl Daemon {
         let tail =
             crate::logs::tail_service_log_since(project, service_name, 8, started_at);
 
-        let diag = if output_indicates_port_conflict(&tail) {
-            let port = port_from_output(&tail).or_else(|| port_from_command(command));
+        let output_conflict = output_indicates_port_conflict(&tail);
+        let port = port_from_output(&tail).or_else(|| port_from_command(command));
+        let occupied_port = if output_conflict {
+            None
+        } else {
+            occupied_command_port(command)
+        };
+
+        let diag = if output_conflict || occupied_port.is_some() {
+            let port = port.or(occupied_port);
             let subject = match port {
                 Some(port) => format!(
                     "service `{service_name}` could not bind port {port}: already in use"
@@ -7652,7 +7665,9 @@ impl Drop for Daemon {
 
 #[cfg(test)]
 mod port_in_use_tests {
-    use super::{output_indicates_port_conflict, port_from_output};
+    #[cfg(target_os = "linux")]
+    use super::occupied_command_port;
+    use super::{output_indicates_port_conflict, port_from_command, port_from_output};
 
     fn lines(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|line| line.to_string()).collect()
@@ -7689,6 +7704,24 @@ mod port_in_use_tests {
             None
         );
         assert_eq!(port_from_output(&lines(&["Address already in use"])), None);
+    }
+
+    #[test]
+    fn pulls_the_port_from_the_command() {
+        assert_eq!(
+            port_from_command(Some("python3 -m http.server 8080 --bind 127.0.0.1")),
+            Some(8080)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn confirms_an_occupied_command_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let command = format!("python3 -m http.server {port} --bind 127.0.0.1");
+
+        assert_eq!(occupied_command_port(Some(&command)), Some(port));
     }
 }
 
