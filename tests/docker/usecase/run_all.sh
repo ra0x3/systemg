@@ -55,51 +55,87 @@ run_case() {
   local case="$1"
   local dir="${USECASE_DIR}/${case}"
   local log="${LOG_DIR}/${case}.log"
+  local rc=0
   {
     if [ ! -f "${dir}/Dockerfile" ]; then
       echo "!! no Dockerfile for case '${case}'"
-      echo 2 >"${LOG_DIR}/${case}.rc"
-      return
-    fi
-    if ! docker build -f "${dir}/Dockerfile" -t "sysg-usecase-${case}" "${REPO_ROOT}"; then
+      rc=2
+    elif ! docker build -f "${dir}/Dockerfile" -t "sysg-usecase-${case}" "${REPO_ROOT}"; then
       echo "!! build failed for '${case}'"
-      echo 2 >"${LOG_DIR}/${case}.rc"
-      return
+      rc=2
+    else
+      docker run --rm --init "sysg-usecase-${case}"
+      rc=$?
     fi
-    docker run --rm --init "sysg-usecase-${case}"
-    echo "$?" >"${LOG_DIR}/${case}.rc"
   } >"${log}" 2>&1
+  echo "${rc}" >"${LOG_DIR}/${case}.rc"
 }
 
 echo "== running ${#CASES[@]} case(s), up to ${JOBS} in parallel =="
 
-# Fan out with a concurrency cap: launch up to JOBS at a time, wait for a slot.
-pids=()
-for case in "${CASES[@]}"; do
-  run_case "${case}" &
-  pids+=("$!")
-  while [ "$(jobs -rp | wc -l)" -ge "${JOBS}" ]; do
-    wait -n 2>/dev/null || true
-  done
-done
-wait
-
-# Print each case's captured log under a banner, then tally.
 GREEN=()
 RED=()
-for case in "${CASES[@]}"; do
+LAUNCHED=()
+REPORTED=()
+
+was_reported() {
+  local target="$1"
+  local case
+  for case in "${REPORTED[@]:-}"; do
+    [ "${case}" = "${target}" ] && return 0
+  done
+  return 1
+}
+
+report_case() {
+  local case="$1"
+  local rc
   echo
   echo "############################################################"
   echo "# CASE: ${case}"
   echo "############################################################"
   cat "${LOG_DIR}/${case}.log" 2>/dev/null || echo "(no output captured)"
   rc="$(cat "${LOG_DIR}/${case}.rc" 2>/dev/null || echo 1)"
+  REPORTED+=("${case}")
   if [ "${rc}" = "0" ]; then
     GREEN+=("${case}")
   else
     RED+=("${case}")
   fi
+}
+
+report_done() {
+  local case
+  for case in "${LAUNCHED[@]:-}"; do
+    [ -f "${LOG_DIR}/${case}.rc" ] || continue
+    was_reported "${case}" || report_case "${case}"
+  done
+}
+
+STOP=0
+for case in "${CASES[@]}"; do
+  report_done
+  if [ "${#RED[@]}" -gt 0 ]; then
+    STOP=1
+  fi
+  [ "${STOP}" = "0" ] || break
+  run_case "${case}" &
+  LAUNCHED+=("${case}")
+  while [ "$(jobs -rp | wc -l)" -ge "${JOBS}" ]; do
+    wait -n 2>/dev/null || true
+    report_done
+    if [ "${#RED[@]}" -gt 0 ]; then
+      STOP=1
+      break
+    fi
+  done
 done
+
+while [ "$(jobs -rp | wc -l)" -gt 0 ]; do
+  wait -n 2>/dev/null || true
+  report_done
+done
+report_done
 
 echo
 echo "############################################################"
