@@ -3822,7 +3822,7 @@ fn force_kill(pid: libc::pid_t) -> io::Result<()> {
             && system.process(target).is_some_and(is_supervisor)
     };
     if !verified_process {
-        if wait_for_supervisor_exit(pid, PROCESS_CHECK_INTERVAL) {
+        if wait_for_supervisor_exit(pid, SUPERVISOR_FORCE_EXIT_TIMEOUT) {
             return Ok(());
         }
         return Err(io::Error::new(

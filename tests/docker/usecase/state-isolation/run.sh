@@ -119,9 +119,9 @@ check "$?" "projects/alpha/pid.xml exists"
 [ -f "$STATE_DIR/projects/beta/pid.xml" ]
 check "$?" "projects/beta/pid.xml exists"
 # alpha's pid file names alpha's pid and NOT beta's.
-grep -q "$ALPHA_PID" "$STATE_DIR/projects/alpha/pid.xml" 2>/dev/null
+grep -Fq "<pid>${ALPHA_PID}</pid>" "$STATE_DIR/projects/alpha/pid.xml" 2>/dev/null
 check "$?" "alpha/pid.xml records alpha's worker pid"
-if grep -q "$BETA_PID" "$STATE_DIR/projects/alpha/pid.xml" 2>/dev/null; then
+if grep -Fq "<pid>${BETA_PID}</pid>" "$STATE_DIR/projects/alpha/pid.xml" 2>/dev/null; then
   check 1 "alpha/pid.xml does NOT contain beta's worker pid"
 else
   check 0 "alpha/pid.xml does NOT contain beta's worker pid"
@@ -142,11 +142,11 @@ kill -0 "$BETA_PID" 2>/dev/null
 check "$?" "beta/worker process ($BETA_PID) still alive after alpha restart"
 
 # beta's pid file still records its original pid, unchanged
-grep -q "$BETA_PID" "$STATE_DIR/projects/beta/pid.xml" 2>/dev/null
+grep -Fq "<pid>${BETA_PID}</pid>" "$STATE_DIR/projects/beta/pid.xml" 2>/dev/null
 check "$?" "beta/pid.xml still records beta's original pid"
 
 # alpha actually restarted: its pid file no longer names the old pid
-if grep -q "$ALPHA_PID" "$STATE_DIR/projects/alpha/pid.xml" 2>/dev/null; then
+if grep -Fq "<pid>${ALPHA_PID}</pid>" "$STATE_DIR/projects/alpha/pid.xml" 2>/dev/null; then
   check 1 "alpha/pid.xml no longer records the pre-restart pid"
 else
   check 0 "alpha/pid.xml no longer records the pre-restart pid"
