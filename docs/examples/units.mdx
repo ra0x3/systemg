@@ -18,7 +18,8 @@ When `--name` is omitted, systemg generates a unit name from the command.
   **Staging is translation.** systemg writes your command as a generated
   version 2 manifest—the format its central supervisor understands for every
   service and project. The generated unit is project-less, so the supervisor
-  manages it in the `__loose__` bundle.
+  manages it in the `__loose__` bundle. Its command runs from the directory
+  where it was staged, even though the generated manifest lives elsewhere.
 </Info>
 
 ## From command to running unit
@@ -44,13 +45,13 @@ the unit:
 
 ```text
 Unit staged at ~/.local/share/systemg/units/db-tunnel-<hash>.yaml.
-Run `sysg restart --daemonize --config ~/.local/share/systemg/units/db-tunnel-<hash>.yaml` to apply it.
+Run `sysg start --daemonize --config ~/.local/share/systemg/units/db-tunnel-<hash>.yaml` to apply it.
 ```
 
 Run that printed command, then inspect the unit normally:
 
 ```bash
-$ sysg restart --daemonize --config ~/.local/share/systemg/units/db-tunnel-<hash>.yaml
+$ sysg start --daemonize --config ~/.local/share/systemg/units/db-tunnel-<hash>.yaml
 $ sysg status
 $ sysg logs --service db-tunnel
 $ sysg stop --service db-tunnel
@@ -126,7 +127,7 @@ when it stages new units.
 <Warning>
   Treat this directory as staging space. For a long-lived unit, copy its
   generated manifest to a durable path before applying it, then pass that path
-  to `sysg restart --config`. The registered path becomes the supervisor's
+  to `sysg start --config`. The registered path becomes the supervisor's
   source of truth for later restarts.
 </Warning>
 

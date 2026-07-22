@@ -48,10 +48,11 @@ use systemg::{
     spawn::{SpawnedChild, SpawnedChildKind, SpawnedExit},
     state_store::StateStore,
     status::{
-        CronUnitStatus, ExitMetadata, OverallHealth, ProcessState, ProjectRunMode,
-        SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitIntent, UnitKind,
-        UnitMetricsSummary, UnitState, UnitStatus, UptimeInfo, collect_disk_snapshot,
-        compute_overall_health, explain_unit_health, format_elapsed,
+        BootStatus, CronUnitStatus, ExitMetadata, OverallHealth, ProcessState,
+        ProjectRunMode, SpawnedProcessNode, StatusSnapshot, UnitHealth, UnitIntent,
+        UnitKind, UnitMetricsSummary, UnitState, UnitStatus, UptimeInfo,
+        collect_disk_snapshot, compute_overall_health, explain_unit_health,
+        format_elapsed,
     },
     supervisor::{Supervisor, SupervisorError},
     validate::{self, ValidationReport},
@@ -103,8 +104,6 @@ const FOREGROUND_RECONNECT_RETRIES: usize = 4;
 const FOREGROUND_BACKLOG_LINES: usize = 20;
 /// Capacity of the single-result foreground boot channel.
 const FOREGROUND_BOOT_RESULT_CAPACITY: usize = 1;
-/// Number of service log lines inspected for a foreground port collision.
-const PORT_DIAGNOSTIC_TAIL_LINES: usize = 12;
 /// Thread name for terminal progress rendering.
 const SPINNER_THREAD: &str = "sysg-spinner";
 /// Thread name for interactive log streaming.
@@ -2219,6 +2218,7 @@ mod tests {
                     name: "Arbitration".to_string(),
                     mode: ProjectRunMode::Daemon,
                     config_path: None,
+                    boot: None,
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
@@ -2242,6 +2242,7 @@ mod tests {
                     name: "Gamecast".to_string(),
                     mode: ProjectRunMode::Daemon,
                     config_path: None,
+                    boot: None,
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
@@ -3821,6 +3822,9 @@ fn force_kill(pid: libc::pid_t) -> io::Result<()> {
             && system.process(target).is_some_and(is_supervisor)
     };
     if !verified_process {
+        if wait_for_supervisor_exit(pid, PROCESS_CHECK_INTERVAL) {
+            return Ok(());
+        }
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("refusing to force-kill unverified supervisor PID {pid}"),
@@ -4950,7 +4954,7 @@ fn dispatch_start_resident(
                 "Staged unit config at {config:?}. Running supervisor was left unchanged."
             );
             println!(
-                "Unit staged at {}. Run `sysg restart --daemonize --config {}` to apply it.",
+                "Unit staged at {}. Run `sysg start --daemonize --config {}` to apply it.",
                 config.display(),
                 config.display()
             );
@@ -4985,7 +4989,7 @@ fn dispatch_start_resident(
         }
         _ => None,
     };
-    let failed = with_progress_spinner("Starting", || {
+    let boot = with_progress_spinner("Starting", || {
         if awaited_project.is_some() {
             send_add_project(&command)?;
         } else {
@@ -4993,23 +4997,22 @@ fn dispatch_start_resident(
         }
         Ok(match &awaited_project {
             Some(project) => await_queued_boot(project)?,
-            None => Vec::new(),
+            None => QueuedBoot::default(),
         })
     })?;
 
-    // The supervisor logged the real cause (SG0103 pre-start failure, a health
-    // check that never passed, ...). Without this the CLI printed "loaded" and
-    // exited 0 while the project had comprehensively failed to start — a script
-    // or CI job would read that as a clean start.
-    if !failed.is_empty() {
+    if let Some(diag) = boot.cause {
+        return Err(Box::new(DiagError(Box::new(diag))));
+    }
+    if !boot.failed.is_empty() {
         use systemg::diag::{Diagnostic, SgCode};
         let project = awaited_project.as_deref().unwrap_or("<project>");
         let mut diag = Diagnostic::error(
             SgCode::ProjectServicesNotUp,
-            format!("{} service(s) did not come up", failed.len()),
+            format!("{} service(s) did not come up", boot.failed.len()),
         )
-        .note(format!("did not start: {}", failed.join(", ")));
-        for service in failed.iter().take(3) {
+        .note(format!("did not start: {}", boot.failed.join(", ")));
+        for service in boot.failed.iter().take(3) {
             diag = diag.help_cmd(
                 format!("why '{service}' failed"),
                 format!("sysg logs -p {project} -s {service}"),
@@ -5021,6 +5024,17 @@ fn dispatch_start_resident(
         ))));
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct QueuedBoot {
+    failed: Vec<String>,
+    cause: Option<systemg::diag::Diagnostic>,
+}
+
+struct ProjectUnits {
+    units: Vec<(String, UnitState)>,
+    boot: Option<BootStatus>,
 }
 
 fn send_add_project(command: &ControlCommand) -> Result<(), Box<dyn Error>> {
@@ -5055,8 +5069,11 @@ fn send_add_project(command: &ControlCommand) -> Result<(), Box<dyn Error>> {
 /// Bounded, so a genuinely slow or wedged boot cannot hang the CLI: on timeout
 /// the caller is told what is still pending rather than being left to believe
 /// the start succeeded.
-fn await_queued_boot(project: &str) -> Result<Vec<String>, ControlError> {
-    let deadline = Instant::now() + systemg::constants::START_SETTLE_GRACE;
+fn await_queued_boot(project: &str) -> Result<QueuedBoot, ControlError> {
+    let timeout = systemg::config::supervisor::SupervisorConfig::load_or_create()
+        .timeouts
+        .start_settle_timeout();
+    let deadline = Instant::now() + timeout;
     // Units left behind by a previous stop are ALREADY `stopped` — not
     // `starting` — so judging the snapshot immediately reads stale state from
     // before this boot and reports failure in ~1s, before a single service has
@@ -5067,8 +5084,17 @@ fn await_queued_boot(project: &str) -> Result<Vec<String>, ControlError> {
     let mut boot_began = false;
     while Instant::now() < deadline {
         thread::sleep(BOOT_PROGRESS_INTERVAL);
-        let units = project_service_units(project)?;
+        let ProjectUnits { units, boot } = project_service_units(project)?;
         if units.is_empty() {
+            continue;
+        }
+        if let Some(boot) = boot {
+            if boot.settled {
+                return Ok(QueuedBoot {
+                    failed: boot.failed,
+                    cause: boot.cause,
+                });
+            }
             continue;
         }
         // A unit is still working while it is starting; anything else has
@@ -5080,21 +5106,25 @@ fn await_queued_boot(project: &str) -> Result<Vec<String>, ControlError> {
             boot_began = true;
             continue;
         }
-        let bind_failed = units.iter().any(|(service, state)| {
-            *state == UnitState::Failed
-                && systemg::daemon::output_indicates_port_conflict(
-                    &systemg::logs::tail_service_log(
-                        project,
-                        service,
-                        PORT_DIAGNOSTIC_TAIL_LINES,
-                    ),
-                )
-        });
+        let terminal = units
+            .iter()
+            .any(|(_, state)| matches!(state, UnitState::Failed | UnitState::Lost));
+        if terminal {
+            return Ok(QueuedBoot {
+                failed: units
+                    .iter()
+                    .filter(|(_, state)| {
+                        matches!(state, UnitState::Failed | UnitState::Lost)
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect(),
+                cause: None,
+            });
+        }
         if !boot_began {
             if units
                 .iter()
                 .any(|(_, state)| matches!(state, UnitState::Running | UnitState::Done))
-                || bind_failed
             {
                 boot_began = true;
             } else {
@@ -5116,11 +5146,7 @@ fn await_queued_boot(project: &str) -> Result<Vec<String>, ControlError> {
         // Everything is up: return AT ONCE. The long grace exists only to give a
         // slow pre-start room to finish, so a healthy project must never pay it.
         if down.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        if bind_failed {
-            return Ok(down);
+            return Ok(QueuedBoot::default());
         }
 
         // Something is down. It may still be retrying — a service whose
@@ -5130,27 +5156,37 @@ fn await_queued_boot(project: &str) -> Result<Vec<String>, ControlError> {
         // to run healthily.
     }
     // Grace expired with services still down: report the last known offenders.
-    Ok(project_service_units(project)?
-        .into_iter()
-        .filter(|(_, state)| {
-            matches!(
-                state,
-                UnitState::Unknown
-                    | UnitState::Stopped
-                    | UnitState::Failed
-                    | UnitState::Lost
-            )
-        })
-        .map(|(name, _)| name)
-        .collect())
+    let ProjectUnits { units, boot } = project_service_units(project)?;
+    if let Some(boot) = boot
+        && boot.settled
+    {
+        return Ok(QueuedBoot {
+            failed: boot.failed,
+            cause: boot.cause,
+        });
+    }
+    Ok(QueuedBoot {
+        failed: units
+            .into_iter()
+            .filter(|(_, state)| {
+                matches!(
+                    state,
+                    UnitState::Unknown
+                        | UnitState::Stopped
+                        | UnitState::Failed
+                        | UnitState::Lost
+                )
+            })
+            .map(|(name, _)| name)
+            .collect(),
+        cause: None,
+    })
 }
 
 /// Returns `(unit name, state)` for every service in `project`. An unavailable
 /// control plane remains a typed error so the caller can recover from shutdown.
 /// Cron units are excluded because they never indicate whether services booted.
-fn project_service_units(
-    project: &str,
-) -> Result<Vec<(String, UnitState)>, ControlError> {
+fn project_service_units(project: &str) -> Result<ProjectUnits, ControlError> {
     let snapshot = match ipc::send_command_with_timeout(
         &ControlCommand::Status { live: false },
         SUPERVISOR_REQUEST_TIMEOUT,
@@ -5166,18 +5202,24 @@ fn project_service_units(
             ))));
         }
     };
-    Ok(snapshot
+    let mut boot = None;
+    let units = snapshot
         .units
         .iter()
         .filter(|unit| {
             unit.kind == UnitKind::Service
-                && unit
-                    .project
-                    .as_ref()
-                    .is_some_and(|owner| owner.id == project)
+                && unit.project.as_ref().is_some_and(|owner| {
+                    if owner.id == project {
+                        boot = owner.boot.clone();
+                        true
+                    } else {
+                        false
+                    }
+                })
         })
         .map(|unit| (unit.name.clone(), unit.state))
-        .collect())
+        .collect();
+    Ok(ProjectUnits { units, boot })
 }
 
 /// Whether a start lost contact with the resident supervisor. The caller waits
@@ -5559,6 +5601,15 @@ fn write_ad_hoc_config(
     command: &[String],
     requested_name: Option<&str>,
 ) -> Result<PathBuf, Box<dyn Error>> {
+    let cwd = std::env::current_dir()?;
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let cwd = cwd.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unit working directory must be valid UTF-8",
+        )
+    })?;
+    let hash = short_unit_hash(command, cwd);
     let service_name = requested_name
         .map(sanitize_service_name)
         .unwrap_or_else(|| {
@@ -5567,12 +5618,14 @@ fn write_ad_hoc_config(
                 .map(|value| sanitize_service_name(value))
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "unit".to_string());
-            let hash = short_command_hash(command);
             format!("{base}-{hash}")
         });
 
-    let shell_command = render_shell_command(command);
-    let hash = short_command_hash(command);
+    let shell_command = format!(
+        "cd {} && {}",
+        shell_escape_arg(cwd),
+        render_shell_command(command)
+    );
     let units_dir = runtime::state_dir().join("units");
     fs::create_dir_all(&units_dir)?;
 
@@ -5657,6 +5710,18 @@ fn default_child_name(command: &[String]) -> String {
 /// Builds the short command hash.
 fn short_command_hash(command: &[String]) -> String {
     let mut hasher = Sha256::new();
+    for part in command {
+        hasher.update(part.as_bytes());
+        hasher.update([0u8]);
+    }
+    let digest = hasher.finalize();
+    format!("{:x}", digest)[..12].to_string()
+}
+
+fn short_unit_hash(command: &[String], cwd: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(cwd.as_bytes());
+    hasher.update([0u8]);
     for part in command {
         hasher.update(part.as_bytes());
         hasher.update([0u8]);

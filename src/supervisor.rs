@@ -43,9 +43,10 @@ use crate::{
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     start::{self, BootFrame, BootJournal},
     status::{
-        ProjectRunMode, StatusCache, StatusError, StatusRefresher, StatusSnapshot,
-        collect_runtime_snapshot, collect_runtime_snapshot_with_cron_hashes,
-        compute_overall_health, cron_hashes_for_config,
+        BootStatus, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
+        StatusSnapshot, collect_runtime_snapshot,
+        collect_runtime_snapshot_with_cron_hashes, compute_overall_health,
+        cron_hashes_for_config,
     },
     upgrade::{
         HANDOFF_SCHEMA_VERSION, HandoffProject, LIVE_REEXEC_PROTOCOL, LiveUpgradeInfo,
@@ -149,6 +150,8 @@ pub struct Supervisor {
     boot_journal: BootJournal,
     /// Daemons visible to cancellation-aware boot requests.
     boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
+    /// Latest queued project boot state exposed through status snapshots.
+    boots: Arc<RwLock<HashMap<String, BootStatus>>>,
     /// Whether the control plane is quiescing for live re-execution.
     upgrading: Arc<AtomicBool>,
     /// Serializes cron due-state mutation with upgrade preflight.
@@ -271,6 +274,7 @@ struct ReadContext {
     version: String,
     boot_journal: BootJournal,
     boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
+    boots: Arc<RwLock<HashMap<String, BootStatus>>>,
     /// Whether mutations are refused while a live upgrade is committing.
     upgrading: Arc<AtomicBool>,
 }
@@ -1710,6 +1714,7 @@ impl Supervisor {
             pending_projects,
             boot_journal: BootJournal::new(),
             boot_projects,
+            boots: Arc::new(RwLock::new(HashMap::new())),
             upgrading: Arc::new(AtomicBool::new(false)),
             cron_gate: Arc::new(std::sync::Mutex::new(())),
             handoff: None,
@@ -2173,7 +2178,9 @@ impl Supervisor {
     ) -> Option<ControlResponse> {
         match command {
             ControlCommand::Status { live: false } => {
-                Some(ControlResponse::Status(read_ctx.status_cache.snapshot()))
+                let mut snapshot = read_ctx.status_cache.snapshot();
+                Self::apply_boots(&mut snapshot, &read_ctx.boots);
+                Some(ControlResponse::Status(snapshot))
             }
             ControlCommand::Version => {
                 Some(ControlResponse::DaemonVersion(read_ctx.version.clone()))
@@ -2188,6 +2195,21 @@ impl Supervisor {
                 ..
             } => Some(Self::inspect_from_cache(unit, project.as_deref(), read_ctx)),
             _ => None,
+        }
+    }
+
+    /// Attaches the latest queued boot result to every unit in its project.
+    fn apply_boots(
+        snapshot: &mut StatusSnapshot,
+        boots: &Arc<RwLock<HashMap<String, BootStatus>>>,
+    ) {
+        let boots = boots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for unit in &mut snapshot.units {
+            if let Some(project) = unit.project.as_mut() {
+                project.boot = boots.get(&project.id).cloned();
+            }
         }
     }
 
@@ -2634,6 +2656,7 @@ impl Supervisor {
             version: env!("CARGO_PKG_VERSION").to_string(),
             boot_journal: self.boot_journal.clone(),
             boot_projects: Arc::clone(&self.boot_projects),
+            boots: Arc::clone(&self.boots),
             upgrading: Arc::clone(&self.upgrading),
         };
         Self::spawn_acceptor(listener.try_clone()?, read_ctx, mutation_tx)?;
@@ -3581,11 +3604,12 @@ impl Supervisor {
                 Ok(ControlResponse::Message("Supervisor shutting down".into()))
             }
             ControlCommand::Status { live } => {
-                let snapshot = if live {
+                let mut snapshot = if live {
                     self.collect_live_snapshot_for_request()?
                 } else {
                     self.collect_configured_snapshot()?
                 };
+                Self::apply_boots(&mut snapshot, &self.boots);
                 self.status_cache.replace(snapshot.clone());
                 Ok(ControlResponse::Status(snapshot))
             }
@@ -4155,6 +4179,10 @@ impl Supervisor {
         let resolved = resolved.to_path_buf();
         let project_id = config.project.id.clone();
         let primary_project = self.daemon.config().project.id.clone();
+        self.boots
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&project_id);
 
         if project_id == primary_project {
             let unchanged = crate::restart::ManifestDiff::compute(
@@ -4272,17 +4300,58 @@ impl Supervisor {
             let boot_metrics = self.metrics_store.clone();
             let boot_spawn = self.spawn_manager.clone();
             let boot_mode = Self::status_snapshot_mode(self.daemon.config().as_ref());
+            let boots = Arc::clone(&self.boots);
+            boots
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    project_id.clone(),
+                    BootStatus {
+                        settled: false,
+                        failed: Vec::new(),
+                        cause: None,
+                    },
+                );
             if let Err(err) = thread::Builder::new()
                 .name(format!("sysg-boot-{project_id}"))
                 .spawn(move || {
                     let _op = op_slot.guard(format!("starting project '{boot_project}'"));
-                    match Self::start_project_services(
+                    let result = Self::start_project_services(
                         &daemon,
                         daemon.config().as_ref(),
                         boot_filter.as_deref(),
                         &spawn_manager,
                         None,
-                    ) {
+                    );
+                    let boot = match &result {
+                        Ok(failed) => BootStatus {
+                            settled: true,
+                            failed: failed.services.clone(),
+                            cause: failed.cause.clone(),
+                        },
+                        Err(err) => {
+                            let cause = match error_response(err) {
+                                ControlResponse::Diag(diag) => Some(*diag),
+                                ControlResponse::Error(message) => Some(
+                                    crate::start::unit_start_failed(
+                                        &boot_project,
+                                        message,
+                                    ),
+                                ),
+                                _ => None,
+                            };
+                            BootStatus {
+                                settled: true,
+                                failed: Vec::new(),
+                                cause,
+                            }
+                        }
+                    };
+                    boots
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(boot_project.clone(), boot);
+                    match result {
                         Ok(failed) if !failed.is_empty() => error!(
                             "Background boot of project '{boot_project}' left services down: {}",
                             failed.services().join(", ")
@@ -4306,6 +4375,10 @@ impl Supervisor {
             {
                 self.extra_projects.remove(&project_id);
                 self.boot_projects
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&project_id);
+                self.boots
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&project_id);
@@ -6614,6 +6687,7 @@ services:
                 name: project.into(),
                 mode: Default::default(),
                 config_path: None,
+                boot: None,
             }),
             kind: UnitKind::Service,
             lifecycle: None,

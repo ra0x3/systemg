@@ -101,6 +101,7 @@ in `~/.local/share/systemg/supervisor.xml`, or
     <pre_start_secs>300</pre_start_secs>
     <startup_stability_ms>250</startup_stability_ms>
     <stop_verify_secs>10</stop_verify_secs>
+    <start_settle_secs>360</start_settle_secs>
   </timeouts>
 </supervisor>
 ```
@@ -108,6 +109,7 @@ in `~/.local/share/systemg/supervisor.xml`, or
 - `pre_start_secs`: default execution budget for deployment `pre_start` commands.
 - `startup_stability_ms`: survival window for services without a health check.
 - `stop_verify_secs`: time allowed to confirm that a terminated process is gone.
+- `start_settle_secs`: maximum wait for an unresolved queued project start.
 
 The file is created on first supervisor start. Existing compact XML remains
 compatible and is rewritten in the indented form after it parses successfully.
@@ -129,7 +131,7 @@ manifest's resolved path for each project it registers. Later commands can omit
   Ad-hoc units use the same manifest pipeline. `sysg start -- <command...>`
   first stages the command as a generated version 2 manifest. If a supervisor
   is already running, that file is not registered or started until you run the
-  explicit `sysg restart --config ...` command systemg prints. See
+  explicit `sysg start --config ...` command systemg prints. See
   [Units](/examples/units).
 </Info>
 

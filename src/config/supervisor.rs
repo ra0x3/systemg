@@ -14,9 +14,16 @@ use serde::{Deserialize, Serialize};
 
 use super::{LOGS_DEFAULT_MAX_BYTES, LOGS_DEFAULT_MAX_FILES};
 use crate::{
-    constants::{PRE_START_TIMEOUT, SERVICE_START_STABILITY, STOP_VERIFY_TIMEOUT},
+    constants::{
+        PRE_START_TIMEOUT, SERVICE_START_STABILITY, START_SETTLE_GRACE,
+        STOP_VERIFY_TIMEOUT,
+    },
     runtime, xml,
 };
+
+fn default_start_settle_secs() -> u64 {
+    START_SETTLE_GRACE.as_secs()
+}
 
 /// File name of the supervisor config in the state directory.
 pub const SUPERVISOR_CONFIG_FILE: &str = "supervisor.xml";
@@ -48,6 +55,9 @@ pub struct SupervisorTimeouts {
     pub startup_stability_ms: u64,
     /// Maximum wait for a terminated process to disappear.
     pub stop_verify_secs: u64,
+    /// Maximum wait for a queued project boot to settle.
+    #[serde(default = "default_start_settle_secs")]
+    pub start_settle_secs: u64,
 }
 
 impl Default for SupervisorTimeouts {
@@ -57,6 +67,7 @@ impl Default for SupervisorTimeouts {
             pre_start_secs: PRE_START_TIMEOUT.as_secs(),
             startup_stability_ms: SERVICE_START_STABILITY.as_millis() as u64,
             stop_verify_secs: STOP_VERIFY_TIMEOUT.as_secs(),
+            start_settle_secs: default_start_settle_secs(),
         }
     }
 }
@@ -75,6 +86,11 @@ impl SupervisorTimeouts {
     /// Returns the configured stop verification timeout.
     pub fn stop_verify_timeout(&self) -> Duration {
         Duration::from_secs(self.stop_verify_secs.max(1))
+    }
+
+    /// Returns the configured queued-start settle timeout.
+    pub fn start_settle_timeout(&self) -> Duration {
+        Duration::from_secs(self.start_settle_secs.max(1))
     }
 }
 
@@ -180,6 +196,7 @@ mod tests {
                 pre_start_secs: 8,
                 startup_stability_ms: 90,
                 stop_verify_secs: 10,
+                start_settle_secs: 11,
             },
         };
         let output = xml::to_string(&cfg).unwrap();
@@ -189,6 +206,7 @@ mod tests {
         assert_eq!(back.timeouts.pre_start_secs, 8);
         assert_eq!(back.timeouts.startup_stability_ms, 90);
         assert_eq!(back.timeouts.stop_verify_secs, 10);
+        assert_eq!(back.timeouts.start_settle_secs, 11);
     }
 
     #[test]

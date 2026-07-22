@@ -549,11 +549,13 @@ services:
 fn start_daemonize_accepts_unit_command_without_config() {
     let temp = tempdir().expect("failed to create tempdir");
     let dir = temp.path();
+    let cwd = fs::canonicalize(dir).expect("failed to canonicalize tempdir");
     let home = dir.join("home");
     fs::create_dir_all(&home).expect("failed to create home dir");
     let _home = HomeEnvGuard::set(&home);
 
     Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+        .current_dir(&cwd)
         .arg("start")
         .arg("--daemonize")
         .arg("sleep")
@@ -580,8 +582,9 @@ fn start_daemonize_accepts_unit_command_without_config() {
 
     let generated_yaml =
         fs::read_to_string(&yaml_files[0]).expect("failed to read generated unit yaml");
+    let expected_command = format!("command: 'cd {} && sleep 30'", cwd.display());
     assert!(
-        generated_yaml.contains("command: 'sleep 30'"),
+        generated_yaml.contains(&expected_command),
         "generated unit config should include command; got:\n{}",
         generated_yaml
     );
