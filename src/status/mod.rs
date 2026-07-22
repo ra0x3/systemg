@@ -668,7 +668,20 @@ pub struct ProjectStatus {
     pub mode: ProjectRunMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<BootStatus>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BootStatus {
+    pub settled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<crate::diag::Diagnostic>,
+}
+
+impl Eq for BootStatus {}
 
 impl From<&ProjectConfig> for ProjectStatus {
     fn from(project: &ProjectConfig) -> Self {
@@ -677,6 +690,7 @@ impl From<&ProjectConfig> for ProjectStatus {
             name: project.name.clone(),
             mode: ProjectRunMode::Daemon,
             config_path: None,
+            boot: None,
         }
     }
 }

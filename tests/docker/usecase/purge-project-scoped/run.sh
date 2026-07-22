@@ -21,8 +21,11 @@ section "boot the two-project stack, then stop the supervisor"
 sysg start --config "$CONFIG" --daemonize
 check "$?" "start exits 0"
 sleep 3
-sysg stop --supervisor >/dev/null 2>&1
-sleep 2
+sysg stop --supervisor >/tmp/stop.out 2>/tmp/stop.err
+RC=$?
+cat /tmp/stop.out /tmp/stop.err
+[ "$RC" = "0" ]
+check "$?" "stop --supervisor exits 0"
 [ -d "$PROJ_DIR/alpha" ] && [ -d "$PROJ_DIR/beta" ]
 check "$?" "both project state dirs present"
 
