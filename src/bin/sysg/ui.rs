@@ -358,6 +358,7 @@ fn render_service_logs_from_snapshot(
     lines: usize,
     kind: Option<&str>,
     snapshot_mode: bool,
+    show_header: bool,
     filter: &LogFilter,
 ) -> Result<(), Box<dyn Error>> {
     let unit = snapshot
@@ -379,6 +380,7 @@ fn render_service_logs_from_snapshot(
                     process_pid,
                     lines,
                     kind,
+                    show_header,
                     filter,
                 )?;
             } else {
@@ -388,6 +390,7 @@ fn render_service_logs_from_snapshot(
                     process_pid,
                     lines,
                     kind,
+                    show_header,
                     filter,
                 )?;
             }
@@ -400,10 +403,18 @@ fn render_service_logs_from_snapshot(
                 service_name,
                 lines,
                 kind,
+                show_header,
                 filter,
             )?;
         } else {
-            manager.show_inactive_log(&unit_project, service_name, lines, kind, filter)?;
+            manager.show_inactive_log(
+                &unit_project,
+                service_name,
+                lines,
+                kind,
+                show_header,
+                filter,
+            )?;
         }
         return Ok(());
     }
@@ -419,10 +430,23 @@ fn render_service_logs_from_snapshot(
             || resolve_log_path(project_id, bare, "stderr").exists();
         if has_log {
             if snapshot_mode {
-                manager
-                    .show_inactive_log_snapshot(project_id, bare, lines, kind, filter)?;
+                manager.show_inactive_log_snapshot(
+                    project_id,
+                    bare,
+                    lines,
+                    kind,
+                    show_header,
+                    filter,
+                )?;
             } else {
-                manager.show_inactive_log(project_id, bare, lines, kind, filter)?;
+                manager.show_inactive_log(
+                    project_id,
+                    bare,
+                    lines,
+                    kind,
+                    show_header,
+                    filter,
+                )?;
             }
         } else {
             warn!("Service '{service_name}' is not present in the requested project");
@@ -442,9 +466,23 @@ fn render_service_logs_from_snapshot(
         || stderr_exists
     {
         if snapshot_mode {
-            manager.show_inactive_log_snapshot(loose, service_name, lines, kind, filter)?;
+            manager.show_inactive_log_snapshot(
+                loose,
+                service_name,
+                lines,
+                kind,
+                show_header,
+                filter,
+            )?;
         } else {
-            manager.show_inactive_log(loose, service_name, lines, kind, filter)?;
+            manager.show_inactive_log(
+                loose,
+                service_name,
+                lines,
+                kind,
+                show_header,
+                filter,
+            )?;
         }
     } else {
         warn!("Service '{service_name}' is not currently running");
@@ -506,14 +544,26 @@ fn render_all_logs_from_snapshot(
         if let Some(project_id) = project {
             let names = captured_service_names(project_id);
             if !names.is_empty() {
+                let show_headers = names.len() > 1;
                 for name in names {
                     if snapshot_mode {
                         manager.show_inactive_log_snapshot(
-                            project_id, &name, lines, kind, filter,
+                            project_id,
+                            &name,
+                            lines,
+                            kind,
+                            show_headers,
+                            filter,
                         )?;
                     } else {
-                        manager
-                            .show_inactive_log(project_id, &name, lines, kind, filter)?;
+                        manager.show_inactive_log(
+                            project_id,
+                            &name,
+                            lines,
+                            kind,
+                            show_headers,
+                            filter,
+                        )?;
                     }
                 }
                 return Ok(());
@@ -522,6 +572,13 @@ fn render_all_logs_from_snapshot(
         println!("No active services");
         return Ok(());
     }
+
+    let show_headers = project_groups
+        .iter()
+        .flat_map(|(_, units)| units.iter())
+        .filter(|(_, unit)| !matches!(unit.kind, UnitKind::Orphaned))
+        .count()
+        > 1;
 
     for (index, (label, group_units)) in project_groups.iter().enumerate() {
         let mut group_snapshot = filtered_snapshot.clone();
@@ -549,6 +606,7 @@ fn render_all_logs_from_snapshot(
                     lines,
                     kind,
                     snapshot_mode,
+                    show_headers,
                     filter,
                 )?;
             }
