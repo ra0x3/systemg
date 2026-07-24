@@ -2891,6 +2891,7 @@ impl LogManager {
         pid: u32,
         lines: usize,
         kind: Option<&str>,
+        show_header: bool,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
@@ -2900,6 +2901,7 @@ impl LogManager {
             lines,
             kind,
             resolve_tail_mode(TailMode::current(), filter),
+            show_header,
             filter,
         )
     }
@@ -2912,6 +2914,7 @@ impl LogManager {
         pid: u32,
         lines: usize,
         kind: Option<&str>,
+        show_header: bool,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
@@ -2921,6 +2924,7 @@ impl LogManager {
             lines,
             kind,
             TailMode::OneShot,
+            show_header,
             filter,
         )
     }
@@ -2932,6 +2936,7 @@ impl LogManager {
         service_name: &str,
         lines: usize,
         kind: Option<&str>,
+        show_header: bool,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
@@ -2941,6 +2946,7 @@ impl LogManager {
             lines,
             kind,
             resolve_tail_mode(TailMode::current(), filter),
+            show_header,
             filter,
         )
     }
@@ -2952,6 +2958,7 @@ impl LogManager {
         service_name: &str,
         lines: usize,
         kind: Option<&str>,
+        show_header: bool,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
         self.show_logs_platform_with_mode(
@@ -2961,6 +2968,7 @@ impl LogManager {
             lines,
             kind,
             TailMode::OneShot,
+            show_header,
             filter,
         )
     }
@@ -2976,6 +2984,7 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         follow: bool,
+        show_header: bool,
         filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
@@ -2994,6 +3003,7 @@ impl LogManager {
             lines,
             kind,
             mode,
+            show_header,
             filter,
             stream,
         )
@@ -3117,16 +3127,19 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        show_header: bool,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
-        println!(
-            "\n+{:-^33}+\n\
+        if show_header {
+            println!(
+                "\n+{:-^33}+\n\
      | {:^31} |\n\
      +{:-^33}+\n",
-            "-",
-            Self::format_log_title(service_name, pid),
-            "-"
-        );
+                "-",
+                Self::format_log_title(service_name, pid),
+                "-"
+            );
+        }
 
         let (stdout_path, stderr_path, combined_path) =
             resolve_tail_targets(project, service_name, pid)?;
@@ -3199,10 +3212,13 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        show_header: bool,
         filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
-        write_log_header(stream.try_clone()?, service_name, pid)?;
+        if show_header {
+            write_log_header(stream.try_clone()?, service_name, pid)?;
+        }
 
         let (stdout_path, stderr_path, combined_path) =
             resolve_tail_targets(project, service_name, pid)?;
@@ -3279,16 +3295,19 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        show_header: bool,
         filter: &LogFilter,
     ) -> Result<(), LogsManagerError> {
-        println!(
-            "\n+{:-^33}+\n\
+        if show_header {
+            println!(
+                "\n+{:-^33}+\n\
      | {:^31} |\n\
      +{:-^33}+\n",
-            "-",
-            Self::format_log_title(service_name, pid),
-            "-"
-        );
+                "-",
+                Self::format_log_title(service_name, pid),
+                "-"
+            );
+        }
 
         let (stdout_path, stderr_path, combined_path) =
             resolve_tail_targets(project, service_name, pid)?;
@@ -3350,10 +3369,13 @@ impl LogManager {
         lines: usize,
         kind: Option<&str>,
         mode: TailMode,
+        show_header: bool,
         filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
-        write_log_header(stream.try_clone()?, service_name, pid)?;
+        if show_header {
+            write_log_header(stream.try_clone()?, service_name, pid)?;
+        }
 
         let (stdout_path, stderr_path, combined_path) =
             resolve_tail_targets(project, service_name, pid)?;

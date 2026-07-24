@@ -1444,6 +1444,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             lines,
                             kind.as_ref().map(|kind| kind.as_str()),
                             snapshot_mode,
+                            false,
                             &log_filter,
                         )?;
                     }

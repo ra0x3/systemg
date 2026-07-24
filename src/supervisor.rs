@@ -3267,6 +3267,7 @@ impl Supervisor {
                         request.lines,
                         requested_kind,
                         request.follow,
+                        false,
                         &request.filter,
                         request.stream,
                     )
@@ -3294,6 +3295,7 @@ impl Supervisor {
                         request.lines,
                         requested_kind,
                         request.follow,
+                        false,
                         &request.filter,
                         request.stream,
                     )
@@ -3354,6 +3356,12 @@ impl Supervisor {
             || project_groups
                 .iter()
                 .any(|(label, _)| label.as_str() != "Ungrouped");
+        let show_headers = project_groups
+            .iter()
+            .flat_map(|(_, units)| units.iter())
+            .filter(|unit| !matches!(unit.kind, crate::status::UnitKind::Orphaned))
+            .count()
+            > 1;
 
         for (group_index, (project_label, group_units)) in
             project_groups.into_iter().enumerate()
@@ -3421,6 +3429,7 @@ impl Supervisor {
                         request.lines,
                         requested_kind,
                         false,
+                        show_headers,
                         &request.filter,
                         request.stream,
                     )?;
