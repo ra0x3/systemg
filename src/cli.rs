@@ -4,6 +4,8 @@ use std::{fmt, str::FromStr};
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing::level_filters::LevelFilter;
 
+use crate::constants::DEFAULT_LOG_LINES;
+
 /// Documentation links appended to `--help` output.
 const DOCS_HELP: &str = "\
 Documentation:
@@ -369,9 +371,8 @@ pub enum Commands {
         #[arg(short = 'p', long)]
         project: Option<String>,
 
-        /// Number of trailing lines to show. Omit to show the FULL captured log;
-        /// pass `-l N` to limit to the last N lines.
-        #[arg(short, long, default_value_t = usize::MAX)]
+        /// Number of trailing lines to show.
+        #[arg(short, long, default_value_t = DEFAULT_LOG_LINES)]
         lines: usize,
 
         /// Kind of logs to show: stdout or stderr. Defaults to stdout+stderr.

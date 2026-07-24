@@ -239,6 +239,9 @@ pub const POST_RESTART_VERIFY_DELAY: Duration = Duration::from_millis(200);
 /// Prevents overwhelming the terminal with excessive log data.
 pub const MAX_STATUS_LOG_LINES: usize = 50;
 
+/// Number of recent service log lines shown when no explicit limit is given.
+pub const DEFAULT_LOG_LINES: usize = 100;
+
 /// Buffer size for log output streams (stdout/stderr).
 pub const LOG_BUFFER_SIZE: usize = 8192;
 

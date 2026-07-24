@@ -288,12 +288,60 @@ fn logs_stream_frame_lines(output: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn write_logs_stream_frame(
-    output: &[u8],
-    previous_line_count: usize,
-) -> io::Result<usize> {
+fn render_logs_stream_frame<W: io::Write>(
+    writer: &mut W,
+    frame_lines: &[String],
+) -> io::Result<()> {
+    write!(writer, "\x1B[2J\x1B[H")?;
+    for (index, line) in frame_lines.iter().enumerate() {
+        write!(writer, "\x1B[2K\r{line}")?;
+        if index + 1 < frame_lines.len() {
+            write!(writer, "\r\n")?;
+        }
+    }
+    write!(writer, "\x1B[J")
+}
+
+fn write_logs_stream_frame(output: &[u8]) -> io::Result<()> {
     let frame_lines = logs_stream_frame_lines(output);
-    write_inspect_stream_frame(&frame_lines, previous_line_count)
+    let mut stdout = io::stdout().lock();
+    render_logs_stream_frame(&mut stdout, &frame_lines)?;
+    stdout.flush()
+}
+
+/// Converts line feeds into terminal-safe carriage-return line feeds.
+struct CrlfWriter<W> {
+    inner: W,
+    previous_was_cr: bool,
+}
+
+impl<W> CrlfWriter<W> {
+    /// Creates a terminal newline adapter.
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            previous_was_cr: false,
+        }
+    }
+}
+
+impl<W: Write> Write for CrlfWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut normalized = Vec::with_capacity(bytes.len());
+        for byte in bytes {
+            if *byte == b'\n' && !self.previous_was_cr {
+                normalized.push(b'\r');
+            }
+            normalized.push(*byte);
+            self.previous_was_cr = *byte == b'\r';
+        }
+        self.inner.write_all(&normalized)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn stderr_is_tty() -> bool {
@@ -1435,10 +1483,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                     terminal::enable_raw_mode()?;
                 }
                 let stream_result = (|| -> Result<(), Box<dyn Error>> {
-                    let mut previous_line_count = 0usize;
-                    if logs_stream_tty {
-                        clear_terminal_output()?;
-                    }
                     loop {
                         let command = ControlCommand::Logs {
                             service: service.clone(),
@@ -1458,10 +1502,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         {
                             Ok(()) => {
                                 if logs_stream_tty {
-                                    previous_line_count = write_logs_stream_frame(
-                                        &output,
-                                        previous_line_count,
-                                    )?;
+                                    write_logs_stream_frame(&output)?;
                                 } else if machine_output {
                                     let mut writer = make_log_writer();
                                     writer.write_all(&output)?;
@@ -1481,7 +1522,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                                         clear_terminal_output()?;
                                     }
                                     render_logs_once(true)?;
-                                    previous_line_count = 0;
                                     if logs_stream_tty {
                                         terminal::enable_raw_mode()?;
                                     }
@@ -1531,23 +1571,24 @@ fn run() -> Result<(), Box<dyn Error>> {
                     let log_format_owned = log_format;
                     let strip_ansi_owned = strip_ansi_output;
                     let service_owned = service.clone();
-                    let stream_thread = thread::Builder::new()
-                        .name(LOG_STREAM_THREAD.into())
-                        .spawn(move || {
-                            let mut writer = LogWriter::new(
-                                io::stdout(),
-                                log_format_owned,
-                                strip_ansi_owned,
-                                service_owned,
-                            );
-                            let outcome =
-                                ipc::stream_command_output(&stream_cmd, &mut writer);
-                            let _ = writer.flush();
-                            outcome
-                        })?;
-
                     terminal::enable_raw_mode()?;
-                    let key_result = (|| -> Result<(), Box<dyn Error>> {
+                    let follow_result = (|| -> Result<(), Box<dyn Error>> {
+                        let stream_thread = thread::Builder::new()
+                            .name(LOG_STREAM_THREAD.into())
+                            .spawn(move || {
+                                let output = CrlfWriter::new(io::stdout());
+                                let mut writer = LogWriter::new(
+                                    output,
+                                    log_format_owned,
+                                    strip_ansi_owned,
+                                    service_owned,
+                                );
+                                let outcome =
+                                    ipc::stream_command_output(&stream_cmd, &mut writer);
+                                let _ = writer.flush();
+                                outcome
+                            })?;
+
                         loop {
                             if stream_thread.is_finished() {
                                 return Ok(());
@@ -1563,17 +1604,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         }
                     })();
                     terminal::disable_raw_mode()?;
-                    key_result?;
-
-                    // If the stream ended on its own (not a key press), surface a
-                    // NotAvailable fallback the same way the blocking path does.
-                    // NEVER in follow mode: see `render_logs_once` below.
-                    if !follow_logs
-                        && stream_thread.is_finished()
-                        && let Ok(Err(ControlError::NotAvailable)) = stream_thread.join()
-                    {
-                        render_logs_once(true)?;
-                    }
+                    follow_result?;
                 } else {
                     match stream_logs_via_supervisor(follow_logs) {
                         Ok(()) => {}
@@ -3370,13 +3401,11 @@ mod tests {
         let output = b"header\n\nlog line one\nlog line two\n";
         let mut frame_output = Vec::new();
         let frame_lines = logs_stream_frame_lines(output);
-        let line_count = render_inspect_stream_frame(&mut frame_output, &frame_lines, 5)
-            .expect("write frame");
+        render_logs_stream_frame(&mut frame_output, &frame_lines).expect("write frame");
 
-        assert_eq!(line_count, 4);
         assert_eq!(
             String::from_utf8(frame_output).expect("utf8"),
-            "\x1B[H\x1B[2Kheader\r\n\x1B[2K\r\n\x1B[2Klog line one\r\n\x1B[2Klog line two\r\n\x1B[2K\x1B[J"
+            "\x1B[2J\x1B[H\x1B[2K\rheader\r\n\x1B[2K\r\r\n\x1B[2K\rlog line one\r\n\x1B[2K\rlog line two\x1B[J"
         );
     }
 
