@@ -386,8 +386,8 @@ Manifest reference (see `docs/how-it-works/configuration.mdx` for details):
 - Per service: `command` (required), `depends_on`, `env` (`vars`, `file`,
   `inherit_env`, `clear_session_vars`, `strip`), `restart_policy`
   (`always|on-failure|never`; clean exits never restart), `backoff`,
-  `max_restarts`, `hooks` (`on_start`/`on_stop`/`on_restart` with
-  `success`/`error` handlers), `cron` (`expression`, `timezone`),
+  `max_restarts`, `hooks` (`onstart` after successful starts and `onerr` after
+  unsuccessful exits), `cron` (`expression`, `timezone`),
   `deployment` (`strategy: rolling|immediate`, `pre_start`, `health_check`,
   `grace_period`, `blue_green`), `logs`, `skip`, `spawn` (`mode`, `limits`).
 - Privileged mode only: `user`, `group`, `supplementary_groups`,

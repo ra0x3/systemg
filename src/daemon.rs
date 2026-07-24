@@ -29,8 +29,8 @@ use tracing::{debug, error, info, trace, warn};
 use crate::{
     config::{
         BlueGreenDeploymentConfig, Config, DependsOnCondition, EffectiveLogsConfig,
-        EnvConfig, HealthCheckConfig, HookAction, HookOutcome, HookStage, LogSink,
-        ServiceConfig, SkipConfig, supervisor::SupervisorTimeouts,
+        EnvConfig, HealthCheckConfig, HookAction, LogSink, ServiceConfig, SkipConfig,
+        supervisor::SupervisorTimeouts,
     },
     constants::{
         DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL, DEFAULT_HEALTH_RETRIES,
@@ -1413,16 +1413,14 @@ impl ServiceStateFile {
 fn run_hook(
     action: &HookAction,
     env: &Option<EnvConfig>,
-    stage: HookStage,
-    outcome: HookOutcome,
+    hook: &str,
     service_name: &str,
     project_root: &Path,
     cancel: Option<(&AtomicU64, &AtomicBool)>,
 ) {
-    let hook_label = format!("{}.{}", stage.as_ref(), outcome.as_ref());
     debug!(
         "Running {} hook for '{}': `{}`",
-        hook_label, service_name, action.command
+        hook, service_name, action.command
     );
 
     let mut cmd = Command::new(DEFAULT_SHELL);
@@ -1439,7 +1437,7 @@ fn run_hook(
             Err(err) => {
                 error!(
                     "Invalid timeout '{}' for hook {} on '{}': {}",
-                    raw_timeout, hook_label, service_name, err
+                    raw_timeout, hook, service_name, err
                 );
                 command_timeout(PRE_START_TIMEOUT)
             }
@@ -1463,19 +1461,19 @@ fn run_hook(
                     if status.success() {
                         debug!(
                             "{} hook for '{}' completed successfully.",
-                            hook_label, service_name
+                            hook, service_name
                         );
                     } else {
                         warn!(
                             "{} hook for '{}' exited with status: {:?}",
-                            hook_label, service_name, status
+                            hook, service_name, status
                         );
                     }
                 }
                 Ok(None) => {
                     warn!(
                         "{} hook for '{}' was cancelled or timed out after {:?}. Terminating hook process.",
-                        hook_label, service_name, timeout
+                        hook, service_name, timeout
                     );
                     let pid = child.id();
                     let _ = Daemon::terminate_process_tree(
@@ -1495,16 +1493,13 @@ fn run_hook(
                     let _ = child.wait();
                     error!(
                         "Failed while waiting for hook {} on '{}': {}",
-                        hook_label, service_name, err
+                        hook, service_name, err
                     );
                 }
             }
         }
         Err(e) => {
-            error!(
-                "Failed to run {} hook for '{}': {}",
-                hook_label, service_name, e
-            );
+            error!("Failed to run {} hook for '{}': {}", hook, service_name, e);
         }
     }
 }
@@ -3943,7 +3938,7 @@ impl Daemon {
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let config = self.cfg();
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
-        let state = Self::wait_for_ready(
+        let state = match Self::wait_for_ready(
             service_name,
             &self.processes,
             &self.pid_file,
@@ -3951,7 +3946,18 @@ impl Daemon {
             Some((&self.boot_epoch, epoch, &self.boot_cancelled)),
             self.timeouts().startup_stability(),
             started_at,
-        )?;
+        ) {
+            Ok(state) => state,
+            Err(err) => {
+                if matches!(
+                    self.recorded_status(service_name),
+                    Some(ServiceLifecycleStatus::ExitedWithError)
+                ) {
+                    self.run_onerr(service_name, service);
+                }
+                return Err(err);
+            }
+        };
 
         if let ServiceReadyState::Running = state
             && let Some(health_check) = service
@@ -3963,6 +3969,12 @@ impl Daemon {
             if let Err(err) =
                 self.wait_for_health_check(service_name, health_check, started_at)
             {
+                if matches!(
+                    self.recorded_status(service_name),
+                    Some(ServiceLifecycleStatus::ExitedWithError)
+                ) {
+                    self.run_onerr(service_name, service);
+                }
                 // The unit came up as a process but never passed its health
                 // check — it is NOT healthy, and leaving it running would let
                 // status report a live-but-never-healthy process as `healthy`
@@ -3983,6 +3995,23 @@ impl Daemon {
         }
 
         Ok(state)
+    }
+
+    fn run_onerr(&self, service_name: &str, service: &ServiceConfig) {
+        if let Some(action) = service
+            .hooks
+            .as_ref()
+            .and_then(|hooks| hooks.onerr.as_ref())
+        {
+            run_hook(
+                action,
+                &service.env,
+                "onerr",
+                service_name,
+                &self.project_root,
+                Some((&self.boot_epoch, &self.boot_cancelled)),
+            );
+        }
     }
 
     /// Builds a port-conflict diagnostic when startup output or ownership
@@ -6309,24 +6338,7 @@ impl Daemon {
             Ok(pid) => {
                 self.mark_running(name, pid)?;
             }
-            Err(err) => {
-                if let Some(action) = service
-                    .hooks
-                    .as_ref()
-                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
-                {
-                    run_hook(
-                        action,
-                        &service.env,
-                        HookStage::OnStart,
-                        HookOutcome::Error,
-                        name,
-                        &self.project_root,
-                        Some((&self.boot_epoch, &self.boot_cancelled)),
-                    );
-                }
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         }
 
         let readiness = self.wait_for_service_ready(name, service, started_at);
@@ -6345,13 +6357,12 @@ impl Daemon {
                 if let Some(action) = service
                     .hooks
                     .as_ref()
-                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Success))
+                    .and_then(|cfg| cfg.onstart.as_ref())
                 {
                     run_hook(
                         action,
                         &service.env,
-                        HookStage::OnStart,
-                        HookOutcome::Success,
+                        "onstart",
                         name,
                         &self.project_root,
                         Some((&self.boot_epoch, &self.boot_cancelled)),
@@ -6359,24 +6370,7 @@ impl Daemon {
                 }
                 Ok(state)
             }
-            Err(err) => {
-                if let Some(action) = service
-                    .hooks
-                    .as_ref()
-                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
-                {
-                    run_hook(
-                        action,
-                        &service.env,
-                        HookStage::OnStart,
-                        HookOutcome::Error,
-                        name,
-                        &self.project_root,
-                        Some((&self.boot_epoch, &self.boot_cancelled)),
-                    );
-                }
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 
@@ -6410,22 +6404,7 @@ impl Daemon {
                     self.mark_running(name, pid)?;
                     pid
                 }
-                Err(err) => {
-                    if let Some(action) = service.hooks.as_ref().and_then(|cfg| {
-                        cfg.action(HookStage::OnStart, HookOutcome::Error)
-                    }) {
-                        run_hook(
-                            action,
-                            &service.env,
-                            HookStage::OnStart,
-                            HookOutcome::Error,
-                            name,
-                            &self.project_root,
-                            Some((&self.boot_epoch, &self.boot_cancelled)),
-                        );
-                    }
-                    return Err(err);
-                }
+                Err(err) => return Err(err),
             };
 
         let readiness = self.wait_for_service_ready(name, service, started_at);
@@ -6445,13 +6424,12 @@ impl Daemon {
                 if let Some(action) = service
                     .hooks
                     .as_ref()
-                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Success))
+                    .and_then(|cfg| cfg.onstart.as_ref())
                 {
                     run_hook(
                         action,
                         &service.env,
-                        HookStage::OnStart,
-                        HookOutcome::Success,
+                        "onstart",
                         name,
                         &self.project_root,
                         Some((&self.boot_epoch, &self.boot_cancelled)),
@@ -6461,21 +6439,6 @@ impl Daemon {
             }
             Err(err) => {
                 ctx.cancel_service_thread(name, pid);
-                if let Some(action) = service
-                    .hooks
-                    .as_ref()
-                    .and_then(|cfg| cfg.action(HookStage::OnStart, HookOutcome::Error))
-                {
-                    run_hook(
-                        action,
-                        &service.env,
-                        HookStage::OnStart,
-                        HookOutcome::Error,
-                        name,
-                        &self.project_root,
-                        Some((&self.boot_epoch, &self.boot_cancelled)),
-                    );
-                }
                 Err(err)
             }
         }
@@ -6689,8 +6652,6 @@ impl Daemon {
             self.context().cancel_service_thread(service_name, pid);
         }
 
-        let was_running = running_pid.is_some();
-
         let config = self.cfg();
         let result = Self::stop_service_with_handles(
             service_name,
@@ -6708,23 +6669,6 @@ impl Daemon {
                 let mut suppressed_guard = self.restart_suppressed.lock()?;
                 suppressed_guard.remove(service_name);
             }
-        }
-
-        if was_running
-            && result.is_ok()
-            && let Some(service) = config.services.get(service_name)
-            && let Some(hooks) = &service.hooks
-            && let Some(action) = hooks.action(HookStage::OnStop, HookOutcome::Success)
-        {
-            run_hook(
-                action,
-                &service.env,
-                HookStage::OnStop,
-                HookOutcome::Success,
-                service_name,
-                &self.project_root,
-                None,
-            );
         }
 
         // A targeted stop relies on the recorded pid/pgid, which — now that
@@ -7209,25 +7153,20 @@ impl Daemon {
                     let signal = exit_status.signal();
                     #[cfg(not(unix))]
                     let signal = None;
-                    let hook_outcome = if manually_stopped || exit_success {
-                        HookOutcome::Success
-                    } else {
-                        HookOutcome::Error
-                    };
                     if !manually_stopped
+                        && !exit_success
                         && let Some(service) = ctx.config.services.get(&name)
                     {
                         let env = service.env.clone();
                         if let Some(action) = service
                             .hooks
                             .as_ref()
-                            .and_then(|cfg| cfg.action(HookStage::OnStop, hook_outcome))
+                            .and_then(|cfg| cfg.onerr.as_ref())
                         {
                             run_hook(
                                 action,
                                 &env,
-                                HookStage::OnStop,
-                                hook_outcome,
+                                "onerr",
                                 &name,
                                 &ctx.project_root,
                                 None,
@@ -7572,7 +7511,6 @@ impl Daemon {
 
         let name = name.to_string();
         let service_clone = service.clone();
-        let hooks = service.hooks.clone();
         let max_restarts = service.max_restarts;
         {
             let mut counts = ctx
@@ -7675,12 +7613,12 @@ impl Daemon {
                     return;
                 }
 
-                let hook_outcome = match &restart_result {
+                let restart_succeeded = match &restart_result {
                     Ok(ServiceReadyState::Running) => {
                         info!(
                             "Service '{name}' restarted and passed its readiness gates."
                         );
-                        HookOutcome::Success
+                        true
                     }
                     Ok(ServiceReadyState::CompletedSuccess) => {
                         if matches!(
@@ -7693,33 +7631,17 @@ impl Daemon {
                                 "Service '{name}' completed successfully during restart."
                             );
                         }
-                        HookOutcome::Success
+                        true
                     }
                     Err(err) => {
                         error!("Failed to restart '{name}': {err}");
-                        HookOutcome::Error
+                        false
                     }
                 };
 
-                if matches!(hook_outcome, HookOutcome::Success)
-                    && let Ok(mut counts) = ctx.lock_restart_counts()
+                if restart_succeeded && let Ok(mut counts) = ctx.lock_restart_counts()
                 {
                     counts.insert(name.clone(), 0);
-                }
-
-                if let Some(action) = hooks
-                    .as_ref()
-                    .and_then(|cfg| cfg.action(HookStage::OnRestart, hook_outcome))
-                {
-                    run_hook(
-                        action,
-                        &service_clone.env,
-                        HookStage::OnRestart,
-                        hook_outcome,
-                        &name,
-                        &ctx.project_root,
-                        Some((&ctx.boot_epoch, &ctx.boot_cancelled)),
-                    );
                 }
             })
         {

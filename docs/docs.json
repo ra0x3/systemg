@@ -87,7 +87,7 @@
           "how-it-works/configuration",
           "how-it-works/projects",
           "how-it-works/cron",
-          "how-it-works/webhooks",
+          "how-it-works/hooks",
           "how-it-works/state",
           "how-it-works/logs",
           "how-it-works/privileged-mode",

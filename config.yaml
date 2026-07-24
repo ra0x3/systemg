@@ -7,12 +7,10 @@ services:
     restart_policy: "always"
     backoff: "5s"
     hooks:
-      on_start:
-        success:
-          command: "echo 'Postgres started'"
-      on_stop:
-        error:
-          command: "echo 'Postgres crashed'"
+      onstart:
+        command: "echo 'Postgres started'"
+      onerr:
+        command: "echo 'Postgres crashed'"
 
   django:
     command: "python manage.py runserver"
@@ -25,21 +23,17 @@ services:
     depends_on:
       - "postgres"
     hooks:
-      on_start:
-        success:
-          command: "curl -X POST http://example.com/hook/django-start"
-      on_stop:
-        error:
-          command: "curl -X POST http://example.com/hook/django-error"
+      onstart:
+        command: "curl -X POST http://example.com/hook/django-start"
+      onerr:
+        command: "curl -X POST http://example.com/hook/django-error"
 
   ngrok:
     command: "ngrok http 8000"
     restart_policy: "on-failure"
     backoff: "3s"
     hooks:
-      on_start:
-        success:
-          command: "echo 'ngrok started'"
-      on_stop:
-        error:
-          command: "echo 'ngrok crashed'"
+      onstart:
+        command: "echo 'ngrok started'"
+      onerr:
+        command: "echo 'ngrok crashed'"

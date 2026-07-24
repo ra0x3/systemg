@@ -122,7 +122,7 @@ It sits in the gap between systemd and Docker Compose. systemd wants to own the 
 - Cron jobs with overlap detection
 - Foreground multiplexed logs with per-service prefixes
 - Same-PID live upgrades within a compatible release line
-- Lifecycle [hooks](docs/how-it-works/webhooks.mdx) on start/stop
+- Process [hooks](docs/how-it-works/hooks.mdx) on successful starts and unsuccessful exits
 - `.env` file propagation
 - Tracks child processes your services spawn
 - CPU/RSS metrics built into `status` and `inspect`

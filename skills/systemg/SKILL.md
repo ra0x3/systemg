@@ -70,9 +70,8 @@ services:
         retries: 5
       grace_period: "5s"
     hooks:
-      on_stop:
-        error:
-          command: "curl -X POST https://alerts.example.com/api/crash"
+      onerr:
+        command: "curl -X POST https://alerts.example.com/api/crash"
   backup:
     command: "pg_dump mydb > /backups/db.sql"
     cron:
@@ -90,9 +89,9 @@ services:
   before each (re)start — builds/migrations go here), `health_check`
   (`url` or `command`, `interval`, `timeout`, `retries`), `grace_period`,
   `blue_green` (`slots`, `switch_command`, `env_var`)
-- `hooks` — `on_start`/`on_stop`/`on_restart`, each with `success`/`error`
-  holding `{command, timeout}`; fire after lifecycle events (non-blocking),
-  unlike `deployment.pre_start` which blocks the start
+- `hooks` — `onstart` runs after a successful start and `onerr` after an
+  unsuccessful exit; each holds `{command, timeout}` and runs independently of
+  `deployment.pre_start`, which blocks the start
 - `cron` — `expression` (6-field, seconds first), optional `timezone`; makes
   the unit scheduled instead of supervised
 - `logs` — per-service `sink`, `max_bytes`, `max_files`
