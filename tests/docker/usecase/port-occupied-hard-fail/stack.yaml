@@ -3,6 +3,6 @@ projects:
   dev:
     services:
       web:
-        command: "python3 -m http.server 39187"
+        command: "sleep 1; python3 -m http.server 39187"
         restart_policy: on-failure
         max_restarts: 2
