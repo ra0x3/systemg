@@ -2884,6 +2884,7 @@ impl LogManager {
     }
 
     /// Shows the logs for a specific service's stdout/stderr in real-time.
+    #[allow(clippy::too_many_arguments)]
     pub fn show_log(
         &self,
         project: &str,
@@ -2907,6 +2908,7 @@ impl LogManager {
     }
 
     /// Shows a one-shot snapshot of logs for a specific service.
+    #[allow(clippy::too_many_arguments)]
     pub fn show_log_snapshot(
         &self,
         project: &str,

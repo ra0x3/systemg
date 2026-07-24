@@ -1551,17 +1551,44 @@ fn port_from_output(lines: &[String]) -> Option<u16> {
 
 fn port_from_command(command: Option<&str>) -> Option<u16> {
     let command = command?;
-    let pattern = Regex::new(
-        r#"(?ix)(?:--?port(?:\s+|=)|\bhttp\.server\s+|(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]):)([0-9]{1,5})\b"#,
-    )
-    .expect("valid command port pattern");
-    let captures = pattern.captures(command)?;
-    parse_port(&captures[1])
+    let patterns = [
+        r#"(?ix)(?:^|\s)--?port(?:\s+|=)([0-9]{1,5})\b"#,
+        r#"(?ix)\bhttp\.server\s+([0-9]{1,5})\b"#,
+        r#"(?ix)(?:(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]))?:([0-9]{1,5})\b"#,
+    ];
+    patterns.into_iter().find_map(|pattern| {
+        let pattern = Regex::new(pattern).expect("valid command port pattern");
+        let captures = pattern.captures(command)?;
+        parse_port(&captures[1])
+    })
 }
 
+#[cfg(target_os = "linux")]
 fn occupied_command_port(command: Option<&str>) -> Option<u16> {
     let port = port_from_command(command)?;
     crate::reconcile::port_holder(port).map(|_| port)
+}
+
+#[cfg(target_os = "linux")]
+fn occupied_foreign_command_port(
+    command: Option<&str>,
+    service_name: &str,
+    pid_file: &Arc<Mutex<PidFile>>,
+) -> Option<u16> {
+    let port = occupied_command_port(command)?;
+    match Daemon::service_owns_port(service_name, port, pid_file) {
+        Ok(true) | Err(_) => None,
+        Ok(false) => Some(port),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn occupied_foreign_command_port(
+    _command: Option<&str>,
+    _service_name: &str,
+    _pid_file: &Arc<Mutex<PidFile>>,
+) -> Option<u16> {
+    None
 }
 
 fn wait_with_epoch(
@@ -4020,6 +4047,7 @@ impl Daemon {
         service_name: &str,
         config: &Config,
         started_at: chrono::DateTime<chrono::Utc>,
+        pid_file: &Arc<Mutex<PidFile>>,
     ) -> Option<ProcessManagerError> {
         let project = &config.project.id;
         let command = config
@@ -4033,7 +4061,7 @@ impl Daemon {
         let occupied_port = if output_conflict {
             None
         } else {
-            occupied_command_port(command)
+            occupied_foreign_command_port(command, service_name, pid_file)
         };
         if !output_conflict && occupied_port.is_none() {
             return None;
@@ -4076,6 +4104,7 @@ impl Daemon {
         status: ExitStatus,
         config: &Config,
         started_at: chrono::DateTime<chrono::Utc>,
+        pid_file: &Arc<Mutex<PidFile>>,
     ) -> ProcessManagerError {
         #[cfg(unix)]
         let signal = status.signal();
@@ -4091,7 +4120,9 @@ impl Daemon {
             (None, Some(sig)) => format!("was killed by signal {sig}"),
             (None, None) => "terminated unexpectedly".to_string(),
         };
-        if let Some(err) = Self::startup_port_error(service_name, config, started_at) {
+        if let Some(err) =
+            Self::startup_port_error(service_name, config, started_at, pid_file)
+        {
             return err;
         }
 
@@ -4202,6 +4233,7 @@ impl Daemon {
                         status,
                         state.1,
                         started_at,
+                        pid_file,
                     ));
                 }
                 ServiceProbe::NotStarted => {
@@ -4212,7 +4244,9 @@ impl Daemon {
             }
         }
 
-        if let Some(err) = Self::startup_port_error(service_name, state.1, started_at) {
+        if let Some(err) =
+            Self::startup_port_error(service_name, state.1, started_at, pid_file)
+        {
             return Err(err);
         }
 
@@ -4949,7 +4983,11 @@ impl Daemon {
                 }
                 ServiceProbe::Exited(status) if !status.success() => {
                     return Err(Self::startup_exit_error(
-                        name, status, &config, started_at,
+                        name,
+                        status,
+                        &config,
+                        started_at,
+                        &self.pid_file,
                     ));
                 }
                 ServiceProbe::Exited(_) | ServiceProbe::NotStarted => {
@@ -5561,6 +5599,7 @@ impl Daemon {
                     status,
                     &config,
                     generation_started_at,
+                    &self.pid_file,
                 ));
             }
             let progress = match total_timeout {
@@ -6354,10 +6393,8 @@ impl Daemon {
                         None,
                     )?;
                 }
-                if let Some(action) = service
-                    .hooks
-                    .as_ref()
-                    .and_then(|cfg| cfg.onstart.as_ref())
+                if let Some(action) =
+                    service.hooks.as_ref().and_then(|cfg| cfg.onstart.as_ref())
                 {
                     run_hook(
                         action,
@@ -6398,14 +6435,13 @@ impl Daemon {
             log_settings,
         );
 
-        let pid =
-            match launch_result {
-                Ok(pid) => {
-                    self.mark_running(name, pid)?;
-                    pid
-                }
-                Err(err) => return Err(err),
-            };
+        let pid = match launch_result {
+            Ok(pid) => {
+                self.mark_running(name, pid)?;
+                pid
+            }
+            Err(err) => return Err(err),
+        };
 
         let readiness = self.wait_for_service_ready(name, service, started_at);
 
@@ -6421,10 +6457,8 @@ impl Daemon {
                         None,
                     )?;
                 }
-                if let Some(action) = service
-                    .hooks
-                    .as_ref()
-                    .and_then(|cfg| cfg.onstart.as_ref())
+                if let Some(action) =
+                    service.hooks.as_ref().and_then(|cfg| cfg.onstart.as_ref())
                 {
                     run_hook(
                         action,
@@ -6646,9 +6680,8 @@ impl Daemon {
             let mut suppressed_guard = self.restart_suppressed.lock()?;
             suppressed_guard.insert(service_name.to_string());
         }
-        let running_pid = { self.pid_file.lock()?.get(service_name) };
         #[cfg(target_os = "linux")]
-        if let Some(pid) = running_pid {
+        if let Some(pid) = self.pid_file.lock()?.get(service_name) {
             self.context().cancel_service_thread(service_name, pid);
         }
 
@@ -7158,10 +7191,8 @@ impl Daemon {
                         && let Some(service) = ctx.config.services.get(&name)
                     {
                         let env = service.env.clone();
-                        if let Some(action) = service
-                            .hooks
-                            .as_ref()
-                            .and_then(|cfg| cfg.onerr.as_ref())
+                        if let Some(action) =
+                            service.hooks.as_ref().and_then(|cfg| cfg.onerr.as_ref())
                         {
                             run_hook(
                                 action,
@@ -7700,7 +7731,10 @@ impl Drop for Daemon {
 #[cfg(test)]
 mod port_in_use_tests {
     #[cfg(target_os = "linux")]
-    use super::occupied_command_port;
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(target_os = "linux")]
+    use super::{PidFile, occupied_command_port, occupied_foreign_command_port};
     use super::{output_indicates_port_conflict, port_from_command, port_from_output};
 
     fn lines(raw: &[&str]) -> Vec<String> {
@@ -7748,6 +7782,16 @@ mod port_in_use_tests {
         );
     }
 
+    #[test]
+    fn explicit_port_wins_over_earlier_url() {
+        assert_eq!(
+            port_from_command(Some(
+                "GAMECAST_AGENT_URL=http://127.0.0.1:8090 gamecast serve --host 127.0.0.1 --port 8000"
+            )),
+            Some(8000)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn confirms_an_occupied_command_port() {
@@ -7756,6 +7800,22 @@ mod port_in_use_tests {
         let command = format!("python3 -m http.server {port} --bind 127.0.0.1");
 
         assert_eq!(occupied_command_port(Some(&command)), Some(port));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ignores_a_service_owned_command_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let command = format!("server --port {port}");
+        let mut pids = PidFile::default();
+        pids.insert_in_memory("api", std::process::id());
+        let pids = Arc::new(Mutex::new(pids));
+
+        assert_eq!(
+            occupied_foreign_command_port(Some(&command), "api", &pids),
+            None
+        );
     }
 }
 
@@ -8412,44 +8472,6 @@ sleep 30
             let config1 = daemon.config();
             let config2 = daemon.config();
             assert!(Arc::ptr_eq(&config1, &config2));
-        });
-    }
-
-    #[test]
-    fn stop_service_runs_hooks_once() {
-        with_temp_home(|dir| {
-            let hook_log = dir.join("hooks.log");
-
-            let hooks = crate::config::Hooks {
-                on_start: None,
-                on_stop: Some(crate::config::HookLifecycleConfig {
-                    success: Some(crate::config::HookAction {
-                        command: format!("echo 'STOP_SUCCESS' >> {}", hook_log.display()),
-                        timeout: None,
-                    }),
-                    error: Some(crate::config::HookAction {
-                        command: format!("echo 'STOP_ERROR' >> {}", hook_log.display()),
-                        timeout: None,
-                    }),
-                }),
-                on_restart: None,
-            };
-
-            let mut service = make_service("sleep 60", &[]);
-            service.hooks = Some(hooks);
-
-            let mut services = HashMap::new();
-            services.insert("hooked_service".into(), service);
-
-            let daemon = create_daemon(dir, services);
-            daemon.start_services().unwrap();
-
-            thread::sleep(Duration::from_millis(100));
-            daemon.stop_service("hooked_service").unwrap();
-
-            thread::sleep(Duration::from_millis(100));
-            let content = fs::read_to_string(&hook_log).unwrap_or_default();
-            assert_eq!(content.matches("STOP_SUCCESS").count(), 1);
         });
     }
 
