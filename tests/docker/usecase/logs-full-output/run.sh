@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# USE CASE: `sysg logs` shows the FULL captured output by default, no silent cutoff.
-#
-# WHAT THIS TESTS (0.54.2 bug: logs randomly cut to a few lines)
-#   A service emits 200 known numbered lines. Default `sysg logs` must return ALL
-#   200 — no arbitrary truncation. A limit applies ONLY when -l/--lines is given.
-#
-# HARD INVARIANTS
-#   - default `logs -p dev -s chatty` returns ALL 200 LINE_ lines,
-#   - `logs ... -l 10` returns exactly 10 (the last 10),
-#   - the count is deterministic (not a random 2-line cutoff).
 set -u
 . /usecase/lib.sh
 
@@ -19,11 +9,11 @@ sysg start --config "$CONFIG" --daemonize
 check "$?" "start exits 0"
 sleep 3
 
-section "default logs returns ALL 200 lines (no silent cutoff)"
+section "default logs returns the latest 100 lines"
 FULL="$(sysg logs --config "$CONFIG" -p dev -s chatty --no-follow 2>/dev/null | grep -c '^.*LINE_[0-9]')"
-echo "default logs LINE_ count: $FULL (expected 200)"
-[ "$FULL" = "200" ]
-check "$?" "default logs shows all 200 lines"
+echo "default logs LINE_ count: $FULL (expected 100)"
+[ "$FULL" = "100" ]
+check "$?" "default logs shows the latest 100 lines"
 
 section "explicit -l 10 limits to 10"
 TEN="$(sysg logs --config "$CONFIG" -p dev -s chatty --no-follow -l 10 2>/dev/null | grep -c '^.*LINE_[0-9]')"
@@ -36,6 +26,12 @@ LAST="$(sysg logs --config "$CONFIG" -p dev -s chatty --no-follow -l 10 2>/dev/n
 echo "last line with -l 10: $LAST (expect LINE_200)"
 [ "$LAST" = "LINE_200" ]
 check "$?" "-l 10 returns the newest lines (tail), ending at LINE_200"
+
+section "--all returns complete captured history"
+ALL="$(sysg logs --config "$CONFIG" -p dev -s chatty --no-follow --all 2>/dev/null | grep -c '^.*LINE_[0-9]')"
+echo "--all LINE_ count: $ALL (expected 200)"
+[ "$ALL" = "200" ]
+check "$?" "--all shows all 200 lines"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish

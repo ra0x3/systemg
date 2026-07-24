@@ -834,19 +834,15 @@ const PROJECT_LOG_CHANNEL_CAPACITY: usize = 4096;
 /// Interval used to detect disconnected clients while no log data is arriving.
 const LOG_FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Holds recent log bytes and active subscribers for a single service stream.
+/// Holds recent complete log lines for a single service stream.
 struct LiveLogEntry {
     buffer: Vec<u8>,
-    subscribers: Vec<mpsc::Sender<Vec<u8>>>,
 }
 
 impl LiveLogEntry {
     /// Creates an empty live log entry.
     fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-            subscribers: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     /// Appends bytes and trims the in-memory buffer to the configured cap.
@@ -854,10 +850,13 @@ impl LiveLogEntry {
         self.buffer.extend_from_slice(chunk);
         if self.buffer.len() > LIVE_LOG_BUFFER_LIMIT {
             let overflow = self.buffer.len() - LIVE_LOG_BUFFER_LIMIT;
-            self.buffer.drain(..overflow);
+            let cutoff = self.buffer[overflow..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|offset| overflow + offset + 1)
+                .unwrap_or(self.buffer.len());
+            self.buffer.drain(..cutoff);
         }
-        self.subscribers
-            .retain(|subscriber| subscriber.send(chunk.to_vec()).is_ok());
     }
 }
 
@@ -1004,45 +1003,12 @@ fn subscribe_project_logs(projects: &[String]) -> (Vec<ProjectLogChunk>, Project
 
 /// Drops the in-memory live-log buffer for every stream of a project's service.
 ///
-/// The supervisor serves `sysg logs` from this registry, not from disk, so
-/// truncating the files alone leaves the reader showing "purged" content. A
-/// purge that runs inside the supervisor must clear this too.
+/// Project-wide follow streams replay this registry, so truncating files alone
+/// would leave a serving supervisor able to replay purged content.
 pub fn clear_live_log(project: &str, service: &str) {
     if let Ok(mut registry) = live_log_registry().lock() {
         registry.retain(|(proj, name, _), _| proj != project || name != service);
     }
-}
-
-/// Returns the buffered live log bytes for a project's service stream, if any.
-fn snapshot_live_log(project: &str, service: &str, stream: LogStream) -> Option<Vec<u8>> {
-    let key = (
-        project.to_string(),
-        service.to_string(),
-        stream.as_str().to_string(),
-    );
-    live_log_registry()
-        .lock()
-        .ok()
-        .and_then(|registry| registry.get(&key).map(|entry| entry.buffer.clone()))
-}
-
-/// Registers a subscriber for future live log chunks on a project's service stream.
-fn subscribe_live_log(
-    project: &str,
-    service: &str,
-    stream: LogStream,
-) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    let key = (
-        project.to_string(),
-        service.to_string(),
-        stream.as_str().to_string(),
-    );
-    if let Ok(mut registry) = live_log_registry().lock() {
-        let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
-        entry.subscribers.push(tx);
-    }
-    rx
 }
 
 /// Returns whether the client side of a Unix socket has disconnected.
@@ -2083,6 +2049,7 @@ fn write_service_log(
                 let formatted =
                     format_captured_log_line(line.stream.as_str(), &line.line);
                 file.write_line(&formatted)?;
+                file.flush()?;
                 append_live_log_chunk(
                     project,
                     service_label,
@@ -3012,35 +2979,6 @@ impl LogManager {
         filter: &LogFilter,
         stream: &UnixStream,
     ) -> Result<(), LogsManagerError> {
-        self.stream_log_to_socket_labeled(
-            project,
-            service_name,
-            pid,
-            lines,
-            kind,
-            follow,
-            filter,
-            stream,
-            false,
-        )
-    }
-
-    /// As `stream_log_to_socket`, but `prefix_service` labels every line with the
-    /// service name instead of printing a boxed banner. Required whenever
-    /// several units share one stream: see `prefix_lines_with_service`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn stream_log_to_socket_labeled(
-        &self,
-        project: &str,
-        service_name: &str,
-        pid: Option<u32>,
-        lines: usize,
-        kind: Option<&str>,
-        follow: bool,
-        filter: &LogFilter,
-        stream: &UnixStream,
-        prefix_service: bool,
-    ) -> Result<(), LogsManagerError> {
         let mode = resolve_tail_mode(
             if follow {
                 TailMode::Follow
@@ -3049,80 +2987,6 @@ impl LogManager {
             },
             filter,
         );
-        if !filter.all
-            && let Some(snapshot) = (kind.is_none()
-                || kind.and_then(LogStream::from_filter).is_some())
-            .then(|| snapshot_live_log(project, service_name, LogStream::Combined))
-            .flatten()
-            && !snapshot.is_empty()
-        {
-            if !prefix_service {
-                write_log_header(stream.try_clone()?, service_name, pid)?;
-            }
-            let mut socket = stream.try_clone()?;
-            let snapshot = match kind {
-                Some(kind_name) => filter_captured_log_bytes(&snapshot, kind_name),
-                None => snapshot,
-            };
-            let snapshot = filter.apply(&snapshot);
-            let tail = tail_log_bytes(&snapshot, lines);
-            if !tail.is_empty() {
-                let tail = if prefix_service {
-                    prefix_lines_with_service(&tail, service_name)
-                } else {
-                    tail.to_vec()
-                };
-                socket.write_all(&tail)?;
-                socket.flush()?;
-            }
-            if matches!(mode, TailMode::Follow) {
-                let receiver =
-                    subscribe_live_log(project, service_name, LogStream::Combined);
-                loop {
-                    match receiver.recv_timeout(LOG_FOLLOW_POLL_INTERVAL) {
-                        Ok(chunk) => {
-                            let chunk = match kind {
-                                Some(kind_name) => {
-                                    filter_captured_log_bytes(&chunk, kind_name)
-                                }
-                                None => chunk,
-                            };
-                            let chunk = filter.apply(&chunk);
-                            if chunk.is_empty() {
-                                continue;
-                            }
-                            let chunk = if prefix_service {
-                                prefix_lines_with_service(&chunk, service_name)
-                            } else {
-                                chunk.to_vec()
-                            };
-                            match socket.write_all(&chunk) {
-                                Ok(()) => {
-                                    socket.flush()?;
-                                }
-                                Err(err)
-                                    if matches!(
-                                        err.kind(),
-                                        std::io::ErrorKind::BrokenPipe
-                                            | std::io::ErrorKind::ConnectionReset
-                                    ) =>
-                                {
-                                    break;
-                                }
-                                Err(err) => return Err(err.into()),
-                            }
-                        }
-                        Err(RecvTimeoutError::Timeout) => {
-                            if socket_peer_disconnected(&socket) {
-                                break;
-                            }
-                        }
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-            }
-            return Ok(());
-        }
         self.stream_logs_platform_with_mode(
             project,
             service_name,

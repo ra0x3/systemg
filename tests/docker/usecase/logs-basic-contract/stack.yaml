@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  bar:
+    name: Bar
+    services:
+      foo:
+        command: "python3 /usecase/emitter.py"
+        restart_policy: always

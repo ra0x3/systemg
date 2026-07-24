@@ -27,7 +27,7 @@ $ sysg logs -p myapp
 | `-s` | `--service` | The service whose logs to show. With no `-p`, resolves to the loose (`__loose__`) bundle only |
 | `-p` | `--project` | The project whose logs to show (all its services, or one with `-s`) |
 | `-` | `--supervisor` | Show the supervisor's own log instead of a service's. Cannot be combined with `-s`/`-p` |
-| `-l` | `--lines` | Trailing lines to show. Omit to show the **full** captured log; pass `-l N` for the last N |
+| `-l` | `--lines` | Trailing lines to show. Defaults to the latest 100; pass `-l N` to choose another limit |
 | `-k` | `--kind` | Kind of logs to show: `stdout` or `stderr`. Omit to show stdout+stderr together |
 | `-f` | `--follow` | Follow the log stream until interrupted (like `tail -F`) |
 | `-` | `--no-follow` | Force a one-shot snapshot even on an interactive terminal |
@@ -204,8 +204,9 @@ Because following cannot honor an upper bound, any `--since` / `--until` /
 $ sysg logs --service api --all --grep ERROR
 ```
 
-By default `sysg logs` reads the full active `{service}.log`; pass `--lines N`
-to limit it to the last N lines. `--all` concatenates the rotated backups
+By default `sysg logs` reads the latest 100 lines from the active
+`{service}.log`; pass `--lines N` to choose another tail size. `--all`
+concatenates the rotated backups
 (`{service}.log.2`, `{service}.log.1`) followed by the active file, oldest to
 newest, so you can query the entire retained history without joining files by
 hand. `--all` ignores `--lines`.
@@ -262,7 +263,9 @@ terminal are stored with their ANSI escapes.
 $ sysg logs --service api --lines 200 --stream 2
 ```
 
-In stream mode, each refresh prints a new snapshot of the latest `--lines` entries.
+In stream mode, each refresh replaces the current frame with a new snapshot of
+the latest `--lines` entries. Without `--lines`, each frame contains the latest
+100 lines.
 
 ### Prune rotated backups
 
@@ -323,7 +326,7 @@ label:
 
 ## Performance model
 
-For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes both streams through one per-service writer into `{project}/{service}.log`. On Linux and macOS, the follow view (`--follow`, or the interactive default) tails that file directly with `tail -F`; the one-shot view (`--no-follow`, or the default when stdout is not an interactive terminal) reads the active file once and exits. `--kind stdout` and `--kind stderr` filter captured lines by the stored stream label. The command itself is lightweight; the continuous cost comes from the capture threads, one writer thread, and one append-only file write path per service.
+For the default `file` logging sink, systemg captures each service's stdout and stderr through pipes and writes complete, immediately flushed lines through one per-service writer into `{project}/{service}.log`. A single-service follow (`--follow`, or the interactive default) tails that canonical file. A project-wide follow atomically takes a recent complete-line backlog and subscribes to future lines from the supervisor so several services can share one stream. The one-shot view (`--no-follow`, or the default when stdout is not an interactive terminal) reads the persisted active file once and exits. `--kind stdout` and `--kind stderr` filter captured lines by the stored stream label. The command itself is lightweight; the continuous cost comes from the capture threads, one writer thread, and one append-only file write path per service.
 
 For high-output production workloads, configure `logs.sink: none` globally or per service to discard service output and avoid systemg log-writer threads, pipe backpressure from log capture, and file growth.
 
