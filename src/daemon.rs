@@ -3985,6 +3985,62 @@ impl Daemon {
         Ok(state)
     }
 
+    /// Builds a port-conflict diagnostic when startup output or ownership
+    /// shows that another process holds the service's declared port.
+    fn startup_port_error(
+        service_name: &str,
+        config: &Config,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<ProcessManagerError> {
+        let project = &config.project.id;
+        let command = config
+            .services
+            .get(service_name)
+            .map(|service| service.command.as_str());
+        let tail =
+            crate::logs::tail_service_log_since(project, service_name, 8, started_at);
+        let output_conflict = output_indicates_port_conflict(&tail);
+        let port = port_from_output(&tail).or_else(|| port_from_command(command));
+        let occupied_port = if output_conflict {
+            None
+        } else {
+            occupied_command_port(command)
+        };
+        if !output_conflict && occupied_port.is_none() {
+            return None;
+        }
+
+        let port = port.or(occupied_port);
+        let subject = match port {
+            Some(port) => {
+                format!(
+                    "service `{service_name}` could not bind port {port}: already in use"
+                )
+            }
+            None => {
+                format!(
+                    "service `{service_name}` could not bind its port: already in use"
+                )
+            }
+        };
+        let diag = crate::diag::Diagnostic::error(crate::diag::SgCode::PortInUse, subject)
+            .note(
+                "another process is already listening on that port, so this service exited at start",
+            )
+            .note(
+                "stop whatever holds the port, or change the port in this service's command",
+            )
+            .evidence(format!("last output from `{service_name}`"), tail)
+            .help_cmd("see what sysg manages", "sysg status")
+            .help_cmd(
+                "view logs",
+                format!("sysg logs -s {service_name} -p {project}"),
+            )
+            .help_docs();
+
+        Some(ProcessManagerError::Diag(Box::new(diag)))
+    }
+
     /// Builds the typed diagnostic for a service generation that exited before readiness.
     fn startup_exit_error(
         service_name: &str,
@@ -4006,62 +4062,57 @@ impl Daemon {
             (None, Some(sig)) => format!("was killed by signal {sig}"),
             (None, None) => "terminated unexpectedly".to_string(),
         };
+        if let Some(err) = Self::startup_port_error(service_name, config, started_at) {
+            return err;
+        }
+
         let project = &config.project.id;
-        let command = config
-            .services
-            .get(service_name)
-            .map(|service| service.command.as_str());
         let tail =
             crate::logs::tail_service_log_since(project, service_name, 8, started_at);
-
-        let output_conflict = output_indicates_port_conflict(&tail);
-        let port = port_from_output(&tail).or_else(|| port_from_command(command));
-        let occupied_port = if output_conflict {
-            None
-        } else {
-            occupied_command_port(command)
-        };
-
-        let diag = if output_conflict || occupied_port.is_some() {
-            let port = port.or(occupied_port);
-            let subject = match port {
-                Some(port) => format!(
-                    "service `{service_name}` could not bind port {port}: already in use"
-                ),
-                None => format!(
-                    "service `{service_name}` could not bind its port: already in use"
-                ),
-            };
-            crate::diag::Diagnostic::error(crate::diag::SgCode::PortInUse, subject)
-                .note(
-                    "another process is already listening on that port, so this service exited at start",
-                )
-                .note(
-                    "stop whatever holds the port, or change the port in this service's command",
-                )
-                .evidence(format!("last output from `{service_name}`"), tail)
-                .help_cmd("see what sysg manages", "sysg status")
-                .help_cmd(
-                    "view logs",
-                    format!("sysg logs -s {service_name} -p {project}"),
-                )
-                .help_docs()
-        } else {
-            crate::diag::Diagnostic::error(
-                crate::diag::SgCode::UnitImmediateExit,
-                format!("service `{service_name}` exited immediately at start"),
-            )
-            .note(format!("the process {how} before it finished starting"))
-            .evidence(format!("last output from `{service_name}`"), tail)
-            .help_cmd(
-                "view logs",
-                format!("sysg logs -s {service_name} -p {project}"),
-            )
-            .help_cmd("check status", format!("sysg status -p {project}"))
-            .help_docs()
-        };
+        let diag = crate::diag::Diagnostic::error(
+            crate::diag::SgCode::UnitImmediateExit,
+            format!("service `{service_name}` exited immediately at start"),
+        )
+        .note(format!("the process {how} before it finished starting"))
+        .evidence(format!("last output from `{service_name}`"), tail)
+        .help_cmd(
+            "view logs",
+            format!("sysg logs -s {service_name} -p {project}"),
+        )
+        .help_cmd("check status", format!("sysg status -p {project}"))
+        .help_docs();
 
         ProcessManagerError::Diag(Box::new(diag))
+    }
+
+    /// Reports whether the listener on `port` belongs to this service's
+    /// recorded process or process group.
+    fn service_owns_port(
+        service_name: &str,
+        port: u16,
+        pid_file: &Arc<Mutex<PidFile>>,
+    ) -> Result<bool, ProcessManagerError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (service_name, port, pid_file);
+            Ok(true)
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let Some(holder) = crate::reconcile::port_holder(port) else {
+                return Ok(false);
+            };
+            let pids = pid_file.lock()?;
+            if pids.get(service_name) == Some(holder) {
+                return Ok(true);
+            }
+            let pgid = pids.pgid_for(service_name);
+            drop(pids);
+            Ok(pgid.is_some_and(|pgid| {
+                Self::process_group_for_pid(holder) == Some(pgid as libc::pid_t)
+            }))
+        }
     }
 
     /// Polls explicit process and state handles until one service reaches a
@@ -4075,6 +4126,11 @@ impl Daemon {
         startup_stability: Duration,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
+        let command_port = state
+            .1
+            .services
+            .get(service_name)
+            .and_then(|service| port_from_command(Some(&service.command)));
         let mut waited = Duration::ZERO;
         let mut running_since = None;
         while waited <= SERVICE_START_TIMEOUT {
@@ -4093,7 +4149,15 @@ impl Daemon {
                 ServiceProbe::Running => {
                     let started = running_since.get_or_insert_with(Instant::now);
                     if started.elapsed() >= startup_stability {
-                        return Ok(ServiceReadyState::Running);
+                        let owns_port = match command_port {
+                            Some(port) => {
+                                Self::service_owns_port(service_name, port, pid_file)?
+                            }
+                            None => true,
+                        };
+                        if owns_port {
+                            return Ok(ServiceReadyState::Running);
+                        }
                     }
 
                     thread::sleep(SERVICE_POLL_INTERVAL);
@@ -4117,6 +4181,10 @@ impl Daemon {
                     continue;
                 }
             }
+        }
+
+        if let Some(err) = Self::startup_port_error(service_name, state.1, started_at) {
+            return Err(err);
         }
 
         Err(ProcessManagerError::ServiceStartError {
