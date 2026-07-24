@@ -19,8 +19,6 @@ use assert_cmd::Command;
 #[cfg(target_os = "linux")]
 use common::HomeEnvGuard;
 #[cfg(target_os = "linux")]
-use predicates::prelude::PredicateBooleanExt;
-#[cfg(target_os = "linux")]
 use systemg::{
     config::load_config,
     daemon::{Daemon, PidFile, ServiceLifecycleStatus, ServiceStateFile},
@@ -80,8 +78,7 @@ services:
         .arg("1")
         .assert()
         .success()
-        .stdout(predicates::str::contains("arb_rs"))
-        .stdout(predicates::str::contains("streamed stdout line"));
+        .stdout("streamed stdout line\n");
 
     unsafe { env::remove_var("SYSTEMG_TAIL_MODE") };
 }
@@ -196,12 +193,7 @@ services:
         .arg("1")
         .assert()
         .success()
-        .stdout(predicates::str::contains(format!(
-            "demo [pid {}]",
-            child.id()
-        )))
-        .stdout(predicates::str::contains("snapshot log line"))
-        .stdout(predicates::str::contains("offline").not());
+        .stdout("snapshot log line\n");
 
     let _ = child.kill();
     let _ = child.wait();

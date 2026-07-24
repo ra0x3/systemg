@@ -9,7 +9,6 @@ use ctrlc as _;
 use openssl_sys as _;
 #[cfg(test)]
 use predicates as _;
-use strum as _;
 #[cfg(test)]
 use tempfile as _;
 use terminal_size as _;
