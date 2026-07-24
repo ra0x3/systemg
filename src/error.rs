@@ -40,7 +40,7 @@ pub enum ProcessManagerError {
         source: std::io::Error,
     },
 
-    /// Error executing a lifecycle hook (e.g., on_start, on_error).
+    /// Error executing a service hook (e.g., onstart, onerr).
     #[error("Failed to execute hook for service '{service}': {source}")]
     HookExecutionError {
         /// The service name whose hook execution failed.

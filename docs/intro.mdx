@@ -29,11 +29,10 @@ services:
       expression: "0 0 2 * * *"
       timezone: "America/New_York"
     hooks:
-      on_stop:
-        success:
-          command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup completed successfully\"}'"
-        error:
-          command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
+      onstart:
+        command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup completed successfully\"}'"
+      onerr:
+        command: "curl -X POST https://hooks.slack.com/services/T00/B00/XXX -H 'Content-Type: application/json' -d '{\"text\":\"Backup failed!\"}'"
 ```
 
 Run `sysg start` to attach in the foreground and stream every service with a

@@ -63,12 +63,10 @@ services:
       health_check:
         command: "curl --fail http://localhost:8000/health"
     hooks:
-      on_start:
-        success:
-          command: "echo 'API started'"
-      on_stop:
-        error:
-          command: "curl --request POST https://alerts.example.com/api/crash"
+      onstart:
+        command: "echo 'API started'"
+      onerr:
+        command: "curl --request POST https://alerts.example.com/api/crash"
   worker:
     command: >
       celery -A tasks worker
@@ -400,21 +398,17 @@ after `max_restarts` (unlimited when unset).
 
 ### `hooks`
 
-Run commands when services start or stop.
+Run commands after successful starts or unsuccessful exits.
 
 ```yaml
 services:
   api:
     command: "python app.py"
     hooks:
-      on_start:
-        success:
-          command: "curl --request POST https://status.example.com/api/up"
-        error:
-          command: "curl --request POST https://status.example.com/api/down"
-      on_stop:
-        error:
-          command: "curl --request POST https://alerts.example.com/crash"
+      onstart:
+        command: "curl --request POST https://status.example.com/api/up"
+      onerr:
+        command: "/usr/local/bin/report-crash api"
 ```
 
 ### `cron`
@@ -510,15 +504,14 @@ Environment sources and inline overrides merged into the service process environ
 
 ### Hooks object
 
-Lifecycle callbacks you can trigger on service start/stop/restart outcomes.
+Commands triggered by service outcomes.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `on_start` | object | Commands for start events |
-| `on_stop` | object | Commands for stop events |
-| `on_restart` | object | Commands for restart events |
+| `onstart` | object | Command run after readiness or successful one-shot completion |
+| `onerr` | object | Command run after an unsuccessful service exit |
 
-Each hook has `success` and `error` handlers with:
+Each hook supports:
 - `command` - Command to execute
 - `timeout` - Maximum execution time
 

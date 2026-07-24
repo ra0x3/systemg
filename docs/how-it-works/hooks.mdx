@@ -1,0 +1,56 @@
+---
+title: Hooks
+---
+
+# Hooks
+
+Run any shell command after a successful service start or unsuccessful service
+exit.
+
+## Events
+
+| Hook | When |
+|------|------|
+| `onstart` | Service reaches readiness or a one-shot completes successfully |
+| `onerr` | Service exits unsuccessfully before or after readiness |
+
+## Configuration
+
+```yaml
+services:
+  postgres:
+    command: "postgres -D /var/lib/postgres"
+    hooks:
+      onstart:
+        command: "echo 'Postgres started'"
+        timeout: "10s"
+      onerr:
+        command: "/usr/local/bin/report-crash postgres"
+```
+
+Hooks inherit service environment variables.
+
+## Execution
+
+- Run via `sh -c`
+- Fire-and-forget (no retries)
+- Timeout kills with SIGKILL
+- Failures logged but don't affect service
+
+## Behavior
+
+| Scenario | Hooks |
+|----------|-------|
+| Start and readiness success | `onstart` |
+| Successful one-shot completion | `onstart` |
+| Spawn or readiness failure while running | None |
+| Clean exit | None |
+| Manual stop | None |
+| Unsuccessful exit before or after readiness | `onerr` |
+| Successful automatic restart | `onstart` |
+
+## Tips
+
+- Keep commands short
+- Use env vars for secrets
+- Make repeated actions idempotent

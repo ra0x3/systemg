@@ -14,7 +14,6 @@ use std::{
 use regex::Regex;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use sha2::{Digest, Sha256};
-use strum_macros::AsRefStr;
 use tracing::warn;
 
 /// Restart policy that relaunches a service after every exit.
@@ -746,7 +745,7 @@ pub struct ServiceConfig {
     pub depends_on: Option<Vec<DependsOn>>,
     /// Deployment strategy configuration.
     pub deployment: Option<DeploymentConfig>,
-    /// Hooks for lifecycle events (e.g., on_start, on_error).
+    /// Hooks for successful starts and unsuccessful exits.
     pub hooks: Option<Hooks>,
     /// Cron configuration for scheduled service execution.
     pub cron: Option<CronConfig>,
@@ -1229,29 +1228,7 @@ impl EnvConfig {
     }
 }
 
-/// Lifecycle stages for service hooks.
-#[derive(Debug, Clone, Copy, AsRefStr)]
-#[strum(serialize_all = "snake_case")]
-pub enum HookStage {
-    /// Hook triggered when service starts.
-    OnStart,
-    /// Hook triggered when service stops.
-    OnStop,
-    /// Hook triggered when service restarts.
-    OnRestart,
-}
-
-/// Outcomes recorded for a lifecycle stage.
-#[derive(Debug, Clone, Copy, AsRefStr)]
-#[strum(serialize_all = "snake_case")]
-pub enum HookOutcome {
-    /// Hook outcome when service lifecycle event succeeds.
-    Success,
-    /// Hook outcome when service lifecycle event fails.
-    Error,
-}
-
-/// Command executed for a hook outcome.
+/// Command executed for a service hook.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct HookAction {
     /// Shell command to execute for this hook.
@@ -1260,41 +1237,14 @@ pub struct HookAction {
     pub timeout: Option<String>,
 }
 
-/// Hook commands grouped by outcome for a lifecycle stage.
+/// Hooks that run after a successful start or unsuccessful exit.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
-pub struct HookLifecycleConfig {
-    /// Hook action to execute when the lifecycle event succeeds.
-    pub success: Option<HookAction>,
-    /// Hook action to execute when the lifecycle event fails.
-    pub error: Option<HookAction>,
-}
-
-/// Hooks that run on specific service lifecycle events.
-#[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Hooks {
-    /// Hooks to execute when the service starts.
-    pub on_start: Option<HookLifecycleConfig>,
-    /// Hooks to execute when the service stops.
-    pub on_stop: Option<HookLifecycleConfig>,
-    /// Hooks to execute when the service restarts.
-    #[serde(default)]
-    pub on_restart: Option<HookLifecycleConfig>,
-}
-
-impl Hooks {
-    /// Returns the configured hook action for a lifecycle stage and outcome.
-    pub fn action(&self, stage: HookStage, outcome: HookOutcome) -> Option<&HookAction> {
-        let lifecycle = match stage {
-            HookStage::OnStart => self.on_start.as_ref(),
-            HookStage::OnStop => self.on_stop.as_ref(),
-            HookStage::OnRestart => self.on_restart.as_ref(),
-        }?;
-
-        match outcome {
-            HookOutcome::Success => lifecycle.success.as_ref(),
-            HookOutcome::Error => lifecycle.error.as_ref(),
-        }
-    }
+    /// Hook to execute after the service starts successfully.
+    pub onstart: Option<HookAction>,
+    /// Hook to execute after the service exits unsuccessfully.
+    pub onerr: Option<HookAction>,
 }
 
 /// Cron configuration for scheduled service execution.
