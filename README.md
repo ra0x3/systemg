@@ -96,7 +96,7 @@ Then run it:
 ```sh
 sysg start --daemonize      # start everything, in dependency order
 sysg status                 # see what's running
-sysg logs --service api -f  # follow one service's logs
+sysg logs --service api --lines 0 --follow  # stream only new service logs
 sysg restart --service api  # bounce one service, not the world
 ```
 

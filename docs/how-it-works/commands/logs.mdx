@@ -137,10 +137,13 @@ returns immediately instead of blocking on a follow that can never be
 interrupted.
 
 ```sh
-$ sysg logs --service api --follow      # stay attached (interactive)
+$ sysg logs -p arbitration-dev -s arb_rs__dev --lines 0 --follow
 $ sysg logs --service api --no-follow    # one snapshot, then exit
 $ sysg logs --service api | grep ERROR   # auto one-shot: stdout is a pipe
 ```
+
+`--lines 0 --follow` is the standard live-streaming form: it skips existing
+log history, stays attached, and prints only newly emitted lines.
 
 ### Purge logs for a specific service
 

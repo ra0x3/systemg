@@ -26,12 +26,13 @@ sysg inspect -s <unit> --format json
 sysg logs -s <unit> --format json          # JSON-lines: {ts, stream, service, line}
 sysg logs -s <unit> --raw                  # app lines without sysg prefixes
 sysg logs -s <unit> --grep ERROR --since 2h
+sysg logs -p <project> -s <unit> --lines 0 --follow
 sysg logs --path                 # locate log files for external tooling
 sysg purge                       # wipe all systemg state/runtime files
 ```
 
 `sysg logs` never follows in pipes/agent sessions; it prints a snapshot and
-exits. Use `--follow` only for an intentional long-running tail.
+exits. Use `--lines 0 --follow` for an intentional new-lines-only tail.
 
 ## Config skeleton
 

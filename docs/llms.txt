@@ -75,8 +75,8 @@ legacy XML remains readable.
 As of `0.50.0`, `sysg logs` is safe for non-interactive callers by default. It
 follows logs only when stdout is an interactive terminal and agent mode is not
 enabled. In pipes, files, SSH commands, and agent sessions, it prints a one-shot
-snapshot and exits. Use `--follow` only when a long-running tail is intended;
-use `--no-follow` to force a one-shot snapshot on a terminal.
+snapshot and exits. Use `--lines 0 --follow` when a long-running, new-lines-only
+tail is intended; use `--no-follow` to force a one-shot snapshot on a terminal.
 
 Useful log options:
 
