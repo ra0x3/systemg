@@ -1,0 +1,11 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      probe:
+        command: "sh -c 'echo probe >> /usecase/probe-runs'"
+      api:
+        command: "sh -c 'echo V1 > /usecase/api-version && exec sleep 3000'"
+        restart_policy: "always"
+        depends_on: ["probe"]

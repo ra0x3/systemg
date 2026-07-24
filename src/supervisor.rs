@@ -690,6 +690,44 @@ impl Supervisor {
                         }
                         completed.insert(dependency_name.to_string());
                     }
+                    let dependency_completed = completed.contains(dependency_name);
+                    let dependency_running =
+                        healthy.contains(dependency_name) && !dependency_completed;
+                    let finite = config
+                        .services
+                        .get(dependency_name)
+                        .is_some_and(|dependency| !dependency.restarts_after_failure());
+                    if !Daemon::dependency_satisfied(
+                        dependency,
+                        dependency_running,
+                        dependency_completed,
+                        finite,
+                    ) {
+                        error!(
+                            "Skipping service '{service_name}' because dependency '{dependency_name}' did not reach its target"
+                        );
+                        failed.insert(service_name.clone());
+                        let diag = start::dependency_unavailable(
+                            &service_name,
+                            dependency_name,
+                            format!(
+                                "dependency `{dependency_name}` did not reach its required state"
+                            ),
+                        );
+                        cause.get_or_insert_with(|| diag.clone());
+                        if let Some(journal) = boot_journal {
+                            journal.push(BootFrame::UnitStarting {
+                                project: project_id.clone(),
+                                service: service_name.clone(),
+                            });
+                            journal.record(
+                                project_id,
+                                &service_name,
+                                start::Outcome::Failed(diag),
+                            );
+                        }
+                        continue 'services;
+                    }
                 }
             }
 
@@ -1262,8 +1300,8 @@ impl Supervisor {
         }
     }
 
-    /// Reconciles the primary project's services in place without touching any
-    /// sibling project or unchanged service.
+    /// Reconciles an active primary project by manifest delta and an inactive
+    /// primary project to its complete target.
     fn reconcile_primary_project(
         &mut self,
         new_config: Config,
@@ -1276,7 +1314,11 @@ impl Supervisor {
         let metrics_store = metrics::shared_store(metrics_settings)?;
         let diff =
             crate::restart::ManifestDiff::compute(old_config.as_ref(), &new_config);
-        let affected = Self::reconcile_targets(&new_config, &diff)?;
+        let affected = if self.primary_active {
+            Self::reconcile_targets(&new_config, &diff)?
+        } else {
+            new_config.services.keys().cloned().collect()
+        };
 
         self.stop_primary_workers();
         let mut stop_error = None;

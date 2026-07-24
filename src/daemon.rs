@@ -3796,6 +3796,25 @@ impl Daemon {
                         }
                         completed_services.insert(dep_name.to_string());
                     }
+                    let completed = completed_services.contains(dep_name);
+                    let running = healthy_services.contains(dep_name) && !completed;
+                    let finite = config
+                        .services
+                        .get(dep_name)
+                        .is_some_and(|dependency| !dependency.restarts_after_failure());
+                    if !Self::dependency_satisfied(dep, running, completed, finite) {
+                        error!(
+                            "Skipping start of '{service_name}' because dependency '{dep_name}' did not reach its target."
+                        );
+                        first_error.get_or_insert(
+                            ProcessManagerError::DependencyFailed {
+                                service: service_name.clone(),
+                                dependency: dep_name.to_string(),
+                            },
+                        );
+                        failed_services.insert(service_name.clone());
+                        continue 'service_loop;
+                    }
                 }
             }
 
@@ -4306,6 +4325,39 @@ impl Daemon {
         guard.get(&key).map(|entry| entry.status)
     }
 
+    pub(crate) fn dependency_satisfied(
+        dependency: &crate::config::DependsOn,
+        running: bool,
+        completed: bool,
+        finite: bool,
+    ) -> bool {
+        match dependency.condition() {
+            DependsOnCondition::Started => running || (finite && completed),
+            DependsOnCondition::Completed => completed,
+        }
+    }
+
+    fn dependency_ready(&self, dependency: &crate::config::DependsOn) -> bool {
+        let dependency_name = dependency.service();
+        let running = self.pid_file.lock().ok().is_some_and(|pids| {
+            pids.get(dependency_name).is_some_and(|pid| {
+                pids.start_for(dependency_name).is_some_and(|started| {
+                    Self::pid_is_alive(pid) && process_start_time(pid) == Some(started)
+                })
+            })
+        });
+        let completed = matches!(
+            self.recorded_status(dependency_name),
+            Some(ServiceLifecycleStatus::ExitedSuccessfully)
+        );
+        let finite = self
+            .cfg()
+            .services
+            .get(dependency_name)
+            .is_some_and(|service| !service.restarts_after_failure());
+        Self::dependency_satisfied(dependency, running, completed, finite)
+    }
+
     /// Reports whether a pid is still alive. `kill(pid, 0)` succeeds for a live
     /// process and for a zombie the caller has yet to reap; a zombie holds no
     /// resources and no longer runs, so it is treated as dead here.
@@ -4547,23 +4599,8 @@ impl Daemon {
                         failed_services.insert(service_name.clone());
                         continue 'services;
                     }
-                    if dep.condition() != DependsOnCondition::Completed
-                        && !services.contains(dep_name)
-                    {
-                        let dep_running = self
-                            .pid_file
-                            .lock()
-                            .ok()
-                            .and_then(|guard| {
-                                let pid = guard.get(dep_name)?;
-                                let identity_ok =
-                                    guard.start_for(dep_name).is_some_and(|started| {
-                                        process_start_time(pid) == Some(started)
-                                    });
-                                (identity_ok && Self::pid_is_alive(pid)).then_some(())
-                            })
-                            .is_some();
-                        if !dep_running {
+                    if !services.contains(dep_name) {
+                        if !self.dependency_ready(dep) {
                             let err = ProcessManagerError::DependencyFailed {
                                 service: service_name.clone(),
                                 dependency: dep_name.to_string(),
@@ -4572,6 +4609,7 @@ impl Daemon {
                             failed_services.insert(service_name.clone());
                             continue 'services;
                         }
+                        continue;
                     }
                     if dep.condition() == DependsOnCondition::Completed
                         && !completed_services.contains(dep_name)
@@ -4587,6 +4625,21 @@ impl Daemon {
                             continue 'services;
                         }
                         completed_services.insert(dep_name.to_string());
+                    }
+                    let completed = completed_services.contains(dep_name);
+                    let running = healthy_services.contains(dep_name) && !completed;
+                    let finite = config
+                        .services
+                        .get(dep_name)
+                        .is_some_and(|dependency| !dependency.restarts_after_failure());
+                    if !Self::dependency_satisfied(dep, running, completed, finite) {
+                        let err = ProcessManagerError::DependencyFailed {
+                            service: service_name.clone(),
+                            dependency: dep_name.to_string(),
+                        };
+                        first_error.get_or_insert(err);
+                        failed_services.insert(service_name.clone());
+                        continue 'services;
                     }
                 }
             }
@@ -6780,32 +6833,23 @@ impl Daemon {
             return false;
         }
 
-        match dependency.condition() {
-            DependsOnCondition::Started => {
-                let live = ctx.lock_pid_file().ok().is_some_and(|pids| {
-                    pids.get(dependency_name).is_some_and(|pid| {
-                        pids.start_for(dependency_name).is_some_and(|started| {
-                            Self::pid_is_alive(pid)
-                                && process_start_time(pid) == Some(started)
-                        })
-                    })
-                });
-                let completed = ctx
-                    .config
-                    .services
-                    .get(dependency_name)
-                    .is_some_and(|service| !service.restarts_after_failure())
-                    && matches!(
-                        Self::recorded_status_in_context(ctx, dependency_name),
-                        Some(ServiceLifecycleStatus::ExitedSuccessfully)
-                    );
-                live || completed
-            }
-            DependsOnCondition::Completed => matches!(
-                Self::recorded_status_in_context(ctx, dependency_name),
-                Some(ServiceLifecycleStatus::ExitedSuccessfully)
-            ),
-        }
+        let running = ctx.lock_pid_file().ok().is_some_and(|pids| {
+            pids.get(dependency_name).is_some_and(|pid| {
+                pids.start_for(dependency_name).is_some_and(|started| {
+                    Self::pid_is_alive(pid) && process_start_time(pid) == Some(started)
+                })
+            })
+        });
+        let completed = matches!(
+            Self::recorded_status_in_context(ctx, dependency_name),
+            Some(ServiceLifecycleStatus::ExitedSuccessfully)
+        );
+        let finite = ctx
+            .config
+            .services
+            .get(dependency_name)
+            .is_some_and(|service| !service.restarts_after_failure());
+        Self::dependency_satisfied(dependency, running, completed, finite)
     }
 
     /// Returns the first dependency that blocks an automatic restart.
