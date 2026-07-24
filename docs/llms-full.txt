@@ -258,10 +258,11 @@ sysg logs -s api | grep ERROR
 ssh host 'SYSTEMG_AGENT=1 sysg logs -s api'
 ```
 
-Use `--follow` only when a long-running tail is intentional:
+Use `--lines 0 --follow` when a long-running, new-lines-only tail is
+intentional:
 
 ```sh
-sysg logs -s api --follow
+sysg logs -s api --lines 0 --follow
 ```
 
 ### Structured Logs
@@ -475,7 +476,7 @@ Avoid long-running or interactive commands unless the user explicitly asked for
 streaming:
 
 ```sh
-sysg logs -s api --follow
+sysg logs -s api --lines 0 --follow
 sysg status --stream 5
 sysg inspect -s api --stream 5
 sysg logs -s api --stream 2
