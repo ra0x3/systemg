@@ -1,0 +1,11 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      api:
+        command: "sh -c 'echo V1 > /usecase/api-version && exec sleep 3000'"
+        restart_policy: "always"
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"
