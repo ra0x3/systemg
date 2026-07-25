@@ -36,11 +36,32 @@ else
 fi
 
 section "web is NOT reported healthy, and the bind error was captured"
-S="$(sysg status --config "$CONFIG" --format json 2>/dev/null)"
-H="$(unit_field "$S" web health dev)"
-echo "web health: $H"
-[ "$H" != "healthy" ]
-check "$?" "web is not healthy (it could not bind its port)"
+# `command` here is a shell wrapper (`sleep 1; python3 ...`), so the process
+# survives the no-health-check stability window before the bind is even
+# attempted. The unit therefore cycles healthy -> failing -> healthy as it
+# restarts. Sampling once races that cycle; the real invariant is that it never
+# SETTLES healthy. Poll across a full restart cycle and require a failing
+# observation.
+SAW_FAILING=1
+SETTLED_HEALTHY=0
+STREAK=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  S="$(sysg status --config "$CONFIG" --format json 2>/dev/null)"
+  H="$(unit_field "$S" web health dev)"
+  echo "web health: $H"
+  if [ "$H" != "healthy" ]; then
+    SAW_FAILING=0
+    STREAK=0
+  else
+    STREAK=$((STREAK + 1))
+    # A service that binds successfully stays healthy. Ten seconds of unbroken
+    # health means it is NOT failing to bind, whatever a single sample showed.
+    [ "$STREAK" -ge 5 ] && SETTLED_HEALTHY=1 && break
+  fi
+  sleep 2
+done
+[ "$SAW_FAILING" = "0" ] && [ "$SETTLED_HEALTHY" = "0" ]
+check "$?" "web never settles healthy (it could not bind its port)"
 sysg logs --config "$CONFIG" -p dev -s web --no-follow 2>/dev/null | grep -qi "address already in use"
 check "$?" "the captured output shows the port-in-use error"
 

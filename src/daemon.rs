@@ -33,11 +33,12 @@ use crate::{
         supervisor::SupervisorTimeouts,
     },
     constants::{
-        DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL, DEFAULT_HEALTH_RETRIES,
-        DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock, DeploymentStrategy,
-        POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY, PRE_START_TIMEOUT,
-        PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL,
-        SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG,
+        CRASH_EVIDENCE_WINDOW, DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL,
+        DEFAULT_HEALTH_RETRIES, DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock,
+        DeploymentStrategy, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
+        PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
+        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
+        SHELL_COMMAND_FLAG,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_managed_service_log_writers},
@@ -1563,34 +1564,6 @@ fn port_from_command(command: Option<&str>) -> Option<u16> {
     })
 }
 
-#[cfg(target_os = "linux")]
-fn occupied_command_port(command: Option<&str>) -> Option<u16> {
-    let port = port_from_command(command)?;
-    crate::reconcile::port_holder(port).map(|_| port)
-}
-
-#[cfg(target_os = "linux")]
-fn occupied_foreign_command_port(
-    command: Option<&str>,
-    service_name: &str,
-    pid_file: &Arc<Mutex<PidFile>>,
-) -> Option<u16> {
-    let port = occupied_command_port(command)?;
-    match Daemon::service_owns_port(service_name, port, pid_file) {
-        Ok(true) | Err(_) => None,
-        Ok(false) => Some(port),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn occupied_foreign_command_port(
-    _command: Option<&str>,
-    _service_name: &str,
-    _pid_file: &Arc<Mutex<PidFile>>,
-) -> Option<u16> {
-    None
-}
-
 fn wait_with_epoch(
     child: &mut Child,
     timeout: Duration,
@@ -1765,6 +1738,45 @@ pub enum ServiceReadyState {
     Running,
     /// Service completed successfully (for oneshot/cron services).
     CompletedSuccess,
+}
+
+/// Outcome of a failed subset restart, carrying the units that actually missed
+/// their target alongside the originating error.
+///
+/// `failed_services` is `None` when the restart failed for a reason that belongs
+/// to no particular unit — a monitor thread that would not spawn, or a
+/// post-restart verification sweep — so callers report the failure without
+/// naming units they cannot attribute it to.
+#[derive(Debug)]
+pub(crate) struct RestartFailure {
+    /// Originating error, preferring a per-unit cause over a global one.
+    pub cause: ProcessManagerError,
+    /// Units that missed their target, including dependency cascades.
+    pub failed_services: Option<Vec<String>>,
+}
+
+impl From<RestartFailure> for ProcessManagerError {
+    fn from(failure: RestartFailure) -> Self {
+        failure.cause
+    }
+}
+
+impl RestartFailure {
+    /// Wraps an error whose failing unit is known.
+    fn attributed(cause: ProcessManagerError, service: impl Into<String>) -> Self {
+        Self {
+            cause,
+            failed_services: Some(vec![service.into()]),
+        }
+    }
+
+    /// Wraps an error that belongs to no particular unit.
+    fn unattributed(cause: ProcessManagerError) -> Self {
+        Self {
+            cause,
+            failed_services: None,
+        }
+    }
 }
 
 /// Waitable service process retained either as an originating `Child` or as a
@@ -4041,13 +4053,49 @@ impl Daemon {
         }
     }
 
-    /// Builds a port-conflict diagnostic when startup output or ownership
-    /// shows that another process holds the service's declared port.
+    /// Logs SG0105 when a crashed service's own output shows it could not bind
+    /// its port.
+    ///
+    /// A service wrapped in a shell (`sleep 1; server ...`) outlives the
+    /// readiness window, so the bind failure surfaces here rather than at
+    /// startup. The classification comes from the service's captured output,
+    /// never from guessing a port out of the command string.
+    ///
+    /// The tail is scoped to the crash that was just observed. Reading the
+    /// whole log would let a bind error from an earlier generation misclassify a
+    /// later, unrelated crash.
+    ///
+    /// This writes to the supervisor log only. [`ServiceStateEntry`] has no
+    /// field for a failure cause, so `status` and `inspect` still show the crash
+    /// generically; surfacing SG0105 there needs a typed cause persisted with
+    /// the state, which is a schema change beyond this fix.
+    fn log_port_conflict_if_evident(config: &Config, service_name: &str) {
+        let project = &config.project.id;
+        let since = chrono::Utc::now() - CRASH_EVIDENCE_WINDOW;
+        let tail = crate::logs::tail_service_log_since(project, service_name, 12, since);
+        if !output_indicates_port_conflict(&tail) {
+            return;
+        }
+        let command = config
+            .services
+            .get(service_name)
+            .map(|service| service.command.as_str());
+        match port_from_output(&tail).or_else(|| port_from_command(command)) {
+            Some(port) => warn!(
+                "error[SG0105]: service `{service_name}` could not bind port {port}: already in use"
+            ),
+            None => warn!(
+                "error[SG0105]: service `{service_name}` could not bind its port: already in use"
+            ),
+        }
+    }
+
+    /// Builds a port-conflict diagnostic when the service's own startup output
+    /// reports that its port was already in use.
     fn startup_port_error(
         service_name: &str,
         config: &Config,
         started_at: chrono::DateTime<chrono::Utc>,
-        pid_file: &Arc<Mutex<PidFile>>,
     ) -> Option<ProcessManagerError> {
         let project = &config.project.id;
         let command = config
@@ -4056,18 +4104,11 @@ impl Daemon {
             .map(|service| service.command.as_str());
         let tail =
             crate::logs::tail_service_log_since(project, service_name, 8, started_at);
-        let output_conflict = output_indicates_port_conflict(&tail);
-        let port = port_from_output(&tail).or_else(|| port_from_command(command));
-        let occupied_port = if output_conflict {
-            None
-        } else {
-            occupied_foreign_command_port(command, service_name, pid_file)
-        };
-        if !output_conflict && occupied_port.is_none() {
+        if !output_indicates_port_conflict(&tail) {
             return None;
         }
 
-        let port = port.or(occupied_port);
+        let port = port_from_output(&tail).or_else(|| port_from_command(command));
         let subject = match port {
             Some(port) => {
                 format!(
@@ -4104,7 +4145,6 @@ impl Daemon {
         status: ExitStatus,
         config: &Config,
         started_at: chrono::DateTime<chrono::Utc>,
-        pid_file: &Arc<Mutex<PidFile>>,
     ) -> ProcessManagerError {
         #[cfg(unix)]
         let signal = status.signal();
@@ -4120,9 +4160,7 @@ impl Daemon {
             (None, Some(sig)) => format!("was killed by signal {sig}"),
             (None, None) => "terminated unexpectedly".to_string(),
         };
-        if let Some(err) =
-            Self::startup_port_error(service_name, config, started_at, pid_file)
-        {
+        if let Some(err) = Self::startup_port_error(service_name, config, started_at) {
             return err;
         }
 
@@ -4145,36 +4183,6 @@ impl Daemon {
         ProcessManagerError::Diag(Box::new(diag))
     }
 
-    /// Reports whether the listener on `port` belongs to this service's
-    /// recorded process or process group.
-    fn service_owns_port(
-        service_name: &str,
-        port: u16,
-        pid_file: &Arc<Mutex<PidFile>>,
-    ) -> Result<bool, ProcessManagerError> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (service_name, port, pid_file);
-            Ok(true)
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let Some(holder) = crate::reconcile::port_holder(port) else {
-                return Ok(false);
-            };
-            let pids = pid_file.lock()?;
-            if pids.get(service_name) == Some(holder) {
-                return Ok(true);
-            }
-            let pgid = pids.pgid_for(service_name);
-            drop(pids);
-            Ok(pgid.is_some_and(|pgid| {
-                Self::process_group_for_pid(holder) == Some(pgid as libc::pid_t)
-            }))
-        }
-    }
-
     /// Polls explicit process and state handles until one service reaches a
     /// running, completed, or failed startup state.
     fn wait_for_ready(
@@ -4186,11 +4194,6 @@ impl Daemon {
         startup_stability: Duration,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
-        let command_port = state
-            .1
-            .services
-            .get(service_name)
-            .and_then(|service| port_from_command(Some(&service.command)));
         let mut waited = Duration::ZERO;
         let mut running_since = None;
         while waited <= SERVICE_START_TIMEOUT {
@@ -4209,15 +4212,7 @@ impl Daemon {
                 ServiceProbe::Running => {
                     let started = running_since.get_or_insert_with(Instant::now);
                     if started.elapsed() >= startup_stability {
-                        let owns_port = match command_port {
-                            Some(port) => {
-                                Self::service_owns_port(service_name, port, pid_file)?
-                            }
-                            None => true,
-                        };
-                        if owns_port {
-                            return Ok(ServiceReadyState::Running);
-                        }
+                        return Ok(ServiceReadyState::Running);
                     }
 
                     thread::sleep(SERVICE_POLL_INTERVAL);
@@ -4233,7 +4228,6 @@ impl Daemon {
                         status,
                         state.1,
                         started_at,
-                        pid_file,
                     ));
                 }
                 ServiceProbe::NotStarted => {
@@ -4244,9 +4238,7 @@ impl Daemon {
             }
         }
 
-        if let Some(err) =
-            Self::startup_port_error(service_name, state.1, started_at, pid_file)
-        {
+        if let Some(err) = Self::startup_port_error(service_name, state.1, started_at) {
             return Err(err);
         }
 
@@ -4631,17 +4623,27 @@ impl Daemon {
     pub fn restart_services(&self) -> Result<(), ProcessManagerError> {
         let services: HashSet<String> = self.cfg().services.keys().cloned().collect();
         self.restart_services_subset(&services)
+            .map_err(ProcessManagerError::from)
     }
 
     /// Restarts selected services in dependency order while preserving monitoring.
     pub(crate) fn restart_services_subset(
         &self,
         services: &HashSet<String>,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<(), RestartFailure> {
         info!("Restarting all services...");
 
         let config = self.cfg();
-        let order = config.service_start_order()?;
+        // Ordering fails before anything is touched. `UnknownDependency` knows
+        // which unit is at fault, so keep that identity instead of flattening it
+        // into an unattributed failure.
+        let order = config.service_start_order().map_err(|err| match &err {
+            ProcessManagerError::UnknownDependency { service, .. } => {
+                let service = service.clone();
+                RestartFailure::attributed(err, service)
+            }
+            _ => RestartFailure::unattributed(err),
+        })?;
         self.shutdown_monitor();
         let mut restarted_services = Vec::new();
         let mut healthy_services = HashSet::new();
@@ -4812,21 +4814,34 @@ impl Daemon {
             }
         }
 
+        let mut global_error = None;
         if let Err(err) = self.spawn_monitor_thread() {
-            first_error.get_or_insert(err);
+            global_error.get_or_insert(err);
         }
+        // Verification judges units that PASSED the loop, so anything it fails is
+        // absent from `failed_services`. Fold those names in, or a unit that came
+        // up and then died would be reported as unattributable.
         if let Err(err) =
             self.verify_services_running(&restarted_services, &completed_services)
         {
-            first_error.get_or_insert(err);
-        }
-        match first_error {
-            Some(err) => Err(err),
-            None => {
-                info!("All services restarted successfully.");
-                Ok(())
+            if let ProcessManagerError::ServicesNotRunning { services } = &err {
+                failed_services.extend(services.iter().cloned());
             }
+            global_error.get_or_insert(err);
         }
+
+        if first_error.is_none() && global_error.is_none() {
+            info!("All services restarted successfully.");
+            return Ok(());
+        }
+
+        let mut failed: Vec<String> = failed_services.into_iter().collect();
+        failed.sort_unstable();
+        let cause = first_error.or(global_error).expect("checked above");
+        Err(RestartFailure {
+            cause,
+            failed_services: (!failed.is_empty()).then_some(failed),
+        })
     }
 
     /// Restarts a single service, honoring its deployment strategy.
@@ -4983,11 +4998,7 @@ impl Daemon {
                 }
                 ServiceProbe::Exited(status) if !status.success() => {
                     return Err(Self::startup_exit_error(
-                        name,
-                        status,
-                        &config,
-                        started_at,
-                        &self.pid_file,
+                        name, status, &config, started_at,
                     ));
                 }
                 ServiceProbe::Exited(_) | ServiceProbe::NotStarted => {
@@ -5599,7 +5610,6 @@ impl Daemon {
                     status,
                     &config,
                     generation_started_at,
-                    &self.pid_file,
                 ));
             }
             let progress = match total_timeout {
@@ -7253,6 +7263,7 @@ impl Daemon {
                         }
                     } else if !exit_success {
                         failed_services.push(name.clone());
+                        Self::log_port_conflict_if_evident(&ctx.config, &name);
                         let should_restart = ctx
                             .config
                             .services
@@ -7730,11 +7741,6 @@ impl Drop for Daemon {
 
 #[cfg(test)]
 mod port_in_use_tests {
-    #[cfg(target_os = "linux")]
-    use std::sync::{Arc, Mutex};
-
-    #[cfg(target_os = "linux")]
-    use super::{PidFile, occupied_command_port, occupied_foreign_command_port};
     use super::{output_indicates_port_conflict, port_from_command, port_from_output};
 
     fn lines(raw: &[&str]) -> Vec<String> {
@@ -7792,29 +7798,21 @@ mod port_in_use_tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn confirms_an_occupied_command_port() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let command = format!("python3 -m http.server {port} --bind 127.0.0.1");
+    fn a_port_in_a_command_never_gates_readiness() {
+        let outbound_only =
+            "GAMECAST_PROXY_URL=http://user:pass@proxy.example.com:10001 gamecast ingest";
+        assert!(
+            port_from_command(Some(outbound_only)).is_some(),
+            "the parser still sees a port-shaped token"
+        );
 
-        assert_eq!(occupied_command_port(Some(&command)), Some(port));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn ignores_a_service_owned_command_port() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let command = format!("server --port {port}");
-        let mut pids = PidFile::default();
-        pids.insert_in_memory("api", std::process::id());
-        let pids = Arc::new(Mutex::new(pids));
-
-        assert_eq!(
-            occupied_foreign_command_port(Some(&command), "api", &pids),
-            None
+        let tail =
+            lines(&["2026-07-25T02:21:52Z INFO ingest started provider=draftkings"]);
+        assert!(
+            !output_indicates_port_conflict(&tail),
+            "a clean log must never be read as a port conflict, so a non-listening \
+             service with a URL in its command is never failed for not owning a port"
         );
     }
 }

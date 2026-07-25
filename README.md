@@ -16,6 +16,7 @@ An agent-friendly general process composer.
 
 <div align="center">
 
+[![Live](https://img.shields.io/badge/live-sysg.dev-E0111D?style=flat-square&logo=safari&logoColor=white)](https://sysg.dev)
 [![CI](https://img.shields.io/github/actions/workflow/status/ra0x3/systemg/ci.yaml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/ra0x3/systemg/actions/workflows/ci.yaml)
 [![GitHub branch status](https://img.shields.io/github/checks-status/ra0x3/systemg/main?style=flat-square&label=checks)](https://github.com/ra0x3/systemg/actions)
 

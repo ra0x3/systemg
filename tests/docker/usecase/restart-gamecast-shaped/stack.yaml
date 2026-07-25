@@ -1,0 +1,91 @@
+version: 2
+
+project:
+  id: gamecast-prod
+  name: Gamecast Prod
+
+services:
+  # One-shot migration: exits 0, must land Done and stay Done across restarts.
+  migrations:
+    command: /bin/true
+    restart_policy: never
+
+  # Real listener with an explicit --port. The only unit that binds anything.
+  api:
+    command: python3 -m http.server 8000 --bind 127.0.0.1
+    depends_on:
+      - service: migrations
+        condition: completed
+    restart_policy: always
+
+  # Real listener whose command ALSO carries an outbound URL with a port.
+  # The outbound :9443 must never be mistaken for what this unit listens on.
+  agent:
+    command: env GAMECAST_API_URL=http://127.0.0.1:8000 GAMECAST_VENDOR_URL=https://vendor.example.com:9443 python3 -m http.server 8090 --bind 127.0.0.1
+    depends_on:
+      - service: api
+        condition: started
+    restart_policy: always
+
+  # THE PROD BUG: a non-listening worker whose command contains a proxy URL
+  # with :10001. Nothing here ever binds a port. Under the old readiness gate
+  # this burned SERVICE_START_TIMEOUT and failed a perfectly healthy unit.
+  draftkings_ingest:
+    command: env GAMECAST_PROXY_URL=http://user:pass@proxy.example.com:10001 sleep 100000
+    restart_policy: always
+
+  # Non-listener carrying a client-style upstream port, which means "connect
+  # to", not "listen on". Must not be treated as an owned port either.
+  draftkings_live_odds:
+    command: env ODDS_UPSTREAM=redis://cache.example.com:6379 sleep 100000
+    restart_policy: always
+
+  # `while true` shell wrapper — the shape that leaves shell+child processes.
+  live_sweep:
+    command: while true; do sleep 1; done
+    restart_policy: always
+
+  ingest:
+    command: while true; do sleep 1; done
+    restart_policy: always
+
+  match:
+    command: sleep 100000
+    depends_on:
+      - service: ingest
+        condition: started
+    restart_policy: always
+
+  reconcile:
+    command: sleep 100000
+    restart_policy: always
+
+  sweep:
+    command: sleep 100000
+    restart_policy: always
+
+  observability_rollup:
+    command: sleep 100000
+    restart_policy: always
+
+  # Cron-managed: restart must leave scheduling to the scheduler.
+  vacuum_full:
+    command: /bin/true
+    cron:
+      expression: "0 */59 * * * *"
+
+  # Client-style one-shots mirroring the prod `psql ...` / `redis-cli ...`
+  # units. Their commands carry connect-to ports that must never gate readiness.
+  postgres:
+    command: env PGURL=postgres://db.example.com:5432/gc /bin/true
+    restart_policy: never
+
+  redis:
+    command: env REDIS_ADDR=cache.example.com:6379 /bin/true
+    restart_policy: never
+
+  # Explicitly skipped: must stay skipped across a project-wide restart.
+  legacy_backfill:
+    command: sleep 100000
+    skip: true
+    restart_policy: always

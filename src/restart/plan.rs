@@ -162,17 +162,32 @@ pub fn recycle_failed(config: &std::path::Path, reason: impl Into<String>) -> Di
 
 /// Builds the SG0302 diagnostic for a reconcile that ran but left one or more
 /// units short of their manifest target.
-pub fn reconcile_incomplete(failed: &[String]) -> Diagnostic {
-    Diagnostic::error(
+///
+/// `failed` is `None` when the restart failed for a reason that belongs to no
+/// particular unit. The diagnostic then says so rather than naming every
+/// targeted unit, which would report healthy services as failures.
+pub fn reconcile_incomplete(
+    failed: Option<&[String]>,
+    cause: Option<&str>,
+) -> Diagnostic {
+    let note = match failed {
+        Some(failed) => format!(
+            "units that did not reach their target: {}",
+            failed.join(", ")
+        ),
+        None => "the failure could not be attributed to a specific unit".to_string(),
+    };
+    let diag = Diagnostic::error(
         SgCode::ReconcileIncomplete,
         "the restart did not bring every unit to its target state",
     )
-    .note(format!(
-        "units that did not reach their target: {}",
-        failed.join(", ")
-    ))
-    .help_cmd("see what's running", "sysg status")
-    .help_docs()
+    .note(note);
+    let diag = match cause {
+        Some(cause) => diag.note(format!("cause: {cause}")),
+        None => diag,
+    };
+    diag.help_cmd("see what's running", "sysg status")
+        .help_docs()
 }
 
 #[cfg(test)]
@@ -198,6 +213,31 @@ mod tests {
         assert!(diag.notes.iter().any(|n| n.contains("unsupervised")));
         let help = format!("{diag}");
         assert!(help.contains("sysg start --daemonize --config /x/stack.yaml"));
+    }
+
+    #[test]
+    fn sg0302_names_only_the_units_that_actually_failed() {
+        let failed = ["gamecast_draftkings_ingest".to_string()];
+        let diag = reconcile_incomplete(Some(&failed), Some("timed out"));
+        assert_eq!(diag.code, SgCode::ReconcileIncomplete);
+
+        let rendered = format!("{diag}");
+        assert!(rendered.contains("gamecast_draftkings_ingest"));
+        assert!(
+            !rendered.contains("gamecast_api"),
+            "healthy units must never be named as failures"
+        );
+        assert!(rendered.contains("timed out"));
+    }
+
+    #[test]
+    fn sg0302_says_indeterminate_rather_than_naming_every_unit() {
+        let diag = reconcile_incomplete(None, Some("monitor thread failed to spawn"));
+        assert_eq!(diag.code, SgCode::ReconcileIncomplete);
+
+        let rendered = format!("{diag}");
+        assert!(rendered.contains("could not be attributed"));
+        assert!(rendered.contains("monitor thread failed to spawn"));
     }
 
     #[test]

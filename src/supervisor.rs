@@ -1346,13 +1346,14 @@ impl Supervisor {
         let sync_result = self.sync_cron_projects();
         self.metrics_store = metrics_store;
         let workers_result = self.start_primary_workers();
-        if let Err(err) = restart_result {
-            error!("Project reconcile did not complete: {err}");
-            let failed = Self::reconcile_failures(&err, &affected);
+        if let Err(failure) = restart_result {
+            error!("Project reconcile did not complete: {}", failure.cause);
+            let failed = Self::reconcile_failures(&failure);
+            let cause = failure.cause.to_string();
             sync_result?;
             workers_result?;
             return Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(&failed),
+                crate::restart::reconcile_incomplete(failed.as_deref(), Some(&cause)),
             ))
             .into());
         }
@@ -1405,11 +1406,12 @@ impl Supervisor {
         let sync_result = self.sync_cron_projects();
         self.refresh_status_cache();
         self.respawn_status_refresher()?;
-        if let Err(err) = restart_result {
-            let failed = Self::reconcile_failures(&err, &affected);
+        if let Err(failure) = restart_result {
+            let failed = Self::reconcile_failures(&failure);
+            let cause = failure.cause.to_string();
             sync_result?;
             return Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(&failed),
+                crate::restart::reconcile_incomplete(failed.as_deref(), Some(&cause)),
             ))
             .into());
         }
@@ -1468,7 +1470,7 @@ impl Supervisor {
             Ok(())
         } else {
             Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(failed.services()),
+                crate::restart::reconcile_incomplete(Some(failed.services()), None),
             ))
             .into())
         }
@@ -1503,16 +1505,18 @@ impl Supervisor {
     /// Extracts stable failed-unit names from a reconcile error, falling back to
     /// every affected unit when the originating error carries no unit list.
     fn reconcile_failures(
-        error: &ProcessManagerError,
-        affected: &HashSet<String>,
-    ) -> Vec<String> {
-        let mut failed = match error {
-            ProcessManagerError::ServicesNotRunning { services } => services.clone(),
-            _ => affected.iter().cloned().collect(),
+        failure: &crate::daemon::RestartFailure,
+    ) -> Option<Vec<String>> {
+        let mut failed = match (&failure.failed_services, &failure.cause) {
+            (Some(services), _) => services.clone(),
+            (None, ProcessManagerError::ServicesNotRunning { services }) => {
+                services.clone()
+            }
+            (None, _) => return None,
         };
         failed.sort_unstable();
         failed.dedup();
-        failed
+        (!failed.is_empty()).then_some(failed)
     }
 
     /// Replaces an extra project with a freshly loaded runtime and starts it.
@@ -1565,7 +1569,7 @@ impl Supervisor {
                 Ok(())
             } else {
                 Err(ProcessManagerError::Diag(Box::new(
-                    crate::restart::reconcile_incomplete(failed.services()),
+                    crate::restart::reconcile_incomplete(Some(failed.services()), None),
                 ))
                 .into())
             }
@@ -1636,7 +1640,7 @@ impl Supervisor {
             Ok(())
         } else {
             Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(failed.services()),
+                crate::restart::reconcile_incomplete(Some(failed.services()), None),
             ))
             .into())
         }
@@ -4109,7 +4113,7 @@ impl Supervisor {
         self.sync_cron_projects()?;
         if !failed.is_empty() {
             return Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(failed.services()),
+                crate::restart::reconcile_incomplete(Some(failed.services()), None),
             ))
             .into());
         }
@@ -4164,7 +4168,7 @@ impl Supervisor {
             let _ = replacement.stop_services();
             self.restore_primary_project(old_config, old_metrics)?;
             return Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::reconcile_incomplete(failed.services()),
+                crate::restart::reconcile_incomplete(Some(failed.services()), None),
             ))
             .into());
         }
@@ -5072,6 +5076,35 @@ mod tests {
             OverallHealth, UnitHealth, UnitIntent, UnitKind, UnitState, UnitStatus,
         },
     };
+
+    #[test]
+    fn reconcile_failures_reports_only_real_failures() {
+        let failure = crate::daemon::RestartFailure {
+            cause: ProcessManagerError::ServiceStartError {
+                service: "gamecast_draftkings_ingest".into(),
+                source: std::io::Error::new(io::ErrorKind::TimedOut, "timed out"),
+            },
+            failed_services: Some(vec!["gamecast_draftkings_ingest".into()]),
+        };
+
+        assert_eq!(
+            Supervisor::reconcile_failures(&failure),
+            Some(vec!["gamecast_draftkings_ingest".to_string()])
+        );
+    }
+
+    #[test]
+    fn reconcile_failures_returns_none_for_unattributable_failures() {
+        let failure = crate::daemon::RestartFailure {
+            cause: ProcessManagerError::ServiceStartError {
+                service: "monitor".into(),
+                source: std::io::Error::other("monitor thread failed to spawn"),
+            },
+            failed_services: None,
+        };
+
+        assert_eq!(Supervisor::reconcile_failures(&failure), None);
+    }
 
     fn test_service(depends_on: &[&str]) -> ServiceConfig {
         ServiceConfig {
