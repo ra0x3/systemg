@@ -172,6 +172,11 @@ pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// from being mistaken for a successful launch between process probes.
 pub const SERVICE_START_STABILITY: Duration = Duration::from_millis(250);
 
+/// How far back a crash may look for its own captured output when classifying
+/// the cause. Bounded so a failure from an earlier generation never explains a
+/// later, unrelated crash.
+pub const CRASH_EVIDENCE_WINDOW: Duration = Duration::from_secs(30);
+
 /// Default maximum duration of one health-check probe.
 pub const DEFAULT_HEALTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 
