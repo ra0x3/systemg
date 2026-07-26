@@ -3246,16 +3246,22 @@ impl Supervisor {
                 verb: verb.to_string(),
                 target: project.to_string(),
                 unit: unit.map(str::to_string),
+                project: Some(project.to_string()),
+                service: unit.map(str::to_string),
             },
             (None, Some(service)) => OpParts {
                 verb: verb.to_string(),
                 target: service.to_string(),
                 unit: None,
+                project: None,
+                service: Some(service.to_string()),
             },
             (None, None) => OpParts {
                 verb: verb.to_string(),
                 target: "all services".to_string(),
                 unit: None,
+                project: None,
+                service: None,
             },
         }
     }
