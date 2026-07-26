@@ -102,6 +102,34 @@ struct Op {
     /// appended to whatever unrelated command happened to be in the slot — the
     /// caller then read a wait belonging to a project it never named.
     owner: Option<String>,
+    /// Project this operation targets, when the command named one.
+    ///
+    /// Ownership used to be inferred by searching `label` for the project ID,
+    /// which both dropped every detail when the label had no project in it
+    /// (`restart -s svc`) and matched the wrong operation whenever one id was a
+    /// substring of another. Recording the id up front makes the test exact.
+    project: Option<String>,
+    /// Service this operation targets, when the command named a bare service.
+    service: Option<String>,
+}
+
+impl Op {
+    /// Decides whether a detail written by project `owner` belongs to this
+    /// operation.
+    ///
+    /// Prefers the recorded project id, matched exactly. When the command named
+    /// a bare service instead (`restart -s svc`), the detail is claimed by the
+    /// project reporting that same service — previously such details were
+    /// dropped outright, so the wait never reached the caller. Operations that
+    /// recorded neither predate the structured fields and accept anything, as
+    /// they did before.
+    fn accepts(&self, owner: &str, unit: Option<&str>) -> bool {
+        match (self.project.as_deref(), self.service.as_deref()) {
+            (Some(project), _) => project == owner,
+            (None, Some(service)) => unit.is_none_or(|unit| unit == service),
+            (None, None) => self.label.contains(owner),
+        }
+    }
 }
 
 /// The pieces of a mutation label, kept apart so the CLI can nest them instead
@@ -114,6 +142,10 @@ pub struct OpParts {
     pub target: String,
     /// Service nested under `target`, when a project owns the head line.
     pub unit: Option<String>,
+    /// Project the command named, used to match details exactly.
+    pub project: Option<String>,
+    /// Service the command named, when it named no project.
+    pub service: Option<String>,
 }
 
 /// Shared slot holding the supervisor's current operation, if any.
@@ -153,6 +185,8 @@ impl OpSlot {
         if let Ok(mut guard) = self.inner.lock()
             && guard.as_ref().is_none_or(|op| op.id < id)
         {
+            let project = parts.as_ref().and_then(|parts| parts.project.clone());
+            let service = parts.as_ref().and_then(|parts| parts.service.clone());
             *guard = Some(Op {
                 id,
                 label: label.into(),
@@ -161,6 +195,8 @@ impl OpSlot {
                 wait: None,
                 started_at: SystemTime::now(),
                 owner: None,
+                project,
+                service,
             });
         }
         id
@@ -200,7 +236,7 @@ impl OpSlot {
     pub fn detail_for(&self, owner: &str, detail: impl Into<String>) {
         if let Ok(mut guard) = self.inner.lock()
             && let Some(op) = guard.as_mut()
-            && op.label.contains(owner)
+            && op.accepts(owner, None)
         {
             op.detail = Some(detail.into());
             op.owner = Some(owner.to_string());
@@ -219,7 +255,7 @@ impl OpSlot {
     ) {
         if let Ok(mut guard) = self.inner.lock()
             && let Some(op) = guard.as_mut()
-            && op.label.contains(owner)
+            && op.accepts(owner, Some(unit))
         {
             op.detail = Some(detail.into());
             op.wait = Some(wait.into());
@@ -270,6 +306,28 @@ impl OpSlot {
 mod tests {
     use super::*;
 
+    /// Parts for a command that named a project, optionally with one service.
+    fn project_parts(project: &str, unit: Option<&str>) -> OpParts {
+        OpParts {
+            verb: "restarting".into(),
+            target: project.into(),
+            unit: unit.map(str::to_string),
+            project: Some(project.into()),
+            service: unit.map(str::to_string),
+        }
+    }
+
+    /// Parts for a command that named a bare service and no project.
+    fn service_parts(service: &str) -> OpParts {
+        OpParts {
+            verb: "restarting".into(),
+            target: service.into(),
+            unit: None,
+            project: None,
+            service: Some(service.into()),
+        }
+    }
+
     #[test]
     fn empty_slot_reports_nothing() {
         assert!(OpSlot::new().report().is_none());
@@ -309,11 +367,7 @@ mod tests {
         let slot = OpSlot::new();
         slot.begin_parts(
             "restarting 'gamecast__dev' in project 'arbitration-dev'",
-            Some(OpParts {
-                verb: "restarting".into(),
-                target: "arbitration-dev".into(),
-                unit: None,
-            }),
+            Some(project_parts("arbitration-dev", Some("gamecast__dev"))),
         );
         slot.detail_for_unit(
             "arbitration-dev",
@@ -337,11 +391,7 @@ mod tests {
         let slot = OpSlot::new();
         slot.begin_parts(
             "restarting 'gamecast__dev'",
-            Some(OpParts {
-                verb: "restarting".into(),
-                target: "gamecast__dev".into(),
-                unit: None,
-            }),
+            Some(service_parts("gamecast__dev")),
         );
         slot.detail_for_unit(
             "gamecast__dev",
@@ -365,11 +415,7 @@ mod tests {
         let slot = OpSlot::new();
         slot.begin_parts(
             "restarting all services in project 'arbitration-dev'",
-            Some(OpParts {
-                verb: "restarting".into(),
-                target: "arbitration-dev".into(),
-                unit: None,
-            }),
+            Some(project_parts("arbitration-dev", None)),
         );
 
         slot.detail_for_unit("arbitration-dev", "migrations", "d", "waiting on 'db'");
@@ -388,6 +434,60 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_service_command_still_receives_its_wait() {
+        let slot = OpSlot::new();
+        slot.begin_parts(
+            "restarting 'gamecast__dev'",
+            Some(service_parts("gamecast__dev")),
+        );
+        slot.detail_for_unit(
+            "arbitration-dev",
+            "gamecast__dev",
+            "health check for 'gamecast__dev' (attempt 2, 3s/60s)",
+            "health check (attempt 2, 3s/60s)",
+        );
+
+        let report = slot.report().expect("report");
+        assert_eq!(
+            report.wait.as_deref(),
+            Some("health check (attempt 2, 3s/60s)"),
+            "a label without the project id must not drop the detail"
+        );
+    }
+
+    #[test]
+    fn a_project_id_that_is_a_substring_of_another_is_not_claimed() {
+        let slot = OpSlot::new();
+        slot.begin_parts(
+            "restarting all services in project 'dev'",
+            Some(project_parts("dev", None)),
+        );
+        slot.detail_for_unit("arbitration-dev", "gamecast__dev", "d", "health check");
+
+        let report = slot.report().expect("report");
+        assert_eq!(
+            report.wait, None,
+            "'arbitration-dev' must not claim project 'dev' by substring"
+        );
+    }
+
+    #[test]
+    fn a_foreign_service_cannot_claim_a_bare_service_command() {
+        let slot = OpSlot::new();
+        slot.begin_parts(
+            "restarting 'gamecast__dev'",
+            Some(service_parts("gamecast__dev")),
+        );
+        slot.detail_for_unit("arbitration-dev", "migrations", "d", "waiting on 'db'");
+
+        let report = slot.report().expect("report");
+        assert_eq!(
+            report.wait, None,
+            "another service's wait must not attach to this command"
+        );
+    }
+
+    #[test]
     fn lines_fall_back_when_the_supervisor_sent_no_parts() {
         let slot = OpSlot::new();
         slot.begin("restarting 'alpha' in project 'beta'");
@@ -403,11 +503,7 @@ mod tests {
         let slot = OpSlot::new();
         slot.begin_parts(
             "restarting 'gamecast__dev' in project 'arbitration-dev'",
-            Some(OpParts {
-                verb: "restarting".into(),
-                target: "arbitration-dev".into(),
-                unit: None,
-            }),
+            Some(project_parts("arbitration-dev", Some("gamecast__dev"))),
         );
         slot.detail_for_unit(
             "arbitration-dev",
