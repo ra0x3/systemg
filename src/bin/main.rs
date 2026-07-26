@@ -454,9 +454,76 @@ fn terminal_width() -> usize {
     probed.or_else(from_env).unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
+/// Truncates one row to the visible width, matching the single-line rule that
+/// a wrapped row strands its remainder and breaks in-place repainting.
+fn fit_progress_row(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    text.chars()
+        .take(width.saturating_sub(1))
+        .chain(std::iter::once('…'))
+        .collect()
+}
+
+/// Renders a nested progress frame as an IN-PLACE update spanning several rows.
+///
+/// Unlike the full-screen renderers, the spinner draws inline above live
+/// scrollback, so it cannot home the cursor. Each repaint instead walks back up
+/// `previous_rows - 1` rows and clears as it redraws.
+///
+/// Returns the sequence alongside the number of rows the cursor ends up on. A
+/// frame that shrinks still has to clear the taller frame's leftover rows, which
+/// walks the cursor *past* its own last row — reporting the requested row count
+/// there would leave the next frame repainting partway down the block.
+fn format_progress_spinner_rows(
+    frame: &str,
+    rows: &[String],
+    previous_rows: usize,
+) -> (String, usize) {
+    let width = terminal_width();
+    let mut out = String::new();
+    if previous_rows > 1 {
+        out.push_str(&format!("\x1B[{}A", previous_rows - 1));
+    }
+
+    let painted = rows.len().max(previous_rows);
+    for index in 0..painted {
+        if index > 0 {
+            out.push_str("\r\n");
+        }
+        match (index, rows.get(index)) {
+            (0, Some(head)) => {
+                out.push_str("\x1B[2K");
+                out.push_str(&format_progress_spinner_frame(frame, head));
+            }
+            (_, Some(row)) => {
+                out.push_str("\x1B[2K");
+                out.push_str(&fit_progress_row(row, width.saturating_sub(1)));
+            }
+            (_, None) => out.push_str("\x1B[2K"),
+        }
+    }
+    (out, painted)
+}
+
 /// Returns the terminal sequence that clears the active progress row.
 fn clear_progress_spinner_line() -> &'static str {
     "\r\x1B[2K\r"
+}
+
+/// Clears every row a multi-row progress frame drew, walking back up to the
+/// first so no nested row is left stranded on screen.
+fn clear_progress_spinner_rows(rows: usize) -> String {
+    if rows <= 1 {
+        return clear_progress_spinner_line().to_string();
+    }
+    let mut out = String::from("\r\x1B[2K");
+    for _ in 1..rows {
+        out.push_str("\x1B[A\x1B[2K");
+    }
+    out.push('\r');
+    out
 }
 
 /// Runs `operation` while rendering a delayed progress spinner on a terminal.
@@ -484,32 +551,37 @@ where
 
                 let mut stderr = io::stderr().lock();
                 let mut frame_idx = 0usize;
-                let mut op_label: Option<String> = None;
+                let mut op_rows: Option<Vec<String>> = None;
                 let mut ticks_since_probe = 0usize;
+                let mut drawn_rows = 1usize;
                 loop {
                     if spinner_stop.load(Ordering::Relaxed) {
-                        let _ = write!(stderr, "{}", clear_progress_spinner_line());
+                        let _ =
+                            write!(stderr, "{}", clear_progress_spinner_rows(drawn_rows));
                         let _ = stderr.flush();
                         return;
                     }
 
                     if ticks_since_probe == 0 {
-                        op_label = ipc::current_op().map(|op| op.describe());
+                        op_rows = ipc::current_op().map(|op| {
+                            op.lines("").unwrap_or_else(|| {
+                                vec![format!("{label}: {}", op.describe())]
+                            })
+                        });
                     }
                     ticks_since_probe = (ticks_since_probe + 1) % BUSY_PROBE_EVERY_TICKS;
 
-                    let shown = match &op_label {
-                        Some(detail) => format!("{label}: {detail}"),
-                        None => label.to_string(),
+                    let rows = match &op_rows {
+                        Some(rows) => rows.clone(),
+                        None => vec![label.to_string()],
                     };
                     let frame =
                         FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
-                    let _ = write!(
-                        stderr,
-                        "{}",
-                        format_progress_spinner_frame(frame, &shown)
-                    );
+                    let (painted, cursor_rows) =
+                        format_progress_spinner_rows(frame, &rows, drawn_rows);
+                    let _ = write!(stderr, "{painted}");
                     let _ = stderr.flush();
+                    drawn_rows = cursor_rows;
                     frame_idx += 1;
                     thread::sleep(FETCH_SPINNER_TICK);
                 }
@@ -3427,6 +3499,53 @@ mod tests {
         assert_eq!(
             format_progress_spinner_frame("⠸", "Restarting"),
             "\r⠸ Restarting\x1B[K"
+        );
+    }
+
+    #[test]
+    fn progress_spinner_rows_nest_under_the_head_line() {
+        let rows = vec![
+            "Restarting 'arbitration-dev' (6s)".to_string(),
+            "    gamecast__dev".to_string(),
+            "        health check (attempt 3, 4s/60s)".to_string(),
+        ];
+        let (painted, cursor_rows) = format_progress_spinner_rows("⠸", &rows, 1);
+        assert_eq!(
+            painted,
+            "\x1B[2K\r⠸ Restarting 'arbitration-dev' (6s)\x1B[K\
+             \r\n\x1B[2K    gamecast__dev\
+             \r\n\x1B[2K        health check (attempt 3, 4s/60s)"
+        );
+        assert_eq!(cursor_rows, 3);
+    }
+
+    #[test]
+    fn progress_spinner_rows_walk_back_over_the_previous_frame() {
+        let rows = vec!["Restarting 'alpha' (1s)".to_string()];
+        let (painted, cursor_rows) = format_progress_spinner_rows("⠋", &rows, 3);
+
+        assert!(
+            painted.starts_with("\x1B[2A"),
+            "must rewind to the head row"
+        );
+        assert_eq!(
+            painted.matches("\x1B[2K").count(),
+            3,
+            "must clear the rows the taller previous frame left behind"
+        );
+        assert_eq!(
+            cursor_rows, 3,
+            "clearing the taller frame walks the cursor down to row 3, so the \
+             next frame must rewind from there rather than from row 1"
+        );
+    }
+
+    #[test]
+    fn clearing_multi_row_progress_wipes_every_row() {
+        assert_eq!(clear_progress_spinner_rows(1), "\r\x1B[2K\r");
+        assert_eq!(
+            clear_progress_spinner_rows(3),
+            "\r\x1B[2K\x1B[A\x1B[2K\x1B[A\x1B[2K\r"
         );
     }
 
