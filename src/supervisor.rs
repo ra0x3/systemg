@@ -38,7 +38,7 @@ use crate::{
         spawn_dynamic_child_log_writer, write_log_section_header,
     },
     metrics::{self, MetricSample, MetricsCollector, MetricsHandle},
-    opslot::OpSlot,
+    opslot::{OpParts, OpSlot},
     runtime,
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
     start::{self, BootFrame, BootJournal},
@@ -3156,8 +3156,13 @@ impl Supervisor {
             }
             let should_shutdown = matches!(command, ControlCommand::Shutdown);
             let owns_slot = !matches!(command, ControlCommand::AddProject { .. });
-            let _op =
-                owns_slot.then(|| self.op_slot.guard(Self::mutation_label(&command)));
+            let _op = owns_slot.then(|| {
+                let label = Self::mutation_label(&command);
+                match Self::mutation_parts(&command) {
+                    Some(parts) => self.op_slot.guard_parts(label, parts),
+                    None => self.op_slot.guard(label),
+                }
+            });
             let response = match self.handle_command(command) {
                 Ok(response) => response,
                 Err(err) => {
@@ -3209,6 +3214,49 @@ impl Supervisor {
         match project {
             Some(project) => format!("{verb} {subject} in project '{project}'"),
             None => format!("{verb} {subject}"),
+        }
+    }
+
+    /// Structured form of [`Self::mutation_label`], letting the CLI nest the
+    /// operation instead of printing one long prose line.
+    fn mutation_parts(command: &ControlCommand) -> Option<OpParts> {
+        let (verb, service, project) = match command {
+            ControlCommand::Start { service, project } => {
+                ("starting", service.as_deref(), project.as_deref())
+            }
+            ControlCommand::Stop { service, project } => {
+                ("stopping", service.as_deref(), project.as_deref())
+            }
+            ControlCommand::Restart {
+                service, project, ..
+            } => ("restarting", service.as_deref(), project.as_deref()),
+            ControlCommand::StopProject { project } => {
+                ("stopping", None, Some(project.as_str()))
+            }
+            _ => return None,
+        };
+        Some(Self::target_parts(verb, service, project))
+    }
+
+    /// Splits a target into head line and nested unit: the project owns the head
+    /// line when one is named, and the service nests beneath it.
+    fn target_parts(verb: &str, service: Option<&str>, project: Option<&str>) -> OpParts {
+        match (project, service) {
+            (Some(project), unit) => OpParts {
+                verb: verb.to_string(),
+                target: project.to_string(),
+                unit: unit.map(str::to_string),
+            },
+            (None, Some(service)) => OpParts {
+                verb: verb.to_string(),
+                target: service.to_string(),
+                unit: None,
+            },
+            (None, None) => OpParts {
+                verb: verb.to_string(),
+                target: "all services".to_string(),
+                unit: None,
+            },
         }
     }
 

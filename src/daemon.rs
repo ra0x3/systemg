@@ -3648,9 +3648,11 @@ impl Daemon {
                 );
             } else {
                 info!("Running pre-start command for '{name}': {pre_start}");
-                self.op_slot.detail_for(
+                self.op_slot.detail_for_unit(
                     &self.cfg().project.id.clone(),
+                    name,
                     format!("running pre-start for '{name}'"),
+                    "running pre-start",
                 );
                 self.run_pre_start_command(name, pre_start)?;
             }
@@ -4263,9 +4265,11 @@ impl Daemon {
     ) -> Result<(), ProcessManagerError> {
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
         info!("Waiting for dependency '{dep}' of '{service_name}' to complete");
-        self.op_slot.detail_for(
+        self.op_slot.detail_for_unit(
             &self.cfg().project.id.clone(),
+            service_name,
             format!("waiting on dependency '{dep}' of '{service_name}'"),
+            format!("waiting on dependency '{dep}'"),
         );
 
         loop {
@@ -5620,9 +5624,11 @@ impl Daemon {
                 ),
                 None => format!("attempt {attempt}/{retries}"),
             };
-            self.op_slot.detail_for(
+            self.op_slot.detail_for_unit(
                 &self.cfg().project.id.clone(),
+                service_name,
                 format!("health check for '{service_name}' ({progress})"),
+                format!("health check ({progress})"),
             );
             match self.perform_configured_health_check(
                 service_name,
