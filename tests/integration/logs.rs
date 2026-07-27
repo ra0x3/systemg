@@ -57,12 +57,19 @@ services:
     )
     .expect("write config");
 
-    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "arb_rs", "stdout");
-    let stderr_path = resolve_log_path(LOOSE_PROJECT_ID, "arb_rs", "stderr");
+    // A project-less config is its own project, keyed by a slug derived from its
+    // path — logs and state both live under that id, not a shared `__loose__`.
+    let config =
+        load_config(Some(config_path.to_string_lossy().as_ref())).expect("load config");
+    let project = config.project.id.clone();
+
+    let stdout_path = resolve_log_path(&project, "arb_rs", "stdout");
+    let stderr_path = resolve_log_path(&project, "arb_rs", "stderr");
     write_log(&stdout_path, "streamed stdout line\n");
     write_log(&stderr_path, "");
 
-    let mut pid_file = PidFile::load(StateStore::loose()).expect("load pid file");
+    let mut pid_file =
+        PidFile::load(StateStore::for_project(&project)).expect("load pid file");
     pid_file.insert("arb_rs", 999_999).expect("insert pid");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
@@ -117,8 +124,8 @@ services:
         .expect("start quiet service");
     thread::sleep(Duration::from_millis(300));
 
-    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "quiet", "stdout");
-    let stderr_path = resolve_log_path(LOOSE_PROJECT_ID, "quiet", "stderr");
+    let stdout_path = resolve_log_path(&config.project.id, "quiet", "stdout");
+    let stderr_path = resolve_log_path(&config.project.id, "quiet", "stderr");
     assert!(
         !stdout_path.exists(),
         "stdout log should not be created when logs.sink is none"
@@ -177,7 +184,7 @@ services:
     let mut pid_file = PidFile::load(store).expect("load pid file");
     let _ = pid_file.remove("demo");
 
-    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stdout");
+    let stdout_path = resolve_log_path(&config.project.id, "demo", "stdout");
     write_log(&stdout_path, "snapshot log line\n");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sysg"));
@@ -243,7 +250,7 @@ services:
         )
         .expect("persist state");
 
-    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stdout");
+    let stdout_path = resolve_log_path(&config.project.id, "demo", "stdout");
     write_log(
         &stdout_path,
         "first log line\nsecond log line\nthird log line\nfourth log line\n",
@@ -324,9 +331,9 @@ services:
         )
         .expect("persist state");
 
-    let combined_path = get_service_log_path(LOOSE_PROJECT_ID, "demo");
-    let stdout_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stdout");
-    let stderr_path = resolve_log_path(LOOSE_PROJECT_ID, "demo", "stderr");
+    let combined_path = get_service_log_path(&config.project.id, "demo");
+    let stdout_path = resolve_log_path(&config.project.id, "demo", "stdout");
+    let stderr_path = resolve_log_path(&config.project.id, "demo", "stderr");
     write_log(
         &combined_path,
         "2026-05-14T02:00:00.000000Z stdout first\n\
