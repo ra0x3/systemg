@@ -77,6 +77,27 @@ pub fn loose_service_not_found(service: &str) -> Diagnostic {
     .help_docs()
 }
 
+/// Builds the SG0006 diagnostic for a service name several projects declare.
+///
+/// Only raised where acting on the wrong guess would be destructive — a purge
+/// cannot be undone, so an ambiguous target is refused rather than resolved by
+/// picking whichever project was found first.
+pub fn ambiguous_service(service: &str, projects: &[String]) -> Diagnostic {
+    let mut diag = Diagnostic::error(
+        SgCode::TargetScopeAmbiguous,
+        format!("service `{service}` exists in {} projects", projects.len()),
+    )
+    .note(format!("declared by: {}", projects.join(", ")))
+    .note("nothing was purged; name the project to choose one");
+    if let Some(first) = projects.first() {
+        diag = diag.help_cmd(
+            "purge one project's copy",
+            format!("sysg logs --purge -s {service} -p {first}"),
+        );
+    }
+    diag.help_docs()
+}
+
 /// Builds the SG0204 diagnostic for an unsupported `--format` value.
 pub fn unsupported_format(format: &str) -> Diagnostic {
     Diagnostic::error(

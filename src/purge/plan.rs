@@ -130,6 +130,19 @@ pub fn project_not_found(project: &str) -> Diagnostic {
     .help_docs()
 }
 
+/// Builds the SG0404 diagnostic for a purge target that does not name exactly one
+/// project directory. An empty id resolves to the projects root and a traversing
+/// or absolute id escapes it, so either would delete far more than was named.
+pub fn target_invalid(project: &str) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::PurgeTargetInvalid,
+        format!("'{project}' does not name a single project"),
+    )
+    .note("nothing was deleted; a project id is one path segment")
+    .help_cmd("list what has state", "sysg status")
+    .help_docs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -86,3 +86,11 @@ path = "tests/integration/supervisor.rs"
 [[test]]
 name = "cli"
 path = "tests/integration/cli.rs"
+
+[[test]]
+name = "migrate_state"
+path = "tests/integration/migrate_state.rs"
+
+[[test]]
+name = "loose_projects"
+path = "tests/integration/loose_projects.rs"

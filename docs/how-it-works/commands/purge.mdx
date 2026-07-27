@@ -85,6 +85,11 @@ Purged state for project 'arbitration'
 A `-p` naming a project with no state on disk refuses with
 [`SG0403`](/how-it-works/dialog/codes#sg0403) and deletes nothing.
 
+A project id is one path segment. A `-p` that is empty, traversing, or absolute
+refuses with [`SG0404`](/how-it-works/dialog/codes#sg0404); a `-c` purge resolves
+every project the config declares before deleting any, so one bad target refuses
+the whole purge rather than leaving it half-done.
+
 ### Force a purge while services are running
 
 ```sh
@@ -99,4 +104,4 @@ supervisor, kills its services, and removes the state.
 
 - [`stop`](/how-it-works/commands/stop) - Stop services without removing state
 - [`start`](/how-it-works/commands/start) - Start fresh after purging
-- [Diagnostics](/how-it-works/dialog) - [`SG0401`](/how-it-works/dialog/codes#sg0401), [`SG0402`](/how-it-works/dialog/codes#sg0402), [`SG0403`](/how-it-works/dialog/codes#sg0403)
+- [Diagnostics](/how-it-works/dialog) - [`SG0401`](/how-it-works/dialog/codes#sg0401), [`SG0402`](/how-it-works/dialog/codes#sg0402), [`SG0403`](/how-it-works/dialog/codes#sg0403), [`SG0404`](/how-it-works/dialog/codes#sg0404)

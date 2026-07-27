@@ -212,6 +212,17 @@ pub enum ControlCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
+    /// Report which projects declare a service, straight from the supervisor's
+    /// loaded configs.
+    ///
+    /// Distinct from a status snapshot: that is a periodically-rebuilt cache
+    /// which drops a project whose state was momentarily unreadable, so it
+    /// cannot answer "is this service declared". This reads the loaded manifests
+    /// themselves, which is the only authoritative source for the question.
+    DeclaringProjects {
+        /// Bare service name to look up.
+        service: String,
+    },
     /// Report the version of the resident supervisor binary.
     Version,
     /// Replace the resident supervisor binary without restarting its workloads.
@@ -253,6 +264,8 @@ pub enum ControlResponse {
     Error(String),
     /// Command failed with a structured diagnostic the client renders.
     Diag(Box<crate::diag::Diagnostic>),
+    /// Project ids answering a lookup, in the supervisor's own order.
+    Projects(Vec<String>),
     /// Current status snapshot payload.
     Status(StatusSnapshot),
     /// Inspect payload including recent samples.

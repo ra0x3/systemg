@@ -77,6 +77,12 @@ pub mod runtime;
 /// Per-project on-disk state layout.
 pub mod state_store;
 
+/// Durable record of the loose manifests a supervisor is managing.
+pub mod loose_registry;
+
+/// Offline migration of legacy `__loose__` state into per-manifest projects.
+pub mod migrate_state;
+
 /// Indented XML serialization shared by state and command output.
 pub mod xml;
 

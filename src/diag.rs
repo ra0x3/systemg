@@ -137,6 +137,9 @@ pub enum SgCode {
     PurgeIncomplete,
     /// SG0403 — a scoped purge named a project that has no state on disk.
     PurgeProjectNotFound,
+    /// SG0404 — a purge target did not name a single project directory, so it
+    /// was refused before anything was deleted.
+    PurgeTargetInvalid,
     /// SG0501 — the proposed live-upgrade binary is missing, malformed, or
     /// unsafe for the supervisor to execute.
     UpgradeTargetInvalid,
@@ -152,6 +155,19 @@ pub enum SgCode {
     /// SG0505 — the replacement supervisor could not restore the handed-off
     /// runtime and returned control to the previous binary.
     UpgradeResumeFailed,
+    /// SG0601 — legacy `__loose__` state is present and must be migrated before
+    /// the loose manifests that own it can be managed separately.
+    MigrationRequired,
+    /// SG0602 — a state migration was refused because a supervisor is live.
+    MigrationSupervisorActive,
+    /// SG0603 — legacy state could not be attributed to a single manifest, so it
+    /// was archived rather than assigned.
+    MigrationAmbiguous,
+    /// SG0604 — a previous state migration did not finish; the layout is part
+    /// legacy and part migrated until it is resumed.
+    MigrationIncomplete,
+    /// SG0605 — a migrated artifact did not match its recorded checksum.
+    MigrationVerificationFailed,
 }
 
 impl SgCode {
@@ -201,11 +217,17 @@ impl SgCode {
             SgCode::PurgeSupervisorActive => "SG0401",
             SgCode::PurgeIncomplete => "SG0402",
             SgCode::PurgeProjectNotFound => "SG0403",
+            SgCode::PurgeTargetInvalid => "SG0404",
             SgCode::UpgradeTargetInvalid => "SG0501",
             SgCode::UpgradeIncompatible => "SG0502",
             SgCode::UpgradeEnvironmentUnsafe => "SG0503",
             SgCode::UpgradeHandoffFailed => "SG0504",
             SgCode::UpgradeResumeFailed => "SG0505",
+            SgCode::MigrationRequired => "SG0601",
+            SgCode::MigrationSupervisorActive => "SG0602",
+            SgCode::MigrationAmbiguous => "SG0603",
+            SgCode::MigrationIncomplete => "SG0604",
+            SgCode::MigrationVerificationFailed => "SG0605",
         }
     }
 
