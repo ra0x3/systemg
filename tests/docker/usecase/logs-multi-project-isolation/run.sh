@@ -11,7 +11,8 @@
 # HARD INVARIANTS
 #   - two projects (alpha, beta) each declare a service `web`,
 #   - `logs -p alpha` shows ONLY ALPHA_LINE, never BETA_LINE (and vice versa),
-#   - a loose service reads __loose__; `logs -s <missing>` (no -p) is SG0021,
+#   - a loose service reads its own derived project; `logs -s <missing>` (no -p)
+#     is SG0021,
 #   - bare `logs` is refused SG0019; `logs --supervisor -s x` is SG0020,
 #   - `logs --supervisor` shows the supervisor log.
 set -u
@@ -42,10 +43,21 @@ check "$?" "logs -p beta does NOT contain ALPHA_LINE (isolation)"
 
 section "on-disk: separate per-project log dirs"
 LOGDIR="$HOME/.local/share/systemg/logs"
-[ -d "$LOGDIR/alpha" ] && [ -d "$LOGDIR/beta" ] && [ -d "$LOGDIR/__loose__" ]
-check "$?" "logs/{alpha,beta,__loose__} dirs exist"
+[ -d "$LOGDIR/alpha" ] && [ -d "$LOGDIR/beta" ]
+check "$?" "logs/{alpha,beta} dirs exist"
+# The loose config is its own project now, under a path-derived id, so its logs
+# land there rather than in a shared __loose__ bundle.
+LOOSE_STATUS="$(sysg status --format json 2>/dev/null)"
+LOOSE_PROJECT="$(unit_field "$LOOSE_STATUS" loosesvc project)"
+echo "loosesvc project: $LOOSE_PROJECT"
+[ "$LOOSE_PROJECT" != "__loose__" ] && [ "$LOOSE_PROJECT" != "absent" ]
+check "$?" "loosesvc carries a derived project id"
+[ -d "$LOGDIR/$LOOSE_PROJECT" ]
+check "$?" "logs/$LOOSE_PROJECT dir exists"
+[ ! -d "$LOGDIR/__loose__" ]
+check "$?" "no logs/__loose__ dir is created"
 
-section "loose service reads __loose__; a loose miss is SG0021"
+section "loose service reads its own project; a loose miss is SG0021"
 sysg logs --config /usecase/loose.yaml -s loosesvc --no-follow 2>/dev/null | grep -q "LOOSE_LINE"
 check "$?" "logs -s loosesvc reads the loose bundle"
 sysg logs --config /usecase/loose.yaml -s ghostsvc >/tmp/g.err 2>&1

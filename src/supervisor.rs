@@ -993,27 +993,87 @@ impl Supervisor {
     /// supervisor: truncates the on-disk files AND drops the in-memory live-log
     /// buffer the log reader serves from. Doing this CLI-side would leave the
     /// buffer intact, so the reader would keep replaying "cleared" lines.
+    /// The single project declaring `service`, if exactly one does.
+    ///
+    /// Returns `None` when several projects declare the name: picking one would
+    /// silently act on a project the user never named, which is how an unscoped
+    /// clear came to wipe the wrong logs. The caller decides what an unresolved
+    /// name means for its command.
+    fn project_declaring_service(&self, service: &str) -> Option<String> {
+        match self.projects_declaring_service(service).as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
+    }
+
+    /// Every project declaring `service`, primary first.
+    fn projects_declaring_service(&self, service: &str) -> Vec<String> {
+        let mut owners = Vec::new();
+
+        let primary = self.daemon.config();
+        if primary.services.contains_key(service) {
+            owners.push(primary.project.id.clone());
+        }
+        for project in self.extra_projects.values() {
+            let config = project.daemon.config();
+            if config.services.contains_key(service) {
+                owners.push(config.project.id.clone());
+            }
+        }
+
+        owners
+    }
+
     fn clear_logs(
         &self,
         service: Option<&str>,
-        _project: Option<&str>,
+        project_filter: Option<&str>,
     ) -> Result<(), SupervisorError> {
         let manager = LogManager::new();
         let mut targets: Vec<(String, String)> = Vec::new();
         match service {
             Some(name) => {
-                let project = _project
-                    .map(str::to_string)
-                    .unwrap_or_else(|| self.daemon.config().project.id.clone());
+                // An unscoped clear must find the project that actually declares
+                // the service. Defaulting to the primary silently cleared the
+                // wrong project's logs — and reported success — for any service
+                // living in one of the others.
+                let project = match project_filter {
+                    Some(project) => project.to_string(),
+                    None => match self.project_declaring_service(name) {
+                        Some(project) => project,
+                        // Several projects declare this name, or none does.
+                        // Falling back to the primary would destroy logs the
+                        // request never named; make the caller disambiguate.
+                        None => {
+                            let owners = self.projects_declaring_service(name);
+                            let diag = if owners.is_empty() {
+                                crate::stop::service_not_found(name)
+                            } else {
+                                crate::logs_cmd::ambiguous_service(name, &owners)
+                            };
+                            return Err(ProcessManagerError::Diag(Box::new(diag)).into());
+                        }
+                    },
+                };
                 targets.push((project, name.to_string()));
             }
             None => {
+                // A `-p` here scopes the clear to that project. Ignoring it
+                // wiped every project's logs on a request that named one — the
+                // same cross-project reach the loose rebuild exists to end.
+                let wanted = |id: &str| project_filter.is_none_or(|want| want == id);
+
                 let primary = self.daemon.config();
-                for name in primary.services.keys() {
-                    targets.push((primary.project.id.clone(), name.clone()));
+                if wanted(&primary.project.id) {
+                    for name in primary.services.keys() {
+                        targets.push((primary.project.id.clone(), name.clone()));
+                    }
                 }
                 for project in self.extra_projects.values() {
                     let config = project.daemon.config();
+                    if !wanted(&config.project.id) {
+                        continue;
+                    }
                     for name in config.services.keys() {
                         targets.push((config.project.id.clone(), name.clone()));
                     }
@@ -1667,6 +1727,29 @@ impl Supervisor {
         service_filter: Option<String>,
         primary_project_mode: ProjectRunMode,
     ) -> Result<Self, SupervisorError> {
+        // Refuse to boot over a migration that stopped partway: the layout would
+        // be part legacy and part migrated, and reading it would mean adopting
+        // some services under their old identity and some under their new one.
+        // A journal that cannot be read is treated the same way — it exists to
+        // describe data movement, so being unable to tell whether one is in
+        // flight is itself a reason not to start.
+        match crate::migrate_state::pending_journal(&runtime::state_dir()) {
+            Ok(Some(journal)) => {
+                return Err(io::Error::other(format!(
+                    "a state migration stopped after the {:?} phase; run `sysg migrate-state` to finish it",
+                    journal.phase
+                ))
+                .into());
+            }
+            Err(err) => {
+                return Err(io::Error::other(format!(
+                    "the state migration journal could not be read ({err}); resolve it before starting"
+                ))
+                .into());
+            }
+            Ok(None) => {}
+        }
+
         let config_path = if config_path.is_absolute() {
             config_path
         } else {
@@ -1975,6 +2058,8 @@ impl Supervisor {
             }
         }
 
+        self.boot_registered_loose_projects();
+
         let (started, failed) = self.boot_journal.snapshot().iter().fold(
             (0usize, 0usize),
             |(up, down), frame| match frame {
@@ -1986,6 +2071,95 @@ impl Supervisor {
         self.boot_journal.push(BootFrame::Done { started, failed });
 
         Ok(())
+    }
+
+    /// Registers and synchronously starts one additional project from a
+    /// multi-project manifest during boot. Unlike the live AddProject path this
+    /// Re-registers every loose manifest recorded in the loose registry.
+    ///
+    /// A loose manifest is its own project, keyed by its path, and `config_hint`
+    /// holds exactly one path — so without this a cold boot would restore only
+    /// whichever loose config was started last and silently drop the rest. The
+    /// registry is the durable set; boot replays it.
+    ///
+    /// Failures are logged and skipped rather than propagated: one loose
+    /// manifest that has been deleted or gone invalid since it was registered
+    /// must not take down the boot of every other project.
+    fn boot_registered_loose_projects(&mut self) {
+        let registry = match crate::loose_registry::LooseRegistry::load() {
+            Ok(registry) => registry,
+            Err(err) => {
+                error!("Loose registry unreadable, skipping loose restore: {err}");
+                return;
+            }
+        };
+
+        let primary = self.daemon.config().project.id.clone();
+        // The manifest that booted this supervisor is loose too, and it reached
+        // here as the primary rather than through `add_project_config` — so
+        // nothing has recorded it. Without this, restarting from some other
+        // config would leave it out of the restore set entirely.
+        if self.daemon.config().project.loose {
+            let config_path = self.config_path.clone();
+            let mode = self.primary_project_mode;
+            self.record_loose_manifest(&config_path, &primary, mode);
+        }
+        for entry in registry.entries() {
+            if entry.project_id == primary
+                || self.extra_projects.contains_key(&entry.project_id)
+            {
+                continue;
+            }
+            let path = PathBuf::from(&entry.config_path);
+            if !path.exists() {
+                warn!(
+                    "Loose manifest '{}' in the registry no longer exists; skipping",
+                    entry.config_path
+                );
+                continue;
+            }
+            // The entry records what the file was when it was registered. A
+            // manifest edited since then may now declare its own project, or
+            // several — restoring it on the strength of the stored id would
+            // register projects the registry never recorded, or reconcile an
+            // unrelated one. Only replay a file that is still exactly the one
+            // loose project this entry names.
+            if !self.manifest_still_matches(&path, &entry.project_id) {
+                warn!(
+                    "Loose manifest '{}' no longer declares project '{}'; skipping restore",
+                    entry.config_path, entry.project_id
+                );
+                continue;
+            }
+            info!(
+                "Restoring loose project '{}' from {}",
+                entry.project_id, entry.config_path
+            );
+            if let Err(err) = self.add_project_config(&path, None, entry.mode) {
+                error!(
+                    "Failed to restore loose project '{}': {err}. Continuing with the rest.",
+                    entry.project_id
+                );
+            }
+        }
+    }
+
+    /// Whether `path` still parses to exactly one loose project with `project_id`.
+    ///
+    /// Guards the registry replay against a manifest that changed shape after it
+    /// was registered: a file that grew a `project:` key, or fanned out into
+    /// several projects, is no longer the thing the entry describes.
+    fn manifest_still_matches(&self, path: &Path, project_id: &str) -> bool {
+        let Ok(trusted) = runtime::open_trusted_config(path) else {
+            return false;
+        };
+        let Ok(configs) = load_projects_from_file(trusted, path) else {
+            return false;
+        };
+        matches!(
+            configs.as_slice(),
+            [only] if only.project.loose && only.project.id == project_id
+        )
     }
 
     /// Registers and synchronously starts one additional project from a
@@ -3680,6 +3854,9 @@ impl Supervisor {
             ControlCommand::Logs { .. } => Ok(ControlResponse::Error(
                 "logs command is streamed separately".into(),
             )),
+            ControlCommand::DeclaringProjects { service } => Ok(
+                ControlResponse::Projects(self.projects_declaring_service(&service)),
+            ),
             ControlCommand::ClearLogs { service, project } => {
                 self.clear_logs(service.as_deref(), project.as_deref())?;
                 Ok(ControlResponse::Message(match service {
@@ -4258,13 +4435,18 @@ impl Supervisor {
         let configs = load_projects_from_file(trusted, &resolved)?;
 
         let mut last_id = None;
+        let mut loose_ids = Vec::new();
         for config in configs {
-            last_id = Some(self.register_one_project(
-                config,
-                &resolved,
-                &service_filter,
-                mode,
-            )?);
+            let is_loose = config.project.loose;
+            let id =
+                self.register_one_project(config, &resolved, &service_filter, mode)?;
+            if is_loose {
+                loose_ids.push(id.clone());
+            }
+            last_id = Some(id);
+        }
+        for project_id in loose_ids {
+            self.record_loose_manifest(&resolved, &project_id, mode);
         }
         last_id.ok_or_else(|| {
             io::Error::new(
@@ -4273,6 +4455,35 @@ impl Supervisor {
             )
             .into()
         })
+    }
+
+    /// Records a loose manifest so a cold boot can restore it.
+    ///
+    /// Best-effort: a registry the supervisor cannot write is a lost restore on
+    /// the next boot, not a reason to fail a project that has already started.
+    fn record_loose_manifest(
+        &self,
+        config_path: &Path,
+        project_id: &str,
+        mode: ProjectRunMode,
+    ) {
+        use crate::loose_registry::{LooseEntry, LooseRegistry};
+
+        let mut registry = match LooseRegistry::load() {
+            Ok(registry) => registry,
+            Err(err) => {
+                warn!("Loose registry unreadable, not recording '{project_id}': {err}");
+                return;
+            }
+        };
+        registry.insert(LooseEntry {
+            config_path: config_path.to_string_lossy().to_string(),
+            project_id: project_id.to_string(),
+            mode,
+        });
+        if let Err(err) = registry.save() {
+            warn!("Could not record loose project '{project_id}': {err}");
+        }
     }
 
     /// Registers and starts a single already-parsed project config, the unit of
@@ -6826,6 +7037,7 @@ services:
                 mode: Default::default(),
                 config_path: None,
                 boot: None,
+                loose: false,
             }),
             kind: UnitKind::Service,
             lifecycle: None,

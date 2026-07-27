@@ -670,6 +670,11 @@ pub struct ProjectStatus {
     pub config_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot: Option<BootStatus>,
+    /// Whether this project came from a manifest that declared none of its own.
+    /// Purely presentational — loose projects are grouped under one heading but
+    /// each holds its own identity and state.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loose: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -691,6 +696,7 @@ impl From<&ProjectConfig> for ProjectStatus {
             mode: ProjectRunMode::Daemon,
             config_path: None,
             boot: None,
+            loose: project.loose,
         }
     }
 }

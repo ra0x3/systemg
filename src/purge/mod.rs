@@ -8,5 +8,5 @@ pub mod plan;
 
 pub use plan::{
     Preflight, PurgePlan, World, incomplete, preflight, project_not_found, resolve_plan,
-    supervisor_active,
+    supervisor_active, target_invalid,
 };

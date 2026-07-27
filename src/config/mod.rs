@@ -266,6 +266,7 @@ impl ConfigV1 {
                     project: ProjectConfig {
                         name: entry.name.unwrap_or_else(|| id.clone()),
                         id,
+                        loose: false,
                     },
                     services: project_services,
                     project_dir: self.project_dir.clone(),
@@ -345,6 +346,10 @@ pub struct ProjectConfig {
     pub id: String,
     /// Human-friendly display name. Changing this does not change identity.
     pub name: String,
+    /// Whether this project was derived from a manifest that declared none of
+    /// its own. Presentation groups these together; identity keeps them apart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loose: bool,
 }
 
 /// YAML shapes accepted for top-level project metadata before normalization.
@@ -368,10 +373,12 @@ impl From<ProjectConfigInput> for ProjectConfig {
             ProjectConfigInput::Id(id) => Self {
                 name: id.clone(),
                 id,
+                loose: false,
             },
             ProjectConfigInput::Fields { id, name } => Self {
                 name: name.unwrap_or_else(|| id.clone()),
                 id,
+                loose: false,
             },
         }
     }
@@ -395,18 +402,114 @@ fn validate_project_id(id: &str) -> Result<(), ProcessManagerError> {
         ));
     }
 
+    // The id becomes a directory name under `projects/`. `.` and `..` pass the
+    // character check but address the projects root and the state root, so a
+    // manifest declaring one would aim every state write — and a scoped purge —
+    // outside its own project.
+    if id == "." || id == ".." {
+        return Err(ProcessManagerError::ConfigParseError(
+            serde_yaml::Error::custom("project.id must not be '.' or '..'"),
+        ));
+    }
+
+    if id == LOOSE_PROJECT_ID {
+        return Err(ProcessManagerError::ConfigParseError(
+            serde_yaml::Error::custom(format!(
+                "project.id '{LOOSE_PROJECT_ID}' is reserved for legacy loose state"
+            )),
+        ));
+    }
+
+    // `state_key` writes an unfinalized (empty) id under `none`. A project that
+    // could call itself `none` would key into that same segment and read back
+    // another project's rows as its own.
+    if id == UNFINALIZED_PROJECT_SEGMENT {
+        return Err(ProcessManagerError::ConfigParseError(
+            serde_yaml::Error::custom(format!(
+                "project.id '{UNFINALIZED_PROJECT_SEGMENT}' is reserved"
+            )),
+        ));
+    }
+
     Ok(())
+}
+
+/// Derives a project id for a manifest that declares no project of its own.
+///
+/// Loose configs used to share one `__loose__` id, which made them share one
+/// registry slot: adding a second evicted the first and killed its services.
+/// The id therefore comes from the manifest path, which is what actually
+/// distinguishes them.
+///
+/// The full file stem is kept — the trailing hash a managed unit carries is its
+/// command+cwd identity, and three `gamecast-tunnel-*.yaml` files differing only
+/// by that hash must not collapse onto one id. The path discriminator is then
+/// always appended, never only on an apparent clash: derivation sees one path at
+/// a time and cannot know another directory holds the same filename, so
+/// `/a/svc.yaml` and `/b/svc.yaml` would otherwise both derive `svc` and
+/// reinstate the eviction this exists to prevent.
+pub fn loose_project_id(config_path: &Path) -> String {
+    let stem = config_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy())
+        .unwrap_or_default();
+    let slug: String = stem
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches(['-', '.']);
+    let discriminator = path_discriminator(config_path);
+    if slug.is_empty() {
+        format!("loose-{discriminator}")
+    } else {
+        format!("{slug}-{discriminator}")
+    }
+}
+
+/// A stable hash of a manifest's path, appended to every derived loose id so two
+/// manifests never share one.
+///
+/// Uses SHA-256 rather than `DefaultHasher`, whose output is explicitly not
+/// stable across releases — this value lands in a directory name that has to
+/// survive a toolchain upgrade. 64 bits keeps accidental collision negligible
+/// without making the id unreadable.
+pub fn path_discriminator(config_path: &Path) -> String {
+    let digest = Sha256::digest(config_path.to_string_lossy().as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Resolves a manifest path to the form loose ids are derived from.
+///
+/// Derivation hashes the path, so the same file reached two ways — relative vs
+/// absolute, or through a symlink — would otherwise become two projects. A path
+/// that cannot be canonicalized (the file is gone) is returned unchanged so the
+/// caller still fails on the missing manifest rather than here.
+pub fn canonical_manifest_path(config_path: &Path) -> PathBuf {
+    config_path
+        .canonicalize()
+        .unwrap_or_else(|_| config_path.to_path_buf())
 }
 
 fn resolve_project_config(
     mut project: ProjectConfig,
-    _base_path: &Path,
+    config_path: &Path,
 ) -> Result<ProjectConfig, ProcessManagerError> {
     if project.id.is_empty() {
-        // A project-less manifest (top-level `services:`) is the single loose
-        // bundle; all such services share one `__loose__` namespace.
-        project.id = LOOSE_PROJECT_ID.to_string();
-        project.name = "loose".to_string();
+        // A project-less manifest (top-level `services:`) is its own project,
+        // identified by the file it came from.
+        project.id = loose_project_id(&canonical_manifest_path(config_path));
+        project.name = project.id.clone();
+        project.loose = true;
+        validate_project_id(&project.id)?;
     } else {
         validate_project_id(&project.id)?;
         if project.name.trim().is_empty() {
@@ -1256,15 +1359,29 @@ pub struct CronConfig {
     pub timezone: Option<String>,
 }
 
+/// Project segment used for a config that has not been finalized yet, and so
+/// carries no id. Reserved by `validate_project_id` so no real project can key
+/// into it.
+pub const UNFINALIZED_PROJECT_SEGMENT: &str = "none";
+
 /// Builds the persistent state key for a service: `{version}:{project}:{service}`.
 ///
 /// This uniquely identifies a service in the state and cron files. Unlike a
 /// config hash, two services with identical commands get distinct keys because
-/// their names differ. A project-less (loose) service uses `none` as the
-/// project segment.
+/// their names differ.
+///
+/// A loose service keys under its derived project id like any other; there is no
+/// longer a shared `none` segment for them to collide in.
+///
+/// An empty id still maps to `none`. A config carries one only between parsing
+/// and finalization — `into_configs` builds every project that way before
+/// `resolve_project_config` assigns the real id — so this is reachable without a
+/// bug, and it must not alias onto a real project's key. `none` is a segment no
+/// validated project id can equal, since `.`/`..`/`__loose__` are rejected and a
+/// derived id always carries a path discriminator.
 pub fn state_key(version: Version, project_id: &str, service: &str) -> String {
-    let project = if project_id.is_empty() || project_id == LOOSE_PROJECT_ID {
-        "none"
+    let project = if project_id.is_empty() {
+        UNFINALIZED_PROJECT_SEGMENT
     } else {
         project_id
     };
@@ -1474,8 +1591,20 @@ fn uses_legacy_project_shape(config: &ConfigV1) -> bool {
 }
 
 /// Scope marker for the project-less (loose) service bundle in a multi-project
-/// manifest, so loose services hash distinctly from any real project's. Shares
-/// the on-disk loose id so the scope and the state directory always agree.
+/// manifest, so loose services hash distinctly from any real project's.
+///
+/// This is a parse-time marker, applied before the manifest path that derives a
+/// loose project's real id is known. It stays fixed so a service's hash does not
+/// change with the file it lives at; the state directory is keyed by the derived
+/// id instead.
+///
+/// Consequence: two identically-defined services in two different loose files
+/// share a `compute_hash()`. State no longer collides on that — it is keyed by
+/// project — but the Linux cgroup directory in `privilege.rs` still names itself
+/// from the hash, so under Linux, as root, with an explicit `limits.cgroup`,
+/// those two services would share a cgroup. Qualifying the hash by the derived
+/// id would fix it and would also change every existing hash, which the loose
+/// state migration matches against; it is deferred until after that lands.
 const LOOSE_PROJECT_SCOPE: &str = LOOSE_PROJECT_ID;
 
 /// Stamps each service with its owning project so identical service configs in
@@ -1612,7 +1741,7 @@ pub fn load_config_from_file(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     config.project_dir = Some(base_path.to_string_lossy().to_string());
-    config.project = resolve_project_config(config.project, &base_path)?;
+    config.project = resolve_project_config(config.project, config_path)?;
     if let Some(env_config) = &config.env
         && let Some(resolved_path) = env_config.path(&base_path)
     {
@@ -1655,7 +1784,7 @@ pub fn load_config_from_file(
         .map_err(ProcessManagerError::ConfigParseError)?;
 
     config.project_dir = Some(base_path.to_string_lossy().to_string());
-    config.project = resolve_project_config(config.project, &base_path)?;
+    config.project = resolve_project_config(config.project, config_path)?;
     for service in config.services.values_mut() {
         service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
     }
@@ -1715,7 +1844,7 @@ pub fn load_projects_from_file(
     let mut finalized = Vec::with_capacity(configs.len());
     for mut config in configs {
         config.project_dir = Some(base_path.to_string_lossy().to_string());
-        config.project = resolve_project_config(config.project, &base_path)?;
+        config.project = resolve_project_config(config.project, config_path)?;
         for service in config.services.values_mut() {
             service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
         }
@@ -1771,17 +1900,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn state_key_is_unique_per_service_and_maps_loose_to_none() {
+    fn state_key_is_unique_per_service_and_has_no_shared_loose_segment() {
         assert_eq!(state_key(Version::V2, "foo", "bar"), "v2:foo:bar");
-        assert_eq!(state_key(Version::V2, "", "bar"), "v2:none:bar");
+        // The legacy loose id is no longer special: a project carrying it keys
+        // under it like any other, so derived loose ids never share a key.
         assert_eq!(
             state_key(Version::V2, crate::state_store::LOOSE_PROJECT_ID, "bar"),
-            "v2:none:bar"
+            "v2:__loose__:bar"
         );
         // Same-command services in the same project get distinct keys by name.
         assert_ne!(
             state_key(Version::V2, "foo", "api"),
             state_key(Version::V2, "foo", "worker")
+        );
+    }
+
+    #[test]
+    fn an_unfinalized_empty_id_keys_under_none_and_cannot_alias_a_project() {
+        // `into_configs` builds every project with an empty id before
+        // finalization, so this is reachable without a bug; it must not collide
+        // with any validated project id.
+        assert_eq!(state_key(Version::V2, "", "bar"), "v2:none:bar");
+        // Nothing may call itself `none`, or it would key into that segment and
+        // read an unfinalized config's rows back as its own.
+        assert!(validate_project_id(UNFINALIZED_PROJECT_SEGMENT).is_err());
+        assert_ne!(
+            state_key(Version::V2, "", "bar"),
+            state_key(Version::V2, "none-a1b2c3d4e5f60718", "bar")
         );
     }
 
@@ -1970,7 +2115,7 @@ services:
     }
 
     #[test]
-    fn load_config_maps_missing_project_to_loose_bundle() {
+    fn load_config_derives_a_missing_project_id_from_the_manifest_path() {
         let dir = tempdir().expect("tempdir");
         let yaml_path = dir.path().join("systemg.yaml");
         fs::write(
@@ -1986,8 +2131,127 @@ services:
 
         let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
 
-        assert_eq!(config.project.id, crate::state_store::LOOSE_PROJECT_ID);
-        assert_eq!(config.project.name, "loose");
+        assert!(
+            config.project.id.starts_with("systemg-"),
+            "got '{}'",
+            config.project.id
+        );
+        assert!(config.project.loose);
+        validate_project_id(&config.project.id).expect("derived id must be valid");
+    }
+
+    #[test]
+    fn loose_ids_keep_the_hash_that_distinguishes_sibling_units() {
+        // The three gamecast-tunnel units differ only by the writer's
+        // command+cwd hash. Dropping it collapses them onto one id, which is
+        // the single-slot collision that killed the running service.
+        let ids: Vec<String> = [
+            "/units/gamecast-tunnel-3a2a1f8c6425.yaml",
+            "/units/gamecast-tunnel-5a9ce32857ea.yaml",
+            "/units/gamecast-tunnel-6df683933138.yaml",
+        ]
+        .iter()
+        .map(|path| loose_project_id(Path::new(path)))
+        .collect();
+
+        for (id, hash) in ids
+            .iter()
+            .zip(["3a2a1f8c6425", "5a9ce32857ea", "6df683933138"])
+        {
+            assert!(
+                id.starts_with(&format!("gamecast-tunnel-{hash}-")),
+                "got '{id}'"
+            );
+        }
+        let unique: BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), 3, "sibling units must not share an id");
+    }
+
+    #[test]
+    fn loose_ids_are_stable_across_calls() {
+        let path = Path::new("/units/ngrok-tunnel-8d7ba8fac7f4.yaml");
+        assert_eq!(loose_project_id(path), loose_project_id(path));
+    }
+
+    #[test]
+    fn a_derived_loose_id_is_a_valid_project_id() {
+        for path in [
+            "/units/gamecast-tunnel-3a2a1f8c6425.yaml",
+            "/tmp/weird name!/svc.yaml",
+            "/units/.hidden.yaml",
+        ] {
+            let id = loose_project_id(Path::new(path));
+            validate_project_id(&id).unwrap_or_else(|err| {
+                panic!("'{path}' derived invalid id '{id}': {err}")
+            });
+            assert!(!id.is_empty());
+        }
+    }
+
+    #[test]
+    fn an_unusable_stem_falls_back_to_a_path_discriminated_id() {
+        let id = loose_project_id(Path::new("/units/---.yaml"));
+        assert!(id.starts_with("loose-"), "got '{id}'");
+        validate_project_id(&id).expect("fallback id must be valid");
+    }
+
+    #[test]
+    fn same_filename_in_two_directories_derives_two_ids() {
+        // Derivation sees one path at a time, so the discriminator is always
+        // appended; otherwise both of these become `svc` and evict each other.
+        assert_ne!(
+            loose_project_id(Path::new("/a/svc.yaml")),
+            loose_project_id(Path::new("/b/svc.yaml"))
+        );
+    }
+
+    #[test]
+    fn a_stem_colliding_with_the_legacy_loose_id_is_discriminated() {
+        let id = loose_project_id(Path::new("/units/__loose__.yaml"));
+        assert_ne!(id, crate::state_store::LOOSE_PROJECT_ID);
+        validate_project_id(&id).expect("derived id must be valid");
+    }
+
+    #[test]
+    fn distinct_paths_get_distinct_discriminators() {
+        assert_ne!(
+            path_discriminator(Path::new("/a/unit.yaml")),
+            path_discriminator(Path::new("/b/unit.yaml"))
+        );
+    }
+
+    #[test]
+    fn a_named_project_is_not_marked_loose() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        fs::write(
+            &yaml_path,
+            r#"
+version: "2"
+project: arbitration
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect("write config");
+
+        let config = load_config(Some(yaml_path.to_str().unwrap())).unwrap();
+
+        assert_eq!(config.project.id, "arbitration");
+        assert!(!config.project.loose);
+    }
+
+    #[test]
+    fn a_loose_service_keys_state_under_its_derived_id() {
+        assert_eq!(
+            state_key(
+                Version::V2,
+                "gamecast-tunnel-3a2a1f8c6425",
+                "gamecast-tunnel"
+            ),
+            "v2:gamecast-tunnel-3a2a1f8c6425:gamecast-tunnel"
+        );
     }
 
     #[test]

@@ -254,6 +254,13 @@ state may be partial.
 
 A scoped purge named a project that has no state on disk; nothing was deleted.
 
+### [SG0404](/how-it-works/dialog/codes#sg0404)
+
+A purge target did not name a single project directory. A project id is one path
+segment: an empty id resolves to the projects root and a traversing or absolute
+id escapes it, so either would delete more than the target named. Every target is
+resolved before the first deletion, so nothing was deleted.
+
 ## Upgrade
 
 ### [SG0501](/how-it-works/dialog/codes#sg0501)
@@ -302,3 +309,36 @@ releasing workload ownership.
 The replacement binary started but could not restore the handed-off runtime.
 systemg attempted to re-execute the previous binary; inspect the supervisor log
 before retrying the upgrade.
+
+## Migration
+
+### [SG0601](/how-it-works/dialog/codes#sg0601)
+
+Legacy `__loose__` state is present and has not been migrated. Project-less
+manifests each own a project derived from their path; state written under the
+old shared `__loose__` project predates that and must be placed before those
+manifests can be managed separately.
+
+### [SG0602](/how-it-works/dialog/codes#sg0602)
+
+A state migration was refused because a supervisor is running. The migration
+moves the files a live supervisor is reading and writing, and boot loads state
+before it takes the supervisor lock, so there is no lock that would make it
+safe. Stop the supervisor first. `--dry-run` is always allowed.
+
+### [SG0603](/how-it-works/dialog/codes#sg0603)
+
+Legacy state could not be attributed to exactly one manifest, so it was archived
+rather than assigned. A state row carries only a service name; when several
+manifests declare that name, nothing distinguishes them. The migration never
+guesses — the archived copy is reported so it can be placed by hand.
+
+### [SG0604](/how-it-works/dialog/codes#sg0604)
+
+A previous state migration did not finish, so the layout is part legacy and part
+migrated. Re-run `sysg migrate-state` to resume from the recorded phase.
+
+### [SG0605](/how-it-works/dialog/codes#sg0605)
+
+A migrated artifact did not match the checksum recorded when it was archived.
+Nothing was removed; re-run the migration to retry.

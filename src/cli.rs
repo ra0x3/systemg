@@ -481,6 +481,23 @@ pub enum Commands {
         in_place: bool,
     },
 
+    /// Move legacy `__loose__` state into per-manifest project directories.
+    ///
+    /// Project-less manifests used to share one `__loose__` project, so adding a
+    /// second evicted the first. Each now owns a project derived from its path;
+    /// this places the state the old layout left behind. Runs offline, with no
+    /// supervisor alive, and never guesses: state a manifest cannot be matched
+    /// to is archived and reported rather than assigned.
+    MigrateState {
+        /// Directory holding the unit manifests to attribute state to.
+        #[arg(long, value_name = "DIR")]
+        units: Option<String>,
+
+        /// Report what would move without touching anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Purge systemg state and runtime files.
     ///
     /// With no selector, wipes the entire state root. `-c` scopes to every
@@ -582,6 +599,7 @@ impl Commands {
             Commands::Logs { .. } => "logs",
             Commands::Validate { .. } => "validate",
             Commands::Migrate { .. } => "migrate",
+            Commands::MigrateState { .. } => "migrate-state",
             Commands::Purge { .. } => "purge",
             Commands::UpgradeInfo => "upgrade-info",
             Commands::UpgradeSupervisor { .. } => "upgrade-supervisor",

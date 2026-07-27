@@ -986,10 +986,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             live,
             stream,
         } => {
+            let config_readable = load_config(Some(&config)).is_ok();
             let mut effective_config = config.clone();
-            if load_config(Some(&config)).is_err()
-                && let Ok(Some(hint)) = ipc::read_config_hint()
-            {
+            if !config_readable && let Ok(Some(hint)) = ipc::read_config_hint() {
                 effective_config = hint.to_string_lossy().to_string();
             }
             if let Err(err) =
@@ -1013,6 +1012,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &effective_config,
                 project.clone(),
                 Some(&service),
+                config_readable && effective_config == config,
             )?;
 
             // A bare `-s web` that matches a `web` in more than one loaded
@@ -1266,20 +1266,23 @@ fn run() -> Result<(), Box<dyn Error>> {
                 );
                 return Ok(());
             }
-            let effective_config = match load_config(Some(&config)) {
-                Ok(_) => config.clone(),
-                Err(_) => {
-                    if let Ok(Some(hint)) = ipc::read_config_hint() {
-                        hint.to_string_lossy().to_string()
-                    } else {
-                        config.clone()
-                    }
-                }
+            // A config the user pointed at that cannot be read falls back to
+            // the resident supervisor's manifest so a post-mortem still works.
+            // That substituted config is NOT authoritative for scoping: it is
+            // whatever was started last, not what the user asked about.
+            let config_readable = load_config(Some(&config)).is_ok();
+            let effective_config = if config_readable {
+                config.clone()
+            } else if let Ok(Some(hint)) = ipc::read_config_hint() {
+                hint.to_string_lossy().to_string()
+            } else {
+                config.clone()
             };
             let target_project = resolve_command_project(
                 &effective_config,
                 project.clone(),
                 service.as_deref(),
+                config_readable && effective_config == config,
             )?;
 
             let log_project = target_project.clone().or_else(|| {
@@ -1294,32 +1297,35 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .clone()
                 .unwrap_or_else(|| systemg::state_store::LOOSE_PROJECT_ID.to_string());
 
-            // A bare `-s <service>` (no -p, no `project/` prefix, no resolvable
-            // project) reads the loose bundle only. If that service has no loose
-            // log at all, it is not a loose service — refuse with SG0021 rather
-            // than silently reading an unrelated project's logs.
+            // Whether the user actually scoped this request to one project.
+            // A bare `-s <service>` did not: `log_project_id` is only the
+            // config that happens to be in scope, and every loose manifest is
+            // now its own project, so pre-judging the service against that one
+            // project would refuse services running under any of the others.
+            // The supervisor resolves a bare selector across every project it
+            // manages, so an unscoped request is left for it to answer.
+            let project_scoped = project.is_some()
+                || service.as_deref().is_some_and(|name| name.contains('/'));
+
+            // A bare `-s <service>` that matches nothing anywhere is refused
+            // here rather than left to the supervisor: the log stream carries
+            // its "not found" as output, not as a failing status, so a miss
+            // routed through it would print an error and still exit 0.
             if let Some(service_name) = service.as_deref()
-                && project.is_none()
-                && !service_name.contains('/')
-                && log_project_id == systemg::state_store::LOOSE_PROJECT_ID
+                && !project_scoped
                 && !purge
                 && !path
+                && !service_has_logs_in_any_project(service_name)
             {
-                let loose = systemg::state_store::LOOSE_PROJECT_ID;
-                let has_loose_log = get_service_log_path(loose, service_name).exists()
-                    || resolve_log_path(loose, service_name, "stdout").exists()
-                    || resolve_log_path(loose, service_name, "stderr").exists();
-                if !has_loose_log {
-                    return Err(Box::new(DiagError(Box::new(
-                        systemg::logs_cmd::loose_service_not_found(service_name),
-                    ))));
-                }
+                return Err(Box::new(DiagError(Box::new(
+                    systemg::logs_cmd::loose_service_not_found(service_name),
+                ))));
             }
 
             // A project-scoped `-p <project> -s <service>` miss is a plain
             // target-not-found (SG0202), reusing the shared stop diagnostic.
             if let Some(service_name) = service.as_deref()
-                && log_project_id != systemg::state_store::LOOSE_PROJECT_ID
+                && project_scoped
                 && !service_name.contains('/')
                 && !purge
                 && !path
@@ -1340,7 +1346,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             if path {
                 match service.as_deref() {
                     Some(service_name) => {
-                        let active = get_service_log_path(&log_project_id, service_name);
+                        let (owner, bare) = resolve_log_target(
+                            service_name,
+                            project_scoped,
+                            &log_project_id,
+                        );
+                        let active = get_service_log_path(&owner, &bare);
                         if all {
                             for path in systemg::logs::rotated_history_paths(&active)
                                 .into_iter()
@@ -1363,15 +1374,40 @@ fn run() -> Result<(), Box<dyn Error>> {
                 // showing "purged" lines. Route the clear through the supervisor
                 // when one is up; fall back to a local file clear when it is not.
                 if supervisor_running() {
+                    // Only a project the user actually named may scope a purge.
+                    // `target_project` can be inferred from an incidental config
+                    // — the cwd's, or `config_hint` — and the supervisor treats
+                    // whatever it receives as explicit, so passing an inferred
+                    // one would silently clear a project nobody asked about.
+                    let purge_project =
+                        project_scoped.then(|| target_project.clone()).flatten();
+                    // A `project/service` selector carries its own scope. The
+                    // supervisor matches on a bare service name, so the prefix
+                    // has to be split off here or it is looked up whole and
+                    // never matches anything.
+                    let (purge_project, purge_service) = match service.as_deref() {
+                        Some(selector) => match selector.split_once('/') {
+                            Some((project, name))
+                                if !project.is_empty() && !name.is_empty() =>
+                            {
+                                (Some(project.to_string()), Some(name.to_string()))
+                            }
+                            _ => (purge_project, service.clone()),
+                        },
+                        None => (purge_project, None),
+                    };
                     match ipc::send_command(&ControlCommand::ClearLogs {
-                        service: service.clone(),
-                        project: target_project.clone(),
+                        service: purge_service,
+                        project: purge_project,
                     }) {
                         Ok(ControlResponse::Message(message)) => {
                             println!("{message}");
                             return Ok(());
                         }
                         Ok(ControlResponse::Ok) => return Ok(()),
+                        Ok(ControlResponse::Diag(diag)) => {
+                            return Err(Box::new(DiagError(diag)));
+                        }
                         Ok(ControlResponse::Error(message)) => {
                             return Err(ControlError::Server(message).into());
                         }
@@ -1388,12 +1424,42 @@ fn run() -> Result<(), Box<dyn Error>> {
                 match service.as_deref() {
                     Some(service_name) => {
                         info!("Purging logs for service: {service_name}");
-                        manager.clear_service_logs(&log_project_id, service_name)?;
+                        let bare = service_selector_name(service_name).to_string();
+                        // A purge deletes, so it never guesses. An explicit
+                        // scope is honored; otherwise exactly one project must
+                        // own the name, or the user is asked to say which.
+                        let owner = if project_scoped {
+                            resolve_log_target(service_name, true, &log_project_id).0
+                        } else {
+                            match projects_with_logs_for(&bare)?.as_slice() {
+                                [only] => only.clone(),
+                                [] => {
+                                    return Err(Box::new(DiagError(Box::new(
+                                        systemg::logs_cmd::loose_service_not_found(&bare),
+                                    ))));
+                                }
+                                many => {
+                                    return Err(Box::new(DiagError(Box::new(
+                                        systemg::logs_cmd::ambiguous_service(&bare, many),
+                                    ))));
+                                }
+                            }
+                        };
+                        manager.clear_service_logs(&owner, &bare)?;
                     }
-                    None => {
-                        info!("Purging logs for all services");
-                        manager.clear_all_logs()?;
-                    }
+                    None => match project.as_deref() {
+                        // A `-p` with no supervisor to route through must still
+                        // be honored: clearing everything would destroy logs for
+                        // projects the request never named.
+                        Some(project_id) => {
+                            info!("Purging logs for project: {project_id}");
+                            manager.clear_project_logs(project_id)?;
+                        }
+                        None => {
+                            info!("Purging logs for all services");
+                            manager.clear_all_logs()?;
+                        }
+                    },
                 }
                 return Ok(());
             }
@@ -1732,6 +1798,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 print!("{converted}");
             }
         }
+        Commands::MigrateState { units, dry_run } => {
+            dispatch_migrate_state(units, dry_run)?;
+        }
         Commands::Purge {
             config,
             project,
@@ -1894,6 +1963,83 @@ mod tests {
     #[test]
     fn logs_follow_flag_forces_follow() {
         assert!(logs_follow_decision(true, false, false, true));
+    }
+
+    #[test]
+    fn loose_config_declares_the_loose_id_not_an_empty_one() {
+        let content =
+            "version: \"2\"\nservices:\n  ngrok-tunnel:\n    command: 'echo hi'\n";
+        let configs = systemg::config::parse_config_projects(content).unwrap();
+        let ids: Vec<String> = configs
+            .into_iter()
+            .map(|config| declared_project_id(config.project.id))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![systemg::state_store::LOOSE_PROJECT_ID.to_string()]
+        );
+    }
+
+    #[test]
+    fn project_state_dir_refuses_an_empty_id() {
+        let root = Path::new("/state/projects");
+        assert!(project_state_dir(root, "").is_err());
+    }
+
+    #[test]
+    fn project_state_dir_refuses_traversal_and_absolute_ids() {
+        let root = Path::new("/state/projects");
+        for id in ["..", "../..", "a/b", "/etc", "."] {
+            assert!(
+                project_state_dir(root, id).is_err(),
+                "expected '{id}' to be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn project_state_dir_resolves_a_plain_id() {
+        let root = Path::new("/state/projects");
+        assert_eq!(
+            project_state_dir(root, "arbitration-dev").unwrap(),
+            root.join("arbitration-dev")
+        );
+    }
+
+    #[test]
+    fn project_state_dir_refuses_an_embedded_traversal() {
+        let root = Path::new("/state/projects");
+        assert!(project_state_dir(root, "a/../../etc").is_err());
+        assert!(project_state_dir(root, "./a").is_err());
+    }
+
+    #[test]
+    fn project_state_dir_keeps_the_loose_id_addressable() {
+        let root = Path::new("/state/projects");
+        assert_eq!(
+            project_state_dir(root, systemg::state_store::LOOSE_PROJECT_ID).unwrap(),
+            root.join(systemg::state_store::LOOSE_PROJECT_ID)
+        );
+    }
+
+    #[test]
+    fn refusing_an_invalid_target_reports_sg0404() {
+        let diag = systemg::purge::target_invalid("..");
+        assert_eq!(diag.code.as_str(), "SG0404");
+    }
+
+    #[test]
+    fn an_invalid_target_refuses_before_any_project_is_resolved() {
+        let root = Path::new("/state/projects");
+        let targets = ["arbitration-dev".to_string(), "..".to_string()];
+        let resolved = targets
+            .iter()
+            .map(|project| project_state_dir(root, project))
+            .collect::<Result<Vec<_>, _>>();
+        assert!(
+            resolved.is_err(),
+            "a later invalid target must refuse the whole batch"
+        );
     }
 
     #[test]
@@ -2323,6 +2469,7 @@ mod tests {
                     mode: ProjectRunMode::Daemon,
                     config_path: None,
                     boot: None,
+                    loose: false,
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
@@ -2347,6 +2494,7 @@ mod tests {
                     mode: ProjectRunMode::Daemon,
                     config_path: None,
                     boot: None,
+                    loose: false,
                 }),
                 kind: UnitKind::Service,
                 lifecycle: None,
@@ -3570,6 +3718,347 @@ mod tests {
 
 include!("sysg/ui.rs");
 
+/// Migrates legacy `__loose__` state into per-manifest project directories.
+///
+/// Refuses while a supervisor is live: the migration moves the files a running
+/// daemon is reading and writing, and boot loads state before it takes
+/// `supervisor.lock`, so there is no lock that would make it safe.
+fn dispatch_migrate_state(
+    units: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::migrate_state::{self, Phase, journal::MigrationJournal};
+
+    let state_dir = runtime::state_dir();
+    let log_dir = runtime::log_dir();
+    let journal_path = systemg::migrate_state::journal::journal_path(&state_dir);
+
+    let resumed = migrate_state::pending_journal(&state_dir)?;
+    if let Some(journal) = &resumed {
+        println!(
+            "Resuming a migration that stopped after the {:?} phase.",
+            journal.phase
+        );
+    }
+
+    if !dry_run && supervisor_health() != SupervisorHealth::Down {
+        return Err(Box::new(DiagError(Box::new(
+            migrate_state::supervisor_active(),
+        ))));
+    }
+
+    let units_dir = units
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_dir.join("units"));
+    let candidates = migrate_state::scan_candidates(&units_dir);
+    let plan = migrate_state::plan_migration(&state_dir, &log_dir, &candidates)?;
+
+    if plan.is_empty() {
+        println!("No legacy `__loose__` state to migrate.");
+        return Ok(());
+    }
+
+    let report = migrate_state::describe(&plan, &candidates);
+    render_migration_report(&report, &units_dir, &candidates);
+
+    if dry_run {
+        println!("\nDry run: nothing was changed.");
+        return Ok(());
+    }
+
+    let run_id = resumed
+        .as_ref()
+        .map(|journal| journal.id.clone())
+        .unwrap_or_else(|| format!("migration-{}", std::process::id()));
+    let mut journal =
+        resumed.unwrap_or_else(|| MigrationJournal::new(run_id, &state_dir, &log_dir));
+    for candidate in &candidates {
+        journal.path_to_id.insert(
+            candidate.config_path.to_string_lossy().to_string(),
+            candidate.project_id.clone(),
+        );
+    }
+    journal.advance(Phase::Planned, &journal_path)?;
+
+    let archive_dir = systemg::migrate_state::journal::migrations_dir(&state_dir)
+        .join(&journal.id)
+        .join("archive");
+    archive_legacy_state(&state_dir, &log_dir, &archive_dir, &mut journal)?;
+    journal.advance(Phase::Archived, &journal_path)?;
+
+    // Data lands before the registry: the registry is what makes the supervisor
+    // believe a derived project exists, so publishing it over empty state would
+    // invite a re-adopt of services whose pid/state rows had not arrived yet.
+    let items = migrate_state::publish_items(&plan, &state_dir, &log_dir)?;
+    let staged = stage_migration_outputs(&items, &archive_dir, &mut journal)?;
+    journal.advance(Phase::Staged, &journal_path)?;
+    publish_migration_outputs(&staged)?;
+    journal.advance(Phase::DataPublished, &journal_path)?;
+
+    // Nothing is deleted: the legacy tree stays where it is until Phase 4
+    // cleanup, so a migration that turns out wrong is fully reversible from the
+    // archive plus the untouched original.
+    let registry = migrate_state::registry_with(&report.registry_entries);
+    registry.save()?;
+    journal.advance(Phase::RegistryPublished, &journal_path)?;
+    journal.advance(Phase::Complete, &journal_path)?;
+
+    println!("\nArchived legacy state to {}", archive_dir.display());
+    println!(
+        "Published {} artifact(s) into {} project(s); legacy state left in place for review.",
+        staged.len(),
+        report.registry_entries.len()
+    );
+    if !report.quarantined.is_empty() {
+        println!(
+            "{} artifact(s) could not be attributed and were archived, not assigned.",
+            report.quarantined.len()
+        );
+    }
+    Ok(())
+}
+
+/// Copies every legacy artifact into the run's archive, recording a checksum for
+/// each so a later verification can prove nothing was corrupted in transit.
+fn archive_legacy_state(
+    state_dir: &Path,
+    log_dir: &Path,
+    archive_dir: &Path,
+    journal: &mut systemg::migrate_state::MigrationJournal,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::migrate_state::{journal::SourceRecord, plan};
+
+    let sources = [
+        plan::legacy_project_dir(state_dir),
+        plan::legacy_log_dir(log_dir),
+    ];
+    for source_dir in sources {
+        let Ok(entries) = fs::read_dir(&source_dir) else {
+            continue;
+        };
+        let label = source_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "legacy".to_string());
+        let parent = source_dir
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let target_dir = archive_dir.join(parent).join(label);
+        runtime::create_private_dir(&target_dir)?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let target = target_dir.join(&name);
+            fs::copy(&path, &target)?;
+
+            let digest = systemg::migrate_state::journal::file_digest(&target)?;
+            let copied = systemg::migrate_state::journal::file_digest(&path)?;
+            if digest != copied {
+                return Err(Box::new(DiagError(Box::new(
+                    systemg::diag::Diagnostic::error(
+                        systemg::diag::SgCode::MigrationVerificationFailed,
+                        format!(
+                            "archived copy of {} does not match its source",
+                            path.display()
+                        ),
+                    )
+                    .note("nothing was removed; re-run to retry the archive")
+                    .help_docs(),
+                ))));
+            }
+            journal.sources.insert(
+                path.to_string_lossy().to_string(),
+                SourceRecord {
+                    path: path.to_string_lossy().to_string(),
+                    len: fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+                    sha256: digest,
+                    archive_path: target.to_string_lossy().to_string(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A migration output written to staging, awaiting publication.
+struct StagedOutput {
+    /// Where the verified bytes are staged.
+    stage_path: PathBuf,
+    /// Where they will be published.
+    target: PathBuf,
+    /// The project this output belongs to. Publication is decided per project,
+    /// so this cannot be inferred from the target's directory — a project owns
+    /// both a state directory and a log directory.
+    project_id: String,
+}
+
+impl StagedOutput {
+    /// Whether the target already holds exactly these bytes, meaning a previous
+    /// run published this output and the current one is resuming.
+    ///
+    /// A digest that cannot be read is an error rather than a mismatch: two
+    /// unreadable files must never compare equal and be taken for "already
+    /// done".
+    fn already_published(&self) -> Result<bool, Box<dyn Error>> {
+        use systemg::migrate_state::journal::file_digest;
+
+        if !self.target.exists() {
+            return Ok(false);
+        }
+        Ok(file_digest(&self.stage_path)? == file_digest(&self.target)?)
+    }
+}
+
+/// Writes each output to staging and verifies it, so publishing is a rename of
+/// bytes already proven correct rather than a write that could fail halfway.
+fn stage_migration_outputs(
+    items: &[systemg::migrate_state::PublishItem],
+    archive_dir: &Path,
+    journal: &mut systemg::migrate_state::MigrationJournal,
+) -> Result<Vec<StagedOutput>, Box<dyn Error>> {
+    use systemg::migrate_state::journal::{OutputRecord, file_digest};
+
+    let stage_root = archive_dir
+        .parent()
+        .map(|parent| parent.join("stage"))
+        .unwrap_or_else(|| archive_dir.join("stage"));
+    let mut staged = Vec::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let name = item
+            .target
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "artifact".to_string());
+        let stage_path = stage_root
+            .join(&item.project_id)
+            .join(format!("{index}-{name}"));
+        if let Some(parent) = stage_path.parent() {
+            runtime::create_private_dir(parent)?;
+        }
+        runtime::write_private_file(&stage_path, &item.contents)?;
+
+        let digest = file_digest(&stage_path)?;
+        journal.outputs.insert(
+            item.target.to_string_lossy().to_string(),
+            OutputRecord {
+                stage_path: stage_path.to_string_lossy().to_string(),
+                target_path: item.target.to_string_lossy().to_string(),
+                sha256: digest,
+                project_id: item.project_id.clone(),
+            },
+        );
+        staged.push(StagedOutput {
+            stage_path,
+            target: item.target.clone(),
+            project_id: item.project_id.clone(),
+        });
+    }
+    Ok(staged)
+}
+
+/// Copies verified staged outputs into their real locations, checking each
+/// against its staged bytes so a partial copy is caught rather than published.
+///
+/// Publication is decided per PROJECT, not per file. The migration only ever
+/// seeds a project that has no state of its own; once the supervisor has run it,
+/// its files are newer than anything reconstructed from the legacy tree. Skipping
+/// file-by-file would be worse than either choice: a project could end up with
+/// its own newer `pid.xml` beside a migrated `state.xml` describing a different
+/// moment. So a project with any pre-existing state is skipped whole — except
+/// where the bytes already match, which is a resumed run finishing its own work.
+fn publish_migration_outputs(staged: &[StagedOutput]) -> Result<(), Box<dyn Error>> {
+    use std::collections::BTreeSet;
+
+    use systemg::migrate_state::journal::file_digest;
+
+    let mut blocked: BTreeSet<&str> = BTreeSet::new();
+    for output in staged {
+        if !output.target.exists() {
+            continue;
+        }
+        // Identical bytes mean this exact output was already published, so the
+        // project is not "occupied by newer state" — it is partly migrated.
+        if output.already_published()? {
+            continue;
+        }
+        blocked.insert(output.project_id.as_str());
+    }
+
+    for project in &blocked {
+        warn!(
+            "Migration skipped project '{project}'; it already holds state newer than the legacy tree"
+        );
+    }
+
+    for output in staged {
+        let (stage_path, target) = (&output.stage_path, &output.target);
+        if blocked.contains(output.project_id.as_str()) {
+            continue;
+        }
+        if target.exists() && output.already_published()? {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            runtime::create_private_dir(parent)?;
+        }
+        fs::copy(stage_path, target)?;
+        if file_digest(stage_path)? != file_digest(target)? {
+            return Err(Box::new(DiagError(Box::new(
+                systemg::diag::Diagnostic::error(
+                    systemg::diag::SgCode::MigrationVerificationFailed,
+                    format!(
+                        "published {} does not match its staged copy",
+                        target.display()
+                    ),
+                )
+                .note("the legacy state and the archive are both intact")
+                .help_cmd("retry", "sysg migrate-state")
+                .help_docs(),
+            ))));
+        }
+    }
+    Ok(())
+}
+
+/// Prints what a migration will do, including everything it refuses to guess at.
+fn render_migration_report(
+    report: &systemg::migrate_state::MigrationReport,
+    units_dir: &Path,
+    candidates: &[systemg::migrate_state::Candidate],
+) {
+    println!(
+        "Scanned {} loose manifest(s) in {}",
+        candidates.len(),
+        units_dir.display()
+    );
+
+    if !report.migrated_services.is_empty() {
+        println!("\nServices to place:");
+        for (service, project) in &report.migrated_services {
+            println!("  {service} -> {project}");
+        }
+    }
+    if !report.migrated_logs.is_empty() {
+        println!("\nLogs to place:");
+        for (log, project) in &report.migrated_logs {
+            println!("  {log} -> {project}");
+        }
+    }
+    if !report.quarantined.is_empty() {
+        println!("\nCannot be attributed (archived, not assigned):");
+        for (kind, name, reason) in &report.quarantined {
+            println!("  [{kind}] {name}: {reason}");
+        }
+    }
+}
+
 /// Resolves the purge selectors into a plan, runs preflight, and — if cleared —
 /// deletes the targeted state.
 fn dispatch_purge(
@@ -3674,7 +4163,152 @@ fn purge_config_project_ids(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
         Box::new(DiagError(Box::new(config_read_diag(&err.to_string()))))
     })?;
     let configs = systemg::config::parse_config_projects(&content)?;
-    Ok(configs.into_iter().map(|c| c.project.id).collect())
+    Ok(configs
+        .into_iter()
+        .map(|config| declared_project_id(config.project.id))
+        .collect())
+}
+
+/// The project a service's logs actually live under.
+///
+/// An unscoped request carries no project of its own, and the config in reach is
+/// often incidental, so `fallback` may name a project that never held this
+/// service. A supervisor that answers is believed — including when it answers
+/// "none" or "several", which are real answers and not a reason to go looking at
+/// files. Only when no supervisor answers at all are the log directories
+/// consulted, and `fallback` is the last resort.
+fn project_owning_service_logs(service: &str, fallback: &str) -> String {
+    let bare = service_selector_name(service);
+
+    match declaring_projects(bare) {
+        Some(projects) => match projects.as_slice() {
+            [only] => only.clone(),
+            _ => fallback.to_string(),
+        },
+        None => match projects_with_logs_for(bare).unwrap_or_default().as_slice() {
+            [only] => only.clone(),
+            _ => fallback.to_string(),
+        },
+    }
+}
+
+/// The projects a resident supervisor says declare `service`, or `None` when no
+/// supervisor answered the question.
+///
+/// `None` and `Some(vec![])` mean different things and must not be conflated:
+/// the first is "nobody could tell us", the second is "the supervisor looked and
+/// there are none".
+fn declaring_projects(service: &str) -> Option<Vec<String>> {
+    match ipc::send_command(&ControlCommand::DeclaringProjects {
+        service: service.to_string(),
+    }) {
+        Ok(ControlResponse::Projects(projects)) => Some(projects),
+        _ => None,
+    }
+}
+
+/// The project a log request targets, and the bare service name within it.
+///
+/// A `project/service` selector names its own project, so it is split rather
+/// than used whole — otherwise the slash-bearing string is looked up as a
+/// service name and never matches. An explicitly-scoped request keeps the scope
+/// it was given; an unscoped one is resolved against the projects that actually
+/// hold logs for the name.
+fn resolve_log_target(
+    selector: &str,
+    project_scoped: bool,
+    fallback: &str,
+) -> (String, String) {
+    if let Some((project, service)) = selector.split_once('/')
+        && !project.is_empty()
+        && !service.is_empty()
+    {
+        return (project.to_string(), service.to_string());
+    }
+
+    let bare = service_selector_name(selector).to_string();
+    if project_scoped {
+        return (fallback.to_string(), bare);
+    }
+    let owner = project_owning_service_logs(&bare, fallback);
+    (owner, bare)
+}
+
+/// Every project directory holding logs for `service`.
+///
+/// A directory that cannot be read is an error rather than an empty answer: a
+/// destructive caller decides what to do from this list, and silently reporting
+/// "no owners" would let it fall back to a project the user never named.
+fn projects_with_logs_for(service: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut owners = Vec::new();
+    for entry in fs::read_dir(runtime::log_dir())? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let project = entry.file_name().to_string_lossy().to_string();
+        let has_logs = get_service_log_path(&project, service).exists()
+            || resolve_log_path(&project, service, "stdout").exists()
+            || resolve_log_path(&project, service, "stderr").exists();
+        if has_logs {
+            owners.push(project);
+        }
+    }
+    Ok(owners)
+}
+
+/// Whether any project knows `service`.
+///
+/// A bare `-s` is not scoped to a project, and every loose manifest is its own
+/// project now, so "does this service exist" can only be answered by looking
+/// across all of them.
+///
+/// This exists only so a typo is refused instead of streaming nothing and
+/// exiting 0. It must never reject a service that exists, so it answers "no"
+/// only from a source that can actually prove absence.
+///
+/// With a supervisor up, that source is its loaded manifests, asked directly.
+/// Neither files nor the status snapshot can stand in for them: files are written
+/// by a background thread and `logs.sink: none` never produces one at all, while
+/// the snapshot is a periodically-rebuilt cache that drops a project whose state
+/// was momentarily unreadable. Files are consulted only when no supervisor
+/// answers, where a missing file is the best evidence available.
+fn service_has_logs_in_any_project(service: &str) -> bool {
+    let bare = service_selector_name(service);
+
+    if let Some(projects) = declaring_projects(bare) {
+        return !projects.is_empty();
+    }
+
+    // No supervisor answered. An older one that does not know this command is
+    // indistinguishable from none at all, and its services may legitimately have
+    // no log file (`logs.sink: none`, or output not yet flushed) — so when a
+    // supervisor process is alive but unable to answer, defer to it rather than
+    // refusing on the strength of missing files.
+    if supervisor_running() {
+        return true;
+    }
+
+    // Any failure to read the log tree means this check cannot prove absence, so
+    // it lets the request through rather than manufacturing an SG0021 out of an
+    // IO error.
+    match projects_with_logs_for(bare) {
+        Ok(owners) => !owners.is_empty(),
+        Err(_) => true,
+    }
+}
+
+/// Normalizes a parsed project id, mapping the empty id a project-less config
+/// yields onto the loose id. `parse_config_projects` skips the finalizing pass
+/// that assigns it, so a loose config arrives here with an empty id; left as-is
+/// it joins onto the projects root itself and a scoped purge would take every
+/// project's state with it.
+fn declared_project_id(id: String) -> String {
+    if id.is_empty() {
+        systemg::state_store::LOOSE_PROJECT_ID.to_string()
+    } else {
+        id
+    }
 }
 
 /// Deletes the state a cleared [`PurgePlan`] targets.
@@ -3691,15 +4325,15 @@ fn execute_purge(plan: systemg::purge::PurgePlan) -> Result<(), Box<dyn Error>> 
             println!("Purged state for {} project(s)", projects.len());
         }
         PurgePlan::Project { project } => {
-            let dir = runtime::state_dir()
-                .join(systemg::state_store::PROJECTS_DIR)
-                .join(&project);
+            let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+            let dir = project_state_dir(&root, &project)?;
             if !dir.exists() {
                 return Err(Box::new(DiagError(Box::new(
                     systemg::purge::project_not_found(&project),
                 ))));
             }
             remove_tree(&dir)?;
+            forget_loose_projects(std::slice::from_ref(&project));
             println!("Purged state for project '{project}'");
         }
     }
@@ -3722,15 +4356,60 @@ fn purge_state_root() -> Result<(), Box<dyn Error>> {
 }
 
 /// Removes each named project's state directory.
+///
+/// Every target is resolved before the first deletion so an invalid id late in
+/// the list refuses the whole purge instead of leaving the earlier projects
+/// already deleted.
 fn purge_projects(projects: &[String]) -> Result<(), Box<dyn Error>> {
     let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
-    for project in projects {
-        let dir = root.join(project);
+    let dirs = projects
+        .iter()
+        .map(|project| project_state_dir(&root, project))
+        .collect::<Result<Vec<_>, _>>()?;
+    for dir in dirs {
         if dir.exists() {
             remove_tree(&dir)?;
         }
     }
+    forget_loose_projects(projects);
     Ok(())
+}
+
+/// Drops purged projects from the loose registry.
+///
+/// The registry is what boot replays, so an entry that outlives its state would
+/// bring the project straight back on the next start — a purge the user watched
+/// succeed, silently undone.
+fn forget_loose_projects(projects: &[String]) {
+    use systemg::loose_registry::LooseRegistry;
+
+    let Ok(mut registry) = LooseRegistry::load() else {
+        return;
+    };
+    let mut changed = false;
+    for project in projects {
+        changed |= registry.remove_project(project);
+    }
+    if changed && let Err(err) = registry.save() {
+        warn!("Purged state but could not update the loose registry: {err}");
+    }
+}
+
+/// Resolves a project's state directory, refusing anything that is not a direct
+/// child of the projects root. An empty id joins to the root itself and a
+/// traversing id (`..`, a nested path, an absolute path) escapes it entirely —
+/// either way a scoped purge would delete far more than the project named.
+fn project_state_dir(root: &Path, project: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let mut components = Path::new(project).components();
+    let named = match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => name,
+        _ => {
+            return Err(Box::new(DiagError(Box::new(
+                systemg::purge::target_invalid(project),
+            ))));
+        }
+    };
+    Ok(root.join(named))
 }
 
 /// Removes the supervisor-level runtime files (socket, pid, config hint).
@@ -6034,7 +6713,10 @@ fn resolve_status_project_filter(
 fn config_declared_projects(config_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     let content = fs::read_to_string(config_path)?;
     let configs = systemg::config::parse_config_projects(&content)?;
-    Ok(configs.into_iter().map(|c| c.project.id).collect())
+    Ok(configs
+        .into_iter()
+        .map(|config| declared_project_id(config.project.id))
+        .collect())
 }
 
 /// Resolves the project a command should target from an explicit project flag and config.
@@ -6042,6 +6724,7 @@ fn resolve_command_project(
     config_arg: &str,
     explicit_project: Option<String>,
     service: Option<&str>,
+    config_explicit: bool,
 ) -> Result<Option<String>, Box<dyn Error>> {
     // An explicit `-p` names the target outright, so a missing/unreadable local
     // config must not sink the command before the selector is even consulted.
@@ -6089,13 +6772,28 @@ fn resolve_command_project(
         return Ok(None);
     };
 
-    if config_arg != DEFAULT_CONFIG_PATH {
+    // A config the user named with `-c` scopes the command even when it does
+    // not declare the service: they pointed at that manifest deliberately, and
+    // silently answering from some other project would be a worse surprise than
+    // a miss.
+    if config_explicit && config_arg != DEFAULT_CONFIG_PATH {
         return Ok(Some(config.project.id));
     }
 
-    if let Some(service) = service
-        && config.services.contains_key(service_selector_name(service))
-    {
+    // Otherwise the config is incidental — resolved from the cwd, or from
+    // `config_hint`, which holds whichever manifest was started last. Every
+    // loose manifest is its own project now, so scoping a bare `-s` on that
+    // guess would answer for one project while the service runs under another.
+    // `None` lets the supervisor resolve the name across everything it manages,
+    // which is the only view that can.
+    if let Some(service) = service {
+        return Ok(config
+            .services
+            .contains_key(service_selector_name(service))
+            .then(|| config.project.id.clone()));
+    }
+
+    if config_arg != DEFAULT_CONFIG_PATH {
         return Ok(Some(config.project.id));
     }
 
@@ -6314,6 +7012,7 @@ fn send_control_command_inner(
         }
         Ok(ControlResponse::Ok) => Ok(()),
         Ok(ControlResponse::Status(_)) => Ok(()),
+        Ok(ControlResponse::Projects(_)) => Ok(()),
         Ok(ControlResponse::Inspect(_)) => Ok(()),
         Ok(ControlResponse::Spawned { pid }) => {
             println!("Spawned process with PID: {}", pid);

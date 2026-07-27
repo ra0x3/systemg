@@ -262,6 +262,43 @@ pub fn parse_age_seconds(value: &str) -> Result<u64, LogsManagerError> {
 }
 
 /// Returns whether a file is a rotated backup (e.g. `supervisor.log.2`).
+/// Resolves a project's log directory, refusing anything that is not a direct
+/// child of the log root.
+///
+/// The id reaches here straight from `-p`. An empty one resolves to the log root
+/// itself and a traversing or absolute one escapes it, so either would let a
+/// scoped purge truncate files well outside the project it named.
+fn contained_project_log_dir(
+    root: &Path,
+    project: &str,
+) -> Result<PathBuf, LogsManagerError> {
+    let reject = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("'{project}' does not name a single project"),
+        )
+    };
+
+    let mut components = Path::new(project).components();
+    let dir = match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => root.join(name),
+        _ => return Err(reject().into()),
+    };
+
+    // A single path segment cannot traverse lexically, but it can still be a
+    // symlink pointing outside the log root. Where the directory exists, the
+    // resolved target has to land under the resolved root too.
+    if dir.exists() {
+        let resolved_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let resolved_dir = dir.canonicalize().map_err(|_| reject())?;
+        if !resolved_dir.starts_with(&resolved_root) {
+            return Err(reject().into());
+        }
+    }
+
+    Ok(dir)
+}
+
 fn is_rotated_backup(file_name: &str) -> bool {
     file_name.rsplit_once('.').is_some_and(|(stem, suffix)| {
         stem.ends_with(".log") && suffix.parse::<usize>().is_ok()
@@ -3083,6 +3120,11 @@ impl LogManager {
         service_name: &str,
     ) -> Result<(), LogsManagerError> {
         validate_service_name(service_name)?;
+        // The project reaches here straight from `-p`, and a traversing or
+        // absolute value would aim these truncations outside the log root
+        // entirely. Validate it for the same reason the service name is.
+        contained_project_log_dir(&runtime::log_dir(), project)?;
+
         let stdout_path = resolve_log_path(project, service_name, "stdout");
         let stderr_path = resolve_log_path(project, service_name, "stderr");
         let combined_path = resolve_combined_log_path(project, service_name);
@@ -3093,6 +3135,49 @@ impl LogManager {
         remove_rotated_log_files(&stdout_path)?;
         remove_rotated_log_files(&stderr_path)?;
         remove_rotated_log_files(&combined_path)?;
+
+        Ok(())
+    }
+
+    /// Clears every log file belonging to one project.
+    ///
+    /// The offline counterpart to a supervisor-side scoped clear: with no daemon
+    /// to route through, a `-p` request would otherwise fall back to clearing
+    /// everything, destroying logs for projects the user never named.
+    pub fn clear_project_logs(&self, project: &str) -> Result<(), LogsManagerError> {
+        let root = runtime::log_dir();
+        let project_dir = contained_project_log_dir(&root, project)?;
+
+        let entries = match fs::read_dir(&project_dir) {
+            Ok(entries) => entries,
+            // A project with no log directory has nothing to clear. Any other
+            // error is real and must not be mistaken for "already empty".
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        };
+
+        // Collect first: truncating an active log removes its rotated backups,
+        // and a live directory iterator would then revisit entries that are
+        // already gone.
+        let mut files: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                files.push(entry.path());
+            }
+        }
+
+        for path in files {
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if file_name.ends_with(".log") {
+                truncate_log_file(&path)?;
+                remove_rotated_log_files(&path)?;
+            } else if is_rotated_backup(file_name) && path.exists() {
+                fs::remove_file(&path)?;
+            }
+        }
 
         Ok(())
     }
@@ -3479,6 +3564,39 @@ mod tests {
     use tempfile::tempdir_in;
 
     use super::*;
+
+    #[test]
+    fn contained_project_log_dir_accepts_only_a_direct_child() {
+        let root = Path::new("/logs");
+        assert_eq!(
+            contained_project_log_dir(root, "alpha").unwrap(),
+            root.join("alpha")
+        );
+        for bad in ["", ".", "..", "a/b", "/etc", "a/../../etc"] {
+            assert!(
+                contained_project_log_dir(root, bad).is_err(),
+                "expected '{bad}' to be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn contained_project_log_dir_refuses_a_symlink_out_of_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("logs");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        // A single path segment cannot traverse lexically, but it can still
+        // point out of the root once resolved.
+        std::os::unix::fs::symlink(&outside, root.join("evil")).unwrap();
+
+        assert!(contained_project_log_dir(&root, "evil").is_err());
+
+        fs::create_dir_all(root.join("real")).unwrap();
+        assert!(contained_project_log_dir(&root, "real").is_ok());
+    }
 
     #[test]
     fn validate_service_name_accepts_plain_names() {
