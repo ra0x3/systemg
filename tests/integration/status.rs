@@ -361,7 +361,13 @@ services:
         unsafe { libc::_exit(0) };
     }
 
-    let mut pid_file = PidFile::load(StateStore::loose()).expect("load pid file");
+    // A project-less config is its own project, keyed by a slug derived from its
+    // path, so the tracked pid has to land in that project's store — a shared
+    // `__loose__` one is not where status will look for it.
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))
+        .expect("failed to load config");
+    let mut pid_file = PidFile::load(StateStore::for_project(&config.project.id))
+        .expect("load pid file");
     pid_file
         .insert("arb_rs", child_pid as u32)
         .expect("insert zombie pid");
