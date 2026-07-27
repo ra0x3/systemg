@@ -62,6 +62,10 @@ if ! git -C "$REPO_ROOT" diff --quiet -- Cargo.toml Cargo.lock ||
   die "Cargo.toml or Cargo.lock already has changes; commit or stash them so the release commit holds only the bump"
 fi
 
+printf 'Running commit checks before bumping...\n'
+"$SCRIPT_DIR/commit-check.sh" ||
+  die "commit-check failed; a release cannot be cut from a tree that does not pass it"
+
 CURRENT_VERSION=$(
   awk '
     /^\[package\]/ { in_package = 1; next }
