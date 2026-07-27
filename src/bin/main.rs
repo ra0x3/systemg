@@ -6920,7 +6920,31 @@ fn send_control_command(command: ControlCommand) -> Result<(), Box<dyn Error>> {
 
 /// Requests a live supervisor replacement and waits until the same PID reports
 /// the staged version or the previous binary confirms rollback.
+///
+/// The whole request holds an exclusive client-side lock. The supervisor's own
+/// operation gate does not span its re-exec and rollback, so without this a
+/// second invocation arriving after a rollback could consume the first one's
+/// failure record — or race it into a resident that just resumed.
 fn request_live_upgrade(binary: String) -> Result<String, Box<dyn Error>> {
+    use fs2::FileExt;
+
+    let lock_path = runtime::state_dir().join("upgrade-cli.lock");
+    if let Some(parent) = lock_path.parent() {
+        runtime::create_private_dir(parent)?;
+    }
+    let upgrade_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    if FileExt::try_lock_exclusive(&upgrade_lock).is_err() {
+        return Err(Box::new(DiagError(Box::new(
+            systemg::upgrade::environment_unsafe(
+                "another sysg upgrade is already in progress",
+            ),
+        ))));
+    }
+
     let target = systemg::upgrade::LiveUpgradeInfo::current();
     match supervisor_health() {
         SupervisorHealth::Down => {
@@ -6951,6 +6975,10 @@ fn request_live_upgrade(binary: String) -> Result<String, Box<dyn Error>> {
     }
     systemg::upgrade::validate_resident_version(&resident, &target).map_err(DiagError)?;
     let original_pid = ipc::supervisor_peer_pid()?;
+    // A reason left by some earlier attempt of this same version describes that
+    // attempt, not this one; consume it so it cannot masquerade as this
+    // upgrade's outcome. Other versions' records belong to other invocations.
+    let _ = systemg::upgrade::take_rollback_result(&target.version.to_string());
     let expected = match ipc::send_command(&ControlCommand::Upgrade { binary }) {
         Ok(ControlResponse::UpgradeAccepted { version }) => version,
         Ok(ControlResponse::Diag(diag)) => return Err(Box::new(DiagError(diag))),
@@ -6969,6 +6997,14 @@ fn request_live_upgrade(binary: String) -> Result<String, Box<dyn Error>> {
     let deadline = Instant::now() + UPGRADE_CONFIRM_TIMEOUT;
     let mut observed = resident;
     while Instant::now() < deadline {
+        // A failed replacement leaves the actual failure in a side-record; the
+        // resident's version alone would only ever show the rollback's
+        // symptom — "still the old version" — not its cause.
+        if let Some(reason) = systemg::upgrade::take_rollback_result(&expected) {
+            return Err(Box::new(DiagError(Box::new(
+                systemg::upgrade::resume_failed(reason),
+            ))));
+        }
         if let Ok(ipc::CommandAck::Response(ControlResponse::DaemonVersion(version))) =
             ipc::send_command_with_timeout(
                 &ControlCommand::Version,

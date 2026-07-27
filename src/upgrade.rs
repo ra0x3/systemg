@@ -222,9 +222,15 @@ pub fn rollback_handoff(path: &Path, reason: impl Into<String>) -> io::Result<()
     use std::ffi::CString;
 
     let mut state = SupervisorHandoff::load(path)?;
+    let reason = reason.into();
     state.target_version = state.source_version.clone();
-    state.rollback_reason = Some(reason.into());
+    state.rollback_reason = Some(reason.clone());
     state.write_to(path)?;
+    // The handoff record itself is deleted by the resumed resident, which may
+    // be an older binary — so the reason recorded in it never reaches the CLI,
+    // which times out and reports a version mismatch instead of the actual
+    // failure. This side-record survives the rollback for the CLI to read.
+    let _ = write_rollback_result(&reason);
     let values = [
         state.source_binary.to_string_lossy().to_string(),
         "supervise".to_string(),
@@ -297,6 +303,56 @@ pub fn resume_failed(reason: impl Into<String>) -> Diagnostic {
     .note(reason)
     .help_cmd("read the supervisor log", "sysg logs --supervisor")
     .help_docs()
+}
+
+/// Path of the side-record a failed replacement leaves for the CLI.
+pub fn rollback_result_path() -> PathBuf {
+    crate::runtime::state_dir().join("upgrade-rollback-reason")
+}
+
+/// Records why a replacement rolled back, where the CLI can find it.
+///
+/// The record's first line is the version the failed replacement was, so a CLI
+/// can tell its own attempt's outcome from some other invocation's. Written via
+/// temp-and-rename: a partially visible record would read as an empty or
+/// truncated reason, which is worse than none.
+pub fn write_rollback_result(reason: &str) -> io::Result<()> {
+    let path = rollback_result_path();
+    if let Some(parent) = path.parent() {
+        crate::runtime::create_private_dir(parent)?;
+    }
+    let contents = format!("{}\n{reason}", LiveUpgradeInfo::current().version);
+    let temp = path.with_file_name(format!(
+        ".upgrade-rollback-reason.{}.tmp",
+        std::process::id()
+    ));
+    crate::runtime::write_private_file(&temp, contents.as_bytes())?;
+    match std::fs::rename(&temp, &path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+/// Consumes the rollback side-record for `expected_version`, if a failed
+/// replacement of that version left one.
+///
+/// A record for some other version is another attempt's outcome and is left in
+/// place for its own CLI to find. Reading a matching record removes it: it
+/// describes ONE attempt, and a stale reason surfacing on a later upgrade would
+/// be worse than none.
+pub fn take_rollback_result(expected_version: &str) -> Option<String> {
+    let path = rollback_result_path();
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let (version, reason) = contents.split_once('\n')?;
+    if version.trim() != expected_version {
+        return None;
+    }
+    let _ = std::fs::remove_file(&path);
+    let trimmed = reason.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Verifies that a resident release can understand a staged target's live
