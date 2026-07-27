@@ -168,6 +168,16 @@ struct LoadedHandoff {
     state: SupervisorHandoff,
 }
 
+/// A handoff project resolved against its manifest as parsed by THIS binary.
+struct LoadedHandoffProject {
+    /// The project as the current loader understands it.
+    config: Config,
+    /// The id the handoff recorded, when it differs from the loaded one — a
+    /// pre-0.59 resident naming its loose project `__loose__`. `None` for an
+    /// exact match.
+    legacy_id: Option<String>,
+}
+
 /// Runtime state for an additional project managed by the resident supervisor.
 struct ProjectRuntime {
     daemon: Daemon,
@@ -1852,7 +1862,16 @@ impl Supervisor {
 
     /// Loads the exact project named by a handoff record and verifies that its
     /// manifest did not change while the supervisor image was replaced.
-    fn load_handoff_project(project: &HandoffProject) -> Result<Config, SupervisorError> {
+    ///
+    /// One identity is translated rather than matched: a pre-0.59 resident
+    /// records its loose project as `__loose__`, an id no manifest can resolve
+    /// to anymore — loose configs derive a per-file id now. The manifest itself
+    /// is proven unchanged by the content hash, so when the record says
+    /// `__loose__` and the file still parses to exactly one loose project, that
+    /// project is what the resident was running, under its migrated name.
+    fn load_handoff_project(
+        project: &HandoffProject,
+    ) -> Result<LoadedHandoffProject, SupervisorError> {
         let actual_hash =
             ipc::manifest_content_hash(&project.config_path).ok_or_else(|| {
                 io::Error::new(
@@ -1874,24 +1893,53 @@ impl Supervisor {
             .into());
         }
         let trusted = runtime::open_trusted_config(&project.config_path)?;
-        load_projects_from_file(trusted, &project.config_path)?
-            .into_iter()
+        let configs = load_projects_from_file(trusted, &project.config_path)?;
+
+        if let Some(config) = configs
+            .iter()
             .find(|config| config.project.id == project.project_id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "project `{}` is absent from handed-off manifest {}",
-                        project.project_id,
-                        project.config_path.display()
-                    ),
-                )
-                .into()
-            })
+        {
+            return Ok(LoadedHandoffProject {
+                config: config.clone(),
+                legacy_id: None,
+            });
+        }
+
+        if project.project_id == crate::state_store::LOOSE_PROJECT_ID
+            && let [only] = configs.as_slice()
+            && only.project.loose
+        {
+            info!(
+                "Handoff project `{}` migrated to `{}` during upgrade of {}",
+                project.project_id,
+                only.project.id,
+                project.config_path.display()
+            );
+            return Ok(LoadedHandoffProject {
+                config: only.clone(),
+                legacy_id: Some(project.project_id.clone()),
+            });
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "project `{}` is absent from handed-off manifest {}",
+                project.project_id,
+                project.config_path.display()
+            ),
+        )
+        .into())
     }
 
     /// Reconstructs a supervisor from a private state record created immediately
     /// before same-PID live re-execution.
+    ///
+    /// A project whose identity migrated during the upgrade (see
+    /// `load_handoff_project`) has its on-disk state seeded into the derived
+    /// project's store before its daemon is built: handoff adoption VERIFIES
+    /// pids against the store, it never writes them, so an empty new-identity
+    /// store would fail the resume that the translation just made possible.
     pub fn from_handoff(path: PathBuf) -> Result<Self, SupervisorError> {
         let state = SupervisorHandoff::load(&path)?;
         let current = LiveUpgradeInfo::current();
@@ -1906,10 +1954,52 @@ impl Supervisor {
             .into());
         }
         let primary = state.primary.clone();
-        let primary_config = Self::load_handoff_project(&primary)?;
+
+        // Resolve every project before touching anything. Identity translation
+        // means a fresh id is no longer guaranteed unique by construction — a
+        // migrated loose project could in principle derive an id some other
+        // handed-off project already carries — and discovering that after
+        // seeding or daemon construction would leave two projects silently
+        // sharing one state and log namespace. Duplicates roll the upgrade back
+        // before any mutation instead.
+        let loaded_primary = Self::load_handoff_project(&primary)?;
+        let loaded_extras: Vec<(&crate::upgrade::HandoffProject, LoadedHandoffProject)> =
+            state
+                .projects
+                .values()
+                .map(|project| {
+                    Self::load_handoff_project(project).map(|loaded| (project, loaded))
+                })
+                .collect::<Result<_, _>>()?;
+        {
+            let mut fresh_ids = std::collections::BTreeSet::new();
+            fresh_ids.insert(loaded_primary.config.project.id.clone());
+            for (_, loaded) in &loaded_extras {
+                if !fresh_ids.insert(loaded.config.project.id.clone()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "handed-off projects resolve to the same id `{}`",
+                            loaded.config.project.id
+                        ),
+                    )
+                    .into());
+                }
+            }
+        }
+
+        let mut remapped: Vec<(String, String)> = Vec::new();
+        if let Some(legacy) = &loaded_primary.legacy_id {
+            crate::migrate_state::seed_project_state_from_legacy(
+                &runtime::state_dir(),
+                legacy,
+                &loaded_primary.config,
+            )?;
+            remapped.push((legacy.clone(), loaded_primary.config.project.id.clone()));
+        }
         let mut supervisor = Self::from_primary_config(
             primary.config_path.clone(),
-            primary_config,
+            loaded_primary.config,
             Vec::new(),
             false,
             state.service_filter.clone(),
@@ -1925,10 +2015,25 @@ impl Supervisor {
             projects.remove(&supervisor.daemon.config().project.id);
         }
 
-        for (project_id, project) in &state.projects {
-            let config = Self::load_handoff_project(project)?;
-            Self::register_spawn_limits_for_config(&supervisor.spawn_manager, &config)?;
-            let mut daemon = Daemon::from_config(config, false)?;
+        for (project, loaded) in loaded_extras {
+            if let Some(legacy) = &loaded.legacy_id {
+                crate::migrate_state::seed_project_state_from_legacy(
+                    &runtime::state_dir(),
+                    legacy,
+                    &loaded.config,
+                )?;
+                remapped.push((legacy.clone(), loaded.config.project.id.clone()));
+            }
+            // Everything downstream keys off the freshly loaded id, so the map
+            // entries must too. Registering under the record's key would leave a
+            // migrated project addressable by a name its own config no longer
+            // carries.
+            let project_id = loaded.config.project.id.clone();
+            Self::register_spawn_limits_for_config(
+                &supervisor.spawn_manager,
+                &loaded.config,
+            )?;
+            let mut daemon = Daemon::from_config(loaded.config, false)?;
             daemon.set_timeouts(supervisor.timeouts.clone());
             daemon.set_op_slot(supervisor.op_slot.clone());
             daemon.set_pipe_stderr(state.pipe_stderr);
@@ -1939,7 +2044,7 @@ impl Supervisor {
                 projects.insert(project_id.clone(), daemon.clone());
             }
             supervisor.extra_projects.insert(
-                project_id.clone(),
+                project_id,
                 ProjectRuntime {
                     daemon,
                     mode: project.mode,
@@ -1948,7 +2053,41 @@ impl Supervisor {
             );
         }
         supervisor.sync_cron_projects()?;
-        crate::logs::resume_log_pipe_handoff(&state.log_pipes)?;
+
+        // Log-pipe records name the project their writers append under; a
+        // migrated one must write where the new identity's readers look.
+        let log_pipes: Vec<crate::upgrade::HandoffLogPipe> = state
+            .log_pipes
+            .iter()
+            .map(|pipe| {
+                let mut pipe = pipe.clone();
+                if let Some((_, new_id)) =
+                    remapped.iter().find(|(legacy, _)| *legacy == pipe.project)
+                {
+                    pipe.project = new_id.clone();
+                }
+                pipe
+            })
+            .collect();
+        crate::logs::resume_log_pipe_handoff(&log_pipes)?;
+
+        // The resident that wrote this handoff predates the loose registry, so
+        // a migrated project was never recorded for cold-boot restore.
+        for (_, new_id) in &remapped {
+            let (config_path, mode) = if *new_id == supervisor.daemon.config().project.id
+            {
+                (
+                    supervisor.config_path.clone(),
+                    supervisor.primary_project_mode,
+                )
+            } else if let Some(project) = supervisor.extra_projects.get(new_id) {
+                (project.config_path.clone(), project.mode)
+            } else {
+                continue;
+            };
+            supervisor.record_loose_manifest(&config_path, new_id, mode);
+        }
+
         supervisor.handoff = Some(LoadedHandoff { path, state });
         Ok(supervisor)
     }
@@ -7279,5 +7418,214 @@ services:
                 std::env::remove_var("HOME");
             }
         }
+    }
+
+    fn handoff_home() -> (tempfile::TempDir, Option<String>) {
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+        (temp, original_home)
+    }
+
+    fn restore_home(original_home: Option<String>) {
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+    }
+
+    fn loose_manifest(dir: &std::path::Path, service: &str) -> PathBuf {
+        let path = dir.join("tunnel-8d7b.yaml");
+        fs::write(
+            &path,
+            format!(
+                "version: \"2\"\nservices:\n  {service}:\n    command: \"/bin/sleep 30\"\n"
+            ),
+        )
+        .expect("write manifest");
+        path
+    }
+
+    #[test]
+    fn handoff_translates_the_legacy_loose_id_to_the_derived_one() {
+        let _guard = crate::test_utils::env_lock();
+        let (temp, original_home) = handoff_home();
+
+        let config_path = loose_manifest(temp.path(), "tunnel");
+        let record = crate::upgrade::HandoffProject {
+            project_id: crate::state_store::LOOSE_PROJECT_ID.to_string(),
+            config_path: config_path.clone(),
+            config_hash: ipc::manifest_content_hash(&config_path).expect("hash"),
+            mode: ProjectRunMode::Daemon,
+            active: true,
+            daemon: crate::upgrade::HandoffDaemonState {
+                processes: Vec::new(),
+                manual_stops: Vec::new(),
+                restart_suppressed: Vec::new(),
+                restart_counts: std::collections::BTreeMap::new(),
+                stopped_for_dependency: std::collections::BTreeMap::new(),
+            },
+        };
+
+        let loaded = Supervisor::load_handoff_project(&record).expect("translate");
+        assert!(loaded.config.project.loose);
+        assert_ne!(
+            loaded.config.project.id,
+            crate::state_store::LOOSE_PROJECT_ID
+        );
+        assert_eq!(
+            loaded.legacy_id.as_deref(),
+            Some(crate::state_store::LOOSE_PROJECT_ID)
+        );
+
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn handoff_still_refuses_a_genuinely_absent_project() {
+        let _guard = crate::test_utils::env_lock();
+        let (temp, original_home) = handoff_home();
+
+        let config_path = loose_manifest(temp.path(), "tunnel");
+        let record = crate::upgrade::HandoffProject {
+            project_id: "some-named-project".to_string(),
+            config_path: config_path.clone(),
+            config_hash: ipc::manifest_content_hash(&config_path).expect("hash"),
+            mode: ProjectRunMode::Daemon,
+            active: true,
+            daemon: crate::upgrade::HandoffDaemonState {
+                processes: Vec::new(),
+                manual_stops: Vec::new(),
+                restart_suppressed: Vec::new(),
+                restart_counts: std::collections::BTreeMap::new(),
+                stopped_for_dependency: std::collections::BTreeMap::new(),
+            },
+        };
+
+        // Only the literal legacy loose id is translated; any other mismatch is
+        // still the config drift it always was.
+        assert!(Supervisor::load_handoff_project(&record).is_err());
+
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn a_pre_migration_handoff_resumes_a_live_loose_service() {
+        let _guard = crate::test_utils::env_lock();
+        let (temp, original_home) = handoff_home();
+
+        let config_path = loose_manifest(temp.path(), "tunnel");
+        let config_hash = ipc::manifest_content_hash(&config_path).expect("hash");
+
+        // A real process standing in for the service the 0.58 resident was
+        // supervising: adoption verifies pid, pgid and kernel start time.
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn child");
+        let pid = child.id();
+        let pgid = crate::daemon::Daemon::process_group_for_pid(pid).expect("child pgid");
+        let started = crate::daemon::process_start_time(pid).expect("child start time");
+
+        // The legacy on-disk layout the old supervisor left behind.
+        let legacy_dir = runtime::state_dir()
+            .join(crate::state_store::PROJECTS_DIR)
+            .join(crate::state_store::LOOSE_PROJECT_ID);
+        fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        fs::write(
+            legacy_dir.join(crate::constants::PID_FILE_NAME),
+            format!(
+                "<PidFile>\n  <services>\n    <name>tunnel</name>\n    <pid>{pid}</pid>\n  \
+                 </services>\n  <service_groups>\n    <name>tunnel</name>\n    \
+                 <pgid>{pgid}</pgid>\n  </service_groups>\n  <service_starts>\n    \
+                 <name>tunnel</name>\n    <started>{started}</started>\n  \
+                 </service_starts>\n</PidFile>\n"
+            ),
+        )
+        .expect("legacy pid.xml");
+        fs::write(
+            legacy_dir.join(crate::constants::STATE_FILE_NAME),
+            format!(
+                "<ServiceStateFile>\n  <services>\n    <name>v2:none:tunnel</name>\n    \
+                 <state>\n      <status>running</status>\n      <pid>{pid}</pid>\n    \
+                 </state>\n  </services>\n</ServiceStateFile>\n"
+            ),
+        )
+        .expect("legacy state.xml");
+
+        let current = crate::upgrade::LiveUpgradeInfo::current();
+        let state = SupervisorHandoff {
+            schema: crate::upgrade::HANDOFF_SCHEMA_VERSION,
+            protocol: crate::upgrade::LIVE_REEXEC_PROTOCOL,
+            source_binary: std::env::current_exe().expect("exe"),
+            source_version: current.version.clone(),
+            target_version: current.version.clone(),
+            rollback_reason: None,
+            lock_fd: -1,
+            listener_fd: -1,
+            service_filter: None,
+            pipe_stderr: false,
+            primary: crate::upgrade::HandoffProject {
+                project_id: crate::state_store::LOOSE_PROJECT_ID.to_string(),
+                config_path: config_path.clone(),
+                config_hash,
+                mode: ProjectRunMode::Daemon,
+                active: true,
+                daemon: crate::upgrade::HandoffDaemonState {
+                    processes: vec![crate::upgrade::HandoffProcess {
+                        service: "tunnel".to_string(),
+                        pid,
+                        pgid,
+                        started,
+                    }],
+                    manual_stops: Vec::new(),
+                    restart_suppressed: Vec::new(),
+                    restart_counts: std::collections::BTreeMap::new(),
+                    stopped_for_dependency: std::collections::BTreeMap::new(),
+                },
+            },
+            projects: std::collections::BTreeMap::new(),
+            log_pipes: Vec::new(),
+        };
+        let handoff_path = state.persist().expect("persist handoff");
+
+        let supervisor =
+            Supervisor::from_handoff(handoff_path).expect("resume across migration");
+
+        // The resumed supervisor speaks the NEW identity end to end.
+        let new_id = supervisor.daemon.config().project.id.clone();
+        assert_ne!(new_id, crate::state_store::LOOSE_PROJECT_ID);
+        assert!(supervisor.daemon.config().project.loose);
+
+        // Its pids were seeded into the derived project's store.
+        let seeded = fs::read_to_string(
+            runtime::state_dir()
+                .join(crate::state_store::PROJECTS_DIR)
+                .join(&new_id)
+                .join(crate::constants::PID_FILE_NAME),
+        )
+        .expect("seeded pid.xml");
+        assert!(seeded.contains(&format!("<pid>{pid}</pid>")));
+
+        // And the registry learned about it, so a later cold boot restores it.
+        let registry = crate::loose_registry::LooseRegistry::load().expect("registry");
+        assert!(registry.by_project(&new_id).is_some());
+
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(supervisor);
+        restore_home(original_home);
     }
 }

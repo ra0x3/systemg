@@ -174,6 +174,131 @@ pub fn registry_with(entries: &[LooseEntry]) -> LooseRegistry {
     registry
 }
 
+/// Writes a seeded state file atomically, beside its target.
+///
+/// A plain write torn by a crash would leave a corrupt file that every retry
+/// then skips as "existing state" — the rename makes the file appear whole or
+/// not at all.
+fn write_seeded_file(target: &Path, contents: String) -> io::Result<()> {
+    let temp = target.with_file_name(format!(
+        ".{}.{}.tmp",
+        target
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "seed".to_string()),
+        std::process::id()
+    ));
+    crate::runtime::write_private_file(&temp, contents)?;
+    match std::fs::rename(&temp, target) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+/// Seeds a derived project's state files from the legacy directory a pre-0.59
+/// resident wrote, for a live-upgrade resume.
+///
+/// The replacement supervisor verifies handed-off pids against the project's
+/// own store — it never writes them — so a project whose identity migrated
+/// during the upgrade needs its `__loose__`-era pid/state/cron entries placed
+/// under the new id before its daemon is built, or the resume fails on an empty
+/// store and rolls the upgrade back.
+///
+/// Only entries for services the config declares are carried over, state keys
+/// are rewritten onto the derived id, existing target files are left alone
+/// (they are newer by definition), and the legacy directory is not touched —
+/// `migrate-state` remains the tool that retires it.
+pub fn seed_project_state_from_legacy(
+    state_dir: &Path,
+    legacy_id: &str,
+    config: &crate::config::Config,
+) -> io::Result<()> {
+    let legacy_dir = state_dir
+        .join(crate::state_store::PROJECTS_DIR)
+        .join(legacy_id);
+    let target_dir = state_dir
+        .join(crate::state_store::PROJECTS_DIR)
+        .join(&config.project.id);
+    if !legacy_dir.exists() {
+        return Ok(());
+    }
+    crate::runtime::create_private_dir(&target_dir)?;
+
+    let services: Vec<&str> = config.services.keys().map(String::as_str).collect();
+
+    let pid_target = target_dir.join(crate::constants::PID_FILE_NAME);
+    if !pid_target.exists()
+        && let Ok(raw) =
+            std::fs::read_to_string(legacy_dir.join(crate::constants::PID_FILE_NAME))
+    {
+        let blocks: Vec<String> = ["services", "service_groups", "service_starts"]
+            .iter()
+            .flat_map(|tag| xml_blocks(&raw, tag))
+            .filter(|block| {
+                xml_field_values(block, "name")
+                    .iter()
+                    .any(|name| services.contains(&name.as_str()))
+            })
+            .collect();
+        if !blocks.is_empty() {
+            write_seeded_file(
+                &pid_target,
+                format!("<PidFile>\n{}</PidFile>\n", blocks.join("")),
+            )?;
+        }
+    }
+
+    let state_target = target_dir.join(crate::constants::STATE_FILE_NAME);
+    if !state_target.exists()
+        && let Ok(raw) =
+            std::fs::read_to_string(legacy_dir.join(crate::constants::STATE_FILE_NAME))
+    {
+        let blocks: Vec<String> = services
+            .iter()
+            .filter_map(|service| {
+                state_block_for(&raw, service)
+                    .map(|block| rekey_state_block(&block, &config.state_key(service)))
+            })
+            .collect();
+        if !blocks.is_empty() {
+            write_seeded_file(
+                &state_target,
+                format!(
+                    "<ServiceStateFile>\n{}</ServiceStateFile>\n",
+                    blocks.join("")
+                ),
+            )?;
+        }
+    }
+
+    let cron_target = target_dir.join(crate::state_store::CRON_FILE_NAME);
+    if !cron_target.exists()
+        && let Ok(raw) =
+            std::fs::read_to_string(legacy_dir.join(crate::state_store::CRON_FILE_NAME))
+    {
+        let hashes: Vec<String> = config.service_hashes().into_values().collect();
+        let blocks: Vec<String> = xml_blocks(&raw, "jobs")
+            .into_iter()
+            .filter(|block| {
+                xml_field_values(block, "hash")
+                    .iter()
+                    .any(|hash| hashes.contains(hash))
+            })
+            .collect();
+        if !blocks.is_empty() {
+            write_seeded_file(
+                &cron_target,
+                format!("<CronStateFile>\n{}</CronStateFile>\n", blocks.join("")),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 /// One artifact the migration writes into a derived project's directory.
 #[derive(Debug, Clone)]
 pub struct PublishItem {
@@ -336,7 +461,8 @@ fn rekey_state_block(block: &str, new_key: &str) -> String {
     let Some(end) = block[start..].find("</name>").map(|idx| start + idx) else {
         return block.to_string();
     };
-    format!("{}<name>{new_key}{}", &block[..start], &block[end..])
+    let escaped = xml_escape(new_key);
+    format!("{}<name>{escaped}{}", &block[..start], &block[end..])
 }
 
 /// Every `<tag>…</tag>` block, including its delimiters.
@@ -409,11 +535,14 @@ fn service_from_state_key(key: &str) -> String {
     key.splitn(3, ':').nth(2).unwrap_or(key).to_string()
 }
 
-/// Values of every `<field>…</field>` in a state document.
+/// Values of every `<field>…</field>` in a state document, entity-decoded.
 ///
-/// The state files are written by this crate's own minimal XML writer, so a
+/// The state files are written by this crate's own XML serializer, so a
 /// targeted scan is enough and avoids constructing the typed state handles —
 /// which would take the project lock and rewrite the very files being migrated.
+/// The serializer escapes text content, so a service literally named
+/// `api&worker` is stored as `api&amp;worker`; values are decoded back before
+/// being compared with raw names from a parsed config.
 fn xml_field_values(raw: &str, field: &str) -> Vec<String> {
     let open = format!("<{field}>");
     let close = format!("</{field}>");
@@ -424,10 +553,29 @@ fn xml_field_values(raw: &str, field: &str) -> Vec<String> {
         let Some(end) = after.find(&close) else {
             break;
         };
-        values.push(after[..end].trim().to_string());
+        values.push(xml_unescape(after[..end].trim()));
         rest = &after[end + close.len()..];
     }
     values
+}
+
+/// Decodes the five XML entities the state serializer produces.
+fn xml_unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+/// Encodes text for placement inside an XML text node, matching the state
+/// serializer's escaping so seeded files parse exactly like written ones.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 /// Builds the SG0602 diagnostic for a migration refused because a supervisor is
@@ -481,6 +629,177 @@ pub fn is_legacy_loose(project_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entity_coding_is_order_safe_and_round_trips() {
+        assert_eq!(xml_unescape("api&amp;worker"), "api&worker");
+        // A literal `&lt;` arrives as `&amp;lt;` and must decode to the four
+        // characters, not to `<`.
+        assert_eq!(xml_unescape("&amp;lt;"), "&lt;");
+        assert_eq!(xml_unescape("&amp;amp;"), "&amp;");
+        assert_eq!(xml_escape("a&b<c"), "a&amp;b&lt;c");
+        assert_eq!(xml_unescape(&xml_escape("&lt;&amp;")), "&lt;&amp;");
+    }
+
+    #[test]
+    fn seeding_matches_names_the_serializer_escaped() {
+        // The state serializer writes `api&worker` as `api&amp;worker`;
+        // comparisons run against decoded values or such services silently
+        // fail to seed and the resume rolls back.
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        let legacy = state_dir
+            .join(crate::state_store::PROJECTS_DIR)
+            .join(crate::state_store::LOOSE_PROJECT_ID);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join(crate::constants::PID_FILE_NAME),
+            "<PidFile>\n  <services>\n    <name>api&amp;worker</name>\n    \
+             <pid>4242</pid>\n  </services>\n</PidFile>\n",
+        )
+        .unwrap();
+
+        let manifest = dir.path().join("amp-1111.yaml");
+        std::fs::write(
+            &manifest,
+            "version: \"2\"\nservices:\n  \"api&worker\":\n    command: 'echo hi'\n",
+        )
+        .unwrap();
+        let config = load_config(Some(&manifest.to_string_lossy())).unwrap();
+
+        seed_project_state_from_legacy(
+            state_dir,
+            crate::state_store::LOOSE_PROJECT_ID,
+            &config,
+        )
+        .unwrap();
+
+        let target = state_dir
+            .join(crate::state_store::PROJECTS_DIR)
+            .join(&config.project.id)
+            .join(crate::constants::PID_FILE_NAME);
+        let seeded = std::fs::read_to_string(target).expect("escaped name must seed");
+        assert!(seeded.contains("<pid>4242</pid>"));
+        // Carried verbatim: still escaped on disk, as the serializer writes it.
+        assert!(seeded.contains("api&amp;worker"));
+    }
+
+    #[test]
+    fn rekeying_escapes_what_it_writes() {
+        let block = "  <services>\n    <name>v2:none:api&amp;worker</name>\n    \
+                     <state>\n      <status>running</status>\n    </state>\n  \
+                     </services>\n";
+        let rekeyed = rekey_state_block(block, "v2:proj-abcd:api&worker");
+        assert!(rekeyed.contains("<name>v2:proj-abcd:api&amp;worker</name>"));
+        assert_eq!(
+            xml_field_values(&rekeyed, "name"),
+            vec!["v2:proj-abcd:api&worker"]
+        );
+    }
+
+    #[test]
+    fn seeding_carries_only_declared_services_and_rekeys_their_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        let legacy = state_dir
+            .join(crate::state_store::PROJECTS_DIR)
+            .join(crate::state_store::LOOSE_PROJECT_ID);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join(crate::constants::PID_FILE_NAME),
+            "<PidFile>\n  <services>\n    <name>mine</name>\n    <pid>4242</pid>\n  \
+             </services>\n  <services>\n    <name>other</name>\n    <pid>9999</pid>\n  \
+             </services>\n</PidFile>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            legacy.join(crate::constants::STATE_FILE_NAME),
+            "<ServiceStateFile>\n  <services>\n    <name>v2:none:mine</name>\n    \
+             <state>\n      <status>running</status>\n    </state>\n  </services>\n  \
+             <services>\n    <name>v2:none:other</name>\n    <state>\n      \
+             <status>running</status>\n    </state>\n  </services>\n\
+             </ServiceStateFile>\n",
+        )
+        .unwrap();
+
+        let manifest = dir.path().join("mine-1111.yaml");
+        std::fs::write(
+            &manifest,
+            "version: \"2\"\nservices:\n  mine:\n    command: 'echo hi'\n",
+        )
+        .unwrap();
+        let config = load_config(Some(&manifest.to_string_lossy())).unwrap();
+
+        seed_project_state_from_legacy(
+            state_dir,
+            crate::state_store::LOOSE_PROJECT_ID,
+            &config,
+        )
+        .unwrap();
+
+        let target = state_dir
+            .join(crate::state_store::PROJECTS_DIR)
+            .join(&config.project.id);
+        let pid = std::fs::read_to_string(target.join(crate::constants::PID_FILE_NAME))
+            .unwrap();
+        assert!(pid.contains("<pid>4242</pid>"));
+        // A sibling loose service the config does not declare stays behind.
+        assert!(!pid.contains("9999"));
+
+        let state =
+            std::fs::read_to_string(target.join(crate::constants::STATE_FILE_NAME))
+                .unwrap();
+        assert!(state.contains(&format!("<name>{}</name>", config.state_key("mine"))));
+        assert!(!state.contains("v2:none:"));
+
+        // The legacy tree is untouched — retiring it stays migrate-state's job.
+        assert!(legacy.join(crate::constants::PID_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn seeding_never_clobbers_state_the_new_identity_already_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        let legacy = state_dir
+            .join(crate::state_store::PROJECTS_DIR)
+            .join(crate::state_store::LOOSE_PROJECT_ID);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(
+            legacy.join(crate::constants::PID_FILE_NAME),
+            "<PidFile>\n  <services>\n    <name>mine</name>\n    <pid>4242</pid>\n  \
+             </services>\n</PidFile>\n",
+        )
+        .unwrap();
+
+        let manifest = dir.path().join("mine-1111.yaml");
+        std::fs::write(
+            &manifest,
+            "version: \"2\"\nservices:\n  mine:\n    command: 'echo hi'\n",
+        )
+        .unwrap();
+        let config = load_config(Some(&manifest.to_string_lossy())).unwrap();
+
+        let target = state_dir
+            .join(crate::state_store::PROJECTS_DIR)
+            .join(&config.project.id);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(
+            target.join(crate::constants::PID_FILE_NAME),
+            b"<PidFile>NEWER</PidFile>",
+        )
+        .unwrap();
+
+        seed_project_state_from_legacy(
+            state_dir,
+            crate::state_store::LOOSE_PROJECT_ID,
+            &config,
+        )
+        .unwrap();
+
+        let kept = std::fs::read_to_string(target.join(crate::constants::PID_FILE_NAME))
+            .unwrap();
+        assert_eq!(kept, "<PidFile>NEWER</PidFile>");
+    }
 
     #[test]
     fn rekeying_a_state_block_produces_wellformed_xml() {
