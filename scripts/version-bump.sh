@@ -53,6 +53,15 @@ done
 [ -n "$BUMP_KIND" ] || die "missing bump flag; use --major, --minor, or --patch"
 [ -f "$CARGO_TOML" ] || die "missing Cargo.toml at $CARGO_TOML"
 
+if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  die "not a git repository: $REPO_ROOT"
+fi
+
+if ! git -C "$REPO_ROOT" diff --quiet -- Cargo.toml Cargo.lock ||
+  ! git -C "$REPO_ROOT" diff --cached --quiet -- Cargo.toml Cargo.lock; then
+  die "Cargo.toml or Cargo.lock already has changes; commit or stash them so the release commit holds only the bump"
+fi
+
 CURRENT_VERSION=$(
   awk '
     /^\[package\]/ { in_package = 1; next }
@@ -128,3 +137,8 @@ printf 'Bumped systemg version: %s -> %s\n' "$CURRENT_VERSION" "$NEW_VERSION"
 
 cd "$REPO_ROOT"
 cargo build --release
+
+git add Cargo.toml Cargo.lock
+git commit -m "release: v$NEW_VERSION"
+
+printf 'Committed release: v%s\n' "$NEW_VERSION"
