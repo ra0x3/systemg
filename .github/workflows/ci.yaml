@@ -131,33 +131,44 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Detect version change on main push
+      # Compares against the PUBLISHED release, not the previous commit.
+      #
+      # Diffing Cargo.toml across commits made a release un-repeatable: when a
+      # release run failed on something unrelated to the code (a flaky job, a
+      # CI-only fix), the retry pushed a commit whose previous commit already
+      # carried the same version, so `bumped` came out false and the version
+      # never shipped at all. The only way out was to burn a patch number on a
+      # fix that changed nothing about the release.
+      #
+      # A release is a tag, and `create-github-release` already creates OR
+      # updates one, so asking "is this version published yet?" makes a retry
+      # idempotent: it republishes the same version until it succeeds, and
+      # still refuses to re-cut a version that already shipped.
+      - name: Detect unpublished version on main push
         id: detect
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           current_version="${{ needs.extract-version.outputs.current_version }}"
+          current_tag="${{ needs.extract-version.outputs.tag }}"
 
           previous_version=""
           bumped="false"
 
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            before_sha="${{ github.event.before }}"
-            if [[ -n "$before_sha" && "$before_sha" != "0000000000000000000000000000000000000000" ]]; then
-              if git cat-file -e "$before_sha:Cargo.toml" 2>/dev/null; then
-                previous_version=$(git show "$before_sha:Cargo.toml" | python ci/extract_version.py --stdin)
-              else
-                echo "Previous commit does not contain Cargo.toml; treating as no bump."
-              fi
+            previous_version="$(gh release view --json tagName -q .tagName 2>/dev/null || true)"
 
-              if [[ -z "$previous_version" ]]; then
-                echo "Could not parse previous Cargo.toml version; treating as no bump."
-              elif [[ "$current_version" != "$previous_version" ]]; then
-                bumped="true"
-              fi
+            if [[ -z "$previous_version" ]]; then
+              echo "No published release found; treating ${current_tag} as unpublished."
+              bumped="true"
+            elif gh release view "$current_tag" >/dev/null 2>&1; then
+              echo "${current_tag} is already published; nothing to release."
             else
-              echo "No valid before SHA available; treating as no bump."
+              echo "${current_tag} is not published yet (latest is ${previous_version})."
+              bumped="true"
             fi
           fi
 
@@ -166,8 +177,8 @@ jobs:
           echo "bumped=$bumped" >> "$GITHUB_OUTPUT"
 
           echo "Current version: $current_version"
-          echo "Previous version: ${previous_version:-<none>}"
-          echo "Version bumped: $bumped"
+          echo "Latest published: ${previous_version:-<none>}"
+          echo "Needs release: $bumped"
 
   docs:
     name: Mintlify Docs
