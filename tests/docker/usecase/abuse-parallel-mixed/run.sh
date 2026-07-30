@@ -61,7 +61,7 @@ sleep 4
 
 section "the supervisor SURVIVED and answers"
 S="$(sysg status --config "$CONFIG" --format json 2>/tmp/st.err)"
-grep -qi "No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
+grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
 [ "$DEAD" = "0" ]
 check "$?" "supervisor still answering after the mixed storm"
 

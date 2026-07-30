@@ -52,7 +52,7 @@ check "$?" "exactly 2 service processes (no double-boot into 4/6/...)"
 
 section "status is consistent: 2 units, both running, supervisor alive"
 S="$(sysg status --config "$CONFIG" --format json 2>/tmp/st.err)"
-grep -qi "No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
+grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
 [ "$DEAD" = "0" ]
 check "$?" "supervisor alive after the registration storm"
 [ "$(unit_count "$S")" = "2" ]

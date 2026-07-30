@@ -46,7 +46,7 @@ check "$?" "svc2 bounced (new pid, running, alive)"
 
 section "supervisor is still up"
 sysg status --config "$CONFIG" --format json 2>/tmp/sup.txt >/dev/null
-if grep -qi "No running supervisor" /tmp/sup.txt; then
+if grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/sup.txt; then
   check 1 "supervisor still answering status"
 else
   check 0 "supervisor still answering status"

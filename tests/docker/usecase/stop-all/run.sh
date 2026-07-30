@@ -52,7 +52,7 @@ section "the supervisor is still up after stop-all"
 # services stopped => non-zero). Liveness is: the status query is answered by
 # the supervisor (no "No running supervisor") and its pid file remains.
 sysg status --format json 2>/tmp/sa_err.txt >/dev/null
-if grep -qi "No running supervisor" /tmp/sa_err.txt; then
+if grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/sa_err.txt; then
   check 1 "supervisor still answers status after stop-all"
 else
   check 0 "supervisor still answers status after stop-all"

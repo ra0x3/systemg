@@ -31,10 +31,10 @@ RC=$?
 cat /tmp/stale_err.txt
 [ "$RC" = "0" ]
 check "$?" "start exits 0 despite the stale pid"
-if grep -qi "No running supervisor" /tmp/stale_err.txt; then
-  check 1 "start did NOT emit 'No running supervisor'"
+if grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/stale_err.txt; then
+  check 1 "start did NOT emit an absent-supervisor error"
 else
-  check 0 "start did NOT emit 'No running supervisor'"
+  check 0 "start did NOT emit an absent-supervisor error"
 fi
 
 sleep 3

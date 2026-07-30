@@ -30,10 +30,10 @@ check "$?" "web is running after cold restart"
 [ -n "$WEB" ] && pid_alive "$WEB"
 check "$?" "web pid is alive"
 
-if grep -qi "No running supervisor" /tmp/r.txt; then
-  check 1 "no 'No running supervisor' error on cold restart"
+if grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/r.txt; then
+  check 1 "no absent-supervisor error on cold restart"
 else
-  check 0 "no 'No running supervisor' error on cold restart"
+  check 0 "no absent-supervisor error on cold restart"
 fi
 
 sysg stop --supervisor >/dev/null 2>&1

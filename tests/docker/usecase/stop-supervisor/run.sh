@@ -12,7 +12,8 @@
 #   - `sysg stop --supervisor` exits 0.
 #   - The control socket is gone.
 #   - sysg.pid is gone.
-#   - A subsequent plain `sysg status` FAILS and says "No running supervisor".
+#   - A subsequent plain `sysg status` FAILS and reports the absent supervisor
+#     as SG0206 — the typed condition, not the SG0001 catch-all.
 set -u
 . /usecase/lib.sh
 
@@ -44,7 +45,14 @@ if sysg status 2>/tmp/s.txt; then
 else
   check 0 "status fails when no supervisor is running"
 fi
-grep -qi "No running supervisor" /tmp/s.txt
-check "$?" "status says 'No running supervisor'"
+grep -qi "no supervisor is running" /tmp/s.txt
+check "$?" "status says no supervisor is running"
+# The absent supervisor is a supervisor condition, not a generic failure: an
+# operator who just tore the daemon down must get a code that names what
+# happened and how to bring it back.
+grep -q "SG0206" /tmp/s.txt
+check "$?" "status types the absent supervisor as SG0206"
+! grep -q "SG0001" /tmp/s.txt
+check "$?" "status does not fall through to the catch-all"
 
 finish

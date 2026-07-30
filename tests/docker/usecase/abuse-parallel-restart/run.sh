@@ -46,7 +46,7 @@ sleep 4
 
 section "the supervisor SURVIVED the storm"
 sysg status --config "$CONFIG" --format json >/tmp/st.json 2>/tmp/st.err
-grep -qi "No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
+grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
 [ "$DEAD" = "0" ]
 check "$?" "supervisor still answering after $N concurrent restarts"
 
