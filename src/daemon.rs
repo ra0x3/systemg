@@ -1738,6 +1738,14 @@ pub enum ServiceReadyState {
     Running,
     /// Service completed successfully (for oneshot/cron services).
     CompletedSuccess,
+    /// The unit was intentionally not started because `skip` selected it.
+    ///
+    /// Distinct from [`ServiceReadyState::CompletedSuccess`]: skipping is a
+    /// successful control decision, but no process ever ran, so it satisfies
+    /// NEITHER `condition: started` NOR `condition: completed`. Folding it into
+    /// `CompletedSuccess` is what let dependents start behind a dependency that
+    /// never came up, and let a skipped cron unit record a successful run.
+    Skipped,
 }
 
 /// Outcome of a failed subset restart, carrying the units that actually missed
@@ -3609,7 +3617,7 @@ impl Daemon {
                 SkipConfig::Flag(true) => {
                     info!("Skipping service '{name}' due to skip flag");
                     self.mark_skipped(name)?;
-                    return Ok(Some(ServiceReadyState::CompletedSuccess));
+                    return Ok(Some(ServiceReadyState::Skipped));
                 }
                 SkipConfig::Flag(false) => {
                     debug!("Skip flag for '{name}' disabled; starting service");
@@ -3619,7 +3627,7 @@ impl Daemon {
                         Ok(true) => {
                             info!("Skipping service '{name}' due to skip condition");
                             self.mark_skipped(name)?;
-                            return Ok(Some(ServiceReadyState::CompletedSuccess));
+                            return Ok(Some(ServiceReadyState::Skipped));
                         }
                         Ok(false) => {
                             debug!(
@@ -3864,6 +3872,9 @@ impl Daemon {
                     info!("Service '{service_name}' completed successfully.");
                     healthy_services.insert(service_name.clone());
                     completed_services.insert(service_name.clone());
+                }
+                Ok(ServiceReadyState::Skipped) => {
+                    skipped_services.insert(service_name.clone());
                 }
                 Err(err) => {
                     error!("Failed to start service '{service_name}': {err}");
@@ -4442,7 +4453,7 @@ impl Daemon {
     /// This is the state SHARED across concurrent operations, so it is the only
     /// reliable answer to "did this service already run to completion?" when
     /// another restart may have observed the exit first.
-    fn recorded_status(&self, service_name: &str) -> Option<ServiceLifecycleStatus> {
+    pub fn recorded_status(&self, service_name: &str) -> Option<ServiceLifecycleStatus> {
         let config = self.cfg();
         if !config.services.contains_key(service_name) {
             return None;
@@ -4810,6 +4821,9 @@ impl Daemon {
                     healthy_services.insert(service_name.clone());
                     restarted_services.push(service_name);
                 }
+                Ok(ServiceReadyState::Skipped) => {
+                    skipped_services.insert(service_name);
+                }
                 Err(err) => {
                     error!("Failed to restart '{service_name}': {err}");
                     first_error.get_or_insert(err);
@@ -4853,7 +4867,7 @@ impl Daemon {
         &self,
         name: &str,
         service: &ServiceConfig,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<ServiceReadyState, ProcessManagerError> {
         let strategy_str = service
             .deployment
             .as_ref()
@@ -4870,6 +4884,13 @@ impl Daemon {
             }
         };
 
+        // A skipped unit has no process to verify: it was intentionally never
+        // started, so asserting it is running would fail a restart that did
+        // exactly what the manifest asked for.
+        if matches!(start_state, ServiceReadyState::Skipped) {
+            return Ok(start_state);
+        }
+
         let completed_services =
             if matches!(start_state, ServiceReadyState::CompletedSuccess) {
                 HashSet::from([name.to_string()])
@@ -4878,7 +4899,7 @@ impl Daemon {
             };
         self.verify_services_running(&[name.to_string()], &completed_services)?;
 
-        Ok(())
+        Ok(start_state)
     }
 
     /// Performs a rolling restart keeping the previous instance alive until the replacement is
@@ -5118,6 +5139,16 @@ impl Daemon {
                 return Err(err);
             }
         };
+
+        // `skip` selected the unit, so there is no candidate to switch to and
+        // nothing to roll back to either: restoring the previous generation
+        // would keep serving a unit the manifest just turned off. Retire it.
+        if matches!(start_state, ServiceReadyState::Skipped) {
+            if let Some(detached) = previous {
+                self.terminate_service(name, detached)?;
+            }
+            return Ok(start_state);
+        }
 
         if matches!(start_state, ServiceReadyState::CompletedSuccess) {
             if let Some(detached) = previous {
@@ -7669,16 +7700,11 @@ impl Daemon {
                         true
                     }
                     Ok(ServiceReadyState::CompletedSuccess) => {
-                        if matches!(
-                            daemon.recorded_status(&name),
-                            Some(ServiceLifecycleStatus::Skipped)
-                        ) {
-                            info!("Service '{name}' is skipped after restart evaluation.");
-                        } else {
-                            info!(
-                                "Service '{name}' completed successfully during restart."
-                            );
-                        }
+                        info!("Service '{name}' completed successfully during restart.");
+                        true
+                    }
+                    Ok(ServiceReadyState::Skipped) => {
+                        info!("Service '{name}' is skipped after restart evaluation.");
                         true
                     }
                     Err(err) => {

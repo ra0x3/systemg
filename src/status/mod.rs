@@ -1453,6 +1453,13 @@ fn derive_unit_state(
         };
     }
 
+    // An active skip outranks cron history: the unit is not running now, by
+    // configuration, and a past run — however it ended — does not describe the
+    // unit's present state. History itself is preserved and still rendered.
+    if matches!(lifecycle, Some(ServiceLifecycleStatus::Skipped)) {
+        return UnitState::Skipped;
+    }
+
     if let Some(cron_status) = cron {
         if let Some(last) = cron_status.last_run.as_ref()
             && let Some(status) = &last.status
@@ -1532,6 +1539,12 @@ fn derive_unit_health(
                 }
             }
         }
+    }
+
+    // Matches the precedence in `derive_unit_state`: a skipped unit is idle by
+    // configuration, and must not inherit `Healthy` from an older cron run.
+    if matches!(lifecycle, Some(ServiceLifecycleStatus::Skipped)) {
+        return UnitHealth::Idle;
     }
 
     if let Some(cron_status) = cron {
@@ -1615,6 +1628,23 @@ fn describe_exit(exit: Option<&ExitMetadata>) -> Option<String> {
     }
 }
 
+/// Explains a unit that a skip rule kept from starting.
+fn skipped_health_report(name: &str) -> HealthReport {
+    HealthReport {
+        health: UnitHealth::Idle,
+        severity: 1,
+        title: format!("'{name}' was skipped"),
+        tldr: "A skip rule kept this unit from starting.".to_string(),
+        description: format!(
+            "'{name}' did not start because a configured skip rule matched. \
+This is intentional and does not indicate a problem."
+        ),
+        recommended_fix: "No action needed unless you expected it to run; \
+in that case review the unit's skip condition in your config."
+            .to_string(),
+    }
+}
+
 /// Builds a human-readable explanation of a unit's current health.
 ///
 /// The branch order mirrors `derive_unit_health` so the explanation always
@@ -1683,6 +1713,13 @@ out from under the supervisor without a clean lifecycle transition.",
                 }
             }
         }
+    }
+
+    // Mirrors the skip precedence in `derive_unit_health`: without this a
+    // skipped cron unit is explained by its last run while the table beside it
+    // reads Idle, and the explanation contradicts the verdict.
+    if matches!(unit.lifecycle, Some(ServiceLifecycleStatus::Skipped)) {
+        return skipped_health_report(name);
     }
 
     if let Some(cron_status) = unit.cron.as_ref() {
@@ -1823,19 +1860,7 @@ A service that should stay available has crashed or returned a non-zero status."
             };
         }
         Some(ServiceLifecycleStatus::Skipped) => {
-            return HealthReport {
-                health: UnitHealth::Idle,
-                severity: 1,
-                title: format!("'{name}' was skipped"),
-                tldr: "A skip rule kept this unit from starting.".to_string(),
-                description: format!(
-                    "'{name}' did not start because a configured skip rule matched. \
-This is intentional and does not indicate a problem."
-                ),
-                recommended_fix: "No action needed unless you expected it to run; \
-in that case review the unit's skip condition in your config."
-                    .to_string(),
-            };
+            return skipped_health_report(name);
         }
         Some(ServiceLifecycleStatus::Stopped) => {
             if matches!(unit.intent, UnitIntent::Serve) {
@@ -3806,6 +3831,67 @@ services:
             None,
         );
         assert_eq!(health, UnitHealth::Failing);
+    }
+
+    #[test]
+    fn an_active_skip_outranks_a_successful_cron_run() {
+        let success = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            pid: None,
+            user: None,
+            command: None,
+            metrics: vec![],
+        };
+        let cron_status = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(success.clone()),
+            recent_runs: vec![success],
+        };
+
+        let state = derive_unit_state(
+            UnitKind::Cron,
+            Some(ServiceLifecycleStatus::Skipped),
+            None,
+            Some(&cron_status),
+        );
+        let health = derive_unit_health(
+            UnitKind::Cron,
+            state,
+            UnitIntent::Cron,
+            Some(ServiceLifecycleStatus::Skipped),
+            None,
+            Some(&cron_status),
+        );
+
+        assert_eq!(state, UnitState::Skipped);
+        assert_eq!(health, UnitHealth::Idle);
+    }
+
+    #[test]
+    fn cron_history_still_wins_when_the_unit_is_not_skipped() {
+        let success = CronExecutionSummary {
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            pid: None,
+            user: None,
+            command: None,
+            metrics: vec![],
+        };
+        let cron_status = CronUnitStatus {
+            timezone_label: "UTC".into(),
+            timezone: Some("UTC".into()),
+            last_run: Some(success.clone()),
+            recent_runs: vec![success],
+        };
+
+        let state = derive_unit_state(UnitKind::Cron, None, None, Some(&cron_status));
+        assert_eq!(state, UnitState::Done);
     }
 
     #[test]

@@ -37,6 +37,9 @@ pub enum Outcome {
     Up(Liveness),
     /// A finite unit (one-shot/cron) ran and exited cleanly. Not a failure.
     Completed,
+    /// `skip` selected the unit, so it never ran. Not a failure, and not a
+    /// start: dependents of a skipped unit are themselves skipped.
+    Skipped,
     /// The unit did not come up. Carries the diagnostic to show the user.
     Failed(Diagnostic),
 }
@@ -185,6 +188,7 @@ pub fn outcome_of(
             )),
         },
         Ok(ServiceReadyState::CompletedSuccess) => Outcome::Completed,
+        Ok(ServiceReadyState::Skipped) => Outcome::Skipped,
         Err(ProcessManagerError::Diag(diag)) => Outcome::Failed(*diag),
         Err(err) => Outcome::Failed(unit_start_failed(service, err.to_string())),
     }

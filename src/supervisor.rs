@@ -584,6 +584,18 @@ impl Supervisor {
                 continue;
             };
 
+            // A statically skipped unit is skipped whatever its kind. This is
+            // checked BEFORE the cron hand-off below: a cron unit that returns
+            // early here would be recorded healthy and completed, and its
+            // scheduler entry would go on claiming a boundary every expression
+            // tick for a command that is never allowed to run.
+            if matches!(service_config.skip, Some(SkipConfig::Flag(true))) {
+                info!("Skipping service '{service_name}' due to skip flag");
+                daemon.mark_service_skipped(&service_name)?;
+                skipped.insert(service_name.clone());
+                continue;
+            }
+
             if service_config.cron.is_some() {
                 healthy.insert(service_name.clone());
                 completed.insert(service_name.clone());
@@ -779,6 +791,9 @@ impl Supervisor {
                 Ok(ServiceReadyState::CompletedSuccess) => {
                     healthy.insert(service_name.clone());
                     completed.insert(service_name.clone());
+                }
+                Ok(ServiceReadyState::Skipped) => {
+                    skipped.insert(service_name.clone());
                 }
                 Err(_) => {
                     failed.insert(service_name.clone());
@@ -3216,6 +3231,11 @@ impl Supervisor {
 
                         let Some(project) = project else {
                             if !cron_manager.contains_job_hash(&due_job.service_hash) {
+                                // The job went away between the claim and here.
+                                // Its ownership must go with it, or re-adding
+                                // the same service finds itself permanently
+                                // claimed and never runs again.
+                                cron_manager.abandon_job_run(&due_job);
                                 continue;
                             }
                             error!(
@@ -3237,6 +3257,7 @@ impl Supervisor {
                         if project.daemon.boot_cancelled()
                             || !cron_manager.contains_job_hash(&due_job.service_hash)
                         {
+                            cron_manager.abandon_job_run(&due_job);
                             continue;
                         }
 
@@ -3256,6 +3277,7 @@ impl Supervisor {
                             let metrics_store_clone = metrics_store.clone();
                             let service_hash = due_job.service_hash.clone();
                             let run_started_at = due_job.started_at;
+                            let withdraw_claim = due_job.clone();
 
                             let failed_manager = cron_manager_clone.clone();
                             let failed_hash = service_hash.clone();
@@ -3265,6 +3287,14 @@ impl Supervisor {
                                 match daemon
                                     .start_service(&job_name_clone, &service_config)
                                 {
+                                    Ok(ServiceReadyState::Skipped) => {
+                                        info!(
+                                            "Cron job '{}' was skipped; recording no execution",
+                                            job_name_clone
+                                        );
+                                        cron_manager_clone
+                                            .withdraw_job_run(&withdraw_claim);
+                                    }
                                     Ok(ServiceReadyState::CompletedSuccess) => {
                                         cron_manager_clone.annotate_job_run(
                                             &service_hash,
@@ -5043,6 +5073,22 @@ impl Supervisor {
     /// A dependent must re-handshake the freshly-restarted dependency, so
     /// `restart -s A` bounces A then everything that depends on A. A dependent
     /// carrying `skip: true` is honored — it is not launched by the cascade.
+    /// Stops a unit a cascade decided to skip, then records it as skipped.
+    ///
+    /// A unit that was already running when the cascade reached it keeps its
+    /// process unless it is stopped here: marking it skipped while it runs
+    /// leaves an untracked process behind and makes status describe a unit that
+    /// is not in the state it reports.
+    /// A unit that is not running already stops cleanly, so a real error here
+    /// means the process is still alive; it propagates rather than being logged,
+    /// because recording `Skipped` over a live process is the exact lie this is
+    /// meant to prevent.
+    fn retire_skipped_unit(daemon: &Daemon, name: &str) -> Result<(), SupervisorError> {
+        daemon.stop_service(name)?;
+        daemon.mark_service_skipped(name)?;
+        Ok(())
+    }
+
     fn cascade_restart(
         daemon: &Daemon,
         config: &Config,
@@ -5050,12 +5096,50 @@ impl Supervisor {
         target_project: &str,
     ) -> Result<(), SupervisorError> {
         daemon.begin_boot();
+        // A skipped unit does not satisfy its dependents, so a cascade must
+        // carry that verdict downstream: restarting a dependent whose
+        // dependency was skipped starts it against something that never came
+        // up. `skipped` accumulates those roots as the BFS order is walked,
+        // which is ordered dependency-before-dependent.
+        let mut skipped: HashSet<String> = HashSet::new();
+        // The cascade starts at `root`, so a unit skipped ABOVE it is never
+        // visited and its verdict would be lost: `restart -s B` where B depends
+        // on an already-skipped A must still leave B unstarted. Seed the set
+        // from the manifest AND from what actually happened — a conditional
+        // skip is only knowable from the lifecycle its last evaluation wrote,
+        // and its predicate is deliberately NOT re-run here: this cascade is
+        // not restarting A, so A's verdict stands as recorded.
+        for (name, service_config) in &config.services {
+            let statically_skipped =
+                matches!(service_config.skip, Some(SkipConfig::Flag(true)));
+            let recorded_skipped = matches!(
+                daemon.recorded_status(name),
+                Some(ServiceLifecycleStatus::Skipped)
+            );
+            if statically_skipped || recorded_skipped {
+                skipped.insert(name.clone());
+            }
+        }
         for name in cascade_restart_order(config, root) {
             let Some(service_config) = config.services.get(&name) else {
                 continue;
             };
+            if let Some(blocker) = service_config.depends_on.as_ref().and_then(|deps| {
+                deps.iter()
+                    .map(|dependency| dependency.service())
+                    .find(|dependency| skipped.contains(*dependency))
+            }) {
+                info!(
+                    "Skipping dependent '{name}' during cascade restart (dependency '{blocker}' was skipped)"
+                );
+                Self::retire_skipped_unit(daemon, &name)?;
+                skipped.insert(name);
+                continue;
+            }
             if matches!(service_config.skip, Some(SkipConfig::Flag(true))) {
                 info!("Skipping dependent '{name}' during cascade restart (skip flag)");
+                Self::retire_skipped_unit(daemon, &name)?;
+                skipped.insert(name);
                 continue;
             }
             reject_direct_cron_control(
@@ -5064,7 +5148,21 @@ impl Supervisor {
                 target_project,
                 "restarted",
             )?;
-            daemon.restart_service(&name, service_config)?;
+            // A conditional skip is only known once its predicate has run, so
+            // the restart's own verdict is what says whether this unit came up.
+            // Without it a unit skipped by its condition still satisfies its
+            // dependents, which is the leak this cascade is fixing. The verdict
+            // also RETIRES the seeded guess: a predicate that has flipped back
+            // off makes the recorded `Skipped` stale, and leaving it in the set
+            // would strand every dependent behind a unit that just came up.
+            if matches!(
+                daemon.restart_service(&name, service_config)?,
+                ServiceReadyState::Skipped
+            ) {
+                skipped.insert(name);
+            } else {
+                skipped.remove(&name);
+            }
         }
         Ok(())
     }
