@@ -59,6 +59,11 @@ pub fn render_boot<W: Write>(
                         let _ = writeln!(out, "  \u{2713} {service} completed");
                     }
                 }
+                Outcome::Skipped => {
+                    if verbose {
+                        let _ = writeln!(out, "  \u{2013} {service} skipped");
+                    }
+                }
                 Outcome::Failed(diag) => {
                     if verbose {
                         let _ = writeln!(

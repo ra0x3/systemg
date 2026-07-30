@@ -474,6 +474,12 @@ pub struct CronDueJob {
     pub service_hash: String,
     /// Start identity for the execution record created by the scheduler.
     pub started_at: SystemTime,
+    /// `last_execution` as it stood before this claim overwrote it.
+    ///
+    /// Withdrawing a claim has to put this back: the claim is staked before the
+    /// unit is launched, so a run that turns out to be skipped would otherwise
+    /// erase the timestamp of the last execution that genuinely happened.
+    pub previous_last_execution: Option<SystemTime>,
 }
 
 impl CronJobState {
@@ -612,6 +618,16 @@ fn compute_next_execution(
 pub struct CronManager {
     jobs: Arc<Mutex<Vec<CronJobState>>>,
     stores: Arc<Mutex<HashMap<String, StateStore>>>,
+    /// Claims this process has staked but not yet resolved, by job hash.
+    ///
+    /// A claim is staked before its unit launches, so it has no PID for as long
+    /// as pre-start hooks, dependency waits or `skip` predicates take — all of
+    /// which are unbounded or configurable past any fixed grace. Persisted
+    /// state cannot prove such a claim is still in flight, and a resync that
+    /// guesses wrong lets the next boundary start a SECOND concurrent run.
+    /// Ownership therefore lives here, in the process that staked it, where it
+    /// is exact and outlives any `sync_from_configs`.
+    in_flight: Arc<Mutex<HashMap<String, SystemTime>>>,
 }
 
 impl Default for CronManager {
@@ -629,6 +645,7 @@ impl CronManager {
         Self {
             jobs: Arc::new(Mutex::new(Vec::new())),
             stores: Arc::new(Mutex::new(stores)),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -757,6 +774,25 @@ impl CronManager {
                             &service_hash,
                             cron_config,
                         )?;
+
+                    // Built first, then dropped: building is what validates the
+                    // expression and timezone, and a malformed schedule must be
+                    // rejected whether or not the unit is currently skipped —
+                    // otherwise the error only surfaces when someone re-enables
+                    // it, long after the manifest was accepted. A statically
+                    // skipped job is not armed beyond that: its boundary would
+                    // claim a run and spawn a worker for a command that cannot
+                    // run. A CONDITIONAL skip stays armed, since its predicate
+                    // is evaluated per boundary and may flip.
+                    if matches!(
+                        service_config.skip,
+                        Some(crate::config::SkipConfig::Flag(true))
+                    ) {
+                        debug!(
+                            "Not scheduling cron job for skipped service '{service_name}'"
+                        );
+                        continue;
+                    }
                     let timezone_label = job_state.timezone_label.clone();
 
                     self.persist_job_state(&job_state);
@@ -821,7 +857,13 @@ impl CronManager {
                     job.service_name, next_dt, now_dt
                 );
 
-                if job.currently_running {
+                // `currently_running` is recomputed from persisted records on
+                // every resync, which cannot see a claim whose unit has not
+                // launched yet. The in-process claim can, and it is what makes
+                // the overlap guard hold across a resync.
+                let claimed_here =
+                    lock_recover(&self.in_flight).contains_key(job.service_hash.as_str());
+                if job.currently_running || claimed_here {
                     warn!(
                         "Cron job '{}' is scheduled to run but previous execution is still running",
                         job.service_name
@@ -848,7 +890,9 @@ impl CronManager {
                         service_name: job.service_name.clone(),
                         service_hash: job.service_hash.clone(),
                         started_at: now,
+                        previous_last_execution: job.last_execution,
                     });
+                    lock_recover(&self.in_flight).insert(job.service_hash.clone(), now);
                     job.currently_running = true;
                     job.last_execution = Some(now);
 
@@ -928,6 +972,12 @@ impl CronManager {
         exit_code: Option<i32>,
         metrics: Vec<crate::metrics::MetricSample>,
     ) {
+        // Released unconditionally, BEFORE the job lookup: a resync may have
+        // removed this job while its worker ran, and ownership keyed on a job
+        // that no longer exists would never be dropped — re-adding the same
+        // service would then find itself permanently claimed, logging overlap
+        // errors and never running again.
+        self.release_claim(service_hash, started_at);
         self.mark_job_completed_by(
             |job| job.service_hash == service_hash,
             Some(started_at),
@@ -935,6 +985,78 @@ impl CronManager {
             exit_code,
             metrics,
         );
+    }
+
+    /// Withdraws the provisional run a due job staked, leaving no execution.
+    ///
+    /// `get_due_job_refs` claims a boundary by appending an open record and
+    /// flipping `currently_running` before the unit is launched. A unit that
+    /// turns out to be skipped never ran, so completing that claim — even as a
+    /// success — fabricates history for an execution that did not happen. This
+    /// drops the claim instead: the boundary is consumed and `next_execution`
+    /// stands, but no record, exit code, or metrics are recorded.
+    pub fn withdraw_job_run(&self, claim: &CronDueJob) {
+        self.release_claim(&claim.service_hash, claim.started_at);
+        let mut jobs = lock_recover(&self.jobs);
+        for job in jobs
+            .iter_mut()
+            .filter(|job| job.service_hash == claim.service_hash)
+        {
+            // Matched on the run's identity alone, NOT on it still being
+            // incomplete: a resync landing between the claim and the skip sees
+            // a record with no PID yet, judges it not live, and rewrites it as
+            // `Interrupted`. Requiring incompleteness here would then match
+            // nothing and leave that fabricated run in the history.
+            let before = job.execution_history.len();
+            job.execution_history
+                .retain(|record| !same_run(record.started_at, claim.started_at));
+            if job.execution_history.len() == before {
+                continue;
+            }
+
+            // Only the claim this call withdrew is released. A later boundary
+            // may already have staked its own claim while this unit's skip
+            // predicate ran, and that run IS executing: clearing the flag for it
+            // would let the next boundary start a second concurrent run. The
+            // job is still owned if any incomplete record outlives the removal.
+            let still_claimed =
+                job.execution_history.iter().any(cron_record_is_incomplete);
+            if !still_claimed {
+                job.currently_running = false;
+            }
+            if job
+                .last_execution
+                .is_some_and(|last| same_run(last, claim.started_at))
+            {
+                job.last_execution = claim.previous_last_execution;
+            }
+            self.persist_job_state(job);
+        }
+    }
+
+    /// Drops a claim whose job disappeared before its unit could be dispatched.
+    ///
+    /// Nothing ran, so there is no history to write and no lifecycle to touch;
+    /// only the ownership needs releasing. Without this the claim outlives the
+    /// job it named, and a service re-added under the same state key inherits a
+    /// claim nothing will ever resolve.
+    pub fn abandon_job_run(&self, claim: &CronDueJob) {
+        self.release_claim(&claim.service_hash, claim.started_at);
+    }
+
+    /// Releases this process's claim on a job, if it still owns that run.
+    ///
+    /// Scoped to the exact run: a later boundary may already own the job, and
+    /// dropping its claim would let the next boundary start a second run
+    /// alongside it.
+    fn release_claim(&self, service_hash: &str, started_at: SystemTime) {
+        let mut in_flight = lock_recover(&self.in_flight);
+        if in_flight
+            .get(service_hash)
+            .is_some_and(|owned| same_run(*owned, started_at))
+        {
+            in_flight.remove(service_hash);
+        }
     }
 
     /// Mark a cron job matching predicate as completed.
@@ -1513,6 +1635,366 @@ mod tests {
         assert!(
             state.currently_running,
             "a live unfinished persisted run should remain marked as running"
+        );
+    }
+
+    #[test]
+    fn withdrawing_a_skipped_run_records_no_execution() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempfile::tempdir_in(&base).unwrap();
+        let home = temp.path();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", home);
+        }
+        crate::runtime::init_with_test_home(home);
+        crate::runtime::set_drop_privileges(false);
+
+        let manager = CronManager::new();
+        let schedule = Schedule::from_str("* * * * * *").expect("valid schedule");
+        let mut job = CronJobState::new(
+            String::new(),
+            "skipped_service".to_string(),
+            "skipped-hash".to_string(),
+            schedule,
+            EffectiveTimezone::Utc,
+            "UTC".to_string(),
+            None,
+        );
+
+        // A run that GENUINELY happened before the skip. Withdrawing the later
+        // claim must not erase it.
+        let genuine_run = SystemTime::now() - Duration::from_secs(600);
+        job.last_execution = Some(genuine_run);
+        job.execution_history.push_back(CronExecutionRecord {
+            started_at: genuine_run,
+            completed_at: Some(genuine_run),
+            status: Some(CronExecutionStatus::Success),
+            exit_code: Some(0),
+            pid: None,
+            process_start: None,
+            user: None,
+            command: None,
+            metrics: vec![],
+        });
+        job.next_execution = Some(SystemTime::now() - Duration::from_secs(1));
+        {
+            let mut jobs = manager.jobs.lock().unwrap();
+            jobs.push(job);
+        }
+
+        let due = manager.get_due_job_refs();
+        let claim = due.first().expect("the job came due").clone();
+        assert_eq!(manager.jobs.lock().unwrap()[0].execution_history.len(), 2);
+
+        manager.withdraw_job_run(&claim);
+
+        let jobs = manager.jobs.lock().unwrap();
+        let job = jobs.first().expect("job present");
+        assert_eq!(
+            job.execution_history.len(),
+            1,
+            "a skipped run must leave no record of itself"
+        );
+        assert!(
+            job.execution_history
+                .iter()
+                .all(|record| same_run(record.started_at, genuine_run)),
+            "the genuine earlier run must survive the withdrawal"
+        );
+        assert!(!job.currently_running);
+        assert_eq!(
+            job.last_execution,
+            Some(genuine_run),
+            "withdrawal restores the previous execution, it does not clear it"
+        );
+        assert!(
+            job.next_execution.is_some(),
+            "the schedule must survive a withdrawn run"
+        );
+        drop(jobs);
+
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn withdrawal_removes_a_claim_a_resync_already_marked_interrupted() {
+        let manager = CronManager::new();
+        let schedule = Schedule::from_str("* * * * * *").expect("valid schedule");
+        let claimed_at = SystemTime::now();
+        let mut job = CronJobState::new(
+            String::new(),
+            "raced_service".to_string(),
+            "raced-hash".to_string(),
+            schedule,
+            EffectiveTimezone::Utc,
+            "UTC".to_string(),
+            None,
+        );
+
+        // A resync between the claim and the skip sees a record with no PID,
+        // judges it dead and rewrites it as Interrupted rather than incomplete.
+        job.execution_history.push_back(CronExecutionRecord {
+            started_at: claimed_at,
+            completed_at: None,
+            status: Some(CronExecutionStatus::Interrupted(
+                STALE_CRON_INTERRUPTION_REASON.to_string(),
+            )),
+            exit_code: None,
+            pid: None,
+            process_start: None,
+            user: None,
+            command: None,
+            metrics: vec![],
+        });
+        job.last_execution = Some(claimed_at);
+        job.currently_running = true;
+        {
+            let mut jobs = manager.jobs.lock().unwrap();
+            jobs.push(job);
+        }
+
+        manager.withdraw_job_run(&CronDueJob {
+            service_name: "raced_service".to_string(),
+            service_hash: "raced-hash".to_string(),
+            started_at: claimed_at,
+            previous_last_execution: None,
+        });
+
+        let jobs = manager.jobs.lock().unwrap();
+        let job = jobs.first().expect("job present");
+        assert!(
+            job.execution_history.is_empty(),
+            "a withdrawn claim must be removed even after a resync rewrote it"
+        );
+        assert!(!job.currently_running);
+        assert!(job.last_execution.is_none());
+    }
+
+    /// Builds a job armed to be due immediately.
+    fn due_job_state(service: &str, hash: &str) -> CronJobState {
+        let schedule = Schedule::from_str("* * * * * *").expect("valid schedule");
+        let mut job = CronJobState::new(
+            String::new(),
+            service.to_string(),
+            hash.to_string(),
+            schedule,
+            EffectiveTimezone::Utc,
+            "UTC".to_string(),
+            None,
+        );
+        job.next_execution = Some(SystemTime::now() - Duration::from_secs(1));
+        job
+    }
+
+    #[test]
+    fn a_claim_whose_job_vanished_before_dispatch_does_not_leak_ownership() {
+        let manager = CronManager::new();
+        manager
+            .jobs
+            .lock()
+            .unwrap()
+            .push(due_job_state("gone_service", "gone-hash"));
+
+        let claim = manager.get_due_job_refs();
+        assert_eq!(claim.len(), 1, "the boundary claims the job");
+
+        // A resync removes the job while its claim is outstanding — the unit was
+        // never dispatched, so no completion will ever arrive to release it.
+        manager.jobs.lock().unwrap().clear();
+        manager.abandon_job_run(&claim[0]);
+
+        // The same service comes back under the same state key.
+        manager
+            .jobs
+            .lock()
+            .unwrap()
+            .push(due_job_state("gone_service", "gone-hash"));
+
+        assert_eq!(
+            manager.get_due_job_refs().len(),
+            1,
+            "a re-added service must not inherit a claim nothing can resolve"
+        );
+    }
+
+    #[test]
+    fn a_claim_whose_job_vanished_mid_run_is_released_on_completion() {
+        let manager = CronManager::new();
+        manager
+            .jobs
+            .lock()
+            .unwrap()
+            .push(due_job_state("vanished", "vanished-hash"));
+
+        let claim = manager.get_due_job_refs();
+        assert_eq!(claim.len(), 1, "the boundary claims the job");
+
+        // The worker is already running when a resync removes the job, so
+        // completion finds no `CronJobState` to write its record into.
+        manager.jobs.lock().unwrap().clear();
+        manager.complete_job_run(
+            &claim[0].service_hash,
+            claim[0].started_at,
+            CronExecutionStatus::Success,
+            Some(0),
+            vec![],
+        );
+
+        manager
+            .jobs
+            .lock()
+            .unwrap()
+            .push(due_job_state("vanished", "vanished-hash"));
+
+        assert_eq!(
+            manager.get_due_job_refs().len(),
+            1,
+            "completion releases ownership even with no job left to record it"
+        );
+    }
+
+    #[test]
+    fn a_resynced_unlaunched_claim_still_blocks_the_next_boundary() {
+        let manager = CronManager::new();
+        let schedule = Schedule::from_str("* * * * * *").expect("valid schedule");
+        let mut job = CronJobState::new(
+            String::new(),
+            "slow_service".to_string(),
+            "slow-hash".to_string(),
+            schedule.clone(),
+            EffectiveTimezone::Utc,
+            "UTC".to_string(),
+            None,
+        );
+        job.next_execution = Some(SystemTime::now() - Duration::from_secs(1));
+        {
+            let mut jobs = manager.jobs.lock().unwrap();
+            jobs.push(job);
+        }
+
+        let first = manager.get_due_job_refs();
+        assert_eq!(first.len(), 1, "the first boundary claims the job");
+
+        // The unit has not launched — a slow skip predicate, a pre-start hook,
+        // an unbounded dependency wait — so the persisted record has no PID. A
+        // resync rebuilds the job from that state and cannot tell the claim is
+        // still in flight, clearing `currently_running`.
+        {
+            let mut jobs = manager.jobs.lock().unwrap();
+            let persisted = jobs[0].clone();
+            let mut resynced = CronJobState::new(
+                String::new(),
+                "slow_service".to_string(),
+                "slow-hash".to_string(),
+                schedule,
+                EffectiveTimezone::Utc,
+                "UTC".to_string(),
+                None,
+            );
+            resynced.execution_history = persisted.execution_history;
+            resynced.last_execution = persisted.last_execution;
+            resynced.currently_running = false;
+            resynced.next_execution = Some(SystemTime::now() - Duration::from_secs(1));
+            jobs[0] = resynced;
+        }
+
+        let second = manager.get_due_job_refs();
+        assert!(
+            second.is_empty(),
+            "the next boundary must not claim a job this process is still \
+             running; a second concurrent run is the bug this prevents"
+        );
+
+        manager.withdraw_job_run(&first[0]);
+        {
+            let mut jobs = manager.jobs.lock().unwrap();
+            jobs[0].next_execution = Some(SystemTime::now() - Duration::from_secs(1));
+        }
+        let third = manager.get_due_job_refs();
+        assert_eq!(
+            third.len(),
+            1,
+            "once the claim resolves the job is claimable again"
+        );
+    }
+
+    #[test]
+    fn withdrawing_an_old_claim_leaves_a_newer_running_claim_owned() {
+        let manager = CronManager::new();
+        let schedule = Schedule::from_str("* * * * * *").expect("valid schedule");
+        let old_claim = SystemTime::now() - Duration::from_secs(120);
+        let new_claim = SystemTime::now();
+        let mut job = CronJobState::new(
+            String::new(),
+            "raced_service".to_string(),
+            "raced-hash".to_string(),
+            schedule,
+            EffectiveTimezone::Utc,
+            "UTC".to_string(),
+            None,
+        );
+
+        // The slow predicate of claim 1 spanned a boundary: a resync rewrote it
+        // as Interrupted and claim 2 was staked and IS running.
+        job.execution_history.push_back(CronExecutionRecord {
+            started_at: old_claim,
+            completed_at: None,
+            status: Some(CronExecutionStatus::Interrupted(
+                STALE_CRON_INTERRUPTION_REASON.to_string(),
+            )),
+            exit_code: None,
+            pid: None,
+            process_start: None,
+            user: None,
+            command: None,
+            metrics: vec![],
+        });
+        job.execution_history.push_back(CronExecutionRecord {
+            started_at: new_claim,
+            completed_at: None,
+            status: None,
+            exit_code: None,
+            pid: None,
+            process_start: None,
+            user: None,
+            command: None,
+            metrics: vec![],
+        });
+        job.last_execution = Some(new_claim);
+        job.currently_running = true;
+        {
+            let mut jobs = manager.jobs.lock().unwrap();
+            jobs.push(job);
+        }
+
+        manager.withdraw_job_run(&CronDueJob {
+            service_name: "raced_service".to_string(),
+            service_hash: "raced-hash".to_string(),
+            started_at: old_claim,
+            previous_last_execution: None,
+        });
+
+        let jobs = manager.jobs.lock().unwrap();
+        let job = jobs.first().expect("job present");
+        assert_eq!(job.execution_history.len(), 1, "only the old claim is gone");
+        assert!(
+            job.currently_running,
+            "the newer claim still owns the job; releasing it would let the \
+             next boundary start a second concurrent run"
+        );
+        assert_eq!(
+            job.last_execution,
+            Some(new_claim),
+            "the newer claim's timestamp is not rewritten by an older withdrawal"
         );
     }
 

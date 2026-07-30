@@ -1,0 +1,60 @@
+version: "2"
+project:
+  id: skipcron
+  name: Skip Cron And Cascade
+
+services:
+  # THE PROD BUG: `skip: true` on a CRON unit. Execution was already suppressed,
+  # but the run was recorded as a SUCCESS — the skipped lifecycle was overwritten
+  # with ExitedSuccessfully/0 on every boundary, so status read `Done · exit 0`
+  # instead of `Skipped`, forever, every minute.
+  skipped_cron:
+    skip: true
+    command: sh -c 'echo CRON_FIRED >> /tmp/cron_fired.log'
+    restart_policy: never
+    cron:
+      expression: "*/1 * * * *"
+
+  # The same unit shape WITHOUT skip, to prove the expression really does fire
+  # inside the window the test waits. Without this the skipped case above could
+  # pass for the wrong reason — a cron that never came due proves nothing.
+  live_cron:
+    command: sh -c 'echo LIVE_FIRED >> /tmp/live_fired.log'
+    restart_policy: never
+    cron:
+      expression: "*/1 * * * *"
+
+  # Cascade-restart leak: a skipped root whose dependents must NOT be restarted
+  # into life behind it. `cascade_restart` continued past the skipped root and
+  # went on to restart everything downstream.
+  cascade_root:
+    skip: true
+    command: sh -c 'while true; do echo ROOT_LINE; sleep 1; done'
+
+  cascade_child:
+    command: sh -c 'while true; do echo CHILD_LINE; sleep 1; done'
+    depends_on:
+      - cascade_root
+
+  # Transitive: a dependent of a dependent of a skipped unit is still blocked.
+  cascade_grandchild:
+    command: sh -c 'while true; do echo GRANDCHILD_LINE; sleep 1; done'
+    depends_on:
+      - cascade_child
+
+  # Conditional skip: the predicate exits 0, so this unit is skipped — but only
+  # its recorded lifecycle says so, since the manifest carries a command rather
+  # than a flag. Its dependent must still be blocked.
+  cond_root:
+    skip: /bin/true
+    command: sh -c 'while true; do echo COND_ROOT_LINE; sleep 1; done'
+
+  cond_child:
+    command: sh -c 'while true; do echo COND_CHILD_LINE; sleep 1; done'
+    depends_on:
+      - cond_root
+
+  # Independent control: nothing about skip may touch an unrelated unit.
+  independent:
+    command: sh -c 'while true; do echo INDEPENDENT_LINE; sleep 1; done'
+    restart_policy: always
