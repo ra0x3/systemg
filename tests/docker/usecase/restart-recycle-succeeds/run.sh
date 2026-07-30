@@ -55,7 +55,7 @@ check "$?" "api running on a NEW pid"
 
 section "the live daemon now runs the CLI version (drift resolved)"
 sysg status --config "$CONFIG" >/tmp/sup.txt 2>&1
-if grep -qi "No running supervisor" /tmp/sup.txt; then
+if grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/sup.txt; then
   check 1 "new supervisor is answering the CLI"
 else
   check 0 "new supervisor is answering the CLI"

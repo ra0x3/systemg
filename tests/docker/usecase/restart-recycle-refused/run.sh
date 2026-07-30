@@ -75,7 +75,7 @@ pid_alive "$API1"
 check "$?" "api STILL alive on its original pid (old daemon untouched)"
 
 sysg-old status --config "$CONFIG" --format json >/tmp/sup.txt 2>&1
-if grep -qi "No running supervisor" /tmp/sup.txt; then
+if grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/sup.txt; then
   check 1 "old supervisor still answering status"
 else
   check 0 "old supervisor still answering status"

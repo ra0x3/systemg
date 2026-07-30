@@ -62,7 +62,7 @@ check "$?" "a NEW supervisor pid is live (not the old one)"
 
 section "the live supervisor answers at the CLI version (drift resolved)"
 sysg status --config "$CONFIG" >/tmp/sup.txt 2>&1
-grep -qi "No running supervisor" /tmp/sup.txt && ANS=1 || ANS=0
+grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/sup.txt && ANS=1 || ANS=0
 [ "$ANS" = "0" ]
 check "$?" "new supervisor answers the CLI (no version-drift rejection)"
 

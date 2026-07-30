@@ -39,7 +39,7 @@ check "$?" "state dir still present"
 [ "$(pgrep -c -x sleep || echo 0)" = "2" ]
 check "$?" "both services still running after the refused purge"
 S="$(sysg status --config "$CONFIG" --format json 2>/tmp/st.err)"
-grep -qi "No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
+grep -qiE "SG0206|no supervisor is running|No running supervisor" /tmp/st.err && DEAD=1 || DEAD=0
 [ "$DEAD" = "0" ]
 check "$?" "supervisor still answering after the refused purge"
 [ "$(unit_count "$S")" = "2" ]

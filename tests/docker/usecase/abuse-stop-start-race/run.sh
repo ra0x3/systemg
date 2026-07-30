@@ -67,7 +67,7 @@ check "$?" "supervisor pid file present"
 SUPS="$(pgrep -f 'sysg' | grep -v $$ | wc -l | tr -d ' ')"
 echo "sysg-ish processes: $SUPS"
 S="$(sysg status --config "$CONFIG" --format json 2>/dev/null)"
-grep -qi "No running supervisor" <<<"$S" && DEAD=1 || DEAD=0
+grep -qiE "SG0206|no supervisor is running|No running supervisor" <<<"$S" && DEAD=1 || DEAD=0
 [ "$DEAD" = "0" ]
 check "$?" "supervisor answers status after the race"
 RUN=0
