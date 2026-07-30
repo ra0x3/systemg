@@ -128,8 +128,9 @@ services:
         "Expected configured service to remain visible after purge"
     );
     assert!(
-        stdout_after.contains("Stopped"),
-        "Service should show as Stopped after purge"
+        stdout_after.contains("Unknown"),
+        "Purge wipes the lifecycle record, so a configured service has no \
+         observed state left; status must say Unknown rather than assert Stopped"
     );
 }
 
