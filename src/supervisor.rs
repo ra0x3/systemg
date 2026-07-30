@@ -1871,29 +1871,51 @@ impl Supervisor {
     /// project is what the resident was running, under its migrated name.
     fn load_handoff_project(
         project: &HandoffProject,
+        snapshot: Option<&String>,
     ) -> Result<LoadedHandoffProject, SupervisorError> {
-        let actual_hash =
-            ipc::manifest_content_hash(&project.config_path).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "could not hash handed-off manifest {}",
+        let configs = match snapshot {
+            Some(snapshot) => {
+                match Self::assembled_manifest(&project.config_path) {
+                    Ok(disk) if disk == *snapshot => {}
+                    Ok(_) => warn!(
+                        "manifest {} changed during supervisor handoff; resuming from its handoff snapshot — restart to apply the new manifest",
                         project.config_path.display()
                     ),
-                )
-            })?;
-        if actual_hash != project.config_hash {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "manifest {} changed during supervisor handoff",
-                    project.config_path.display()
-                ),
-            )
-            .into());
-        }
-        let trusted = runtime::open_trusted_config(&project.config_path)?;
-        let configs = load_projects_from_file(trusted, &project.config_path)?;
+                    Err(err) => warn!(
+                        "manifest {} did not load during supervisor handoff ({err}); resuming from its handoff snapshot",
+                        project.config_path.display()
+                    ),
+                }
+                crate::config::load_projects_from_snapshot(
+                    snapshot,
+                    &project.config_path,
+                )?
+            }
+            None => {
+                let actual_hash = ipc::manifest_content_hash(&project.config_path)
+                    .map_err(|err| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "could not hash handed-off manifest {}: {err}",
+                                project.config_path.display()
+                            ),
+                        )
+                    })?;
+                if actual_hash != project.config_hash {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "manifest {} changed during supervisor handoff",
+                            project.config_path.display()
+                        ),
+                    )
+                    .into());
+                }
+                let trusted = runtime::open_trusted_config(&project.config_path)?;
+                load_projects_from_file(trusted, &project.config_path)?
+            }
+        };
 
         if let Some(config) = configs
             .iter()
@@ -1962,13 +1984,20 @@ impl Supervisor {
         // seeding or daemon construction would leave two projects silently
         // sharing one state and log namespace. Duplicates roll the upgrade back
         // before any mutation instead.
-        let loaded_primary = Self::load_handoff_project(&primary)?;
+        let loaded_primary = Self::load_handoff_project(
+            &primary,
+            state.manifests.get(&primary.config_path),
+        )?;
         let loaded_extras: Vec<(&crate::upgrade::HandoffProject, LoadedHandoffProject)> =
             state
                 .projects
                 .values()
                 .map(|project| {
-                    Self::load_handoff_project(project).map(|loaded| (project, loaded))
+                    Self::load_handoff_project(
+                        project,
+                        state.manifests.get(&project.config_path),
+                    )
+                    .map(|loaded| (project, loaded))
                 })
                 .collect::<Result<_, _>>()?;
         {
@@ -2289,11 +2318,19 @@ impl Supervisor {
     /// was registered: a file that grew a `project:` key, or fanned out into
     /// several projects, is no longer the thing the entry describes.
     fn manifest_still_matches(&self, path: &Path, project_id: &str) -> bool {
-        let Ok(trusted) = runtime::open_trusted_config(path) else {
-            return false;
+        let trusted = match runtime::open_trusted_config(path) {
+            Ok(trusted) => trusted,
+            Err(err) => {
+                warn!("registry replay skipped {}: {err}", path.display());
+                return false;
+            }
         };
-        let Ok(configs) = load_projects_from_file(trusted, path) else {
-            return false;
+        let configs = match load_projects_from_file(trusted, path) {
+            Ok(configs) => configs,
+            Err(err) => {
+                warn!("registry replay skipped {}: {err}", path.display());
+                return false;
+            }
         };
         matches!(
             configs.as_slice(),
@@ -2713,6 +2750,7 @@ impl Supervisor {
     fn project_handoff(
         daemon: &Daemon,
         config_path: &Path,
+        snapshot: &str,
         mode: ProjectRunMode,
         active: bool,
     ) -> Result<HandoffProject, ProcessManagerError> {
@@ -2744,16 +2782,21 @@ impl Supervisor {
         Ok(HandoffProject {
             project_id: config.project.id.clone(),
             config_path: config_path.to_path_buf(),
-            config_hash: ipc::manifest_content_hash(config_path).ok_or_else(|| {
-                ProcessManagerError::ServiceStartError {
-                    service: config.project.id.clone(),
-                    source: io::Error::other("could not hash the active manifest"),
-                }
-            })?,
+            config_hash: ipc::manifest_fingerprint(snapshot)?,
             mode,
             active,
             daemon: state,
         })
+    }
+
+    /// Reads a manifest through its trust-validated descriptor and assembles
+    /// its includes, so snapshotting and hashing operate on one set of bytes.
+    fn assembled_manifest(path: &Path) -> Result<String, ProcessManagerError> {
+        use std::io::Read;
+        let mut file = runtime::open_trusted_config(path)?;
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        crate::config::resolve_includes(&content, path)
     }
 
     /// Stops monitor threads so process identity and restart bookkeeping cannot
@@ -2831,9 +2874,27 @@ impl Supervisor {
 
         self.quiesce_project_monitors();
         let prepared = (|| {
+            let mut manifests = BTreeMap::new();
+            for path in std::iter::once(&self.config_path).chain(
+                self.extra_projects
+                    .values()
+                    .map(|project| &project.config_path),
+            ) {
+                if manifests.contains_key(path) {
+                    continue;
+                }
+                let snapshot = Self::assembled_manifest(path).map_err(|err| {
+                    Box::new(crate::upgrade::handoff_failed(format!(
+                        "could not snapshot manifest {}: {err}",
+                        path.display()
+                    )))
+                })?;
+                manifests.insert(path.clone(), snapshot);
+            }
             let primary = Self::project_handoff(
                 &self.daemon,
                 &self.config_path,
+                &manifests[&self.config_path],
                 self.primary_project_mode,
                 self.primary_active,
             )
@@ -2845,6 +2906,7 @@ impl Supervisor {
                 let handoff = Self::project_handoff(
                     &project.daemon,
                     &project.config_path,
+                    &manifests[&project.config_path],
                     project.mode,
                     true,
                 )
@@ -2883,6 +2945,7 @@ impl Supervisor {
                 primary,
                 projects,
                 log_pipes,
+                manifests,
             };
             let path = state.persist().map_err(|err| {
                 Box::new(crate::upgrade::handoff_failed(err.to_string()))
@@ -7479,7 +7542,7 @@ services:
             },
         };
 
-        let loaded = Supervisor::load_handoff_project(&record).expect("translate");
+        let loaded = Supervisor::load_handoff_project(&record, None).expect("translate");
         assert!(loaded.config.project.loose);
         assert_ne!(
             loaded.config.project.id,
@@ -7516,7 +7579,7 @@ services:
 
         // Only the literal legacy loose id is translated; any other mismatch is
         // still the config drift it always was.
-        assert!(Supervisor::load_handoff_project(&record).is_err());
+        assert!(Supervisor::load_handoff_project(&record, None).is_err());
 
         restore_home(original_home);
     }
@@ -7598,6 +7661,7 @@ services:
             },
             projects: std::collections::BTreeMap::new(),
             log_pipes: Vec::new(),
+            manifests: BTreeMap::new(),
         };
         let handoff_path = state.persist().expect("persist handoff");
 

@@ -4162,6 +4162,7 @@ fn purge_config_project_ids(path: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let content = fs::read_to_string(path).map_err(|err| -> Box<dyn Error> {
         Box::new(DiagError(Box::new(config_read_diag(&err.to_string()))))
     })?;
+    let content = systemg::config::resolve_includes(&content, Path::new(path))?;
     let configs = systemg::config::parse_config_projects(&content)?;
     Ok(configs
         .into_iter()
@@ -5679,7 +5680,19 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string()),
     };
-    let daemon = build_daemon(&config)?;
+    let loaded = match load_config(Some(&config)) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            if matches!(plan, StopPlan::Service { .. }) {
+                return Err(err.into());
+            }
+            warn!("config '{config}' did not load ({err}); stopping from recorded state");
+            stop_tracked_projects()?;
+            cleanup_stopped_runtime();
+            return Ok(());
+        }
+    };
+    let daemon = Daemon::from_config(loaded, false)?;
     match plan {
         StopPlan::Service { service, .. } => daemon.stop_service(&service)?,
         _ => daemon.stop_services()?,
@@ -5813,7 +5826,7 @@ fn dispatch_start_resident(
     // report its real outcome.
     let awaited_project = match &command {
         ControlCommand::AddProject { config, .. } => {
-            load_config(Some(config)).ok().map(|c| c.project.id)
+            Some(load_config(Some(config))?.project.id)
         }
         _ => None,
     };
@@ -6105,6 +6118,8 @@ fn start_supervisor_daemon(
     pipe_stderr: bool,
     verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
+    load_config(Some(config_path.to_string_lossy().as_ref()))?;
+
     let child_pid = unsafe { libc::fork() };
     if child_pid < 0 {
         return Err(io::Error::last_os_error().into());
@@ -6712,6 +6727,7 @@ fn resolve_status_project_filter(
 /// loose config, N for a multi-project config).
 fn config_declared_projects(config_path: &Path) -> Result<Vec<String>, Box<dyn Error>> {
     let content = fs::read_to_string(config_path)?;
+    let content = systemg::config::resolve_includes(&content, config_path)?;
     let configs = systemg::config::parse_config_projects(&content)?;
     Ok(configs
         .into_iter()

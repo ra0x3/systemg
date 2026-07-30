@@ -87,6 +87,25 @@ pub fn validate(path: &str) -> (ValidationReport, Option<String>) {
         }
     };
 
+    let content = match crate::config::resolve_includes(&content, Path::new(path)) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            let diagnostic = Diagnostic {
+                line: None,
+                column: None,
+                kind: "unresolved-include".into(),
+                message: err.to_string(),
+                why: format!(
+                    "'{path}' could not be assembled from its includes, so there is nothing to validate."
+                ),
+                suggestion: "Fix the included file or its path, then re-run validate."
+                    .into(),
+                doc: format!("{DOCS}/how-it-works/commands/validate"),
+            };
+            return (ValidationReport::failed(path, diagnostic), Some(content));
+        }
+    };
+
     if let Err(err) = parse_config_manifest(&content) {
         let diagnostic = classify_yaml(&err);
         return (ValidationReport::failed(path, diagnostic), Some(content));

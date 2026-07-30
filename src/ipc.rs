@@ -715,10 +715,23 @@ pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
 
 /// Hashes a manifest file by its parsed, canonicalized content so cosmetic edits
 /// (whitespace, comments, key order) don't read as a change, but any real
-/// manifest change does. Returns `None` if the file cannot be read or parsed.
-pub fn manifest_content_hash(config: &Path) -> Option<String> {
-    let content = fs::read_to_string(config).ok()?;
-    let configs = crate::config::parse_config_projects(&content).ok()?;
+/// manifest change does. Includes are resolved first, so a fragment edit reads
+/// as a change and a broken fragment fails with its include chain.
+pub fn manifest_content_hash(
+    config: &Path,
+) -> Result<String, crate::error::ProcessManagerError> {
+    let content = fs::read_to_string(config)?;
+    let content = crate::config::resolve_includes(&content, config)?;
+    manifest_fingerprint(&content)
+}
+
+/// Fingerprints already include-resolved manifest text; the content-addressed
+/// core of [`manifest_content_hash`], for callers that must hash the exact
+/// bytes they captured rather than a second disk read.
+pub fn manifest_fingerprint(
+    content: &str,
+) -> Result<String, crate::error::ProcessManagerError> {
+    let configs = crate::config::parse_config_projects(content)?;
     let mut fingerprints: Vec<String> = Vec::new();
     for config in &configs {
         let mut svc: Vec<String> = config
@@ -730,7 +743,7 @@ pub fn manifest_content_hash(config: &Path) -> Option<String> {
         fingerprints.push(format!("{}:{}", config.project.id, svc.join(",")));
     }
     fingerprints.sort();
-    Some(fingerprints.join("\n"))
+    Ok(fingerprints.join("\n"))
 }
 
 /// Reads the supervisor PID if present.

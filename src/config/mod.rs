@@ -4,6 +4,7 @@
 /// manifests; holds supervisor-wide defaults such as log-rotation caps.
 pub mod supervisor;
 
+mod include;
 use std::{
     collections::{BTreeSet, HashMap},
     env, fmt, fs,
@@ -11,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+pub use include::resolve_includes;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use sha2::{Digest, Sha256};
@@ -1529,6 +1531,45 @@ fn expand_env_vars(input: &str) -> Result<String, ProcessManagerError> {
     Ok(result.to_string())
 }
 
+/// Expands environment variables inside every string scalar of an assembled
+/// manifest and re-emits it. An assembled document lost its original scalar
+/// styles in re-serialization, so textual expansion could inject unquoted YAML
+/// syntax; expanding on the parsed tree lets the emitter quote the final
+/// values correctly.
+fn expand_env_vars_assembled(content: &str) -> Result<String, ProcessManagerError> {
+    let root: serde_yaml::Value =
+        serde_yaml::from_str(content).map_err(ProcessManagerError::ConfigParseError)?;
+    let expanded = expand_env_vars_value(root)?;
+    serde_yaml::to_string(&expanded).map_err(ProcessManagerError::ConfigParseError)
+}
+
+/// Expands environment variables in every string scalar of a YAML tree.
+fn expand_env_vars_value(
+    value: serde_yaml::Value,
+) -> Result<serde_yaml::Value, ProcessManagerError> {
+    use serde_yaml::Value;
+    Ok(match value {
+        Value::String(text) => Value::String(expand_env_vars(&text)?),
+        Value::Mapping(map) => {
+            let mut out = serde_yaml::Mapping::with_capacity(map.len());
+            for (key, val) in map {
+                out.insert(expand_env_vars_value(key)?, expand_env_vars_value(val)?);
+            }
+            Value::Mapping(out)
+        }
+        Value::Sequence(seq) => Value::Sequence(
+            seq.into_iter()
+                .map(expand_env_vars_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        Value::Tagged(mut tagged) => {
+            tagged.value = expand_env_vars_value(tagged.value)?;
+            Value::Tagged(tagged)
+        }
+        other => other,
+    })
+}
+
 /// Loads an `.env` file and sets environment variables.
 fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
     let content =
@@ -1732,6 +1773,9 @@ pub fn load_config_from_file(
             format!("{} ({})", e, config_path.display()),
         ))
     })?;
+    let raw = content;
+    let content = resolve_includes(&raw, config_path)?;
+    let assembled = content != raw;
 
     let mut config =
         parse_config_manifest(&content).map_err(ProcessManagerError::ConfigParseError)?;
@@ -1778,7 +1822,11 @@ pub fn load_config_from_file(
         service.env = merged_env;
     }
 
-    let expanded_content = expand_env_vars(&content)?;
+    let expanded_content = if assembled {
+        expand_env_vars_assembled(&content)?
+    } else {
+        expand_env_vars(&content)?
+    };
 
     let mut config = parse_config_manifest(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
@@ -1809,7 +1857,29 @@ pub fn load_projects_from_file(
             format!("{} ({})", e, config_path.display()),
         ))
     })?;
+    let raw = content;
+    let content = resolve_includes(&raw, config_path)?;
+    let assembled = content != raw;
+    load_projects_from_content(content, config_path, assembled)
+}
 
+/// Loads projects from an already-assembled manifest snapshot, e.g. the
+/// resolved YAML persisted in an upgrade handoff. Expansion is structural
+/// because a snapshot may have lost its original scalar styles.
+pub fn load_projects_from_snapshot(
+    content: &str,
+    config_path: &Path,
+) -> Result<Vec<Config>, ProcessManagerError> {
+    load_projects_from_content(content.to_string(), config_path, true)
+}
+
+/// Shared tail of project loading over include-resolved manifest text: env
+/// side effects, expansion, fan-out, and per-project finalization.
+fn load_projects_from_content(
+    content: String,
+    config_path: &Path,
+    assembled: bool,
+) -> Result<Vec<Config>, ProcessManagerError> {
     let base_path = config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -1823,7 +1893,11 @@ pub fn load_projects_from_file(
         apply_env_side_effects(&config, &base_path)?;
     }
 
-    let expanded_content = expand_env_vars(&content)?;
+    let expanded_content = if assembled {
+        expand_env_vars_assembled(&content)?
+    } else {
+        expand_env_vars(&content)?
+    };
     let (configs, legacy) = parse_config_projects_with_legacy(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
 

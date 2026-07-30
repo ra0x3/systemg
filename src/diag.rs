@@ -122,7 +122,13 @@ pub enum SgCode {
     /// SG0206 — no supervisor is running, so the reported state is off disk and
     /// unsupervised; any surviving processes are orphaned.
     SupervisorOffline,
-    /// SG0301 — a restart's new manifest is invalid; nothing was changed.
+    /// SG0207 — an `!include`d file is missing, unreadable, or not valid YAML.
+    IncludeUnresolved,
+    /// SG0208 — a manifest's includes form a cycle.
+    IncludeCycle,
+    /// SG0209 — includes exceed the nesting depth or cumulative size cap.
+    IncludeLimit,
+    /// SG0301 —a restart's new manifest is invalid; nothing was changed.
     ManifestRejected,
     /// SG0302 — a reconcile ran but left units short of their manifest target.
     ReconcileIncomplete,
@@ -211,6 +217,9 @@ impl SgCode {
             SgCode::ConflictingSelectors => "SG0204",
             SgCode::SupervisorNotResponding => "SG0205",
             SgCode::SupervisorOffline => "SG0206",
+            SgCode::IncludeUnresolved => "SG0207",
+            SgCode::IncludeCycle => "SG0208",
+            SgCode::IncludeLimit => "SG0209",
             SgCode::ManifestRejected => "SG0301",
             SgCode::ReconcileIncomplete => "SG0302",
             SgCode::SupervisorRecycleFailed => "SG0303",
@@ -237,7 +246,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 48] = [
+    pub const ALL: [SgCode; 51] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -275,6 +284,9 @@ impl SgCode {
         SgCode::ConflictingSelectors,
         SgCode::SupervisorNotResponding,
         SgCode::SupervisorOffline,
+        SgCode::IncludeUnresolved,
+        SgCode::IncludeCycle,
+        SgCode::IncludeLimit,
         SgCode::ManifestRejected,
         SgCode::ReconcileIncomplete,
         SgCode::SupervisorRecycleFailed,
