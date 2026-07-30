@@ -316,6 +316,52 @@ services:
     command: "python app.py"
 ```
 
+### `!include`
+
+Splits a manifest across files: an `!include <path>` tag at any node is
+replaced by the parsed content of the referenced file. Relative paths resolve
+against the directory of the file doing the including, and included files can
+include further files.
+
+```yaml
+version: "2"
+projects:
+  api: !include projects/api.yaml
+  worker:
+    services: !include services/worker.yaml
+```
+
+```yaml
+# projects/api.yaml — a fragment is a plain replacement value;
+# only the root manifest declares `version:`
+services:
+  server:
+    command: "python app.py"
+```
+
+<Info>
+`!include` uses YAML's standard *local tag* syntax, part of both the
+[YAML 1.1](https://yaml.org/spec/1.1/#id858600) and
+[YAML 1.2](https://yaml.org/spec/1.2.2/#24-tags) specs, so an include-bearing
+manifest is valid YAML to any spec-conformant parser. The inclusion behavior
+itself is sysg-specific: the spec deliberately leaves
+[local tag semantics](https://yaml.org/spec/1.2.2/#691-node-tags) to the
+application, so generic tools (`yq`, linters) parse the tag but do not resolve
+it, and strict loaders that reject unknown tags (such as PyYAML's `safe_load`)
+refuse to construct it.
+</Info>
+
+Fragments are held to the same trust bar as the root manifest, `${VAR}`
+expansion applies to included content, and every command (`validate`,
+`status`, `restart`, `upgrade`) sees the assembled result. A missing or broken
+fragment is always a hard error carrying the include chain
+([SG0207](/how-it-works/dialog/codes#sg0207)) — never a partially loaded
+manifest — and cyclic includes ([SG0208](/how-it-works/dialog/codes#sg0208))
+or includes past the depth/size caps
+([SG0209](/how-it-works/dialog/codes#sg0209)) are refused. Include paths
+themselves cannot use `${VAR}` expansion. `sysg migrate` preserves `!include`
+tags unresolved.
+
 ## Service configuration
 
 ### `command`

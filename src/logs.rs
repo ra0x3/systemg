@@ -2646,19 +2646,26 @@ fn validate_log_pipe_handoff(pipes: &[HandoffLogPipe]) -> io::Result<Vec<LogStre
 ///
 /// # Errors
 ///
-/// Returns an operating-system error when a descriptor is invalid or a worker
-/// cannot be restored.
+/// Returns an operating-system error when a descriptor is invalid, a worker
+/// cannot be restored, or a handed-off service already has a registered pipe
+/// (a double resume).
 pub fn resume_log_pipe_handoff(pipes: &[HandoffLogPipe]) -> io::Result<()> {
-    if !registered_log_pipes()
-        .lock()
-        .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?
-        .is_empty()
-    {
-        return Err(io::Error::other(
-            "managed log pipe registry was not empty during resume",
-        ));
-    }
     let streams = validate_log_pipe_handoff(pipes)?;
+    {
+        let registry = registered_log_pipes()
+            .lock()
+            .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?;
+        for pipe in pipes {
+            if registry.iter().any(|entry| {
+                entry.project == pipe.project && entry.service == pipe.service
+            }) {
+                return Err(io::Error::other(format!(
+                    "a managed log pipe for {}/{} is already registered during resume",
+                    pipe.project, pipe.service
+                )));
+            }
+        }
+    }
     let mut writers: HashMap<(String, String), (u64, mpsc::Sender<ServiceLogMessage>)> =
         HashMap::new();
     for (pipe, stream) in pipes.iter().zip(streams) {

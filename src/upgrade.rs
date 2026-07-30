@@ -161,6 +161,11 @@ pub struct SupervisorHandoff {
     pub primary: HandoffProject,
     /// Additional registered projects keyed by stable project id.
     pub projects: BTreeMap<String, HandoffProject>,
+    /// Assembled manifest text captured at handoff, keyed by config path, so
+    /// resume and rollback never depend on include fragments surviving the
+    /// upgrade window.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub manifests: BTreeMap<PathBuf, String>,
     /// Service-output descriptors retained across re-exec.
     pub log_pipes: Vec<HandoffLogPipe>,
 }
