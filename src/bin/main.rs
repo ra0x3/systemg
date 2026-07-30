@@ -1966,6 +1966,48 @@ mod tests {
     }
 
     #[test]
+    fn an_unobservable_expired_boot_fails_instead_of_reporting_success() {
+        let verdict = expired_boot_verdict(ProjectUnits {
+            units: Vec::new(),
+            boot: None,
+        });
+
+        assert!(
+            matches!(verdict, Err(ControlError::Timeout)),
+            "a boot that never became observable must not read as success"
+        );
+    }
+
+    #[test]
+    fn an_expired_boot_reports_the_units_still_down() {
+        let verdict = expired_boot_verdict(ProjectUnits {
+            units: vec![
+                ("api".to_string(), UnitState::Running),
+                ("worker".to_string(), UnitState::Failed),
+            ],
+            boot: None,
+        })
+        .expect("units present, so the verdict is a report");
+
+        assert_eq!(verdict.failed, vec!["worker".to_string()]);
+    }
+
+    #[test]
+    fn a_settled_boot_wins_over_the_unit_reading() {
+        let verdict = expired_boot_verdict(ProjectUnits {
+            units: Vec::new(),
+            boot: Some(BootStatus {
+                settled: true,
+                failed: vec!["migrations".to_string()],
+                cause: None,
+            }),
+        })
+        .expect("a settled boot is a verdict even with no units");
+
+        assert_eq!(verdict.failed, vec!["migrations".to_string()]);
+    }
+
+    #[test]
     fn loose_config_declares_the_loose_id_not_an_empty_one() {
         let content =
             "version: \"2\"\nservices:\n  ngrok-tunnel:\n    command: 'echo hi'\n";
@@ -5926,9 +5968,10 @@ fn await_queued_boot(project: &str) -> Result<QueuedBoot, ControlError> {
     while Instant::now() < deadline {
         thread::sleep(BOOT_PROGRESS_INTERVAL);
         let ProjectUnits { units, boot } = project_service_units(project)?;
-        if units.is_empty() {
-            continue;
-        }
+        // A settled boot is the authoritative verdict, so it is read BEFORE the
+        // empty-units guard below: a project whose units the snapshot does not
+        // carry (skipped by a best-effort collection, or declaring only cron
+        // jobs) would otherwise poll to timeout with its real result unread.
         if let Some(boot) = boot {
             if boot.settled {
                 return Ok(QueuedBoot {
@@ -5936,6 +5979,9 @@ fn await_queued_boot(project: &str) -> Result<QueuedBoot, ControlError> {
                     cause: boot.cause,
                 });
             }
+            continue;
+        }
+        if units.is_empty() {
             continue;
         }
         // A unit is still working while it is starting; anything else has
@@ -5997,7 +6043,19 @@ fn await_queued_boot(project: &str) -> Result<QueuedBoot, ControlError> {
         // to run healthily.
     }
     // Grace expired with services still down: report the last known offenders.
-    let ProjectUnits { units, boot } = project_service_units(project)?;
+    let last = project_service_units(project)?;
+    expired_boot_verdict(last)
+}
+
+/// The verdict for a boot whose grace expired, from the final reading.
+///
+/// A settled result wins. Otherwise the still-down units are the offenders —
+/// unless there are no units at all, which is not an empty failure list but an
+/// unobservable boot: the supervisor never published anything describing this
+/// project, so reporting success would be the lie the publish ordering exists
+/// to prevent.
+fn expired_boot_verdict(last: ProjectUnits) -> Result<QueuedBoot, ControlError> {
+    let ProjectUnits { units, boot } = last;
     if let Some(boot) = boot
         && boot.settled
     {
@@ -6006,6 +6064,11 @@ fn await_queued_boot(project: &str) -> Result<QueuedBoot, ControlError> {
             cause: boot.cause,
         });
     }
+
+    if units.is_empty() {
+        return Err(ControlError::Timeout);
+    }
+
     Ok(QueuedBoot {
         failed: units
             .into_iter()
@@ -6043,20 +6106,24 @@ fn project_service_units(project: &str) -> Result<ProjectUnits, ControlError> {
             ))));
         }
     };
-    let mut boot = None;
+    // The boot result is harvested from ANY unit the project owns, not just the
+    // services counted below: a cron-only project owns no service units, and
+    // scoping the lookup to them would hide a settled boot behind an empty list.
+    let boot = snapshot
+        .units
+        .iter()
+        .filter_map(|unit| unit.project.as_ref())
+        .find(|owner| owner.id == project)
+        .and_then(|owner| owner.boot.clone());
     let units = snapshot
         .units
         .iter()
         .filter(|unit| {
             unit.kind == UnitKind::Service
-                && unit.project.as_ref().is_some_and(|owner| {
-                    if owner.id == project {
-                        boot = owner.boot.clone();
-                        true
-                    } else {
-                        false
-                    }
-                })
+                && unit
+                    .project
+                    .as_ref()
+                    .is_some_and(|owner| owner.id == project)
         })
         .map(|unit| (unit.name.clone(), unit.state))
         .collect();

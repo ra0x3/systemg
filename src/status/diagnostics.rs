@@ -45,9 +45,38 @@ pub fn state_inconsistent(detail: impl Into<String>) -> Diagnostic {
     .help_docs()
 }
 
+/// The boot finished but its snapshot could not be published, so the served
+/// cache still describes the world as it was before the boot.
+///
+/// Startup itself ran — its units may have come up or failed — and only the
+/// reading is behind. Reported so a caller is never handed a silent success
+/// over a pre-boot snapshot.
+pub fn snapshot_unavailable(detail: impl Into<String>) -> Diagnostic {
+    Diagnostic::warn(
+        SgCode::StatusStateInconsistent,
+        "the boot completed but its status snapshot could not be published",
+    )
+    .note(detail)
+    .note(
+        "service startup ran; until the next refresh `sysg status` may still \
+         report those units as not yet running",
+    )
+    .help_cmd("read live state instead", "sysg status --live")
+    .help_docs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_unavailable_is_sg0009_and_does_not_claim_units_came_up() {
+        let diag = snapshot_unavailable("lock poisoned");
+        assert_eq!(diag.code, SgCode::StatusStateInconsistent);
+        let rendered = diag.render(false);
+        assert!(rendered.contains("service startup ran"));
+        assert!(rendered.contains("lock poisoned"));
+    }
 
     #[test]
     fn offline_is_sg0206_and_names_orphans() {

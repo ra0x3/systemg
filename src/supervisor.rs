@@ -60,6 +60,10 @@ const CRON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const CONTROL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Maximum time allowed for a live-upgrade acceptance response to reach its client.
 const UPGRADE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Attempts to publish the post-boot snapshot before announcing the boot done.
+const BOOT_SNAPSHOT_ATTEMPTS: usize = 3;
+/// Delay between post-boot snapshot publication attempts.
+const BOOT_SNAPSHOT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Supervisor errors.
 #[derive(Debug, Error)]
@@ -510,7 +514,16 @@ impl Supervisor {
 
     /// Returns the snapshot mode used by an explicit live request.
     fn live_status_snapshot_mode(config: &Config) -> StatusSnapshotMode {
-        match config.status.snapshot_mode {
+        Self::live_snapshot_mode(config.status.snapshot_mode)
+    }
+
+    /// Promotes a configured mode to one that actually collects.
+    ///
+    /// `Off` disables the periodic refresher, not status itself: reads still
+    /// have to be answered, so a collection made on their behalf substitutes
+    /// the cheapest mode that produces a snapshot.
+    fn live_snapshot_mode(mode: StatusSnapshotMode) -> StatusSnapshotMode {
+        match mode {
             StatusSnapshotMode::Off => StatusSnapshotMode::Summary,
             mode => mode,
         }
@@ -2228,17 +2241,19 @@ impl Supervisor {
 
         self.boot_registered_loose_projects();
 
-        let (started, failed) = self.boot_journal.snapshot().iter().fold(
-            (0usize, 0usize),
-            |(up, down), frame| match frame {
+        Ok(())
+    }
+
+    /// Counts the units that came up and failed in the boot journal so far.
+    fn boot_tally(&self) -> (usize, usize) {
+        self.boot_journal
+            .snapshot()
+            .iter()
+            .fold((0usize, 0usize), |(up, down), frame| match frame {
                 BootFrame::Unit { outcome, .. } if outcome.succeeded() => (up + 1, down),
                 BootFrame::Unit { .. } => (up, down + 1),
                 _ => (up, down),
-            },
-        );
-        self.boot_journal.push(BootFrame::Done { started, failed });
-
-        Ok(())
+            })
     }
 
     /// Registers and synchronously starts one additional project from a
@@ -3087,21 +3102,19 @@ impl Supervisor {
             info!("systemg supervisor listening on {:?}", socket_path);
         }
 
-        if resumed {
+        let (started, failed) = if resumed {
             if self.primary_active {
                 self.daemon.ensure_monitoring()?;
             }
             for project in self.extra_projects.values() {
                 project.daemon.ensure_monitoring()?;
             }
-            self.boot_journal.push(BootFrame::Done {
-                started: 0,
-                failed: 0,
-            });
+            (0, 0)
         } else {
             self.boot_primary_services()?;
             self.daemon.ensure_monitoring()?;
-        }
+            self.boot_tally()
+        };
 
         let config_handle = self.daemon.config();
         let pid_handle = self.daemon.pid_file_handle();
@@ -3110,10 +3123,33 @@ impl Supervisor {
         // Seed the cache from ALL managed projects, not just the primary, so a
         // multi-project boot (which registers extra projects before this point)
         // is reflected in status from the first read.
-        match self.collect_aggregate_snapshot(false) {
-            Ok(snapshot) => self.status_cache.replace(snapshot),
-            Err(err) => error!("failed to build initial status snapshot: {err}"),
-        }
+        //
+        // This MUST precede `BootFrame::Done`. `Done` is what releases a waiting
+        // `sysg start` to exit 0, so publishing after it lets the CLI return
+        // while `status` still serves the pre-boot snapshot — every unit reading
+        // as stopped with no pid while its process is already running.
+        //
+        // A failure here is reported, never fatal: a resumed supervisor has
+        // already adopted the running services, so aborting would strand them.
+        // But it must not be silent either — announcing `Done` over an unwritten
+        // cache is exactly the false success this ordering exists to prevent, so
+        // the boot carries the failure out to the caller and supervision lives.
+        let (started, failed) = match self.publish_boot_snapshot() {
+            Ok(()) => (started, failed),
+            Err(err) => {
+                error!("failed to publish post-boot status snapshot: {err}");
+                self.boot_journal.push(BootFrame::Unit {
+                    project: self.daemon.config().project.id.clone(),
+                    service: "status".to_string(),
+                    outcome: crate::start::Outcome::Failed(
+                        crate::status::diagnostics::snapshot_unavailable(err.to_string()),
+                    ),
+                });
+                (started, failed + 1)
+            }
+        };
+
+        self.boot_journal.push(BootFrame::Done { started, failed });
 
         let cache_clone = self.status_cache.clone();
         let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
@@ -4845,7 +4881,7 @@ impl Supervisor {
                         &spawn_manager,
                         None,
                     );
-                    let boot = match &result {
+                    let mut boot = match &result {
                         Ok(failed) => BootStatus {
                             settled: true,
                             failed: failed.services.clone(),
@@ -4869,6 +4905,46 @@ impl Supervisor {
                             }
                         }
                     };
+                    // Publish before settling, for the same reason the primary
+                    // boot publishes before `BootFrame::Done`: `settled` is what
+                    // releases a waiting `sysg start`, so a snapshot taken after
+                    // it lets the caller observe the pre-boot world.
+                    //
+                    // This runs even under `snapshot_mode: off`, which disables
+                    // only the periodic refresher — a default `status` read is
+                    // still served straight from this cache, so skipping the
+                    // publication here would leave it pre-boot indefinitely.
+                    //
+                    // Collection is best-effort per project and the owner thread
+                    // may not have added this one to the routing table yet, so a
+                    // snapshot that silently omits it is not a publication: say
+                    // so on the boot rather than settle over a cache that never
+                    // described the project the caller is waiting for.
+                    match Self::collect_projects_snapshot(
+                        &boot_projects,
+                        &boot_metrics,
+                        &boot_spawn,
+                        Self::live_snapshot_mode(boot_mode),
+                    ) {
+                        Ok(snapshot) if snapshot.has_project(&boot_project) => {
+                            boot_cache.replace(snapshot);
+                        }
+                        outcome => {
+                            let detail = match outcome {
+                                Err(err) => err.to_string(),
+                                _ => format!(
+                                    "project '{boot_project}' was not in the collected snapshot"
+                                ),
+                            };
+                            error!(
+                                "failed to publish status snapshot for project '{boot_project}': {detail}"
+                            );
+                            boot.cause.get_or_insert_with(|| {
+                                crate::status::diagnostics::snapshot_unavailable(detail)
+                            });
+                        }
+                    }
+
                     boots
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4882,16 +4958,6 @@ impl Supervisor {
                             error!("Background boot of project '{boot_project}' failed: {err}")
                         }
                         _ => {}
-                    }
-                    if !matches!(boot_mode, StatusSnapshotMode::Off)
-                        && let Ok(snapshot) = Self::collect_projects_snapshot(
-                            &boot_projects,
-                            &boot_metrics,
-                            &boot_spawn,
-                            boot_mode,
-                        )
-                    {
-                        boot_cache.replace(snapshot);
                     }
                 })
             {
@@ -5226,6 +5292,30 @@ impl Supervisor {
         match self.collect_aggregate_snapshot(false) {
             Ok(snapshot) => self.status_cache.replace(snapshot),
             Err(err) => error!("failed to refresh status snapshot: {err}"),
+        }
+    }
+
+    /// Publishes the post-boot snapshot, returning why it could not be served.
+    ///
+    /// Retries briefly so a state file caught mid-rewrite does not leave the
+    /// cache holding the pre-boot world for a whole refresh interval, which is
+    /// what made a freshly started project read back as stopped with no pid.
+    /// A poisoned lock will not clear on retry; it fails out to the caller.
+    fn publish_boot_snapshot(&mut self) -> Result<(), SupervisorError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.collect_aggregate_snapshot(false) {
+                Ok(snapshot) => {
+                    self.status_cache.replace(snapshot);
+                    return Ok(());
+                }
+                Err(err) if attempt == BOOT_SNAPSHOT_ATTEMPTS => return Err(err),
+                Err(err) => {
+                    warn!("post-boot status snapshot failed ({err}); retrying");
+                    thread::sleep(BOOT_SNAPSHOT_RETRY_DELAY);
+                }
+            }
         }
     }
 

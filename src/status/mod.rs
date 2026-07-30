@@ -212,6 +212,18 @@ impl StatusSnapshot {
             units: Vec::new(),
         }
     }
+
+    /// Whether any unit in this snapshot belongs to `project`.
+    ///
+    /// Collection is best-effort per project, so this distinguishes a snapshot
+    /// that describes a project from one that silently skipped it.
+    pub fn has_project(&self, project: &str) -> bool {
+        self.units.iter().any(|unit| {
+            unit.project
+                .as_ref()
+                .is_some_and(|unit_project| unit_project.id == project)
+        })
+    }
 }
 
 /// Hierarchical status for a dynamically spawned child process.
@@ -1115,10 +1127,6 @@ fn build_snapshot(
                 state_entry = service_state.get(&hash).cloned();
                 lifecycle = state_entry.as_ref().map(|entry| entry.status);
             }
-        }
-
-        if lifecycle.is_none() && actual_name.is_some() && kind != UnitKind::Orphaned {
-            lifecycle = Some(ServiceLifecycleStatus::Stopped);
         }
 
         let uptime = if matches!(mode, StatusSnapshotMode::Detailed) {
@@ -3934,6 +3942,24 @@ services:
             runtime_command: None,
             spawned_children: Vec::new(),
         }
+    }
+
+    #[test]
+    fn has_project_distinguishes_a_skipped_project_from_a_described_one() {
+        let mut unit = unit_for_health("api");
+        unit.project = Some(ProjectStatus {
+            id: "gamecast".into(),
+            name: "Gamecast".into(),
+            mode: ProjectRunMode::Daemon,
+            config_path: None,
+            boot: None,
+            loose: false,
+        });
+
+        let snapshot = StatusSnapshot::new(vec![unit]);
+        assert!(snapshot.has_project("gamecast"));
+        assert!(!snapshot.has_project("other"));
+        assert!(!StatusSnapshot::empty().has_project("gamecast"));
     }
 
     #[test]
