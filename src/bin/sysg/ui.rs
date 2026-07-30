@@ -139,6 +139,7 @@ struct StatusReading {
     presence: SupervisorPresence,
 }
 
+
 /// Fetches a status snapshot, gated on the supervisor's actual health rather
 /// than mere socket connectability. A live daemon's snapshot is authoritative; a
 /// daemon that is alive but not answering is probed within a bounded window and
@@ -166,11 +167,9 @@ fn fetch_status_reading(
     };
 
     let Some(config_path) = config_path else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "No running supervisor",
-        )
-        .into());
+        return Err(Box::new(DiagError(Box::new(
+            systemg::status::diagnostics::supervisor_not_started(),
+        ))));
     };
     let config = load_status_config(config_path)?;
     let snapshot =

@@ -38,8 +38,18 @@ fn status_without_config_reports_missing_supervisor_not_missing_manifest() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("No running supervisor"),
+        stderr.contains("no supervisor is running"),
         "stderr should explain the missing supervisor, got: {stderr}"
+    );
+    // The condition is a supervisor problem and carries the supervisor code,
+    // not the SG0001 catch-all that leaves an operator with no next step.
+    assert!(
+        stderr.contains("SG0206") && !stderr.contains("SG0001"),
+        "the absent supervisor should be typed as SG0206, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("sysg start --daemonize"),
+        "stderr should say how to fix it, got: {stderr}"
     );
     assert!(
         !stderr.contains("systemg.yaml"),
