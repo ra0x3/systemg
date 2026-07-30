@@ -8,6 +8,26 @@
 
 use crate::diag::{Diagnostic, SgCode};
 
+/// No supervisor is running AND there is no manifest to read state from, so
+/// `status` has nothing to report at all.
+///
+/// The sibling of [`supervisor_offline`], which still shows a disk reading.
+/// Here there is no reading to label: without a config there is no project to
+/// resolve, so this is a hard error rather than a warning over some data.
+pub fn supervisor_not_started() -> Diagnostic {
+    Diagnostic::error(
+        SgCode::SupervisorOffline,
+        "no supervisor is running, and no manifest was given to read state from",
+    )
+    .note(
+        "`status` falls back to persisted state when the supervisor is down, \
+         but that needs a project to read: none was named and none is loaded",
+    )
+    .help_cmd("start a supervisor", "sysg start --daemonize")
+    .help_cmd("read a project off disk", "sysg status -c <config>.yaml")
+    .help_docs()
+}
+
 /// The supervisor is not running, so `status` is reading persisted state off
 /// disk. Any process still alive is unsupervised. This is a warning, not a hard
 /// error: the reading is shown, clearly labelled offline.
@@ -83,6 +103,18 @@ mod tests {
         let diag = supervisor_offline();
         assert_eq!(diag.code, SgCode::SupervisorOffline);
         assert!(diag.render(false).contains("orphaned"));
+    }
+
+    #[test]
+    fn not_started_is_sg0206_and_says_how_to_start_one() {
+        let diag = supervisor_not_started();
+        assert_eq!(diag.code, SgCode::SupervisorOffline);
+        let rendered = diag.render(false);
+        assert!(rendered.contains("no supervisor is running"));
+        assert!(rendered.contains("sysg start --daemonize"));
+        // Distinct from `supervisor_offline`: there is no reading to label, so
+        // it must not claim anything survived the supervisor.
+        assert!(!rendered.contains("orphaned"));
     }
 
     #[test]
