@@ -1958,20 +1958,30 @@ fn acquire_lock<'a, T>(
 #[cfg(target_os = "linux")]
 type CancelTokens = Arc<Mutex<HashMap<(String, u32), Arc<AtomicBool>>>>;
 
+/// Journals attached to one daemon, keyed by the operation watching it.
+///
+/// Keyed rather than a single slot because operations overlap: an `AddProject`
+/// boot runs on its own thread long after the command that queued it returned,
+/// so a second watcher arriving meanwhile would otherwise replace the first's
+/// journal and the first guard's drop would then detach the second's.
+type OpJournals = Arc<Mutex<Vec<(String, u64, crate::start::BootJournal)>>>;
+
 /// Detaches a watched journal when the operation that attached it ends.
 ///
 /// A journal seals on its terminal frame, so one left attached would swallow
-/// every later operation's progress silently.
+/// every later operation's progress silently. Removes only the attachment IT
+/// made, so ending one operation never blinds another that is still running.
 pub struct WatchGuard {
-    slot: Arc<Mutex<Option<crate::start::BootJournal>>>,
+    slot: OpJournals,
+    token: u64,
 }
 
 impl Drop for WatchGuard {
     fn drop(&mut self) {
-        *self
-            .slot
+        self.slot
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, token, _)| *token != self.token);
     }
 }
 
@@ -2023,8 +2033,8 @@ struct DaemonContext {
     liveness: Weak<()>,
     /// Operation reporter used by pre-start and health-check waits.
     op_slot: OpSlot,
-    /// Journal for the mutation in flight, when a client is watching it.
-    op_journal: Arc<Mutex<Option<crate::start::BootJournal>>>,
+    /// Journals for the mutations in flight, keyed by watching operation.
+    op_journal: OpJournals,
     /// Operator-controlled lifecycle timeout policy.
     timeouts: Arc<RwLock<SupervisorTimeouts>>,
     /// Services currently being replaced through an explicit deployment strategy.
@@ -2180,12 +2190,12 @@ pub struct Daemon {
     liveness: Arc<()>,
     /// Reports what a blocking boot step is currently waiting on.
     op_slot: OpSlot,
-    /// Journal for the mutation in flight, when a client is watching it.
+    /// Journals for the mutations in flight, keyed by watching operation.
     ///
-    /// `None` for work nobody asked to see — background respawns, rollbacks —
-    /// so those paths cost nothing. Set for the duration of a watched command
-    /// and cleared after, since a journal seals on its terminal frame.
-    op_journal: Arc<std::sync::Mutex<Option<crate::start::BootJournal>>>,
+    /// Empty for work nobody asked to see — background respawns, rollbacks —
+    /// so those paths cost nothing. An entry lives for the duration of the
+    /// operation that attached it, since a journal seals on its terminal frame.
+    op_journal: OpJournals,
     /// Operator-controlled lifecycle timeout policy.
     timeouts: Arc<RwLock<SupervisorTimeouts>>,
     boot_epoch: Arc<AtomicU64>,
@@ -2729,7 +2739,7 @@ impl Daemon {
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             pipe_stderr: Arc::new(AtomicBool::new(false)),
             op_slot: OpSlot::new(),
-            op_journal: Arc::new(std::sync::Mutex::new(None)),
+            op_journal: Arc::new(std::sync::Mutex::new(Vec::new())),
             timeouts: Arc::new(RwLock::new(SupervisorTimeouts::default())),
             liveness: Arc::new(()),
             boot_epoch: Arc::new(AtomicU64::new(0)),
@@ -2750,13 +2760,24 @@ impl Daemon {
     /// Scoped rather than permanent because a journal seals on its terminal
     /// frame: leaving one attached would silently swallow every later
     /// operation's frames.
-    pub fn watch(&self, journal: crate::start::BootJournal) -> WatchGuard {
-        *self
+    pub fn watch(&self, op: &str, journal: crate::start::BootJournal) -> WatchGuard {
+        // Identifies the ATTACHMENT, not the operation. Keying the guard on the
+        // operation alone means re-attaching it hands out two guards for one
+        // key, and whichever drops first detaches the other's journal.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let token = NEXT.fetch_add(1, Ordering::Relaxed);
+        let mut slot = self
             .op_journal
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(journal);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Re-attaching the same operation replaces its own entry rather than
+        // stacking a duplicate that would double every frame it records.
+        slot.retain(|(existing, _, _)| existing != op);
+        slot.push((op.to_string(), token, journal));
+        drop(slot);
         WatchGuard {
             slot: Arc::clone(&self.op_journal),
+            token,
         }
     }
 
@@ -2801,14 +2822,31 @@ impl Daemon {
         });
     }
 
-    /// Runs `emit` against the attached journal, if any.
-    fn with_journal(&self, emit: impl FnOnce(&crate::start::BootJournal, String)) {
-        let guard = self
+    /// Runs `emit` against every attached journal.
+    ///
+    /// A frame goes to EVERY watcher of this daemon, not just the operation
+    /// that produced it — the emit sites report per-unit progress and do not
+    /// know which command asked for the work. Isolation therefore comes from
+    /// attaching narrowly (see the watch set built per command), not from
+    /// filtering here. Two watched operations on the SAME project will still
+    /// see each other's units.
+    ///
+    /// The list is cloned out of the registry lock before emitting so the
+    /// journal's own locking is never taken beneath it.
+    fn with_journal(&self, emit: impl Fn(&crate::start::BootJournal, String)) {
+        let journals: Vec<_> = self
             .op_journal
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(journal) = guard.as_ref() {
-            emit(journal, self.cfg().project.id.clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(_, _, journal)| journal.clone())
+            .collect();
+        if journals.is_empty() {
+            return;
+        }
+        let project = self.cfg().project.id.clone();
+        for journal in &journals {
+            emit(journal, project.clone());
         }
     }
 
@@ -8714,6 +8752,69 @@ sleep 30
                 Err(e) => panic!("Unexpected error: {:?}", e),
             }
             let _ = parent.wait();
+        });
+    }
+
+    #[test]
+    fn overlapping_watches_each_receive_every_frame() {
+        with_temp_home(|dir| {
+            let daemon = create_daemon(dir, HashMap::new());
+            let first = crate::start::BootJournal::new();
+            let second = crate::start::BootJournal::new();
+
+            let first_guard = daemon.watch("op-1", first.clone());
+            let second_guard = daemon.watch("op-2", second.clone());
+
+            // A single-slot registry let the second attach replace the first,
+            // silently stealing its stream.
+            daemon.note_unit_starting("api");
+            assert_eq!(first.snapshot().len(), 1, "first watcher still fed");
+            assert_eq!(second.snapshot().len(), 1, "second watcher fed too");
+
+            // Ending one operation must not blind the other.
+            drop(first_guard);
+            daemon.note_unit_starting("worker");
+            assert_eq!(first.snapshot().len(), 1, "detached watcher stops here");
+            assert_eq!(second.snapshot().len(), 2, "live watcher keeps receiving");
+
+            drop(second_guard);
+            daemon.note_unit_starting("late");
+            assert_eq!(second.snapshot().len(), 2, "nothing is fed once detached");
+        });
+    }
+
+    #[test]
+    fn re_attaching_an_op_does_not_let_the_stale_guard_detach_it() {
+        with_temp_home(|dir| {
+            let daemon = create_daemon(dir, HashMap::new());
+            let old = crate::start::BootJournal::new();
+            let new = crate::start::BootJournal::new();
+
+            let stale = daemon.watch("op-1", old.clone());
+            let live = daemon.watch("op-1", new.clone());
+
+            // Re-attaching replaces the entry rather than stacking a duplicate
+            // that would double every frame the operation records.
+            daemon.note_unit_starting("api");
+            assert_eq!(new.snapshot().len(), 1, "the replacement receives once");
+            assert!(
+                old.snapshot().is_empty(),
+                "the replaced journal is detached"
+            );
+
+            // Guards are keyed by ATTACHMENT, so dropping the stale one must
+            // not detach the replacement that shares its operation id.
+            drop(stale);
+            daemon.note_unit_starting("worker");
+            assert_eq!(
+                new.snapshot().len(),
+                2,
+                "the live attachment survives the stale guard's drop"
+            );
+
+            drop(live);
+            daemon.note_unit_starting("late");
+            assert_eq!(new.snapshot().len(), 2, "its own guard does detach it");
         });
     }
 }

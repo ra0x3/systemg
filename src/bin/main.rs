@@ -5222,6 +5222,7 @@ fn start_foreground_attached(
         config: config_path.to_string_lossy().to_string(),
         service,
         mode: ProjectRunMode::Foreground,
+        watch: None,
     };
     let ctrlc = foreground_ctrlc()?;
     // NO spinner here. A foreground start's whole purpose is to show the
@@ -5900,6 +5901,9 @@ fn progress_target(command: &ControlCommand) -> String {
         ControlCommand::Start {
             service, project, ..
         } => ("Starting", service.as_deref(), project.as_deref()),
+        // Carries a config path, not a project name. The caller resolves the
+        // project from that config and names the head line itself.
+        ControlCommand::AddProject { .. } => ("Starting", None, None),
         _ => ("Working", None, None),
     };
     let target = project
@@ -5934,7 +5938,8 @@ fn stamp_watch(command: &mut ControlCommand) -> Option<String> {
         ControlCommand::Restart { watch, .. }
         | ControlCommand::Start { watch, .. }
         | ControlCommand::Stop { watch, .. }
-        | ControlCommand::StopProject { watch, .. } => {
+        | ControlCommand::StopProject { watch, .. }
+        | ControlCommand::AddProject { watch, .. } => {
             *watch = Some(id.clone());
             Some(id)
         }
@@ -6241,6 +6246,7 @@ fn dispatch_start_resident(
             config: config.to_string_lossy().to_string(),
             service: None,
             mode: ProjectRunMode::Daemon,
+            watch: None,
         },
         StartPlan::Project { project, .. } => ControlCommand::Start {
             service: None,
@@ -6262,36 +6268,47 @@ fn dispatch_start_resident(
     // and startup failures all land after the user is back at the prompt.
     // Attach must behave like the fork path — show the boot's progress and
     // report its real outcome.
-    let awaited_project = match &command {
-        ControlCommand::AddProject { config, .. } => {
-            Some(load_config(Some(config))?.project.id)
-        }
-        _ => None,
+    // One config file may declare SEVERAL projects, each booting on its own
+    // supervisor thread. Awaiting only the first reports success while the rest
+    // are still starting, and drops their failures on the floor.
+    let awaited_projects = match &command {
+        ControlCommand::AddProject { config, .. } => project_ids_in_config(config)?,
+        _ => Vec::new(),
     };
-    // A plain `Start` runs synchronously in the supervisor, so its journal can
-    // be watched live. `AddProject` queues onto a background thread and is
-    // awaited through its own boot status, which the tree does not model.
+    let awaited_project = awaited_projects.first().cloned();
+    // Both shapes stream their journal. `AddProject` queues its boot onto a
+    // supervisor thread, so the tree renders that boot's progress while
+    // `await_queued_boot` remains the authoritative verdict: streaming is
+    // presentation, the polled boot status is what decides success or failure.
     let mut command = command;
-    let head = progress_target(&command);
-    let boot = if awaited_project.is_some() {
-        with_progress_spinner("Starting", || {
-            send_add_project(&command)?;
-            Ok(match &awaited_project {
-                Some(project) => await_queued_boot(project)?,
-                None => QueuedBoot::default(),
-            })
-        })?
-    } else {
-        match stamp_watch(&mut command) {
-            Some(op) => with_progress_tree(head, op, || {
+    // `AddProject` knows only its config path, so the project resolved from it
+    // above is what names the head line — otherwise it reads a bare "Working".
+    let head = match awaited_projects.as_slice() {
+        [project] => format!("Starting '{project}'"),
+        [] => progress_target(&command),
+        many => format!("Starting {} projects", many.len()),
+    };
+    let boot = match stamp_watch(&mut command) {
+        Some(op) => with_progress_tree(head, op, || match awaited_projects.is_empty() {
+            false => {
+                send_add_project(&command)?;
+                Ok(await_queued_boots(&awaited_projects)?)
+            }
+            true => {
                 send_control_command(command)?;
                 Ok(QueuedBoot::default())
-            })?,
-            None => {
+            }
+        })?,
+        None => match awaited_projects.is_empty() {
+            false => {
+                send_add_project(&command)?;
+                await_queued_boots(&awaited_projects)?
+            }
+            true => {
                 send_control_command(command)?;
                 QueuedBoot::default()
             }
-        }
+        },
     };
 
     if let Some(diag) = boot.cause {
@@ -6328,6 +6345,32 @@ struct QueuedBoot {
 struct ProjectUnits {
     units: Vec<(String, UnitState)>,
     boot: Option<BootStatus>,
+}
+
+/// Every project id declared by a config file, in declaration order.
+///
+/// A manifest may carry several, and each becomes its own queued boot.
+fn project_ids_in_config(config: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let path = Path::new(config);
+    let file = fs::File::open(path)?;
+    Ok(systemg::config::load_projects_from_file(file, path)?
+        .into_iter()
+        .map(|config| config.project.id)
+        .collect())
+}
+
+/// Awaits every queued boot and merges their verdicts.
+///
+/// Returning on the first settled project would report success while the others
+/// were still starting, and silently drop whatever they failed with.
+fn await_queued_boots(projects: &[String]) -> Result<QueuedBoot, ControlError> {
+    let mut merged = QueuedBoot::default();
+    for project in projects {
+        let boot = await_queued_boot(project)?;
+        merged.failed.extend(boot.failed);
+        merged.cause = merged.cause.or(boot.cause);
+    }
+    Ok(merged)
 }
 
 fn send_add_project(command: &ControlCommand) -> Result<(), Box<dyn Error>> {
@@ -6631,6 +6674,7 @@ fn start_supervisor_daemon(
                 config: config_path.to_string_lossy().to_string(),
                 service,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             });
         }
         use systemg::diag::{Diagnostic, SgCode};

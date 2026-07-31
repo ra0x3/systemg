@@ -128,6 +128,13 @@ pub enum ControlCommand {
         /// Requested project run mode.
         #[serde(default)]
         mode: ProjectRunMode,
+        /// Client-generated id for this operation's progress journal.
+        ///
+        /// The boot this queues runs on its own thread and outlives the
+        /// command, so the journal is held open by a lease until the last
+        /// project it started has finished.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<String>,
     },
     /// Stop all services for one project.
     StopProject {
