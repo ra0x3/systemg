@@ -1958,11 +1958,29 @@ fn acquire_lock<'a, T>(
 #[cfg(target_os = "linux")]
 type CancelTokens = Arc<Mutex<HashMap<(String, u32), Arc<AtomicBool>>>>;
 
+/// Detaches a watched journal when the operation that attached it ends.
+///
+/// A journal seals on its terminal frame, so one left attached would swallow
+/// every later operation's progress silently.
+pub struct WatchGuard {
+    slot: Arc<Mutex<Option<crate::start::BootJournal>>>,
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        *self
+            .slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 /// Shared context for daemon operations to reduce function parameters and ensure
 /// consistent lock ordering.
 ///
 /// Lock ordering is enforced via the `DaemonLock` enum. Always acquire locks in
 /// ascending order of their priority values to prevent deadlocks:
+///
 /// 1. Processes → 2. PidFile → 3. StateFile → 4. RestartCounts → 5. ManualStopFlags → 6. RestartSuppressed
 #[derive(Clone)]
 struct DaemonContext {
@@ -2005,6 +2023,8 @@ struct DaemonContext {
     liveness: Weak<()>,
     /// Operation reporter used by pre-start and health-check waits.
     op_slot: OpSlot,
+    /// Journal for the mutation in flight, when a client is watching it.
+    op_journal: Arc<Mutex<Option<crate::start::BootJournal>>>,
     /// Operator-controlled lifecycle timeout policy.
     timeouts: Arc<RwLock<SupervisorTimeouts>>,
     /// Services currently being replaced through an explicit deployment strategy.
@@ -2160,6 +2180,12 @@ pub struct Daemon {
     liveness: Arc<()>,
     /// Reports what a blocking boot step is currently waiting on.
     op_slot: OpSlot,
+    /// Journal for the mutation in flight, when a client is watching it.
+    ///
+    /// `None` for work nobody asked to see — background respawns, rollbacks —
+    /// so those paths cost nothing. Set for the duration of a watched command
+    /// and cleared after, since a journal seals on its terminal frame.
+    op_journal: Arc<std::sync::Mutex<Option<crate::start::BootJournal>>>,
     /// Operator-controlled lifecycle timeout policy.
     timeouts: Arc<RwLock<SupervisorTimeouts>>,
     boot_epoch: Arc<AtomicU64>,
@@ -2221,6 +2247,7 @@ impl Daemon {
             boot_cancelled: Arc::clone(&self.boot_cancelled),
             liveness: Arc::downgrade(&self.liveness),
             op_slot: self.op_slot.clone(),
+            op_journal: Arc::clone(&self.op_journal),
             timeouts: Arc::clone(&self.timeouts),
             replacements: Arc::clone(&self.replacements),
             #[cfg(target_os = "linux")]
@@ -2252,6 +2279,7 @@ impl Daemon {
             pipe_stderr: Arc::clone(&ctx.pipe_stderr),
             liveness: ctx.liveness.upgrade()?,
             op_slot: ctx.op_slot.clone(),
+            op_journal: Arc::clone(&ctx.op_journal),
             timeouts: Arc::clone(&ctx.timeouts),
             boot_epoch: Arc::clone(&ctx.boot_epoch),
             boot_cancelled: Arc::clone(&ctx.boot_cancelled),
@@ -2701,6 +2729,7 @@ impl Daemon {
             thread_cancellation_tokens: Arc::new(Mutex::new(HashMap::new())),
             pipe_stderr: Arc::new(AtomicBool::new(false)),
             op_slot: OpSlot::new(),
+            op_journal: Arc::new(std::sync::Mutex::new(None)),
             timeouts: Arc::new(RwLock::new(SupervisorTimeouts::default())),
             liveness: Arc::new(()),
             boot_epoch: Arc::new(AtomicU64::new(0)),
@@ -2713,6 +2742,74 @@ impl Daemon {
     /// boot steps report what they are waiting on.
     pub fn set_op_slot(&mut self, op_slot: OpSlot) {
         self.op_slot = op_slot;
+    }
+
+    /// Attaches a journal so this daemon's per-unit progress is streamable, and
+    /// returns a guard that detaches it when the operation ends.
+    ///
+    /// Scoped rather than permanent because a journal seals on its terminal
+    /// frame: leaving one attached would silently swallow every later
+    /// operation's frames.
+    pub fn watch(&self, journal: crate::start::BootJournal) -> WatchGuard {
+        *self
+            .op_journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(journal);
+        WatchGuard {
+            slot: Arc::clone(&self.op_journal),
+        }
+    }
+
+    /// Records that a unit has begun, when someone is watching.
+    pub(crate) fn note_unit_starting(&self, service: &str) {
+        self.with_journal(|journal, project| {
+            journal.push(crate::start::BootFrame::UnitStarting {
+                project,
+                service: service.to_string(),
+            });
+        });
+    }
+
+    /// Records a unit's terminal outcome, when someone is watching.
+    pub(crate) fn note_unit_done(&self, service: &str, outcome: crate::start::Outcome) {
+        self.with_journal(|journal, project| {
+            journal.push(crate::start::BootFrame::Unit {
+                project,
+                service: service.to_string(),
+                outcome: outcome.clone(),
+            });
+        });
+    }
+
+    /// Records progress of one step within a unit, when someone is watching.
+    pub(crate) fn note_step(
+        &self,
+        service: &str,
+        id: &str,
+        label: impl Into<String>,
+        state: crate::start::StepState,
+    ) {
+        let label = label.into();
+        self.with_journal(|journal, project| {
+            journal.push(crate::start::BootFrame::UnitStep {
+                project,
+                service: service.to_string(),
+                id: id.to_string(),
+                label: label.clone(),
+                state,
+            });
+        });
+    }
+
+    /// Runs `emit` against the attached journal, if any.
+    fn with_journal(&self, emit: impl FnOnce(&crate::start::BootJournal, String)) {
+        let guard = self
+            .op_journal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(journal) = guard.as_ref() {
+            emit(journal, self.cfg().project.id.clone());
+        }
     }
 
     /// Applies the supervisor's lifecycle timeout policy to this daemon and all
@@ -4282,6 +4379,12 @@ impl Daemon {
             format!("waiting on dependency '{dep}' of '{service_name}'"),
             format!("waiting on dependency '{dep}'"),
         );
+        self.note_step(
+            service_name,
+            &format!("dep:{dep}"),
+            format!("dependency '{dep}'"),
+            crate::start::StepState::Active,
+        );
 
         loop {
             if self.boot_cancelled() || !self.boot_active(epoch) {
@@ -4299,6 +4402,12 @@ impl Daemon {
                             Some(0),
                             None,
                         )?;
+                        self.note_step(
+                            service_name,
+                            &format!("dep:{dep}"),
+                            format!("dependency '{dep}'"),
+                            crate::start::StepState::Done,
+                        );
                         return Ok(());
                     }
 
@@ -4314,6 +4423,12 @@ impl Daemon {
                         signal,
                     )?;
 
+                    self.note_step(
+                        service_name,
+                        &format!("dep:{dep}"),
+                        format!("dependency '{dep}' failed"),
+                        crate::start::StepState::Failed,
+                    );
                     return Err(ProcessManagerError::DependencyFailed {
                         service: service_name.to_string(),
                         dependency: dep.to_string(),
@@ -4801,6 +4916,7 @@ impl Daemon {
                 .and_then(|s| DeploymentStrategy::from_str(s).ok())
                 .unwrap_or_default();
 
+            self.note_unit_starting(&service_name);
             let mut service_to_start = service.clone();
             service_to_start.skip = None;
             let result = match strategy {
@@ -4813,19 +4929,38 @@ impl Daemon {
             };
             match result {
                 Ok(ServiceReadyState::CompletedSuccess) => {
+                    self.note_unit_done(&service_name, crate::start::Outcome::Completed);
                     healthy_services.insert(service_name.clone());
                     completed_services.insert(service_name.clone());
                     restarted_services.push(service_name);
                 }
                 Ok(ServiceReadyState::Running) => {
+                    let pid = self
+                        .pid_file
+                        .lock()
+                        .ok()
+                        .and_then(|pids| pids.pid_for(&service_name))
+                        .unwrap_or_default();
+                    self.note_unit_done(
+                        &service_name,
+                        crate::start::Outcome::Up(crate::start::Liveness { pid }),
+                    );
                     healthy_services.insert(service_name.clone());
                     restarted_services.push(service_name);
                 }
                 Ok(ServiceReadyState::Skipped) => {
+                    self.note_unit_done(&service_name, crate::start::Outcome::Skipped);
                     skipped_services.insert(service_name);
                 }
                 Err(err) => {
                     error!("Failed to restart '{service_name}': {err}");
+                    self.note_unit_done(
+                        &service_name,
+                        crate::start::Outcome::Failed(crate::start::unit_start_failed(
+                            &service_name,
+                            err.to_string(),
+                        )),
+                    );
                     first_error.get_or_insert(err);
                     failed_services.insert(service_name);
                 }
@@ -5661,6 +5796,14 @@ impl Daemon {
                 format!("health check for '{service_name}' ({progress})"),
                 format!("health check ({progress})"),
             );
+            // Same identity every attempt, so the watching client updates this
+            // row in place instead of appending one line per probe.
+            self.note_step(
+                service_name,
+                "health",
+                format!("health check ({progress})"),
+                crate::start::StepState::Active,
+            );
             match self.perform_configured_health_check(
                 service_name,
                 health_check,
@@ -5670,6 +5813,12 @@ impl Daemon {
                 Ok(true) => {
                     info!(
                         "Health check passed for '{service_name}' on attempt {attempt}"
+                    );
+                    self.note_step(
+                        service_name,
+                        "health",
+                        "health check passed",
+                        crate::start::StepState::Done,
                     );
                     return Ok(());
                 }
@@ -5716,6 +5865,18 @@ impl Daemon {
         }
 
         let elapsed = started_at.elapsed();
+        // Resolve the row a watching client has been spinning: without this it
+        // would be inherited by the unit's own outcome, losing which step gave
+        // up and how many attempts it took.
+        self.note_step(
+            service_name,
+            "health",
+            format!(
+                "health check failed ({attempt} attempts, {}s)",
+                elapsed.as_secs()
+            ),
+            crate::start::StepState::Failed,
+        );
         Err(ProcessManagerError::Diag(Box::new(
             self.health_check_failure_diag(
                 service_name,
@@ -6974,9 +7135,22 @@ impl Daemon {
         let mut first_error = None;
 
         for service in services {
+            // Emitted here rather than inside `stop_service`: a restart stops
+            // each unit before starting it, and instrumenting the inner call
+            // would resolve a unit ✔ the moment it went down.
+            self.note_unit_starting(&service);
             if let Err(err) = self.stop_service(&service) {
                 error!("Failed to stop service '{service}': {err}");
+                self.note_unit_done(
+                    &service,
+                    crate::start::Outcome::Failed(crate::start::unit_start_failed(
+                        &service,
+                        err.to_string(),
+                    )),
+                );
                 first_error.get_or_insert(err);
+            } else {
+                self.note_unit_done(&service, crate::start::Outcome::Stopped);
             }
         }
 

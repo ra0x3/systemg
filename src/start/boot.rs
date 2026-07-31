@@ -13,6 +13,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::start::Outcome;
 
+/// Where a step within a unit is in its own lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepState {
+    /// Running now; the client spins this row.
+    Active,
+    /// Finished successfully; the client marks it ✔.
+    Done,
+    /// Gave up; the client marks it ✗.
+    Failed,
+}
+
 /// One event in a project's boot. Frames are line-delimited JSON on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum BootFrame {
@@ -31,6 +42,27 @@ pub enum BootFrame {
         service: String,
         /// Whether it came up, completed, or failed.
         outcome: Outcome,
+    },
+    /// Progress on one step WITHIN a unit that has not finished yet: a
+    /// dependency wait, a pre-start hook, a health check.
+    ///
+    /// Rides the same ordered stream as the unit it belongs to so a client can
+    /// nest it under that unit and resolve it independently — the health check
+    /// ticks, turns ✔, and only then does its service. Carried here rather than
+    /// in `OpReport` because that slot holds a single snapshot which clears
+    /// when the operation ends, so a terminal step state is easily missed.
+    UnitStep {
+        /// The project the unit belongs to.
+        project: String,
+        /// The service the step runs under.
+        service: String,
+        /// Stable identity for the step, so a later state replaces the earlier
+        /// row rather than appending a second one.
+        id: String,
+        /// Human-readable description, e.g. `health check (attempt 8, 14s/300s)`.
+        label: String,
+        /// Where the step is in its own lifecycle.
+        state: StepState,
     },
     /// Boot finished. Terminal frame; nothing follows it.
     Done {
@@ -123,6 +155,50 @@ impl BootJournal {
             .clone()
     }
 
+    /// Counts of units that succeeded and failed, as `(started, failed)`.
+    ///
+    /// Derived from the unit frames actually recorded, so a `Done` built from
+    /// this reports the operation that happened rather than a placeholder.
+    ///
+    /// Counts UNITS, not frames: a unit re-reported keeps its latest outcome
+    /// instead of being tallied twice. `Skipped` and `Stopped` count as
+    /// neither: `started` means "came up or completed", and a unit that never
+    /// ran — or that was brought down — did neither.
+    pub fn tally(&self) -> (usize, usize) {
+        let mut latest: Vec<(&str, &str, &Outcome)> = Vec::new();
+        let guard = self
+            .inner
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for frame in guard.frames.iter() {
+            if let BootFrame::Unit {
+                project,
+                service,
+                outcome,
+            } = frame
+            {
+                match latest
+                    .iter_mut()
+                    .find(|(p, s, _)| *p == project && *s == service)
+                {
+                    Some(entry) => entry.2 = outcome,
+                    None => latest.push((project, service, outcome)),
+                }
+            }
+        }
+        let mut started = 0;
+        let mut failed = 0;
+        for (_, _, outcome) in latest {
+            match outcome {
+                Outcome::Skipped | Outcome::Stopped => {}
+                other if other.succeeded() => started += 1,
+                _ => failed += 1,
+            }
+        }
+        (started, failed)
+    }
+
     /// Blocks until at least `from` frames exist or boot is done, then returns
     /// the frames from index `from` onward. A subscriber loops:
     /// `let next = j.wait_from(seen); seen += next.len();` until it sees `Done`.
@@ -153,6 +229,67 @@ mod tests {
             service: service.into(),
             outcome: Outcome::Up(Liveness { pid: 1 }),
         }
+    }
+
+    #[test]
+    fn tally_counts_units_once_and_excludes_skipped() {
+        let j = BootJournal::new();
+        j.push(up("a"));
+        // The same unit re-reported keeps its latest outcome rather than
+        // counting twice.
+        j.push(up("a"));
+        j.push(BootFrame::Unit {
+            project: "p".into(),
+            service: "b".into(),
+            outcome: Outcome::Skipped,
+        });
+        j.push(BootFrame::Unit {
+            project: "p".into(),
+            service: "c".into(),
+            outcome: Outcome::Failed(crate::diag::Diagnostic::error(
+                crate::diag::SgCode::UnitStartFailed,
+                "boom",
+            )),
+        });
+        // Same service name in another project is a different unit.
+        j.push(BootFrame::Unit {
+            project: "q".into(),
+            service: "a".into(),
+            outcome: Outcome::Completed,
+        });
+
+        assert_eq!(j.tally(), (2, 1));
+    }
+
+    #[test]
+    fn tally_excludes_stopped_units() {
+        let j = BootJournal::new();
+        j.push(BootFrame::Unit {
+            project: "p".into(),
+            service: "a".into(),
+            outcome: Outcome::Stopped,
+        });
+        j.push(up("b"));
+
+        // A stopped unit did not come up or complete, so it is neither a start
+        // nor a failure.
+        assert_eq!(j.tally(), (1, 0));
+    }
+
+    #[test]
+    fn tally_takes_the_latest_outcome_for_a_unit() {
+        let j = BootJournal::new();
+        j.push(up("a"));
+        j.push(BootFrame::Unit {
+            project: "p".into(),
+            service: "a".into(),
+            outcome: Outcome::Failed(crate::diag::Diagnostic::error(
+                crate::diag::SgCode::UnitStartFailed,
+                "died after coming up",
+            )),
+        });
+
+        assert_eq!(j.tally(), (0, 1));
     }
 
     #[test]

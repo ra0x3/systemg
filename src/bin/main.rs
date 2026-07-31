@@ -9,7 +9,7 @@ use std::{
     process,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -65,6 +65,9 @@ const UNIT_CONFIG_MAX_AGE_DAYS: u64 = 30;
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
 const FETCH_SPINNER_DELAY: Duration = Duration::from_millis(120);
+/// Bound on waiting for the progress stream's final frames after the operation
+/// returns, so a supervisor that died mid-operation cannot hang the CLI.
+const TREE_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const FETCH_SPINNER_TICK: Duration = Duration::from_millis(80);
 const FETCH_SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 const BUSY_PROBE_EVERY_TICKS: usize = 12;
@@ -431,6 +434,57 @@ fn format_progress_spinner_frame(frame: &str, label: &str) -> String {
     format!("\r{frame} {shown}\x1B[K")
 }
 
+/// Paints one progress-tree row: indent, mark, then label.
+///
+/// `frame` is the live spinner glyph, used for rows still in flight. Colour is
+/// applied AFTER truncation: the label is cut to the visible budget first, so a
+/// cut can never land inside an escape sequence and leave the terminal wearing
+/// the colour for everything that follows.
+fn format_tree_row(
+    row: &systemg::start::TreeRow,
+    frame: &str,
+    width: usize,
+    color: bool,
+) -> String {
+    use systemg::start::RowState;
+
+    const TREE_INDENT: usize = 2;
+    let paint = |code: &str, text: &str| {
+        if color {
+            format!("{code}{text}\x1B[0m")
+        } else {
+            text.to_string()
+        }
+    };
+
+    let indent = " ".repeat(TREE_INDENT * (row.depth + 1));
+    let (mark, mark_color) = match row.state {
+        RowState::Active => (frame, ""),
+        RowState::Done => ("\u{2714}", "\x1B[32m"),
+        RowState::Failed => ("\u{2717}", "\x1B[1;91m"),
+    };
+
+    let budget = width.saturating_sub(indent.chars().count() + mark.chars().count() + 2);
+    let shown: String = if row.label.chars().count() > budget {
+        row.label
+            .chars()
+            .take(budget.saturating_sub(1))
+            .chain(std::iter::once('…'))
+            .collect()
+    } else {
+        row.label.clone()
+    };
+
+    // Detail rows sit under the unit they belong to, so they are dimmed to keep
+    // the unit names the thing the eye lands on.
+    let label = if row.depth > 0 {
+        paint("\x1B[2m", &shown)
+    } else {
+        shown
+    };
+    format!("{indent}{} {label}", paint(mark_color, mark))
+}
+
 /// Usable terminal width.
 ///
 /// A failed or nonsense probe must not shrink the line to a stub — an
@@ -457,13 +511,34 @@ fn terminal_width() -> usize {
 /// Truncates one row to the visible width, matching the single-line rule that
 /// a wrapped row strands its remainder and breaks in-place repainting.
 fn fit_progress_row(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
+    // Escapes occupy no columns, so they must not count toward the budget and
+    // must never be cut through: a severed sequence leaves the terminal wearing
+    // the colour for everything printed after it. Rows arrive pre-truncated to
+    // their visible width, so this only trims rows that were built elsewhere.
+    let mut visible = 0usize;
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            out.push(ch);
+            for esc in chars.by_ref() {
+                out.push(esc);
+                if esc.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        if visible + 1 > width.saturating_sub(1) && chars.peek().is_some() {
+            out.push('…');
+            // Close any active styling so the truncation cannot bleed.
+            out.push_str("\x1B[0m");
+            return out;
+        }
+        out.push(ch);
+        visible += 1;
     }
-    text.chars()
-        .take(width.saturating_sub(1))
-        .chain(std::iter::once('…'))
-        .collect()
+    out
 }
 
 /// Renders a nested progress frame as an IN-PLACE update spanning several rows.
@@ -524,6 +599,134 @@ fn clear_progress_spinner_rows(rows: usize) -> String {
     }
     out.push('\r');
     out
+}
+
+/// Runs `operation` while drawing the live progress tree for `op`.
+///
+/// Each unit appears as it is worked and resolves independently of its steps,
+/// so a health check ticks in place, turns ✔, and only then does the service it
+/// belongs to. Falls back to `operation` alone when there is no terminal to
+/// paint, or when the supervisor does not know the operation — an older daemon,
+/// or one whose work finished before this attached.
+fn with_progress_tree<T, F>(
+    head: String,
+    op: String,
+    operation: F,
+) -> Result<T, Box<dyn Error>>
+where
+    F: FnOnce() -> Result<T, Box<dyn Error>>,
+{
+    if !stderr_is_tty() {
+        return operation();
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let painter_stop = Arc::clone(&stop);
+    let tree = Arc::new(std::sync::Mutex::new(systemg::start::TreeState::new()));
+    let stream_tree = Arc::clone(&tree);
+
+    // The stream blocks until frames arrive, so it cannot also drive the
+    // animation: one thread accumulates, another repaints on a fixed tick.
+    let streamer = thread::Builder::new()
+        .name("sysg-op-stream".into())
+        .spawn(move || {
+            let _ = ipc::stream_op_frames(&op, |frame| {
+                stream_tree
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .apply(&frame);
+            });
+        })
+        .ok();
+
+    let painter = thread::Builder::new()
+        .name(SPINNER_THREAD.into())
+        .spawn(move || {
+            thread::sleep(FETCH_SPINNER_DELAY);
+            let color = std::env::var_os("NO_COLOR").is_none();
+            let mut stderr = io::stderr().lock();
+            let mut frame_idx = 0usize;
+            let mut drawn_rows = 1usize;
+            loop {
+                let finished = painter_stop.load(Ordering::Relaxed);
+                let frame = FETCH_SPINNER_FRAMES[frame_idx % FETCH_SPINNER_FRAMES.len()];
+                let width = terminal_width();
+                let height = terminal_height().saturating_sub(2);
+
+                let snapshot = tree
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .rows();
+                let (shown, hidden) = systemg::start::fit_rows(&snapshot, height);
+
+                // Nothing is in flight on the last pass, so rows lose the
+                // spinner: a finished operation must not be left wearing a
+                // glyph that says it is still working.
+                let head_frame = if finished { " " } else { frame };
+                let mut rows = vec![head.clone()];
+                if hidden > 0 {
+                    // "hidden" rather than "more": when an oversized subtree is
+                    // truncated the elided rows sit in the MIDDLE of what is
+                    // drawn, so promising more rows above would misdescribe it.
+                    rows.push(format!("  … {hidden} hidden"));
+                }
+                rows.extend(
+                    shown
+                        .iter()
+                        .map(|row| format_tree_row(row, head_frame, width, color)),
+                );
+
+                let (painted, cursor_rows) =
+                    format_progress_spinner_rows(head_frame, &rows, drawn_rows);
+                let _ = write!(stderr, "{painted}");
+                let _ = stderr.flush();
+                drawn_rows = cursor_rows;
+
+                if finished {
+                    // The final frame is left on screen rather than cleared, so
+                    // the completed tree survives as a record of what ran. Only
+                    // the trailing newline is added to release the cursor.
+                    let _ = writeln!(stderr);
+                    let _ = stderr.flush();
+                    return;
+                }
+                frame_idx += 1;
+                thread::sleep(FETCH_SPINNER_TICK);
+            }
+        });
+
+    let painter = match painter {
+        Ok(handle) => handle,
+        Err(_) => return operation(),
+    };
+
+    let result = operation();
+    // The supervisor seals the journal as the operation ends, which releases
+    // the stream. Draining it BEFORE stopping the painter is what lets a fast
+    // operation still render: otherwise the last frames arrive after the final
+    // repaint and the tree shows nothing at all.
+    //
+    // Bounded, because the terminal frame comes from the supervisor: one that
+    // died mid-operation — or that never registered the op — would otherwise
+    // hang the CLI forever on a stream that can no longer produce anything.
+    let drain_deadline = Instant::now() + TREE_DRAIN_TIMEOUT;
+    while streamer.as_ref().is_some_and(|s| !s.is_finished())
+        && Instant::now() < drain_deadline
+    {
+        thread::sleep(FETCH_SPINNER_TICK);
+    }
+    stop.store(true, Ordering::Relaxed);
+    let _ = painter.join();
+    result
+}
+
+/// Usable terminal height, defaulting when the probe fails.
+fn terminal_height() -> usize {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(_, rows)| rows as usize)
+        .filter(|rows| *rows > 2)
+        .unwrap_or(24)
 }
 
 /// Runs `operation` while rendering a delayed progress spinner on a terminal.
@@ -1959,6 +2162,110 @@ mod tests {
     use systemg::{spawn::SpawnedChild, status::SpawnedProcessNode};
 
     use super::*;
+
+    fn tree_row(
+        depth: usize,
+        label: &str,
+        state: systemg::start::RowState,
+    ) -> systemg::start::TreeRow {
+        systemg::start::TreeRow {
+            depth,
+            label: label.into(),
+            state,
+        }
+    }
+
+    #[test]
+    fn a_finished_row_is_marked_and_a_running_row_spins() {
+        use systemg::start::RowState;
+
+        let done = format_tree_row(&tree_row(0, "api", RowState::Done), "⠙", 80, false);
+        assert!(
+            done.contains('\u{2714}'),
+            "finished rows are checked: {done}"
+        );
+        assert!(!done.contains('⠙'));
+
+        let active =
+            format_tree_row(&tree_row(0, "api", RowState::Active), "⠙", 80, false);
+        assert!(active.contains('⠙'), "in-flight rows spin: {active}");
+
+        let failed =
+            format_tree_row(&tree_row(0, "api", RowState::Failed), "⠙", 80, false);
+        assert!(
+            failed.contains('\u{2717}'),
+            "failed rows are crossed: {failed}"
+        );
+    }
+
+    #[test]
+    fn a_step_row_is_indented_under_its_unit() {
+        use systemg::start::RowState;
+
+        let unit = format_tree_row(&tree_row(0, "api", RowState::Active), "⠙", 80, false);
+        let step = format_tree_row(
+            &tree_row(1, "health check", RowState::Active),
+            "⠙",
+            80,
+            false,
+        );
+
+        let unit_indent = unit.len() - unit.trim_start().len();
+        let step_indent = step.len() - step.trim_start().len();
+        assert!(
+            step_indent > unit_indent,
+            "steps nest under their unit: {unit_indent} vs {step_indent}"
+        );
+    }
+
+    #[test]
+    fn color_is_omitted_when_disabled_and_present_when_enabled() {
+        use systemg::start::RowState;
+
+        let plain = format_tree_row(&tree_row(0, "api", RowState::Done), "⠙", 80, false);
+        assert!(!plain.contains('\u{1b}'), "no escapes when color is off");
+
+        let painted = format_tree_row(&tree_row(0, "api", RowState::Done), "⠙", 80, true);
+        assert!(painted.contains("\x1B[32m"), "a done mark is green");
+        assert!(painted.contains("\x1B[0m"), "and is reset");
+    }
+
+    #[test]
+    fn a_long_label_is_truncated_without_splitting_an_escape() {
+        use systemg::start::RowState;
+
+        let long = "a".repeat(500);
+        let painted = format_tree_row(&tree_row(0, &long, RowState::Done), "⠙", 40, true);
+
+        // Truncation happens before painting, so the row still ends with a
+        // complete reset rather than a severed escape sequence.
+        assert!(painted.ends_with('…') || painted.contains('…'));
+        assert!(painted.contains("\x1B[0m"));
+        let visible: String = strip_ansi(&painted);
+        assert!(
+            visible.chars().count() <= 40,
+            "row fits the terminal: {} chars",
+            visible.chars().count()
+        );
+    }
+
+    /// Removes ANSI escapes so a row's visible width can be measured.
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
 
     #[test]
     fn logs_follow_flag_forces_follow() {
@@ -4844,6 +5151,7 @@ fn start_foreground(
             Err(err) => {
                 let _ = ipc::send_command(&ControlCommand::StopProject {
                     project: project_id,
+                    watch: None,
                 });
                 return Err(err.into());
             }
@@ -4866,6 +5174,7 @@ fn start_foreground(
             boot_progress.stop();
             let _ = ipc::send_command(&ControlCommand::StopProject {
                 project: project_id,
+                watch: None,
             });
             return Err(err.into());
         }
@@ -4879,6 +5188,7 @@ fn start_foreground(
             stop_foreground_follow(&streaming, &shutdown);
             let _ = ipc::send_command(&ControlCommand::StopProject {
                 project: project_id,
+                watch: None,
             });
             let _ = follow_handle.join();
             return Err(err);
@@ -4888,6 +5198,7 @@ fn start_foreground(
         stop_foreground_follow(&streaming, &shutdown);
         let _ = ipc::send_command(&ControlCommand::StopProject {
             project: project_id,
+            watch: None,
         });
         let _ = follow_handle.join();
         return Err(Box::new(DiagError(Box::new(diag))));
@@ -5458,6 +5769,7 @@ fn wait_for_foreground_attachment_with_ctrlc(
 fn stop_foreground_project(project_id: &str) -> Result<(), Box<dyn Error>> {
     match ipc::send_command(&ControlCommand::StopProject {
         project: project_id.to_string(),
+        watch: None,
     }) {
         Ok(ControlResponse::Message(message)) => {
             println!("{message}");
@@ -5543,11 +5855,13 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config: restart_scoped_config(&config),
             service: None,
             project: None,
+            watch: None,
         },
         RestartPlan::Project { config, project } => ControlCommand::Restart {
             config: restart_scoped_config(&config),
             service: None,
             project: Some(project),
+            watch: None,
         },
         RestartPlan::Service {
             config,
@@ -5560,14 +5874,89 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config: restart_scoped_config(&config),
             service: Some(service),
             project,
+            watch: None,
         },
     };
 
     if daemonize {
         restart_daemonized(command, config_path, false)
     } else {
-        with_progress_message("Restarting", || send_control_message(command))
+        send_with_progress_tree(command)
     }
+}
+
+/// The head line for a mutation the CLI is about to send.
+fn progress_target(command: &ControlCommand) -> String {
+    let (head, service, project) = match command {
+        ControlCommand::Restart {
+            service, project, ..
+        } => ("Restarting", service.as_deref(), project.as_deref()),
+        ControlCommand::Stop {
+            service, project, ..
+        } => ("Stopping", service.as_deref(), project.as_deref()),
+        ControlCommand::StopProject { project, .. } => {
+            ("Stopping", None, Some(project.as_str()))
+        }
+        ControlCommand::Start {
+            service, project, ..
+        } => ("Starting", service.as_deref(), project.as_deref()),
+        _ => ("Working", None, None),
+    };
+    let target = project
+        .or(service)
+        .map(|name| format!(" '{name}'"))
+        .unwrap_or_default();
+    format!("{head}{target}")
+}
+
+/// Mints the journal id for one operation and stamps it onto the command.
+///
+/// The client generates the id rather than taking one from the supervisor so it
+/// can subscribe the instant it sends the request, without a round trip that
+/// would race the work it wants to watch. It has to be unique per invocation:
+/// a key derived from the target would cross-wire two identical concurrent
+/// commands and could not tell a re-run from the one still in flight.
+fn stamp_watch(command: &mut ControlCommand) -> Option<String> {
+    // A counter rather than the clock alone: two stamps in the same nanosecond
+    // — or a clock stepped backwards by NTP — would otherwise mint one id for
+    // two operations, which is precisely the cross-wiring the nonce prevents.
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let id = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or_default(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    match command {
+        ControlCommand::Restart { watch, .. }
+        | ControlCommand::Start { watch, .. }
+        | ControlCommand::Stop { watch, .. }
+        | ControlCommand::StopProject { watch, .. } => {
+            *watch = Some(id.clone());
+            Some(id)
+        }
+        _ => None,
+    }
+}
+
+/// Sends a mutation while drawing its live progress tree, then prints the
+/// supervisor's closing message.
+fn send_with_progress_tree(mut command: ControlCommand) -> Result<(), Box<dyn Error>> {
+    let head = progress_target(&command);
+    let Some(op) = stamp_watch(&mut command) else {
+        let message = send_control_message(command)?;
+        println!("\n\n{message}");
+        return Ok(());
+    };
+    let message = with_progress_tree(head, op, || send_control_message(command))?;
+    // Two blank lines before the closing message, matching the spinner this
+    // replaced: the separation is part of the command's output contract, and
+    // callers parse the message by its position.
+    println!("\n\n{message}");
+    Ok(())
 }
 
 /// The config path a restart plan carries (for the not-running fork/one-shot).
@@ -5646,17 +6035,20 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
             StopPlan::Everything { .. } => ControlCommand::Stop {
                 service: None,
                 project: None,
+                watch: None,
             },
             StopPlan::Project { project } => ControlCommand::Stop {
                 service: None,
                 project: Some(project),
+                watch: None,
             },
             StopPlan::Service { service, project } => ControlCommand::Stop {
                 service: Some(service),
                 project,
+                watch: None,
             },
         };
-        return with_progress_message("Stopping", || send_control_message(command));
+        return send_with_progress_tree(command);
     }
 
     cleanup_stopped_runtime();
@@ -5680,13 +6072,15 @@ fn dispatch_stop(plan: systemg::stop::StopPlan) -> Result<(), Box<dyn Error>> {
             StopPlan::Service { service, project } => ControlCommand::Stop {
                 service: Some(service),
                 project,
+                watch: None,
             },
             _ => ControlCommand::Stop {
                 service: None,
                 project: Some(project),
+                watch: None,
             },
         };
-        return with_progress_message("Stopping", || send_control_message(command));
+        return send_with_progress_tree(command);
     }
 
     // A `-p <project>` with NO supervisor running has nothing to stop: there is
@@ -5851,12 +6245,14 @@ fn dispatch_start_resident(
         StartPlan::Project { project, .. } => ControlCommand::Start {
             service: None,
             project: Some(project),
+            watch: None,
         },
         StartPlan::Service {
             service, project, ..
         } => ControlCommand::Start {
             service: Some(service),
             project,
+            watch: None,
         },
     };
     // An `AddProject` returns as soon as the supervisor QUEUES the boot onto a
@@ -5872,17 +6268,31 @@ fn dispatch_start_resident(
         }
         _ => None,
     };
-    let boot = with_progress_spinner("Starting", || {
-        if awaited_project.is_some() {
+    // A plain `Start` runs synchronously in the supervisor, so its journal can
+    // be watched live. `AddProject` queues onto a background thread and is
+    // awaited through its own boot status, which the tree does not model.
+    let mut command = command;
+    let head = progress_target(&command);
+    let boot = if awaited_project.is_some() {
+        with_progress_spinner("Starting", || {
             send_add_project(&command)?;
-        } else {
-            send_control_command(command)?;
+            Ok(match &awaited_project {
+                Some(project) => await_queued_boot(project)?,
+                None => QueuedBoot::default(),
+            })
+        })?
+    } else {
+        match stamp_watch(&mut command) {
+            Some(op) => with_progress_tree(head, op, || {
+                send_control_command(command)?;
+                Ok(QueuedBoot::default())
+            })?,
+            None => {
+                send_control_command(command)?;
+                QueuedBoot::default()
+            }
         }
-        Ok(match &awaited_project {
-            Some(project) => await_queued_boot(project)?,
-            None => QueuedBoot::default(),
-        })
-    })?;
+    };
 
     if let Some(diag) = boot.cause {
         return Err(Box::new(DiagError(Box::new(diag))));

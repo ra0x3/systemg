@@ -14,7 +14,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use nix::unistd::{Uid, User};
@@ -60,6 +60,14 @@ const CRON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const CONTROL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Maximum time allowed for a live-upgrade acceptance response to reach its client.
 const UPGRADE_ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a progress subscriber waits for its operation to register.
+///
+/// Clients subscribe before sending the mutation so they cannot miss its
+/// opening frames, which means the journal legitimately does not exist for the
+/// moment it takes the request to reach the owner thread.
+const OP_STREAM_REGISTER_TIMEOUT: Duration = Duration::from_secs(3);
+/// Gap between checks while waiting for an operation to register.
+const OP_STREAM_REGISTER_POLL: Duration = Duration::from_millis(10);
 /// Attempts to publish the post-boot snapshot before announcing the boot done.
 const BOOT_SNAPSHOT_ATTEMPTS: usize = 3;
 /// Delay between post-boot snapshot publication attempts.
@@ -152,6 +160,12 @@ pub struct Supervisor {
     pending_projects: Vec<Config>,
     /// Race-free record of the initial boot, streamed to a `BootStream` client.
     boot_journal: BootJournal,
+    /// Journals for mutations currently in flight, keyed by operation id.
+    ///
+    /// The boot journal seals on its terminal frame and never reopens, so every
+    /// later restart/stop that a client watches gets its own. Entries are
+    /// dropped once their operation ends and the client has drained them.
+    op_journals: Arc<RwLock<HashMap<String, BootJournal>>>,
     /// Daemons visible to cancellation-aware boot requests.
     boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
     /// Latest queued project boot state exposed through status snapshots.
@@ -279,6 +293,31 @@ impl BootFailures {
     }
 }
 
+/// Keeps a watched operation's journal reachable for the life of the operation.
+///
+/// Dropping it seals the journal with a terminal frame — so a client waiting on
+/// the stream is released even when the operation failed early — and removes the
+/// entry so the registry cannot grow without bound.
+struct OpWatch {
+    op: String,
+    journals: Arc<RwLock<HashMap<String, BootJournal>>>,
+    _daemons: Vec<crate::daemon::WatchGuard>,
+}
+
+impl Drop for OpWatch {
+    fn drop(&mut self) {
+        let journal = self
+            .journals
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.op);
+        if let Some(journal) = journal {
+            let (started, failed) = journal.tally();
+            journal.push(BootFrame::Done { started, failed });
+        }
+    }
+}
+
 /// Cheap-to-clone handles the acceptor uses to answer read commands without
 /// touching the supervisor's mutation state.
 #[derive(Clone)]
@@ -287,6 +326,7 @@ struct ReadContext {
     op_slot: OpSlot,
     version: String,
     boot_journal: BootJournal,
+    op_journals: Arc<RwLock<HashMap<String, BootJournal>>>,
     boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
     boots: Arc<RwLock<HashMap<String, BootStatus>>>,
     /// Whether mutations are refused while a live upgrade is committing.
@@ -772,6 +812,9 @@ impl Supervisor {
                     service: service_name.clone(),
                 });
             }
+            // Also emitted through the daemon so a resident `start` — which has
+            // no boot journal — still streams to whoever is watching it.
+            daemon.note_unit_starting(&service_name);
             let mut service_to_start = service_config.clone();
             service_to_start.skip = None;
             let result = daemon.start_service(&service_name, &service_to_start);
@@ -813,6 +856,7 @@ impl Supervisor {
                     diag.title
                 );
             }
+            daemon.note_unit_done(&service_name, outcome.clone());
             if let Some(journal) = boot_journal {
                 journal.record(project_id, &service_name, outcome);
             }
@@ -1880,6 +1924,7 @@ impl Supervisor {
             op_slot,
             pending_projects,
             boot_journal: BootJournal::new(),
+            op_journals: Arc::new(RwLock::new(HashMap::new())),
             boot_projects,
             boots: Arc::new(RwLock::new(HashMap::new())),
             upgrading: Arc::new(AtomicBool::new(false)),
@@ -2507,10 +2552,11 @@ impl Supervisor {
         };
         debug!("Supervisor received command: {:?}", command);
         match &command {
-            ControlCommand::StopProject { project }
+            ControlCommand::StopProject { project, .. }
             | ControlCommand::Stop {
                 service: None,
                 project: Some(project),
+                ..
             } => {
                 if let Ok(projects) = read_ctx.boot_projects.read()
                     && let Some(daemon) = projects.get(project)
@@ -2522,6 +2568,7 @@ impl Supervisor {
             | ControlCommand::Stop {
                 service: None,
                 project: None,
+                ..
             } => {
                 if let Ok(projects) = read_ctx.boot_projects.read() {
                     for daemon in projects.values() {
@@ -2546,7 +2593,38 @@ impl Supervisor {
         }
 
         if let ControlCommand::BootStream = command {
-            Self::serve_boot_stream(stream, &read_ctx);
+            Self::serve_boot_stream(stream, &read_ctx.boot_journal);
+            return;
+        }
+
+        if let ControlCommand::OpStream { op } = &command {
+            // The client subscribes BEFORE sending its mutation, so that it
+            // cannot miss the opening frames — which means the journal usually
+            // does not exist yet. Waiting for it to appear is the whole point:
+            // closing on the first miss made rendering a race that a fast
+            // operation lost, silently, leaving no tree at all.
+            let deadline = Instant::now() + OP_STREAM_REGISTER_TIMEOUT;
+            let journal = loop {
+                let found = read_ctx
+                    .op_journals
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get(op)
+                    .cloned();
+                match found {
+                    Some(journal) => break Some(journal),
+                    None if Instant::now() < deadline => {
+                        thread::sleep(OP_STREAM_REGISTER_POLL);
+                    }
+                    // Never registered: rejected before it began, or unknown to
+                    // this supervisor. Close so the client stops waiting on a
+                    // stream that cannot carry a frame.
+                    None => break None,
+                }
+            };
+            if let Some(journal) = journal {
+                Self::serve_boot_stream(stream, &journal);
+            }
             return;
         }
 
@@ -2680,9 +2758,8 @@ impl Supervisor {
     /// client that connects after boot still receives the whole journal.
     fn serve_boot_stream(
         mut stream: std::os::unix::net::UnixStream,
-        read_ctx: &ReadContext,
+        journal: &BootJournal,
     ) {
-        let journal = &read_ctx.boot_journal;
         let mut seen = 0usize;
         loop {
             let batch = journal.wait_from(seen);
@@ -3107,6 +3184,7 @@ impl Supervisor {
             op_slot: self.op_slot.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             boot_journal: self.boot_journal.clone(),
+            op_journals: Arc::clone(&self.op_journals),
             boot_projects: Arc::clone(&self.boot_projects),
             boots: Arc::clone(&self.boots),
             upgrading: Arc::clone(&self.upgrading),
@@ -3605,6 +3683,49 @@ impl Supervisor {
                     None => self.op_slot.guard(label),
                 }
             });
+            // Every watched mutation gets its own journal: the boot journal
+            // seals on its terminal frame, so reusing it would silently discard
+            // the progress of everything after the first boot.
+            let _watch = Self::op_id(&command).map(|op| {
+                let journal = crate::start::BootJournal::new();
+                self.op_journals
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(op.clone(), journal.clone());
+                // The TARGET's daemon is what emits the frames, and it is not
+                // always the primary: watching only the primary left
+                // extra-project operations rendering a head line with an empty
+                // tree under it. A command naming a project attaches to that
+                // one alone, so a concurrent boot elsewhere cannot push its
+                // units into this operation's tree.
+                let daemons = match Self::op_project(&command) {
+                    Some(target) => self
+                        .extra_projects
+                        .get(target)
+                        .map(|project| vec![project.daemon.watch(journal.clone())])
+                        .unwrap_or_else(|| vec![self.daemon.watch(journal.clone())]),
+                    // An unscoped op legitimately spans every project. An
+                    // `AddProject` boot running on its own thread at the same
+                    // time can therefore land its units in this tree — a
+                    // display-only artifact, since nothing reads the journal
+                    // back into state. Filtering it out belongs in the emit
+                    // path, not here.
+                    None => {
+                        let mut all = vec![self.daemon.watch(journal.clone())];
+                        all.extend(
+                            self.extra_projects
+                                .values()
+                                .map(|project| project.daemon.watch(journal.clone())),
+                        );
+                        all
+                    }
+                };
+                OpWatch {
+                    op,
+                    journals: Arc::clone(&self.op_journals),
+                    _daemons: daemons,
+                }
+            });
             let response = match self.handle_command(command) {
                 Ok(response) => response,
                 Err(err) => {
@@ -3628,16 +3749,16 @@ impl Supervisor {
     /// busy so a slow command names itself instead of spinning opaquely.
     fn mutation_label(command: &ControlCommand) -> String {
         match command {
-            ControlCommand::Start { service, project } => {
-                Self::target_label("starting", service.as_deref(), project.as_deref())
-            }
-            ControlCommand::Stop { service, project } => {
-                Self::target_label("stopping", service.as_deref(), project.as_deref())
-            }
+            ControlCommand::Start {
+                service, project, ..
+            } => Self::target_label("starting", service.as_deref(), project.as_deref()),
+            ControlCommand::Stop {
+                service, project, ..
+            } => Self::target_label("stopping", service.as_deref(), project.as_deref()),
             ControlCommand::Restart {
                 service, project, ..
             } => Self::target_label("restarting", service.as_deref(), project.as_deref()),
-            ControlCommand::StopProject { project } => {
+            ControlCommand::StopProject { project, .. } => {
                 format!("stopping project '{project}'")
             }
             ControlCommand::Spawn { name, .. } => format!("spawning '{name}'"),
@@ -3663,21 +3784,65 @@ impl Supervisor {
     /// operation instead of printing one long prose line.
     fn mutation_parts(command: &ControlCommand) -> Option<OpParts> {
         let (verb, service, project) = match command {
-            ControlCommand::Start { service, project } => {
-                ("starting", service.as_deref(), project.as_deref())
-            }
-            ControlCommand::Stop { service, project } => {
-                ("stopping", service.as_deref(), project.as_deref())
-            }
+            ControlCommand::Start {
+                service, project, ..
+            } => ("starting", service.as_deref(), project.as_deref()),
+            ControlCommand::Stop {
+                service, project, ..
+            } => ("stopping", service.as_deref(), project.as_deref()),
             ControlCommand::Restart {
                 service, project, ..
             } => ("restarting", service.as_deref(), project.as_deref()),
-            ControlCommand::StopProject { project } => {
+            ControlCommand::StopProject { project, .. } => {
                 ("stopping", None, Some(project.as_str()))
             }
             _ => return None,
         };
         Some(Self::target_parts(verb, service, project))
+    }
+
+    /// The journal key for a command a client may watch.
+    ///
+    /// The client mints this id and carries it on the mutation, so the
+    /// supervisor registers exactly the journal the client already subscribed
+    /// to. Deriving it from the target instead would cross-wire two identical
+    /// concurrent commands and could not tell a re-run from the one still in
+    /// flight. A command with no nonce is unwatched.
+    fn op_id(command: &ControlCommand) -> Option<String> {
+        match command {
+            ControlCommand::Restart { watch, .. }
+            | ControlCommand::Start { watch, .. }
+            | ControlCommand::Stop { watch, .. }
+            | ControlCommand::StopProject { watch, .. } => watch.clone(),
+            _ => None,
+        }
+    }
+
+    /// The project a watched command targets, when it names one.
+    ///
+    /// Scopes the journal to the daemon that will actually run the work, so a
+    /// project booting in the background — `AddProject` hands its boot to a
+    /// `sysg-boot-*` thread that emits through its own daemon — cannot leak its
+    /// units into an unrelated operation's tree.
+    ///
+    /// A `project/service` selector names its project too, so it is read from
+    /// the service field when the explicit one is absent.
+    fn op_project(command: &ControlCommand) -> Option<&str> {
+        let (service, project) = match command {
+            ControlCommand::Restart {
+                service, project, ..
+            }
+            | ControlCommand::Start {
+                service, project, ..
+            }
+            | ControlCommand::Stop {
+                service, project, ..
+            } => (service.as_deref(), project.as_deref()),
+            ControlCommand::StopProject { project, .. } => (None, Some(project.as_str())),
+            _ => return None,
+        };
+        project
+            .or_else(|| service.and_then(|s| split_project_selector(s).map(|(p, _)| p)))
     }
 
     /// Splits a target into head line and nested unit: the project owns the head
@@ -3946,7 +4111,9 @@ impl Supervisor {
         command: ControlCommand,
     ) -> Result<ControlResponse, SupervisorError> {
         match command {
-            ControlCommand::Start { service, project } => {
+            ControlCommand::Start {
+                service, project, ..
+            } => {
                 if let Some(service_name) = service {
                     let selector_has_project =
                         split_project_selector(&service_name).is_some();
@@ -3997,14 +4164,16 @@ impl Supervisor {
                     "Project '{project_id}' loaded"
                 )))
             }
-            ControlCommand::StopProject { project } => {
+            ControlCommand::StopProject { project, .. } => {
                 self.stop_project(&project)?;
                 self.refresh_status_cache();
                 Ok(ControlResponse::Message(format!(
                     "Project '{project}' stopped"
                 )))
             }
-            ControlCommand::Stop { service, project } => {
+            ControlCommand::Stop {
+                service, project, ..
+            } => {
                 if service.is_none()
                     && let Some(project_id) = project.as_deref()
                 {
@@ -4037,6 +4206,7 @@ impl Supervisor {
                 config,
                 service,
                 project,
+                ..
             } => {
                 if let Some(service) = service {
                     self.restart_single_service_target(
@@ -4132,9 +4302,9 @@ impl Supervisor {
                     None => "Cleared logs for all services".into(),
                 }))
             }
-            ControlCommand::BootStream => Ok(ControlResponse::Error(
-                "boot stream is served separately".into(),
-            )),
+            ControlCommand::BootStream | ControlCommand::OpStream { .. } => Ok(
+                ControlResponse::Error("progress streams are served separately".into()),
+            ),
             ControlCommand::Spawn {
                 parent_pid,
                 name,
@@ -5733,6 +5903,59 @@ mod tests {
     };
 
     #[test]
+    fn op_id_is_the_clients_nonce_not_a_derived_key() {
+        assert_eq!(
+            Supervisor::op_id(&ControlCommand::Start {
+                service: Some("api".into()),
+                project: Some("web".into()),
+                watch: Some("pid-42-7".into()),
+            }),
+            Some("pid-42-7".to_string())
+        );
+        // Two identical commands are distinct operations, so an unstamped one
+        // is unwatched rather than sharing the other's journal.
+        assert_eq!(
+            Supervisor::op_id(&ControlCommand::Start {
+                service: Some("api".into()),
+                project: Some("web".into()),
+                watch: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn op_project_reads_the_project_out_of_a_selector() {
+        assert_eq!(
+            Supervisor::op_project(&ControlCommand::Restart {
+                config: None,
+                service: Some("web/api".into()),
+                project: None,
+                watch: None,
+            }),
+            Some("web")
+        );
+        // An explicit project wins over the selector's.
+        assert_eq!(
+            Supervisor::op_project(&ControlCommand::Stop {
+                service: Some("web/api".into()),
+                project: Some("other".into()),
+                watch: None,
+            }),
+            Some("other")
+        );
+        // A bare service names no project, so the op is not scoped to one.
+        assert_eq!(
+            Supervisor::op_project(&ControlCommand::Stop {
+                service: Some("api".into()),
+                project: None,
+                watch: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
     fn reconcile_failures_reports_only_real_failures() {
         let failure = crate::daemon::RestartFailure {
             cause: ProcessManagerError::ServiceStartError {
@@ -6173,6 +6396,7 @@ services:
             .handle_command(ControlCommand::Start {
                 service: Some("beta_cron".into()),
                 project: Some("beta".into()),
+                watch: None,
             })
             .expect_err("direct cron unit start should be rejected");
         assert!(matches!(
@@ -6186,6 +6410,7 @@ services:
                 config: None,
                 service: Some("beta_cron".into()),
                 project: Some("beta".into()),
+                watch: None,
             })
             .expect_err("direct cron unit restart should be rejected");
         assert!(matches!(
@@ -6199,6 +6424,7 @@ services:
                 config: Some(beta_config.to_string_lossy().to_string()),
                 service: Some("beta_worker".into()),
                 project: None,
+                watch: None,
             })
             .expect("restart beta service from beta config");
 
@@ -6232,6 +6458,7 @@ services:
                 config: Some(beta_updated_config.to_string_lossy().to_string()),
                 service: None,
                 project: Some("beta".into()),
+                watch: None,
             })
             .expect("restart beta project from updated config");
 
@@ -6338,6 +6565,7 @@ services:
                 config: None,
                 service: None,
                 project: Some("primary".into()),
+                watch: None,
             })
             .expect("restart primary project without config");
 
@@ -6454,6 +6682,7 @@ services:
                 config: Some(config_path.to_string_lossy().to_string()),
                 service: None,
                 project: Some("primary".into()),
+                watch: None,
             })
             .expect_err("failing added service should make reconcile incomplete");
         assert!(
@@ -6566,6 +6795,7 @@ services:
                 config: None,
                 service: None,
                 project: Some("beta".into()),
+                watch: None,
             })
             .expect("restart beta project without config");
 
@@ -6745,6 +6975,7 @@ services:
             .handle_command(ControlCommand::Stop {
                 service: None,
                 project: Some("primary".into()),
+                watch: None,
             })
             .expect("stop primary project");
 
@@ -7132,6 +7363,7 @@ services:
             .handle_command(ControlCommand::Stop {
                 service: None,
                 project: Some("beta".into()),
+                watch: None,
             })
             .expect("stop beta project");
         match response {
@@ -7362,6 +7594,7 @@ services:
             .handle_command(ControlCommand::Stop {
                 service: None,
                 project: Some("beta".into()),
+                watch: None,
             })
             .expect("stop beta project");
 

@@ -15,11 +15,14 @@ pub mod outcome;
 pub mod plan;
 /// Terminal rendering and startup verdict collection.
 pub mod render;
+/// Reduction of boot frames into the nested progress tree.
+pub mod tree;
 
-pub use boot::{BootFrame, BootJournal};
+pub use boot::{BootFrame, BootJournal, StepState};
 pub use outcome::{
     Liveness, Outcome, ambiguous_service, dependency_unavailable, outcome_of,
     project_mismatch, project_services_not_up, unit_start_failed,
 };
 pub use plan::{ProjectMismatch, StartPlan, resolve_plan};
 pub use render::{BootReport, render_boot};
+pub use tree::{RowState, TreeRow, TreeState, fit_rows};

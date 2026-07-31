@@ -109,6 +109,14 @@ pub enum ControlCommand {
         /// Optional project id to target.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// Client-generated id for this operation's progress journal.
+        ///
+        /// Carried on the mutation so the supervisor registers exactly the
+        /// journal the client already subscribed to. A key derived from the
+        /// target instead would cross-wire two identical concurrent commands
+        /// and could not tell a re-run from the one still in flight.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<String>,
     },
     /// Add another project configuration to the resident supervisor.
     AddProject {
@@ -125,6 +133,14 @@ pub enum ControlCommand {
     StopProject {
         /// Stable project id to stop.
         project: String,
+        /// Client-generated id for this operation's progress journal.
+        ///
+        /// Carried on the mutation so the supervisor registers exactly the
+        /// journal the client already subscribed to. A key derived from the
+        /// target instead would cross-wire two identical concurrent commands
+        /// and could not tell a re-run from the one still in flight.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<String>,
     },
     /// Stop one or all services.
     Stop {
@@ -134,6 +150,14 @@ pub enum ControlCommand {
         /// Optional project id to target.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// Client-generated id for this operation's progress journal.
+        ///
+        /// Carried on the mutation so the supervisor registers exactly the
+        /// journal the client already subscribed to. A key derived from the
+        /// target instead would cross-wire two identical concurrent commands
+        /// and could not tell a re-run from the one still in flight.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<String>,
     },
     /// Restart services, optionally with a new configuration.
     Restart {
@@ -146,6 +170,14 @@ pub enum ControlCommand {
         /// Optional project id to target.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// Client-generated id for this operation's progress journal.
+        ///
+        /// Carried on the mutation so the supervisor registers exactly the
+        /// journal the client already subscribed to. A key derived from the
+        /// target instead would cross-wire two identical concurrent commands
+        /// and could not tell a re-run from the one still in flight.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        watch: Option<String>,
     },
     /// Shutdown the supervisor daemon.
     Shutdown,
@@ -251,6 +283,17 @@ pub enum ControlCommand {
     /// replays every boot frame recorded so far, then streams live frames as
     /// line-delimited JSON until the terminal `Done` frame.
     BootStream,
+    /// Subscribe to the progress of a mutation already in flight.
+    ///
+    /// Separate from [`ControlCommand::BootStream`] because the boot journal is
+    /// sealed by its terminal frame and never reopens: a restart or stop needs
+    /// its own journal, and the client has to say which one it is watching.
+    /// Older supervisors answer this with an error, which the CLI treats as
+    /// "no live tree available" and falls back to its spinner.
+    OpStream {
+        /// Identifies the operation whose journal to serve.
+        op: String,
+    },
 }
 
 /// Response sent by the supervisor.
@@ -611,6 +654,26 @@ pub fn stream_command_output_interruptible(
 /// supervisor streams, returning once the terminal `Done` frame arrives (or the
 /// stream closes). Frames are line-delimited JSON.
 pub fn stream_boot_frames(
+    on_frame: impl FnMut(crate::start::BootFrame),
+) -> Result<(), ControlError> {
+    stream_frames(ControlCommand::BootStream, on_frame)
+}
+
+/// Streams the progress frames of a mutation already in flight.
+///
+/// Returns [`ControlError::NotAvailable`] when the supervisor does not know the
+/// operation — it finished before the client attached, or the daemon predates
+/// `OpStream` — so the caller falls back to a plain spinner rather than hanging.
+pub fn stream_op_frames(
+    op: &str,
+    on_frame: impl FnMut(crate::start::BootFrame),
+) -> Result<(), ControlError> {
+    stream_frames(ControlCommand::OpStream { op: op.to_string() }, on_frame)
+}
+
+/// Subscribes to a progress stream and replays its frames until the terminal one.
+fn stream_frames(
+    command: ControlCommand,
     mut on_frame: impl FnMut(crate::start::BootFrame),
 ) -> Result<(), ControlError> {
     let path = socket_path()?;
@@ -625,7 +688,7 @@ pub fn stream_boot_frames(
         }
         Err(e) => return Err(e.into()),
     };
-    write_command(&mut stream, &ControlCommand::BootStream)?;
+    write_command(&mut stream, &command)?;
 
     let reader = BufReader::new(stream);
     let mut completed = false;
@@ -862,6 +925,7 @@ mod tests {
         let start = ControlCommand::Start {
             service: Some("test_service".to_string()),
             project: None,
+            watch: None,
         };
         let json = serde_json::to_string(&start).unwrap();
         assert!(json.contains("Start"));
@@ -870,6 +934,7 @@ mod tests {
         let stop = ControlCommand::Stop {
             service: None,
             project: None,
+            watch: None,
         };
         let json = serde_json::to_string(&stop).unwrap();
         assert!(json.contains("Stop"));
@@ -878,6 +943,7 @@ mod tests {
             config: Some("config.yaml".to_string()),
             service: Some("service".to_string()),
             project: None,
+            watch: None,
         };
         let json = serde_json::to_string(&restart).unwrap();
         assert!(json.contains("Restart"));
@@ -911,6 +977,7 @@ mod tests {
             config: Some("sysg.config.yaml".to_string()),
             service: None,
             project: None,
+            watch: None,
         };
 
         let json = serde_json::to_string(&restart).expect("serialize restart");
@@ -928,7 +995,8 @@ mod tests {
             ControlCommand::Restart {
                 config: Some(_),
                 service: None,
-                project: None
+                project: None,
+                ..
             }
         ));
 
@@ -941,7 +1009,8 @@ mod tests {
             ControlCommand::Restart {
                 config: Some(_),
                 service: None,
-                project: None
+                project: None,
+                ..
             }
         ));
     }
@@ -1083,6 +1152,7 @@ mod tests {
         let command = ControlCommand::Start {
             service: Some("test".to_string()),
             project: None,
+            watch: None,
         };
         let payload = serde_json::to_vec(&command).unwrap();
         stream.write_all(&payload).unwrap();
