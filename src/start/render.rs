@@ -64,6 +64,11 @@ pub fn render_boot<W: Write>(
                         let _ = writeln!(out, "  \u{2013} {service} skipped");
                     }
                 }
+                Outcome::Stopped => {
+                    if verbose {
+                        let _ = writeln!(out, "  \u{2714} {service} stopped");
+                    }
+                }
                 Outcome::Failed(diag) => {
                     if verbose {
                         let _ = writeln!(
@@ -76,6 +81,9 @@ pub fn render_boot<W: Write>(
                     report.failures.push(diag);
                 }
             },
+            // Progress within a unit is drawn live by the caller's tree; the
+            // verdict this builds cares only about terminal unit outcomes.
+            BootFrame::UnitStep { .. } => {}
             BootFrame::Done { .. } => {}
         }
     }

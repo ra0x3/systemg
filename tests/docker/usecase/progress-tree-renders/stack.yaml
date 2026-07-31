@@ -1,0 +1,32 @@
+version: 2
+project:
+  id: treeproj
+  name: Progress Tree
+
+services:
+  # A one-shot, so the tree has a unit that COMPLETES rather than stays up.
+  migrations:
+    command: /bin/true
+    restart_policy: never
+
+  # The unit the nested step hangs off: its health check is the row that must
+  # tick in place and then resolve on its own, above its service resolving.
+  api:
+    command: sleep 100000
+    depends_on:
+      - service: migrations
+        condition: completed
+    deployment:
+      health_check:
+        command: /bin/true
+        interval: 1s
+        total_timeout: 10s
+        retries: 3
+
+  worker:
+    command: sleep 100000
+
+  # Skipped units are ✔, not failures, and never spin forever.
+  legacy:
+    skip: true
+    command: sleep 100000

@@ -40,6 +40,12 @@ pub enum Outcome {
     /// `skip` selected the unit, so it never ran. Not a failure, and not a
     /// start: dependents of a skipped unit are themselves skipped.
     Skipped,
+    /// The unit was brought down and verified dead.
+    ///
+    /// Distinct from [`Outcome::Completed`], which asserts a unit RAN and
+    /// exited cleanly. A stop asserts the opposite, so reporting one as the
+    /// other would claim work that never happened.
+    Stopped,
     /// The unit did not come up. Carries the diagnostic to show the user.
     Failed(Diagnostic),
 }
