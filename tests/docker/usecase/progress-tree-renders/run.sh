@@ -133,6 +133,34 @@ check "$?" "the failure reports SG0104"
 grep -q 'codes#sg0104' /tmp/raw.txt
 check "$?" "the failure links the SG0104 docs page"
 
+section "start -c <file> draws the tree for the boot it queues"
+# `start -c` becomes AddProject, whose boot the supervisor hands to its own
+# thread and the CLI awaits by polling. That path used to show a bare spinner:
+# the frames were emitted, but no journal was attached to receive them and the
+# stream would have sealed at queue time anyway. --daemonize is included
+# BECAUSE it was wrongly suspected of being the cause; with a resident
+# supervisor the client keeps its terminal, so the tree must render either way.
+sysg stop -p "$PROJECT" >/dev/null 2>&1
+sysg stop --supervisor >/dev/null 2>&1
+sleep 1
+sysg start --config "$CONFIG" --daemonize >/dev/null 2>&1
+sleep 2
+sysg stop -p "$PROJECT" >/dev/null 2>&1
+sleep 1
+
+OUT="$(run_pty sysg start -c "$CONFIG" --daemonize)"
+echo "$OUT"
+printf '%s' "$OUT" | grep -q '✔ api'
+check "$?" "start -c marks 'api' complete"
+printf '%s' "$OUT" | grep -q '✔ worker'
+check "$?" "start -c marks 'worker' complete"
+! printf '%s' "$OUT" | grep -qE '⠋|⠙|⠹|⠸'
+check "$?" "the queued boot draws a tree, not a bare spinner"
+# The command carries a config PATH, not a project name, so the head line has
+# to be built from the project resolved out of that config.
+printf '%s' "$OUT" | grep -q "Starting '$PROJECT'"
+check "$?" "start -c names the project in its head line"
+
 section "a piped (non-terminal) run stays clean"
 sysg restart -p "$PROJECT" --config "$CONFIG" >/tmp/piped.txt 2>&1
 ! grep -qE '✔|✗|\[2K' /tmp/piped.txt

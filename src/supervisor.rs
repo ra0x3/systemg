@@ -166,6 +166,14 @@ pub struct Supervisor {
     /// later restart/stop that a client watches gets its own. Entries are
     /// dropped once their operation ends and the client has drained them.
     op_journals: Arc<RwLock<HashMap<String, BootJournal>>>,
+    /// Journal of the command being handled right now, when one is watched.
+    ///
+    /// Lets a handler attach daemons it CREATES — `AddProject` builds them
+    /// inside the command — to the journal the client already subscribed to.
+    active_op: Option<(String, BootJournal)>,
+    /// Lease on that journal, cloned by handlers that spawn work outliving the
+    /// command so the stream stays open until the last of it finishes.
+    op_lease: Option<Arc<OpWatch>>,
     /// Daemons visible to cancellation-aware boot requests.
     boot_projects: Arc<RwLock<HashMap<String, Daemon>>>,
     /// Latest queued project boot state exposed through status snapshots.
@@ -298,6 +306,11 @@ impl BootFailures {
 /// Dropping it seals the journal with a terminal frame — so a client waiting on
 /// the stream is released even when the operation failed early — and removes the
 /// entry so the registry cannot grow without bound.
+///
+/// Held behind an `Arc` so work that outlives the command can take a lease: an
+/// `AddProject` may queue several project boots onto their own threads, and the
+/// stream must stay open until the LAST of them finishes. Sealing when the
+/// command returned would end the tree at queue time, before a single unit ran.
 struct OpWatch {
     op: String,
     journals: Arc<RwLock<HashMap<String, BootJournal>>>,
@@ -1540,6 +1553,14 @@ impl Supervisor {
         }
 
         daemon.set_config(new_config);
+        // `AddProject` attaches nothing up front, so this daemon reports its
+        // reconcile to nobody unless the operation attaches it here. Runs on
+        // this thread, so no lease is needed to keep the journal open.
+        let _watch = self
+            .active_op
+            .as_ref()
+            .map(|(op, journal)| daemon.watch(op, journal.clone()));
+
         daemon.begin_boot();
         let restart_result = daemon.restart_services_subset(&affected);
         if let Some(runtime) = self.extra_projects.get_mut(&project_id) {
@@ -1698,6 +1719,14 @@ impl Supervisor {
         if let Ok(mut projects) = self.boot_projects.write() {
             projects.insert(project_id.clone(), replacement.clone());
         }
+
+        // The replacement daemon is what reports this reboot's units, and it
+        // did not exist when the command was watched. No lease is needed: the
+        // start below runs on this thread, so the journal outlives it already.
+        let _watch = self
+            .active_op
+            .as_ref()
+            .map(|(op, journal)| replacement.watch(op, journal.clone()));
 
         let start_result = Self::start_project_services(
             &replacement,
@@ -1925,6 +1954,8 @@ impl Supervisor {
             pending_projects,
             boot_journal: BootJournal::new(),
             op_journals: Arc::new(RwLock::new(HashMap::new())),
+            active_op: None,
+            op_lease: None,
             boot_projects,
             boots: Arc::new(RwLock::new(HashMap::new())),
             upgrading: Arc::new(AtomicBool::new(false)),
@@ -3692,40 +3723,53 @@ impl Supervisor {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(op.clone(), journal.clone());
+                // Published for the length of the command so a handler that
+                // spawns work outliving it — `AddProject` queues its boots onto
+                // their own threads — can attach those daemons to this journal
+                // and hold a lease keeping the stream open until they finish.
+                self.active_op = Some((op.clone(), journal.clone()));
                 // The TARGET's daemon is what emits the frames, and it is not
                 // always the primary: watching only the primary left
                 // extra-project operations rendering a head line with an empty
-                // tree under it. A command naming a project attaches to that
-                // one alone, so a concurrent boot elsewhere cannot push its
-                // units into this operation's tree.
-                let daemons = match Self::op_project(&command) {
-                    Some(target) => self
-                        .extra_projects
-                        .get(target)
-                        .map(|project| vec![project.daemon.watch(journal.clone())])
-                        .unwrap_or_else(|| vec![self.daemon.watch(journal.clone())]),
-                    // An unscoped op legitimately spans every project. An
-                    // `AddProject` boot running on its own thread at the same
-                    // time can therefore land its units in this tree — a
-                    // display-only artifact, since nothing reads the journal
-                    // back into state. Filtering it out belongs in the emit
-                    // path, not here.
-                    None => {
-                        let mut all = vec![self.daemon.watch(journal.clone())];
-                        all.extend(
-                            self.extra_projects
-                                .values()
-                                .map(|project| project.daemon.watch(journal.clone())),
-                        );
-                        all
-                    }
+                // tree under it.
+                //
+                // A daemon broadcasts each frame to everything watching IT, so
+                // attaching to more daemons than the command touches is how one
+                // tree ends up showing another's units. Attach as narrowly as
+                // the command allows.
+                let daemons = match &command {
+                    // Its projects do not exist yet — it creates them, and
+                    // attaches each as it goes. Attaching to whichever daemons
+                    // happen to exist now would only capture work this command
+                    // is not doing.
+                    ControlCommand::AddProject { .. } => Vec::new(),
+                    _ => match Self::op_project(&command) {
+                        Some(target) => self
+                            .extra_projects
+                            .get(target)
+                            .map(|project| {
+                                vec![project.daemon.watch(&op, journal.clone())]
+                            })
+                            .unwrap_or_else(|| {
+                                vec![self.daemon.watch(&op, journal.clone())]
+                            }),
+                        // An unscoped op legitimately spans every project.
+                        None => {
+                            let mut all = vec![self.daemon.watch(&op, journal.clone())];
+                            all.extend(self.extra_projects.values().map(|project| {
+                                project.daemon.watch(&op, journal.clone())
+                            }));
+                            all
+                        }
+                    },
                 };
-                OpWatch {
+                Arc::new(OpWatch {
                     op,
                     journals: Arc::clone(&self.op_journals),
                     _daemons: daemons,
-                }
+                })
             });
+            self.op_lease = _watch.clone();
             let response = match self.handle_command(command) {
                 Ok(response) => response,
                 Err(err) => {
@@ -3733,6 +3777,11 @@ impl Supervisor {
                     error_response(&err)
                 }
             };
+            // The handler has taken its own lease if it spawned work that
+            // outlives this command; dropping the supervisor's copy here keeps
+            // an unspawned operation sealing on return as it always did.
+            self.op_lease = None;
+            self.active_op = None;
             let _ = reply.send(response);
             if should_shutdown {
                 info!("Supervisor shutdown request completed; ending event loop");
@@ -3813,7 +3862,8 @@ impl Supervisor {
             ControlCommand::Restart { watch, .. }
             | ControlCommand::Start { watch, .. }
             | ControlCommand::Stop { watch, .. }
-            | ControlCommand::StopProject { watch, .. } => watch.clone(),
+            | ControlCommand::StopProject { watch, .. }
+            | ControlCommand::AddProject { watch, .. } => watch.clone(),
             _ => None,
         }
     }
@@ -4157,6 +4207,7 @@ impl Supervisor {
                 config,
                 service,
                 mode,
+                ..
             } => {
                 let project_id =
                     self.add_project_config(Path::new(&config), service, mode)?;
@@ -4754,6 +4805,12 @@ impl Supervisor {
         if let Ok(mut projects) = self.boot_projects.write() {
             projects.insert(project_id.clone(), daemon.clone());
         }
+        // Created here, so the watch set built when the command arrived could
+        // not have covered it. Synchronous, so it needs no lease.
+        let _watch = self
+            .active_op
+            .as_ref()
+            .map(|(op, journal)| daemon.watch(op, journal.clone()));
         let result = Self::start_project_services(
             &daemon,
             daemon.config().as_ref(),
@@ -4943,6 +5000,17 @@ impl Supervisor {
             .remove(&project_id);
 
         if project_id == primary_project {
+            // `AddProject` attaches nothing up front because its projects
+            // usually do not exist yet — but a config naming the PRIMARY is
+            // handled here, by the daemon that already exists. Unattached, this
+            // whole branch reported to nobody and drew a head line with an
+            // empty tree under it. Everything below runs on this thread, so no
+            // lease is needed to keep the journal open.
+            let _watch = self
+                .active_op
+                .as_ref()
+                .map(|(op, journal)| self.daemon.watch(op, journal.clone()));
+
             let unchanged = crate::restart::ManifestDiff::compute(
                 self.daemon.config().as_ref(),
                 &config,
@@ -5041,6 +5109,14 @@ impl Supervisor {
 
         if matches!(mode, ProjectRunMode::Daemon) {
             let daemon = project.daemon.clone();
+            // This project's daemon did not exist when the command was watched,
+            // so it attaches here — and the boot runs on its own thread, so the
+            // guard and a lease on the journal move onto it. Without the lease
+            // the stream would seal the moment the command returned, ending the
+            // tree at queue time before a single unit had run.
+            let boot_watch = self.active_op.as_ref().map(|(op, journal)| {
+                (daemon.watch(op, journal.clone()), self.op_lease.clone())
+            });
             let spawn_manager = self.spawn_manager.clone();
             let op_slot = self.op_slot.clone();
             let boot_project = project_id.clone();
@@ -5074,6 +5150,9 @@ impl Supervisor {
                 .name(format!("sysg-boot-{project_id}"))
                 .spawn(move || {
                     let _op = op_slot.guard(format!("starting project '{boot_project}'"));
+                    // Held for the whole boot: dropping either detaches this
+                    // daemon's journal or seals the stream early.
+                    let _watch = boot_watch;
                     let result = Self::start_project_services(
                         &daemon,
                         daemon.config().as_ref(),
@@ -6312,6 +6391,7 @@ services:
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Foreground,
+                watch: None,
             })
             .expect("add beta project");
 
@@ -6772,6 +6852,7 @@ services:
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("add beta project");
 
@@ -6906,6 +6987,7 @@ services:
                 config: config_path.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("redundant add of same primary config");
         let pids_after: Vec<(String, u32)> = {
@@ -6999,6 +7081,7 @@ services:
                 config: config_path.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("re-add primary project");
 
@@ -7097,6 +7180,7 @@ services:
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("add beta project");
 
@@ -7203,6 +7287,7 @@ services:
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("add beta project");
 
@@ -7345,6 +7430,7 @@ services:
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("add beta project");
         assert!(
@@ -7481,6 +7567,7 @@ services:
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("add beta project");
 
@@ -7623,6 +7710,7 @@ services:
                 config: beta_config.to_string_lossy().to_string(),
                 service: None,
                 mode: ProjectRunMode::Daemon,
+                watch: None,
             })
             .expect("re-add beta project");
 
