@@ -5373,6 +5373,10 @@ impl Supervisor {
             let Some(service_config) = config.services.get(&name) else {
                 continue;
             };
+            // Opened before the skip branches so every unit the cascade visits
+            // gets a row: a unit that only ever resolves has nothing to resolve
+            // against, and the watching client would draw it out of order.
+            daemon.note_unit_starting(&name);
             if let Some(blocker) = service_config.depends_on.as_ref().and_then(|deps| {
                 deps.iter()
                     .map(|dependency| dependency.service())
@@ -5381,13 +5385,19 @@ impl Supervisor {
                 info!(
                     "Skipping dependent '{name}' during cascade restart (dependency '{blocker}' was skipped)"
                 );
-                Self::retire_skipped_unit(daemon, &name)?;
+                Self::retire_skipped_unit(daemon, &name).inspect_err(|err| {
+                    daemon.note_unit_done(&name, Self::cascade_failure(&name, err));
+                })?;
+                daemon.note_unit_done(&name, start::Outcome::Skipped);
                 skipped.insert(name);
                 continue;
             }
             if matches!(service_config.skip, Some(SkipConfig::Flag(true))) {
                 info!("Skipping dependent '{name}' during cascade restart (skip flag)");
-                Self::retire_skipped_unit(daemon, &name)?;
+                Self::retire_skipped_unit(daemon, &name).inspect_err(|err| {
+                    daemon.note_unit_done(&name, Self::cascade_failure(&name, err));
+                })?;
+                daemon.note_unit_done(&name, start::Outcome::Skipped);
                 skipped.insert(name);
                 continue;
             }
@@ -5396,7 +5406,10 @@ impl Supervisor {
                 &name,
                 target_project,
                 "restarted",
-            )?;
+            )
+            .inspect_err(|err| {
+                daemon.note_unit_done(&name, Self::cascade_failure(&name, err));
+            })?;
             // A conditional skip is only known once its predicate has run, so
             // the restart's own verdict is what says whether this unit came up.
             // Without it a unit skipped by its condition still satisfies its
@@ -5404,16 +5417,62 @@ impl Supervisor {
             // also RETIRES the seeded guess: a predicate that has flipped back
             // off makes the recorded `Skipped` stale, and leaving it in the set
             // would strand every dependent behind a unit that just came up.
-            if matches!(
-                daemon.restart_service(&name, service_config)?,
-                ServiceReadyState::Skipped
-            ) {
+            let ready = daemon
+                .restart_service(&name, service_config)
+                .map_err(SupervisorError::from)
+                .inspect_err(|err| {
+                    daemon.note_unit_done(&name, Self::cascade_failure(&name, err));
+                })?;
+            daemon.note_unit_done(&name, Self::cascade_outcome(daemon, &name, ready));
+            if matches!(ready, ServiceReadyState::Skipped) {
                 skipped.insert(name);
             } else {
                 skipped.remove(&name);
             }
         }
         Ok(())
+    }
+
+    /// The terminal frame for a unit the cascade restarted successfully.
+    fn cascade_outcome(
+        daemon: &Daemon,
+        service: &str,
+        ready: ServiceReadyState,
+    ) -> start::Outcome {
+        match ready {
+            ServiceReadyState::Running => {
+                let pid = daemon
+                    .pid_file_handle()
+                    .lock()
+                    .ok()
+                    .and_then(|pid_file| pid_file.services().get(service).copied());
+                match pid {
+                    Some(pid) => start::Outcome::Up(start::Liveness { pid }),
+                    None => start::Outcome::Failed(start::unit_start_failed(
+                        service,
+                        "the service reported running but no PID was recorded",
+                    )),
+                }
+            }
+            ServiceReadyState::CompletedSuccess => start::Outcome::Completed,
+            ServiceReadyState::Skipped => start::Outcome::Skipped,
+        }
+    }
+
+    /// The terminal frame for a unit the cascade could not restart.
+    ///
+    /// The daemon's own SG01xx diagnostic is kept when it carries one, so the
+    /// tree marks the row with the specific failure rather than a generic one.
+    fn cascade_failure(service: &str, err: &SupervisorError) -> start::Outcome {
+        match err {
+            SupervisorError::Process(ProcessManagerError::Diag(diag)) => {
+                start::Outcome::Failed((**diag).clone())
+            }
+            other => start::Outcome::Failed(start::unit_start_failed(
+                service,
+                other.to_string(),
+            )),
+        }
     }
 
     fn restart_single_service_target(
@@ -5605,7 +5664,7 @@ impl Supervisor {
         let primary_project = self.daemon.config().project.id.clone();
 
         if target_project == primary_project {
-            self.daemon.stop_service(service_name)?;
+            Self::stop_watched(&self.daemon, service_name)?;
             return Ok((target_project, service_name.to_string()));
         }
 
@@ -5630,8 +5689,29 @@ impl Supervisor {
             .into());
         }
 
-        project_runtime.daemon.stop_service(service_name)?;
+        Self::stop_watched(&project_runtime.daemon, service_name)?;
         Ok((target_project, service_name.to_string()))
+    }
+
+    /// Stops one service, reporting it to whoever is watching the operation.
+    ///
+    /// The frames are emitted here rather than inside `stop_service` for the
+    /// reason the bulk path documents: a restart stops each unit before
+    /// starting it, and instrumenting the inner call would resolve a unit ✔ the
+    /// moment it went down.
+    fn stop_watched(daemon: &Daemon, service: &str) -> Result<(), SupervisorError> {
+        daemon.note_unit_starting(service);
+        match daemon.stop_service(service) {
+            Ok(()) => {
+                daemon.note_unit_done(service, start::Outcome::Stopped);
+                Ok(())
+            }
+            Err(err) => {
+                let err = SupervisorError::from(err);
+                daemon.note_unit_done(service, Self::cascade_failure(service, &err));
+                Err(err)
+            }
+        }
     }
 
     /// Handles refresh status cache.

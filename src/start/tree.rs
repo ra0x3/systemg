@@ -69,7 +69,14 @@ impl TreeState {
     pub fn apply(&mut self, frame: &BootFrame) {
         match frame {
             BootFrame::UnitStarting { project, service } => {
-                self.unit_mut(project, service).state = RowState::Active;
+                let unit = self.unit_mut(project, service);
+                unit.state = RowState::Active;
+                // A unit can be worked twice in one operation: a restart whose
+                // manifest diff bounces a dependent reconciles it, then the
+                // cascade revisits it. The second pass starts from nothing, so
+                // the first pass's resolved steps must not sit beneath a row
+                // that is running again — they describe work already over.
+                unit.steps.clear();
             }
             BootFrame::Unit {
                 project,
@@ -281,6 +288,20 @@ mod tests {
         assert_eq!(labels, ["migrations", "api", "worker"]);
         assert_eq!(rows[0].state, RowState::Done);
         assert_eq!(rows[1].state, RowState::Active);
+    }
+
+    #[test]
+    fn reworking_a_unit_drops_the_previous_pass_steps() {
+        let rows = reduce(&[
+            starting("api"),
+            step("api", "health", "health check (attempt 1)", StepState::Done),
+            finished("api", Outcome::Up(Liveness { pid: 7 })),
+            starting("api"),
+        ]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "api");
+        assert_eq!(rows[0].state, RowState::Active);
     }
 
     #[test]
