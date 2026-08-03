@@ -1829,6 +1829,9 @@ fn unit_intent_label(intent: UnitIntent, no_color: bool) -> String {
         UnitIntent::Manual => "Manual",
         UnitIntent::Skip => "Skip",
         UnitIntent::Orphan => "Orphan",
+        // Nothing was declared either way. Naming it would put back the guess
+        // this variant exists to remove.
+        UnitIntent::Unspecified => "—",
     };
     colorize(label, unit_intent_color(intent), no_color)
 }
@@ -1839,7 +1842,7 @@ fn unit_intent_color(intent: UnitIntent) -> &'static str {
         UnitIntent::Once => GREEN,
         UnitIntent::Cron => YELLOW,
         UnitIntent::Manual => MID_GRAY,
-        UnitIntent::Skip | UnitIntent::Orphan => GRAY,
+        UnitIntent::Skip | UnitIntent::Orphan | UnitIntent::Unspecified => GRAY,
     }
 }
 
@@ -2404,6 +2407,7 @@ fn overview_metric_label(metric: OverviewMetric) -> &'static str {
             UnitIntent::Manual => "Manual",
             UnitIntent::Skip => "Skip",
             UnitIntent::Orphan => "Orphan",
+            UnitIntent::Unspecified => "Unspecified",
         },
     }
 }
