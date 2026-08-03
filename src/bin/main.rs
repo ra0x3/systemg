@@ -6446,16 +6446,20 @@ fn await_queued_boot(project: &str) -> Result<QueuedBoot, ControlError> {
             boot_began = true;
             continue;
         }
+        // `Lost` is NOT terminal here. A one-shot that has already exited
+        // cleanly reads `Lost` between the monitor reaping it and stamping its
+        // lifecycle, so returning on the first sight of it blamed units that
+        // completed successfully — the tree showed a green check for the very
+        // unit the verdict named. Only `Failed` is decided; `Lost` waits out the
+        // grace like anything else still settling.
         let terminal = units
             .iter()
-            .any(|(_, state)| matches!(state, UnitState::Failed | UnitState::Lost));
+            .any(|(_, state)| matches!(state, UnitState::Failed));
         if terminal {
             return Ok(QueuedBoot {
                 failed: units
                     .iter()
-                    .filter(|(_, state)| {
-                        matches!(state, UnitState::Failed | UnitState::Lost)
-                    })
+                    .filter(|(_, state)| matches!(state, UnitState::Failed))
                     .map(|(name, _)| name.clone())
                     .collect(),
                 cause: None,

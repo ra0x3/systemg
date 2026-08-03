@@ -4981,6 +4981,32 @@ impl Supervisor {
         }
     }
 
+    /// Publishes a settled boot verdict for `project`.
+    ///
+    /// `settled` is what releases a waiting `sysg start`, and a caller that
+    /// never sees one is left judging raw unit states — where a one-shot caught
+    /// between its reap and its lifecycle stamp reads `Lost` and is blamed for a
+    /// boot it completed. The primary branch below returns without queueing a
+    /// background boot, so it must publish this verdict itself.
+    fn settle_boot(
+        &self,
+        project: &str,
+        failed: Vec<String>,
+        cause: Option<crate::diag::Diagnostic>,
+    ) {
+        self.boots
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                project.to_string(),
+                BootStatus {
+                    settled: true,
+                    failed,
+                    cause,
+                },
+            );
+    }
+
     /// Registers and starts a single already-parsed project config, the unit of
     /// work `add_project_config` loops over once per project a file declares.
     fn register_one_project(
@@ -5011,52 +5037,105 @@ impl Supervisor {
                 .as_ref()
                 .map(|(op, journal)| self.daemon.watch(op, journal.clone()));
 
-            let unchanged = crate::restart::ManifestDiff::compute(
-                self.daemon.config().as_ref(),
-                &config,
-            )
-            .is_empty();
-            if self.primary_active
-                && service_filter.is_none()
-                && unchanged
-                && !self.daemon.needs_start()
-            {
-                self.sync_cron_projects()?;
-                self.primary_project_mode = mode;
-                self.config_path = resolved;
-                let _ = ipc::write_config_hint(&self.config_path);
-                self.refresh_status_cache();
-                return Ok(project_id);
-            }
-            if !unchanged {
-                self.reconcile_primary_project(config)?;
-                self.primary_project_mode = mode;
-                self.config_path = resolved;
-                let _ = ipc::write_config_hint(&self.config_path);
-                return Ok(project_id);
-            }
-            self.primary_active = true;
-            let failed = Self::start_project_services(
-                &self.daemon,
-                self.daemon.config().as_ref(),
-                service_filter.as_deref(),
-                &self.spawn_manager,
-                None,
-            )?;
+            // Every exit from this branch must leave a settled verdict — an
+            // early `?` that publishes nothing strands a waiting `sysg start`
+            // on the poll's guesswork for the whole grace — so the work is
+            // delegated and its result, success or error, is settled once here.
+            let outcome =
+                self.register_primary_project(config, resolved, service_filter, mode);
+            return match outcome {
+                Ok(failed) => {
+                    self.settle_boot(
+                        &project_id,
+                        failed.services.clone(),
+                        failed.cause.clone(),
+                    );
+                    if !failed.is_empty() {
+                        return Err(failed.into_error(&project_id).into());
+                    }
+                    Ok(project_id)
+                }
+                Err(err) => {
+                    let cause = match error_response(&err) {
+                        ControlResponse::Diag(diag) => Some(*diag),
+                        ControlResponse::Error(message) => {
+                            Some(crate::start::unit_start_failed(&project_id, message))
+                        }
+                        _ => None,
+                    };
+                    self.settle_boot(&project_id, Vec::new(), cause);
+                    Err(err)
+                }
+            };
+        }
+
+        self.register_extra_project(config, resolved, service_filter, mode, project_id)
+    }
+
+    /// Starts or reconciles the PRIMARY project on the caller's thread.
+    ///
+    /// Returns the boot's failure report; the caller settles it. Errors here are
+    /// settled by the caller too, so no exit path can leave the boot unresolved.
+    fn register_primary_project(
+        &mut self,
+        config: Config,
+        resolved: PathBuf,
+        service_filter: Option<String>,
+        mode: ProjectRunMode,
+    ) -> Result<BootFailures, SupervisorError> {
+        let unchanged =
+            crate::restart::ManifestDiff::compute(self.daemon.config().as_ref(), &config)
+                .is_empty();
+        if self.primary_active
+            && service_filter.is_none()
+            && unchanged
+            && !self.daemon.needs_start()
+        {
             self.sync_cron_projects()?;
-            self.refresh_status_cache();
-            if self.daemon.boot_cancelled() {
-                return Ok(project_id);
-            }
-            if !failed.is_empty() {
-                return Err(failed.into_error(&project_id).into());
-            }
             self.primary_project_mode = mode;
             self.config_path = resolved;
             let _ = ipc::write_config_hint(&self.config_path);
-            return Ok(project_id);
+            self.refresh_status_cache();
+            return Ok(BootFailures::new(Vec::new(), None));
         }
+        if !unchanged {
+            self.reconcile_primary_project(config)?;
+            self.primary_project_mode = mode;
+            self.config_path = resolved;
+            let _ = ipc::write_config_hint(&self.config_path);
+            return Ok(BootFailures::new(Vec::new(), None));
+        }
+        self.primary_active = true;
+        let failed = Self::start_project_services(
+            &self.daemon,
+            self.daemon.config().as_ref(),
+            service_filter.as_deref(),
+            &self.spawn_manager,
+            None,
+        )?;
+        self.sync_cron_projects()?;
+        self.refresh_status_cache();
+        if self.daemon.boot_cancelled() {
+            return Ok(BootFailures::new(Vec::new(), None));
+        }
+        if !failed.is_empty() {
+            return Ok(failed);
+        }
+        self.primary_project_mode = mode;
+        self.config_path = resolved;
+        let _ = ipc::write_config_hint(&self.config_path);
+        Ok(failed)
+    }
 
+    /// Registers a NON-primary project, queueing its boot onto its own thread.
+    fn register_extra_project(
+        &mut self,
+        config: Config,
+        resolved: PathBuf,
+        service_filter: Option<String>,
+        mode: ProjectRunMode,
+        project_id: String,
+    ) -> Result<String, SupervisorError> {
         if !self.extra_projects.contains_key(&project_id) {
             Self::register_spawn_limits_for_config(&self.spawn_manager, &config)?;
             // Own pid/state handles bound to this project's store, so a
