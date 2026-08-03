@@ -150,6 +150,10 @@ pub enum UnitIntent {
     Serve,
     /// One-shot service expected to complete and exit.
     Once,
+    /// Service that declared no lifetime. Its exit is neither expected nor
+    /// unexpected, so a clean exit is reported on its own terms rather than
+    /// judged against an availability requirement nobody asked for.
+    Unspecified,
     /// Cron-scheduled unit expected to run on its configured schedule.
     Cron,
     /// Manually controlled unit that is allowed to be stopped.
@@ -1188,7 +1192,7 @@ fn build_snapshot(
 
         if let Some(runtime) = process_runtime.as_ref()
             && matches!(runtime.state, ProcessState::Missing)
-            && missing_pid_is_expected(kind, intent, lifecycle, cron.as_ref())
+            && missing_pid_is_expected(kind, lifecycle, cron.as_ref())
         {
             process_runtime = None;
         }
@@ -1406,16 +1410,18 @@ fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary 
     }
 }
 
-/// Returns whether a missing PID is expected for a unit that has already
-/// finished its work.
+/// Returns whether a missing PID is explained by what the unit already recorded.
 ///
-/// Cron jobs and one-shot services are not meant to keep a process alive, so a
-/// PID that has since exited is stale runtime evidence rather than a fault. Once
-/// such a unit has terminal lifecycle state or recorded cron history, its state
-/// and health should be derived from those facts instead of the dead PID.
+/// A process that has ended leaves no PID; that is how finishing looks, not a
+/// fault. Once a unit has terminal lifecycle state or recorded cron history, the
+/// dead PID is stale evidence and its state comes from those facts instead.
+///
+/// Intent is deliberately not consulted. A unit that was expected to stay
+/// available and exited cleanly still exited cleanly — the gap between what it
+/// promised and what it did is a health judgement, made in
+/// [`derive_unit_health`], not a reason to discard its recorded outcome.
 fn missing_pid_is_expected(
     kind: UnitKind,
-    intent: UnitIntent,
     lifecycle: Option<ServiceLifecycleStatus>,
     cron: Option<&CronUnitStatus>,
 ) -> bool {
@@ -1423,19 +1429,22 @@ fn missing_pid_is_expected(
         return cron.is_some_and(|cron| cron.last_run.is_some());
     }
 
-    if matches!(intent, UnitIntent::Once) {
-        return matches!(
-            lifecycle,
-            Some(
-                ServiceLifecycleStatus::ExitedSuccessfully
-                    | ServiceLifecycleStatus::ExitedWithError
-                    | ServiceLifecycleStatus::Stopped
-                    | ServiceLifecycleStatus::Skipped
-            )
-        );
-    }
+    terminal_state(lifecycle).is_some()
+}
 
-    false
+/// The state a recorded lifecycle explains on its own, if it explains one.
+///
+/// These are the outcomes that say where a process went. `Running` is absent
+/// deliberately: a unit whose last record says it was running, with no process
+/// behind it, is exactly the unexplained disappearance `Lost` exists to report.
+fn terminal_state(lifecycle: Option<ServiceLifecycleStatus>) -> Option<UnitState> {
+    match lifecycle? {
+        ServiceLifecycleStatus::ExitedSuccessfully => Some(UnitState::Done),
+        ServiceLifecycleStatus::ExitedWithError => Some(UnitState::Failed),
+        ServiceLifecycleStatus::Stopped => Some(UnitState::Stopped),
+        ServiceLifecycleStatus::Skipped => Some(UnitState::Skipped),
+        ServiceLifecycleStatus::Running => None,
+    }
 }
 
 /// Derives the factual state shown to operators.
@@ -1446,6 +1455,15 @@ fn derive_unit_state(
     cron: Option<&CronUnitStatus>,
 ) -> UnitState {
     if let Some(runtime) = runtime {
+        // A missing process is only `Lost` when nothing explains where it went.
+        // Every process ends and reports an exit code, so a recorded terminal
+        // outcome is the answer to "what happened" — it must not be overridden
+        // by the absence of a PID, which is merely how a finished unit looks.
+        if matches!(runtime.state, ProcessState::Missing)
+            && let Some(explained) = terminal_state(lifecycle)
+        {
+            return explained;
+        }
         return match runtime.state {
             ProcessState::Running => UnitState::Running,
             ProcessState::Zombie => UnitState::Zombie,
@@ -1509,11 +1527,18 @@ fn derive_unit_intent(
                 return UnitIntent::Skip;
             }
 
+            // `restart_policy: never` is a real statement that the unit is not
+            // meant to come back, so it still reads as a one-shot.
             if service_config.restart_is_disabled() {
                 return UnitIntent::Once;
             }
 
-            UnitIntent::Serve
+            // Nothing was said either way. NOT `Serve`: restart policy describes
+            // what to do WHEN a unit exits, never whether exiting was the point,
+            // and reading a promise of availability into its absence is what
+            // marked completed one-shots as lost. What the unit actually does —
+            // exit, or keep running — is observed at runtime, not declared.
+            UnitIntent::Unspecified
         }
     }
 }
@@ -1534,7 +1559,25 @@ fn derive_unit_health(
                 return UnitHealth::Failing;
             }
             ProcessState::Missing => {
+                // Only an EXPLICIT `Serve` warrants a warning for being absent,
+                // and only for an availability it actually promised. A clean
+                // exit still succeeded, so it warns without being called
+                // unhealthy elsewhere: `Done` + `Warn` reads "it worked, and it
+                // is no longer up", which is the honest pair. An undeclared unit
+                // promised nothing and falls through to be judged on its record.
                 if matches!(intent, UnitIntent::Serve) {
+                    return UnitHealth::Warn;
+                }
+                // Nothing recorded explains the absence — the unit is `Lost`.
+                // That is unexplained whatever the unit was for, so it warns
+                // even when no availability was ever promised. Checked here
+                // because the lifecycle arms below would otherwise read the
+                // stale `Running` record as evidence of health.
+                //
+                // Cron is exempt: its run history, not the lifecycle field,
+                // explains where the process went, and it is read further down.
+                if !matches!(kind, UnitKind::Cron) && terminal_state(lifecycle).is_none()
+                {
                     return UnitHealth::Warn;
                 }
             }
@@ -3542,7 +3585,7 @@ services:
     }
 
     #[test]
-    fn missing_pid_is_expected_only_for_finished_cron_and_oneshot() {
+    fn missing_pid_is_expected_when_the_record_explains_the_exit() {
         let success = CronExecutionSummary {
             started_at: Utc::now(),
             completed_at: Some(Utc::now()),
@@ -3568,34 +3611,101 @@ services:
 
         assert!(missing_pid_is_expected(
             UnitKind::Cron,
-            UnitIntent::Cron,
             None,
             Some(&completed_cron),
         ));
         assert!(!missing_pid_is_expected(
             UnitKind::Cron,
-            UnitIntent::Cron,
             None,
             Some(&queued_cron),
         ));
         assert!(missing_pid_is_expected(
             UnitKind::Service,
-            UnitIntent::Once,
             Some(ServiceLifecycleStatus::ExitedSuccessfully),
             None,
         ));
+        // The real anomaly: the last thing recorded was `Running`, so nothing
+        // explains where the process went.
         assert!(!missing_pid_is_expected(
             UnitKind::Service,
-            UnitIntent::Once,
             Some(ServiceLifecycleStatus::Running),
             None,
         ));
-        assert!(!missing_pid_is_expected(
+        // A clean exit is explained whatever the unit was expected to do. That
+        // it was expected to keep serving is a HEALTH concern, asserted in
+        // `serve_unit_that_exits_cleanly_is_done_but_warns`, not grounds to
+        // treat the exit as unexplained.
+        assert!(missing_pid_is_expected(
             UnitKind::Service,
-            UnitIntent::Serve,
             Some(ServiceLifecycleStatus::ExitedSuccessfully),
             None,
         ));
+    }
+
+    #[test]
+    fn undeclared_oneshot_that_exits_cleanly_is_done_and_healthy() {
+        // The regression that started this: a `psql -c 'SELECT 1;'` with no
+        // restart policy read `Lost`/`Warn` forever after succeeding.
+        let state = derive_unit_state(
+            UnitKind::Service,
+            Some(ServiceLifecycleStatus::ExitedSuccessfully),
+            None,
+            None,
+        );
+        assert_eq!(state, UnitState::Done);
+
+        let health = derive_unit_health(
+            UnitKind::Service,
+            state,
+            UnitIntent::Unspecified,
+            Some(ServiceLifecycleStatus::ExitedSuccessfully),
+            None,
+            None,
+        );
+        assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    fn a_vanished_process_with_no_terminal_record_is_still_lost() {
+        // `Lost` must keep meaning what its diagnostic claims: gone with no
+        // clean lifecycle transition recorded.
+        let runtime = ProcessRuntime {
+            pid: 4242,
+            state: ProcessState::Missing,
+            user: None,
+        };
+        let state = derive_unit_state(
+            UnitKind::Service,
+            Some(ServiceLifecycleStatus::Running),
+            Some(&runtime),
+            None,
+        );
+        assert_eq!(state, UnitState::Lost);
+    }
+
+    #[test]
+    fn a_unit_that_says_nothing_has_unspecified_intent() {
+        // Saying nothing is not a promise to stay available. Reading `Serve`
+        // into an absent restart policy is what marked completed one-shots lost.
+        let undeclared = ServiceConfig {
+            command: "true".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_unit_intent(UnitKind::Service, Some(&undeclared)),
+            UnitIntent::Unspecified,
+        );
+
+        // `restart_policy: never` DOES say something: it is not coming back.
+        let never = ServiceConfig {
+            command: "true".into(),
+            restart_policy: Some("never".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            derive_unit_intent(UnitKind::Service, Some(&never)),
+            UnitIntent::Once,
+        );
     }
 
     #[test]
