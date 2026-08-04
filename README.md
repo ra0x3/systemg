@@ -56,7 +56,7 @@ An agent-friendly general process composer.
 
 ### Installation
 
-![Installation](https://i.imgur.com/6d2aq0U.gif)
+![Installation](https://i.imgur.com/JHQPtJp.gif)
 
 ```sh
 $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
