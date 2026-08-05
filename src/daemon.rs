@@ -276,10 +276,55 @@ pub struct PidFile {
         deserialize_with = "deserialize_metadata"
     )]
     spawn_metadata: HashMap<u32, PersistedSpawnChild>,
+    /// Every process generation this supervisor has spawned, retained until its
+    /// death is verified.
+    ///
+    /// The maps above hold ONE record per service, so replacing a service
+    /// overwrote the outgoing process's identity. Anything that outlived that
+    /// write became untracked forever: sysg had spawned it, but no longer had a
+    /// pid, group, or start time to recognize it by. Since sysg deliberately
+    /// declines PDEATHSIG (see the spawn `pre_exec`) and accepts orphans on the
+    /// promise that they are "reaped on restart", losing the identity is what
+    /// broke that promise. A generation is retired before it is replaced and
+    /// dropped only once its death is verified, so an orphan always remains
+    /// attributable to the supervisor that created it.
+    #[serde(default, rename = "generations", skip_serializing_if = "Vec::is_empty")]
+    generations: Vec<ProcessGeneration>,
     /// The project state directory this file is bound to. Never serialized;
     /// re-attached after every load/reload.
     #[serde(skip)]
     store: StateStore,
+}
+
+/// Lifecycle stage of a recorded process generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum GenerationState {
+    /// The generation is the service's current process.
+    #[default]
+    Active,
+    /// The generation has been superseded or stopped, and is awaiting verified
+    /// death. Only retired generations are eligible to be reaped.
+    Retired,
+}
+
+/// One process this supervisor spawned, identified strongly enough to be
+/// recognized after it is no longer the service's current process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProcessGeneration {
+    /// Service this generation was spawned for.
+    pub(crate) service: String,
+    /// Process identifier.
+    pub(crate) pid: u32,
+    /// Kernel start time, which distinguishes this process from a later one
+    /// that reuses its pid.
+    pub(crate) start: u64,
+    /// Session identifier, which every service gets via `setsid` at spawn.
+    pub(crate) sid: i32,
+    /// Process group identifier.
+    pub(crate) pgid: i32,
+    /// Whether this generation is current or awaiting verified death.
+    #[serde(default)]
+    pub(crate) state: GenerationState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -674,14 +719,18 @@ impl PidFile {
         pid: u32,
         pgid: Option<i32>,
     ) -> Result<(), PidFileError> {
+        // Identity is captured BEFORE the lock so a slow lock cannot let the
+        // process exit and a new one reuse its pid underneath the read.
         let started = process_start_time(pid);
+        let sid = Daemon::session_for_pid(pid);
+        let group = pgid.or_else(|| Daemon::process_group_for_pid(pid));
         let _lock = self.acquire_lock()?;
 
         let path = self.path();
         self.reload_into(&path)?;
 
         self.services.insert(service.to_string(), pid);
-        if let Some(group) = pgid {
+        if let Some(group) = group {
             self.service_groups.insert(service.to_string(), group);
         }
         if let Some(started) = started {
@@ -690,7 +739,84 @@ impl PidFile {
             self.service_starts.remove(service);
         }
 
+        // Retire the outgoing generation rather than dropping it. Overwriting
+        // the maps above is what made a surviving process unattributable: the
+        // supervisor had spawned it, then erased the only identity that could
+        // recognize it. Retiring keeps it reapable until its death is verified.
+        self.retire_generations_for(service, Some(pid));
+
+        // A generation is only useful if it can be told apart from a later
+        // process that reuses the pid, so record one only with a full identity.
+        // A partial record would be worse than none: it would invite a kill
+        // decision based on a pid alone.
+        if let (Some(start), Some(sid), Some(pgid)) = (started, sid, group) {
+            self.generations.push(ProcessGeneration {
+                service: service.to_string(),
+                pid,
+                start,
+                sid,
+                pgid,
+                state: GenerationState::Active,
+            });
+        } else {
+            warn!(
+                "Could not capture a full process identity for '{service}' (pid {pid}); \
+                 it will not be tracked as a reapable generation"
+            );
+        }
+
         self.write_at(&path)
+    }
+
+    /// Writes the current in-memory state through the locked path, so a test
+    /// can stage records that the reloading sweep will actually observe.
+    #[cfg(test)]
+    pub(crate) fn persist_for_test(&mut self) {
+        let _lock = self.acquire_lock().expect("lock pid file");
+        let path = self.path();
+        self.write_at(&path).expect("persist pid file");
+    }
+
+    /// Marks every recorded generation for `service` as retired, except the
+    /// generation whose pid is `keep` (the incoming process).
+    fn retire_generations_for(&mut self, service: &str, keep: Option<u32>) {
+        for generation in &mut self.generations {
+            if generation.service == service && Some(generation.pid) != keep {
+                generation.state = GenerationState::Retired;
+            }
+        }
+    }
+
+    /// Drops generations whose processes are confirmed gone, and returns the
+    /// retired generations that are still alive — the reapable orphans.
+    ///
+    /// Identity is re-verified against the kernel before a generation is
+    /// reported: a pid whose start time no longer matches is a DIFFERENT
+    /// process that merely inherited the number, and must never be treated as
+    /// ours.
+    #[allow(dead_code, reason = "reaping wires this up in the next change")]
+    pub(crate) fn sweep_generations(
+        &mut self,
+    ) -> Result<Vec<ProcessGeneration>, PidFileError> {
+        let _lock = self.acquire_lock()?;
+        let path = self.path();
+        self.reload_into(&path)?;
+
+        let mut orphans = Vec::new();
+        self.generations.retain(|generation| {
+            let identity_matches = process_start_time(generation.pid)
+                .is_some_and(|start| start == generation.start);
+            if !identity_matches {
+                return false;
+            }
+            if generation.state == GenerationState::Retired {
+                orphans.push(generation.clone());
+            }
+            true
+        });
+
+        self.write_at(&path)?;
+        Ok(orphans)
     }
 
     /// Atomically clears a service PID while preserving group ownership metadata.
@@ -739,6 +865,11 @@ impl PidFile {
         if !known {
             return Err(PidFileError::ServiceNotFound);
         }
+
+        // Retire rather than forget. A stop that could not verify death still
+        // has to leave the process attributable, or it becomes an orphan no
+        // later sweep can claim.
+        self.retire_generations_for(service, None);
 
         if let Some(root_pid) = removed_pid.or_else(|| {
             removed_group
@@ -1032,6 +1163,7 @@ mod pidfile_tests {
             services: HashMap::new(),
             service_groups: HashMap::new(),
             service_starts: HashMap::new(),
+            generations: Vec::new(),
             parent_map: HashMap::from([(2, 1), (3, 2)]),
             children_map: HashMap::from([(1, vec![2]), (2, vec![3])]),
             spawn_depth: HashMap::from([(1, 0), (2, 1), (3, 2)]),
@@ -1113,6 +1245,7 @@ mod pidfile_tests {
             services: HashMap::from([("svc".to_string(), 10)]),
             service_groups: HashMap::from([("svc".to_string(), 10)]),
             service_starts: HashMap::new(),
+            generations: Vec::new(),
             parent_map: HashMap::from([(11, 10), (12, 11)]),
             children_map: HashMap::from([(10, vec![11]), (11, vec![12])]),
             spawn_depth: HashMap::from([(11, 1), (12, 2)]),
@@ -2327,6 +2460,17 @@ impl Daemon {
         if pgid >= 0 { Some(pgid) } else { None }
     }
 
+    /// Returns the session id of `pid`, if it is alive.
+    ///
+    /// Every service leads its own session (`setsid` at spawn), so the session
+    /// is the widest boundary that still belongs exclusively to one unit — a
+    /// process group can be left behind by a wrapper that execs its payload
+    /// into a new group, but the session survives that.
+    pub(crate) fn session_for_pid(pid: u32) -> Option<libc::pid_t> {
+        let sid = unsafe { libc::getsid(pid as libc::pid_t) };
+        if sid >= 0 { Some(sid) } else { None }
+    }
+
     /// Returns all live process IDs currently assigned to `pgid`.
     #[cfg(target_os = "linux")]
     fn collect_process_group_members(pgid: libc::pid_t) -> HashSet<u32> {
@@ -3020,6 +3164,7 @@ impl Daemon {
                 service: service.clone(),
                 pid,
                 pgid,
+                sid: Self::session_for_pid(pid),
                 started,
             });
         }
@@ -8154,6 +8299,94 @@ mod tests {
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    /// A superseded process stays attributable instead of being overwritten.
+    ///
+    /// Replacing a service used to overwrite its single pid record, so anything
+    /// that outlived the swap became unattributable and held its resources
+    /// (a port, most visibly) until it was killed by hand.
+    fn replacing_a_service_retires_the_previous_generation() {
+        with_temp_home(|_| {
+            let mut outgoing = Command::new(DEFAULT_SHELL)
+                .args(["-c", "sleep 60"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn outgoing");
+            let mut incoming = Command::new(DEFAULT_SHELL)
+                .args(["-c", "sleep 60"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn incoming");
+
+            let mut pids =
+                PidFile::load(StateStore::for_project("generations")).expect("load");
+            pids.insert_with_group("api", outgoing.id(), None)
+                .expect("record outgoing");
+            pids.insert_with_group("api", incoming.id(), None)
+                .expect("record incoming");
+
+            let orphans = pids.sweep_generations().expect("sweep");
+
+            assert_eq!(
+                orphans.len(),
+                1,
+                "the superseded process must remain attributable"
+            );
+            assert_eq!(orphans[0].pid, outgoing.id());
+            assert_eq!(orphans[0].service, "api");
+            assert_eq!(orphans[0].state, GenerationState::Retired);
+
+            let _ = outgoing.kill();
+            let _ = outgoing.wait();
+            let _ = incoming.kill();
+            let _ = incoming.wait();
+        });
+    }
+
+    #[test]
+    /// A pid reused by an unrelated process is never reported as ours.
+    fn sweep_drops_generations_whose_identity_no_longer_matches() {
+        with_temp_home(|_| {
+            let mut child = Command::new(DEFAULT_SHELL)
+                .args(["-c", "sleep 60"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn child");
+            let pid = child.id();
+
+            let mut pids = PidFile::load(StateStore::for_project("generations-identity"))
+                .expect("load");
+            pids.insert_with_group("api", pid, None).expect("record");
+
+            // Corrupt the recorded start time so the live pid no longer matches
+            // the recorded identity, exactly as a reused pid would present.
+            // Persisted through the normal write path, since the sweep reloads
+            // from disk before it decides anything.
+            for generation in &mut pids.generations {
+                generation.start = generation.start.wrapping_add(1);
+                generation.state = GenerationState::Retired;
+            }
+            pids.persist_for_test();
+
+            let orphans = pids.sweep_generations().expect("sweep");
+
+            assert!(
+                orphans.is_empty(),
+                "a pid whose identity does not match must never be claimed"
+            );
+            assert!(pids.generations.is_empty(), "stale generation is dropped");
+
+            let _ = child.kill();
+            let _ = child.wait();
+        });
     }
 
     #[test]

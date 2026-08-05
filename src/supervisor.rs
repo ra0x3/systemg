@@ -8319,6 +8319,7 @@ services:
                         service: "tunnel".to_string(),
                         pid,
                         pgid,
+                        sid: None,
                         started,
                     }],
                     manual_stops: Vec::new(),
