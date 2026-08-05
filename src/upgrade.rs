@@ -79,6 +79,11 @@ pub struct HandoffProcess {
     pub pid: u32,
     /// Service process-group identifier.
     pub pgid: i32,
+    /// Service session identifier. Defaulted for handoffs written by a
+    /// supervisor that predates session tracking; such records are treated as
+    /// having no verified session rather than as belonging to session 0.
+    #[serde(default)]
+    pub sid: Option<i32>,
     /// Kernel process start time used to reject PID reuse.
     pub started: u64,
 }
