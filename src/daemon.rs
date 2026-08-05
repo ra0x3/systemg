@@ -777,6 +777,25 @@ impl PidFile {
         self.write_at(&path).expect("persist pid file");
     }
 
+    /// Returns the recorded session for `service`'s current generation, if its
+    /// identity still matches the live process.
+    ///
+    /// Verifying the start time here keeps a recycled pid from handing back a
+    /// session that belongs to something else entirely — the session is used to
+    /// widen a kill, so a wrong answer is expensive.
+    pub(crate) fn session_for(&self, service: &str) -> Option<libc::pid_t> {
+        self.generations
+            .iter()
+            .filter(|generation| {
+                generation.service == service
+                    && generation.state == GenerationState::Active
+            })
+            .find(|generation| {
+                process_start_time(generation.pid) == Some(generation.start)
+            })
+            .map(|generation| generation.sid)
+    }
+
     /// Marks every recorded generation for `service` as retired, except the
     /// generation whose pid is `keep` (the incoming process).
     fn retire_generations_for(&mut self, service: &str, keep: Option<u32>) {
@@ -2549,6 +2568,88 @@ impl Daemon {
         members
     }
 
+    /// Returns all live process IDs currently in session `sid`.
+    ///
+    /// The session is the widest boundary that still belongs to exactly one
+    /// unit, because every service is given its own session at spawn. A process
+    /// group is narrower and escapable: a wrapper that execs its payload into a
+    /// fresh group leaves that payload outside the recorded group, which is how
+    /// a live process survived a teardown that only signalled the group.
+    #[cfg(target_os = "linux")]
+    fn collect_session_members(sid: libc::pid_t) -> HashSet<u32> {
+        let mut members = HashSet::new();
+        let Ok(entries) = fs::read_dir("/proc") else {
+            return members;
+        };
+
+        for entry in entries.filter_map(Result::ok) {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+
+            let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let Some(close_paren) = stat.rfind(')') else {
+                continue;
+            };
+            let mut fields = stat[close_paren + 1..].split_whitespace();
+            let state = fields.next().and_then(|raw| raw.chars().next());
+            if matches!(state, Some('Z' | 'X')) {
+                continue;
+            }
+
+            let _ppid = fields.next();
+            let _pgid = fields.next();
+            let Some(session) = fields
+                .next()
+                .and_then(|raw| raw.parse::<libc::pid_t>().ok())
+            else {
+                continue;
+            };
+
+            if session == sid {
+                members.insert(pid);
+            }
+        }
+
+        members
+    }
+
+    /// Returns all live process IDs currently in session `sid`.
+    ///
+    /// The session is resolved per pid with `getsid`, NOT from `ps`: the
+    /// `sess=` column on macOS reports the kernel session address (0 for every
+    /// process), so parsing it silently matches nothing.
+    #[cfg(not(target_os = "linux"))]
+    fn collect_session_members(sid: libc::pid_t) -> HashSet<u32> {
+        let mut members = HashSet::new();
+        let Ok(output) = Command::new("ps").args(["-axo", "pid=,stat="]).output() else {
+            return members;
+        };
+
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut fields = line.split_whitespace();
+            let Some(pid) = fields.next().and_then(|raw| raw.parse::<u32>().ok()) else {
+                continue;
+            };
+            let state = fields.next().and_then(|raw| raw.chars().next());
+            if matches!(state, Some('Z')) {
+                continue;
+            }
+
+            if Self::session_for_pid(pid) == Some(sid) {
+                members.insert(pid);
+            }
+        }
+
+        members
+    }
+
     /// Signals process. None = liveness check. Also detects Linux zombies.
     fn signal_pid(
         service_name: &str,
@@ -2676,12 +2777,37 @@ impl Daemon {
         root_pid: u32,
         group_hint: Option<libc::pid_t>,
     ) -> Result<(), ProcessManagerError> {
+        Self::terminate_process_tree_in_session(service_name, root_pid, group_hint, None)
+    }
+
+    /// Terminates a service's processes, widening the sweep to `session_hint`
+    /// when one is recorded.
+    ///
+    /// Descendant- and group-based cleanup both have escape hatches: a process
+    /// that reparents to init leaves the ancestry, and a wrapper that execs its
+    /// payload into a new process group leaves the recorded group. The session
+    /// survives both, and is still exclusive to one unit because every service
+    /// is spawned under its own `setsid`. The supervisor's own session is never
+    /// a target.
+    pub(crate) fn terminate_process_tree_in_session(
+        service_name: &str,
+        root_pid: u32,
+        group_hint: Option<libc::pid_t>,
+        session_hint: Option<libc::pid_t>,
+    ) -> Result<(), ProcessManagerError> {
         use nix::sys::signal::Signal::{SIGKILL, SIGTERM};
 
         let mut pending = Self::collect_descendants(root_pid);
         pending.insert(root_pid);
 
         let supervisor_pgid = unsafe { libc::getpgid(0) };
+        let supervisor_sid = unsafe { libc::getsid(0) };
+        // A session only widens the sweep when it is genuinely the unit's own.
+        // Falling back to the live session of `root_pid` would be wrong for an
+        // adopted or misrecorded pid, so only an explicitly recorded session is
+        // trusted here.
+        let session_target =
+            session_hint.filter(|sid| *sid > 0 && *sid != supervisor_sid);
         let group_target = if let Some(pgid) =
             group_hint.or_else(|| Self::process_group_for_pid(root_pid))
         {
@@ -2725,6 +2851,12 @@ impl Daemon {
                 && target_pgid != supervisor_pgid
             {
                 pending.extend(Self::collect_process_group_members(target_pgid));
+            }
+            // Session members are swept in the same pass so a payload that
+            // re-grouped itself is still caught, and re-swept after each
+            // escalation because a survivor can fork while we are signalling.
+            if let Some(target_sid) = session_target {
+                pending.extend(Self::collect_session_members(target_sid));
             }
         };
 
@@ -6882,6 +7014,10 @@ impl Daemon {
         config: &Arc<Config>,
         stop_verify_timeout: Duration,
     ) -> Result<(), ProcessManagerError> {
+        let service_session = pid_file
+            .lock()
+            .ok()
+            .and_then(|guard| guard.session_for(service_name));
         let (pid, service_group_id, has_child, started) = {
             let mut processes_guard = processes.lock()?;
             let (persisted_group, persisted_start) = pid_file
@@ -6950,8 +7086,12 @@ impl Daemon {
         }
 
         if let Some(process_id) = pid {
-            match Self::terminate_process_tree(service_name, process_id, service_group_id)
-            {
+            match Self::terminate_process_tree_in_session(
+                service_name,
+                process_id,
+                service_group_id,
+                service_session,
+            ) {
                 Ok(_) => {
                     debug!(
                         "Process tree for '{service_name}' (pid {process_id}) terminated successfully"
@@ -6978,7 +7118,12 @@ impl Daemon {
                     ),
                 });
             }
-            Self::terminate_process_tree(service_name, group_id as u32, Some(group_id))?;
+            Self::terminate_process_tree_in_session(
+                service_name,
+                group_id as u32,
+                Some(group_id),
+                service_session,
+            )?;
         }
 
         let child_handle = {
@@ -7013,6 +7158,32 @@ impl Daemon {
                         std::io::ErrorKind::TimedOut,
                         format!(
                             "process {process_id} for '{service_name}' is still alive after termination"
+                        ),
+                    ),
+                });
+            }
+        }
+
+        // The root pid dying does not mean the unit is gone. A wrapper exits
+        // while the payload it launched keeps running — and keeps holding
+        // whatever the payload owns. Confirm the session is empty too, or the
+        // same "stopped but still running" report returns one level down.
+        if let Some(session) = service_session {
+            let deadline = Instant::now() + stop_verify_timeout;
+            let mut survivors = Self::collect_session_members(session);
+            while !survivors.is_empty() && Instant::now() < deadline {
+                thread::sleep(SERVICE_POLL_INTERVAL);
+                survivors = Self::collect_session_members(session);
+            }
+            if !survivors.is_empty() {
+                let mut listed: Vec<u32> = survivors.into_iter().collect();
+                listed.sort_unstable();
+                return Err(ProcessManagerError::ServiceStopError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "session {session} for '{service_name}' still has live processes after termination: {listed:?}"
                         ),
                     ),
                 });
@@ -8299,6 +8470,89 @@ mod tests {
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    /// Session-scoped teardown catches a payload that left its process group.
+    ///
+    /// Group-scoped cleanup misses a payload that calls `setpgid`, which is how
+    /// a wrapper's real workload survived a stop and kept holding its port.
+    fn session_teardown_kills_a_payload_that_escaped_its_group() {
+        with_temp_home(|_| {
+            // Mirror a real service: its own session, as `setsid` at spawn
+            // gives every unit. The leader then EXITS, so its payload is
+            // reparented to init and leaves the ancestry, and the payload puts
+            // itself in a fresh process group so the recorded group misses it
+            // too. Only the session still ties it to the unit — which is
+            // exactly the process that survived a stop and held its port.
+            // The payload calls `setpgid` so it leaves the recorded process
+            // group; a plain background job would INHERIT that group and be
+            // caught by group-scoped cleanup, proving nothing.
+            let mut leader = Command::new(DEFAULT_SHELL);
+            leader
+                .args([
+                    "-c",
+                    "python3 -c 'import os,time; os.setpgid(0,0); time.sleep(60)' & exit 0",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                leader.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut leader = leader.spawn().expect("spawn leader");
+            let leader_pid = leader.id();
+            // The leader called setsid, so it IS the session id, and the value
+            // stays valid after it exits.
+            let session = leader_pid as libc::pid_t;
+            assert_ne!(
+                session,
+                unsafe { libc::getsid(0) },
+                "the fixture must not share the test runner's session"
+            );
+
+            let _ = leader.wait();
+            thread::sleep(Duration::from_millis(300));
+
+            let orphan = Daemon::collect_session_members(session);
+            assert!(
+                !orphan.is_empty(),
+                "payload should survive its parent and remain in the session"
+            );
+            assert!(
+                !orphan.contains(&leader_pid),
+                "the leader has exited; the survivor is the orphaned payload"
+            );
+            for pid in &orphan {
+                assert_ne!(
+                    Daemon::process_group_for_pid(*pid),
+                    Some(leader_pid as libc::pid_t),
+                    "the survivor must have LEFT the recorded group, or the \
+                     group path alone would explain the kill"
+                );
+            }
+
+            // Without the session the payload is unreachable: it is not a
+            // descendant of the (dead) leader, and not in the recorded group.
+            Daemon::terminate_process_tree_in_session(
+                "wrapped",
+                leader_pid,
+                Some(leader_pid as libc::pid_t),
+                Some(session),
+            )
+            .expect("terminate session");
+
+            let survivors = Daemon::collect_session_members(session);
+            assert!(
+                survivors.is_empty(),
+                "session must be empty after teardown, saw {survivors:?}"
+            );
+        });
     }
 
     #[test]
