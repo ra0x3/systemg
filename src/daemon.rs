@@ -768,13 +768,18 @@ impl PidFile {
         self.write_at(&path)
     }
 
-    /// Writes the current in-memory state through the locked path, so a test
-    /// can stage records that the reloading sweep will actually observe.
+    /// Writes the current in-memory state through the locked path.
+    pub(crate) fn persist(&mut self) -> Result<(), PidFileError> {
+        let _lock = self.acquire_lock()?;
+        let path = self.path();
+        self.write_at(&path)
+    }
+
+    /// Writes the current in-memory state, panicking on failure, so a test can
+    /// stage records that the reloading sweep will actually observe.
     #[cfg(test)]
     pub(crate) fn persist_for_test(&mut self) {
-        let _lock = self.acquire_lock().expect("lock pid file");
-        let path = self.path();
-        self.write_at(&path).expect("persist pid file");
+        self.persist().expect("persist pid file");
     }
 
     /// Returns the recorded session for `service`'s current generation, if its
@@ -813,7 +818,6 @@ impl PidFile {
     /// reported: a pid whose start time no longer matches is a DIFFERENT
     /// process that merely inherited the number, and must never be treated as
     /// ours.
-    #[allow(dead_code, reason = "reaping wires this up in the next change")]
     pub(crate) fn sweep_generations(
         &mut self,
     ) -> Result<Vec<ProcessGeneration>, PidFileError> {
@@ -823,9 +827,31 @@ impl PidFile {
 
         let mut orphans = Vec::new();
         self.generations.retain(|generation| {
-            let identity_matches = process_start_time(generation.pid)
-                .is_some_and(|start| start == generation.start);
-            if !identity_matches {
+            // A generation is still live if EITHER its recorded root still has
+            // the identity we recorded, OR the root is gone but its session
+            // still holds processes.
+            //
+            // Requiring the root alone was wrong in the exact way this whole
+            // change exists to fix: a wrapper exits while the payload it
+            // launched keeps running, so the root vanishes and the survivor —
+            // the process actually holding the resources — would be forgotten.
+            let live_start = process_start_time(generation.pid);
+            let root_identity_matches =
+                live_start.is_some_and(|start| start == generation.start);
+            // A root pid that is ALIVE with a different start time has been
+            // handed to someone else. Its session is that stranger's session,
+            // so it can vouch for nothing — claiming it would authorize
+            // signalling processes this supervisor never spawned.
+            let root_reused = !root_identity_matches && live_start.is_some();
+            let session_alive = !root_reused
+                && generation.sid > 0
+                && !Daemon::collect_session_members(generation.sid).is_empty();
+
+            // The root being gone does NOT mean the unit is gone: a wrapper
+            // exits while the payload it launched keeps running and keeps
+            // holding the resources. The session is what still ties that
+            // survivor to us.
+            if !root_identity_matches && !session_alive {
                 return false;
             }
             if generation.state == GenerationState::Retired {
@@ -4123,6 +4149,12 @@ impl Daemon {
     fn start_all_services(&self) -> Result<(), ProcessManagerError> {
         info!("Starting all services...");
 
+        // Clear anything a previous supervisor left running BEFORE starting
+        // replacements. A survivor still owns whatever its predecessor owned,
+        // so starting on top of it just produces a second instance that fails
+        // to acquire the resource the first one is still holding.
+        self.reap_stale_generations_at_boot();
+
         let config = self.cfg();
         let order = config.service_start_order()?;
         let mut healthy_services = HashSet::new();
@@ -5375,12 +5407,6 @@ impl Daemon {
             .transpose()?;
         info!("Performing rolling restart for service: {name}");
         let _replacement = self.replacement(name);
-        if let Some(port) = crate::reconcile::service_port(service) {
-            info!(
-                "Service '{name}' uses configured port {port}; switching to immediate restart semantics."
-            );
-            return self.immediate_restart_service(name, service);
-        }
 
         let previous = self.detach_service_handle(name)?;
         let candidate_started_at = chrono::Utc::now();
@@ -7915,6 +7941,8 @@ impl Daemon {
             let mut reconciled = Self::reconcile_lost_services(&ctx);
             restarted_services.append(&mut reconciled);
 
+            Self::reap_retired_generations(&ctx);
+
             for (name, recorded_pgid) in restarted_services {
                 let live_pgid = ctx.lock_pid_file().ok().and_then(|g| g.pgid_for(&name));
                 let is_current_live = recorded_pgid.is_some()
@@ -7947,6 +7975,108 @@ impl Daemon {
     /// `try_wait` sweep never sees it crash. This reconciler re-detects such
     /// units — configured, long-running, absent from the process map, not
     /// manually stopped or suppressed — and feeds them back into the restart
+    /// Retires every generation this supervisor has no live handle for, then
+    /// reaps whatever is still running.
+    ///
+    /// At boot nothing is owned yet, so any generation left in the ledger came
+    /// from a previous supervisor. Those are exactly the processes the spawn
+    /// `pre_exec` contract promises to reap on restart.
+    fn reap_stale_generations_at_boot(&self) {
+        let tracked: HashSet<String> = self
+            .processes
+            .lock()
+            .map(|guard| guard.keys().cloned().collect())
+            .unwrap_or_default();
+
+        if let Ok(mut guard) = self.pid_file.lock() {
+            let services: Vec<String> = guard
+                .generations
+                .iter()
+                .map(|generation| generation.service.clone())
+                .collect();
+            for service in services {
+                if !tracked.contains(&service) {
+                    guard.retire_generations_for(&service, None);
+                }
+            }
+            if let Err(err) = guard.persist() {
+                warn!("Could not persist retired generations at boot: {err}");
+                return;
+            }
+        }
+
+        Self::reap_retired_generations(&self.context());
+    }
+
+    /// Terminates processes this supervisor spawned that are still alive but no
+    /// longer belong to any running unit.
+    ///
+    /// sysg deliberately declines `PR_SET_PDEATHSIG` (see the spawn `pre_exec`)
+    /// because it fires on parent-*thread* death and cascaded SIGTERM across
+    /// sibling services. The accepted cost is that a service can outlive the
+    /// supervisor, on the promise that such a process is "reaped on restart".
+    /// This is that reaping: the ledger is the only thing that still knows the
+    /// process was ours, which is why the identity has to be durable.
+    ///
+    /// Nothing here consults ports. A process is reaped because THIS supervisor
+    /// spawned it and its identity still matches — never because it happens to
+    /// hold a port some config mentions.
+    fn reap_retired_generations(ctx: &DaemonContext) {
+        // A unit mid-replacement legitimately has an old generation still
+        // winding down; reaping it here would race the restart machinery.
+        let replacing: HashSet<String> = ctx
+            .replacements
+            .lock()
+            .map(|guard| guard.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let orphans = match ctx.lock_pid_file() {
+            Ok(mut guard) => match guard.sweep_generations() {
+                Ok(orphans) => orphans,
+                Err(err) => {
+                    warn!("Could not sweep process generations: {err}");
+                    return;
+                }
+            },
+            Err(err) => {
+                warn!("Could not lock pid file to sweep generations: {err}");
+                return;
+            }
+        };
+
+        for orphan in orphans {
+            if replacing.contains(&orphan.service) {
+                continue;
+            }
+            warn!(
+                "Reaping orphaned process for '{}' (pid {}, session {}): it outlived its unit",
+                orphan.service, orphan.pid, orphan.sid
+            );
+            if let Err(err) = Self::terminate_process_tree_in_session(
+                &orphan.service,
+                orphan.pid,
+                Some(orphan.pgid),
+                Some(orphan.sid),
+            ) {
+                // The record is deliberately kept so the next tick tries again;
+                // a process we could not kill must not be forgotten.
+                warn!(
+                    "Failed to reap orphaned process for '{}' (pid {}): {err}",
+                    orphan.service, orphan.pid
+                );
+            }
+        }
+
+        // Second sweep drops the records whose processes are now confirmed
+        // gone, so the ledger does not grow without bound.
+        if let Ok(mut guard) = ctx.lock_pid_file()
+            && let Err(err) = guard.sweep_generations()
+        {
+            warn!("Could not prune reaped process generations: {err}");
+        }
+    }
+
+    /// Restarts services whose recorded process has vanished, through the normal
     /// path when their policy allows. A non-empty `restart_counts` entry acts as
     /// the in-flight guard so a restart is only triggered once per failure.
     fn reconcile_lost_services(
@@ -8551,6 +8681,79 @@ mod tests {
             assert!(
                 survivors.is_empty(),
                 "session must be empty after teardown, saw {survivors:?}"
+            );
+        });
+    }
+
+    #[test]
+    /// A generation whose ROOT died but whose session lives is still tracked.
+    ///
+    /// Requiring the recorded root to be alive was wrong in the exact shape
+    /// this work exists to fix: a wrapper exits while the payload it launched
+    /// keeps running and keeps holding the resources.
+    fn sweep_keeps_a_generation_whose_root_died_but_session_lives() {
+        with_temp_home(|_| {
+            let mut leader = Command::new(DEFAULT_SHELL);
+            leader
+                .args([
+                    "-c",
+                    "python3 -c 'import os,time; os.setpgid(0,0); time.sleep(60)' & exit 0",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                leader.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let mut leader = leader.spawn().expect("spawn leader");
+            let leader_pid = leader.id();
+            let session = leader_pid as libc::pid_t;
+            let start = process_start_time(leader_pid).unwrap_or_default();
+
+            let mut pids = PidFile::load(StateStore::for_project("generations-session"))
+                .expect("load");
+            pids.generations.push(ProcessGeneration {
+                service: "api".to_string(),
+                pid: leader_pid,
+                start,
+                sid: session,
+                pgid: leader_pid as libc::pid_t,
+                state: GenerationState::Retired,
+            });
+            pids.persist_for_test();
+
+            let _ = leader.wait();
+            thread::sleep(Duration::from_millis(400));
+
+            assert!(
+                !Daemon::pid_is_alive(leader_pid),
+                "the recorded root must be gone for this test to mean anything"
+            );
+
+            let orphans = pids.sweep_generations().expect("sweep");
+            assert_eq!(
+                orphans.len(),
+                1,
+                "a dead root with a live session is still our orphan"
+            );
+
+            Daemon::terminate_process_tree_in_session(
+                "api",
+                leader_pid,
+                Some(leader_pid as libc::pid_t),
+                Some(session),
+            )
+            .expect("reap");
+
+            let remaining = pids.sweep_generations().expect("sweep after reap");
+            assert!(
+                remaining.is_empty(),
+                "the generation is dropped once its session is empty"
             );
         });
     }
