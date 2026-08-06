@@ -39,7 +39,7 @@ use crate::{
     cron::{
         CronExecutionRecord, CronExecutionStatus, CronStateFile, PersistedCronJobState,
     },
-    daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    daemon::{HealthProbe, PidFile, ServiceLifecycleStatus, ServiceStateFile},
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary},
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind},
@@ -1206,6 +1206,7 @@ fn build_snapshot(
             lifecycle,
             process_runtime.as_ref(),
             cron.as_ref(),
+            state_entry.as_ref().and_then(|entry| entry.health),
         );
         let metrics_summary = metrics_store
             .and_then(|store| {
@@ -1551,10 +1552,20 @@ fn derive_unit_health(
     lifecycle: Option<ServiceLifecycleStatus>,
     runtime: Option<&ProcessRuntime>,
     cron: Option<&CronUnitStatus>,
+    probe: Option<HealthProbe>,
 ) -> UnitHealth {
     if let Some(runtime) = runtime {
         match runtime.state {
-            ProcessState::Running => return UnitHealth::Healthy,
+            // A live process is NOT evidence of health. For a unit that
+            // declares a health check, the probe is the evidence, and a failing
+            // probe outranks a running pid — a supervising wrapper stays alive
+            // long after the payload behind it has stopped answering.
+            ProcessState::Running => {
+                return match probe {
+                    Some(HealthProbe::Failing) => UnitHealth::Failing,
+                    _ => UnitHealth::Healthy,
+                };
+            }
             ProcessState::Zombie => {
                 return UnitHealth::Failing;
             }
@@ -3661,8 +3672,61 @@ services:
             Some(ServiceLifecycleStatus::ExitedSuccessfully),
             None,
             None,
+            None,
         );
         assert_eq!(health, UnitHealth::Healthy);
+    }
+
+    #[test]
+    /// A failing probe outranks a live pid.
+    ///
+    /// A wrapper process stays alive long after the payload behind it stops
+    /// answering, so treating `Running` as proof of health reported a unit as
+    /// healthy while nothing was actually serving.
+    fn a_running_process_that_fails_its_probe_is_failing() {
+        let runtime = ProcessRuntime {
+            pid: 1234,
+            state: ProcessState::Running,
+            user: None,
+        };
+
+        let healthy = derive_unit_health(
+            UnitKind::Service,
+            UnitState::Running,
+            UnitIntent::Serve,
+            Some(ServiceLifecycleStatus::Running),
+            Some(&runtime),
+            None,
+            Some(HealthProbe::Passing),
+        );
+        assert_eq!(healthy, UnitHealth::Healthy);
+
+        let failing = derive_unit_health(
+            UnitKind::Service,
+            UnitState::Running,
+            UnitIntent::Serve,
+            Some(ServiceLifecycleStatus::Running),
+            Some(&runtime),
+            None,
+            Some(HealthProbe::Failing),
+        );
+        assert_eq!(
+            failing,
+            UnitHealth::Failing,
+            "a live pid must not outrank a failed probe"
+        );
+
+        // No probe reported yet is not evidence of failure.
+        let unverified = derive_unit_health(
+            UnitKind::Service,
+            UnitState::Running,
+            UnitIntent::Serve,
+            Some(ServiceLifecycleStatus::Running),
+            Some(&runtime),
+            None,
+            None,
+        );
+        assert_eq!(unverified, UnitHealth::Healthy);
     }
 
     #[test]
@@ -3874,6 +3938,7 @@ services:
             None,
             None,
             Some(&cron_status),
+            None,
         );
         assert_eq!(health, UnitHealth::Healthy);
     }
@@ -3906,6 +3971,7 @@ services:
             None,
             None,
             Some(&cron_status),
+            None,
         );
         assert_eq!(health, UnitHealth::Failing);
     }
@@ -3926,6 +3992,7 @@ services:
             None,
             None,
             Some(&cron_status),
+            None,
         );
         assert_eq!(health, UnitHealth::Idle);
     }
@@ -3937,6 +4004,7 @@ services:
             UnitState::Failed,
             UnitIntent::Serve,
             Some(ServiceLifecycleStatus::ExitedWithError),
+            None,
             None,
             None,
         );
@@ -3975,6 +4043,7 @@ services:
             Some(ServiceLifecycleStatus::Skipped),
             None,
             Some(&cron_status),
+            None,
         );
 
         assert_eq!(state, UnitState::Skipped);
@@ -4013,6 +4082,7 @@ services:
             Some(ServiceLifecycleStatus::Stopped),
             None,
             None,
+            None,
         );
 
         assert_eq!(health, UnitHealth::Warn);
@@ -4027,6 +4097,7 @@ services:
             Some(ServiceLifecycleStatus::ExitedSuccessfully),
             None,
             None,
+            None,
         );
 
         assert_eq!(health, UnitHealth::Healthy);
@@ -4039,6 +4110,7 @@ services:
             UnitState::Done,
             UnitIntent::Serve,
             Some(ServiceLifecycleStatus::ExitedSuccessfully),
+            None,
             None,
             None,
         );
@@ -4077,6 +4149,7 @@ services:
             None,
             Some(&runtime),
             Some(&cron_status),
+            None,
         );
         assert_eq!(health, UnitHealth::Healthy);
     }
@@ -4096,6 +4169,7 @@ services:
             Some(ServiceLifecycleStatus::ExitedSuccessfully),
             Some(&runtime),
             None,
+            None,
         );
         assert_eq!(health, UnitHealth::Healthy);
     }
@@ -4114,6 +4188,7 @@ services:
             UnitIntent::Serve,
             Some(ServiceLifecycleStatus::Running),
             Some(&runtime),
+            None,
             None,
         );
         assert_eq!(health, UnitHealth::Warn);
@@ -4315,6 +4390,7 @@ services:
             unit.lifecycle,
             unit.process.as_ref(),
             unit.cron.as_ref(),
+            None,
         );
         assert_eq!(explain_unit_health(&unit).health, derived);
     }
@@ -4353,6 +4429,7 @@ services:
             unit.lifecycle,
             unit.process.as_ref(),
             unit.cron.as_ref(),
+            None,
         );
         assert_eq!(explain_unit_health(&unit).health, derived);
     }

@@ -35,10 +35,10 @@ use crate::{
     constants::{
         CRASH_EVIDENCE_WINDOW, DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL,
         DEFAULT_HEALTH_RETRIES, DEFAULT_SERVICE_PATH, DEFAULT_SHELL, DaemonLock,
-        DeploymentStrategy, POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY,
-        PRE_START_TIMEOUT, PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS,
-        SERVICE_POLL_INTERVAL, SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS,
-        SHELL_COMMAND_FLAG,
+        DeploymentStrategy, HEALTH_PROBE_INTERVAL, HEALTH_PROBE_TIMEOUT,
+        POST_RESTART_VERIFY_ATTEMPTS, POST_RESTART_VERIFY_DELAY, PRE_START_TIMEOUT,
+        PROCESS_CHECK_INTERVAL, PROCESS_READY_CHECKS, SERVICE_POLL_INTERVAL,
+        SERVICE_START_TIMEOUT, SESSION_SCOPED_ENV_VARS, SHELL_COMMAND_FLAG,
     },
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_managed_service_log_writers},
@@ -1387,6 +1387,24 @@ pub struct ServiceStateEntry {
     /// Signal number if the service was terminated by a signal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<i32>,
+    /// Result of the most recent health probe, for units that declare one.
+    ///
+    /// `None` means no probe has reported yet (or the unit declares no health
+    /// check), NOT that the unit is healthy. Status must distinguish "observed
+    /// healthy" from "running, unverified": reporting a live process as healthy
+    /// on the strength of its pid alone is how a wrapper whose payload had died
+    /// kept reporting `Healthy` with nothing serving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthProbe>,
+}
+
+/// Outcome of the most recent health probe for a unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HealthProbe {
+    /// The configured probe succeeded.
+    Passing,
+    /// The configured probe failed.
+    Failing,
 }
 
 /// Wrapper for state entries to make them XML-safe
@@ -1496,6 +1514,7 @@ impl ServiceStateFile {
                 pid,
                 exit_code,
                 signal,
+                health: None,
             },
         );
     }
@@ -1564,6 +1583,15 @@ impl ServiceStateFile {
     ) -> Result<(), ServiceStateError> {
         let _lock = self.acquire_lock()?;
         self.reload_locked()?;
+        // A lifecycle write must not silently assert anything about health. The
+        // probe result is carried over only while the unit keeps running; any
+        // other transition clears it, so a stale `Passing` can never outlive the
+        // process it described.
+        let health = self
+            .services
+            .get(service_hash)
+            .filter(|_| matches!(status, ServiceLifecycleStatus::Running))
+            .and_then(|entry| entry.health);
         self.services.insert(
             service_hash.to_string(),
             ServiceStateEntry {
@@ -1571,8 +1599,23 @@ impl ServiceStateFile {
                 pid,
                 exit_code,
                 signal,
+                health,
             },
         );
+        self.save()
+    }
+
+    /// Records the outcome of a health probe without disturbing the lifecycle.
+    pub fn set_health(
+        &mut self,
+        service_hash: &str,
+        health: HealthProbe,
+    ) -> Result<(), ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
+        if let Some(entry) = self.services.get_mut(service_hash) {
+            entry.health = Some(health);
+        }
         self.save()
     }
 
@@ -7698,6 +7741,10 @@ impl Daemon {
 
     /// Monitors all running services and restarts them if they exit unexpectedly.
     fn monitor_loop(ctx: DaemonContext) {
+        // Probes are paced independently of the monitor tick: liveness is cheap
+        // to check every couple of seconds, but a declared health check is a
+        // real request against the service and must not run that often.
+        let mut last_health_sweep = Instant::now();
         while ctx.running.load(Ordering::SeqCst) {
             let mut exited_services = Vec::new();
             let mut restarted_services: Vec<(String, Option<libc::pid_t>)> = Vec::new();
@@ -7961,6 +8008,11 @@ impl Daemon {
                 }
             }
 
+            if last_health_sweep.elapsed() >= HEALTH_PROBE_INTERVAL {
+                last_health_sweep = Instant::now();
+                Self::probe_declared_health(&ctx);
+            }
+
             thread::sleep(Duration::from_secs(2));
         }
 
@@ -7975,6 +8027,105 @@ impl Daemon {
     /// `try_wait` sweep never sees it crash. This reconciler re-detects such
     /// units — configured, long-running, absent from the process map, not
     /// manually stopped or suppressed — and feeds them back into the restart
+    /// Re-runs each running unit's declared health check and records the result.
+    ///
+    /// A health check was only ever evaluated at startup, so a unit that passed
+    /// once and later stopped serving kept its verdict indefinitely. Combined
+    /// with status treating a live pid as healthy, a wrapper process whose
+    /// payload had died reported `Running`/`Healthy` while nothing answered.
+    ///
+    /// A failure does NOT decide policy here. The unit is stopped exactly as a
+    /// failed startup probe stops it, and `restart_policy` remains the single
+    /// authority on whether it comes back.
+    fn probe_declared_health(ctx: &DaemonContext) {
+        let running: Vec<String> = match ctx.lock_processes() {
+            Ok(guard) => guard.keys().cloned().collect(),
+            Err(_) => return,
+        };
+
+        for name in running {
+            let Some(service) = ctx.config.services.get(&name) else {
+                continue;
+            };
+            // Cron units are judged by their run history, not by availability.
+            if service.cron.is_some() {
+                continue;
+            }
+            let Some(health_check) = service
+                .deployment
+                .as_ref()
+                .and_then(|deployment| deployment.health_check.as_ref())
+            else {
+                continue;
+            };
+            // Only URL probes run on the sweep. A command probe spawns a
+            // process, which is too heavy to repeat on a timer and would
+            // interleave with the unit's own lifecycle.
+            let Some(url) = health_check.url.as_deref() else {
+                continue;
+            };
+            // A unit being replaced or restarted is expected to be briefly
+            // unavailable; probing it would report a failure that is really
+            // just a restart in progress.
+            if ctx
+                .replacements
+                .lock()
+                .map(|guard| guard.contains(&name))
+                .unwrap_or(false)
+                || ctx
+                    .lock_restart_in_flight()
+                    .map(|guard| guard.contains(&name))
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let timeout = health_check
+                .attempt_timeout
+                .as_deref()
+                .and_then(|raw| Self::parse_duration(raw).ok())
+                .unwrap_or(HEALTH_PROBE_TIMEOUT);
+            let Ok(client) = Client::builder().timeout(timeout).build() else {
+                continue;
+            };
+            let passing = Self::perform_health_check(&client, url).unwrap_or(false);
+
+            let key = ctx.config.state_key(&name);
+            if let Ok(mut guard) = ctx.lock_state_file()
+                && let Err(err) = guard.set_health(
+                    &key,
+                    if passing {
+                        HealthProbe::Passing
+                    } else {
+                        HealthProbe::Failing
+                    },
+                )
+            {
+                warn!("Could not record health probe for '{name}': {err}");
+            }
+
+            if !passing {
+                warn!(
+                    "Service '{name}' is running but failed its health check; stopping it so \
+                     restart_policy decides what happens next"
+                );
+                if let Err(err) = Self::stop_service_with_handles(
+                    &name,
+                    &ctx.processes,
+                    &ctx.pid_file,
+                    &ctx.state_file,
+                    &ctx.config,
+                    ctx.timeouts
+                        .read()
+                        .map(|guard| guard.stop_verify_timeout())
+                        .unwrap_or(SERVICE_START_TIMEOUT),
+                ) {
+                    warn!("Failed to stop unhealthy service '{name}': {err}");
+                }
+            }
+        }
+    }
+
     /// Retires every generation this supervisor has no live handle for, then
     /// reaps whatever is still running.
     ///
