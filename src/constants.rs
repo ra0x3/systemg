@@ -163,6 +163,16 @@ pub const PROCESS_READY_CHECKS: usize = 10;
 /// Interval between process readiness checks.
 pub const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How often a running unit's declared health check is re-run.
+///
+/// Slower than the monitor tick on purpose: a probe is a real request against
+/// the service, not a cheap liveness check.
+pub const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Per-attempt timeout for a periodic health probe when the unit does not
+/// declare its own.
+pub const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Maximum time to wait for a service to start before timing out.
 /// Applied during service initialization and health checks.
 pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
