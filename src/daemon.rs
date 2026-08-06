@@ -5450,6 +5450,16 @@ impl Daemon {
             .transpose()?;
         info!("Performing rolling restart for service: {name}");
         let _replacement = self.replacement(name);
+        // A rolling restart overlaps the replacement with the outgoing
+        // instance, which cannot work when both bind the same port. Falling
+        // back to immediate is what keeps `strategy: rolling` on a fixed-port
+        // service from failing with EADDRINUSE on every restart.
+        if let Some(port) = crate::restart::plan::service_port(service) {
+            info!(
+                "Service '{name}' uses configured port {port}; switching to immediate restart semantics."
+            );
+            return self.immediate_restart_service(name, service);
+        }
 
         let previous = self.detach_service_handle(name)?;
         let candidate_started_at = chrono::Utc::now();

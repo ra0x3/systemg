@@ -15,9 +15,57 @@
 use std::path::PathBuf;
 
 use crate::{
+    config::ServiceConfig,
     diag::{Diagnostic, SgCode},
     selector::{ProjectMismatch, Target, resolve_target},
 };
+
+/// Extracts the TCP port a service is expected to bind, from its health-check
+/// URL or a `PORT` entry in its environment.
+///
+/// This decides a restart STRATEGY, never a kill. A rolling restart runs the
+/// replacement before retiring the outgoing instance, which two processes
+/// cannot do on one port — so a unit that declares `rolling` alongside a fixed
+/// port is asking for something the kernel will not allow, and is restarted
+/// immediately instead.
+///
+/// Deliberately NOT used to decide ownership of a port: sysg is a generic
+/// process composer, and a health-check URL says where to probe, not that the
+/// unit owns that port or may kill whoever holds it. Being wrong here costs a
+/// slower restart; being wrong about a kill costs somebody else's process.
+pub fn service_port(service: &ServiceConfig) -> Option<u16> {
+    if let Some(port) = service
+        .deployment
+        .as_ref()
+        .and_then(|deployment| deployment.health_check.as_ref())
+        .and_then(|health| health.url.as_deref())
+        .and_then(port_from_url)
+    {
+        return Some(port);
+    }
+    port_from_env(service)
+}
+
+/// Parses the port out of an `http://host:port/...` style URL.
+fn port_from_url(url: &str) -> Option<u16> {
+    let without_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    host_port.rsplit(':').next().and_then(|p| p.parse().ok())
+}
+
+/// Reads a `PORT` value from a service's declared environment.
+fn port_from_env(service: &ServiceConfig) -> Option<u16> {
+    service
+        .env
+        .as_ref()
+        .and_then(|env| env.vars.as_ref())
+        .and_then(|vars| vars.get("PORT"))
+        .and_then(|value| value.parse().ok())
+}
 
 /// What a `restart` invocation targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +244,16 @@ mod tests {
 
     fn cfg() -> PathBuf {
         PathBuf::from("/x/systemg.yaml")
+    }
+
+    #[test]
+    /// A fixed port is what forces a rolling restart down to immediate.
+    fn parses_port_from_health_url() {
+        assert_eq!(port_from_url("http://127.0.0.1:8100/health"), Some(8100));
+        assert_eq!(port_from_url("https://api.example.com:443/x"), Some(443));
+        // No port in the authority means nothing to collide on, so a rolling
+        // restart is left alone.
+        assert_eq!(port_from_url("http://localhost/health"), None);
     }
 
     #[test]
