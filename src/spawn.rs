@@ -237,6 +237,12 @@ impl DynamicSpawnManager {
         Ok(())
     }
 
+    /// Retires a service's spawn authorization, for definitions that dropped
+    /// their limits.
+    pub fn unregister_service(&self, service_name: &str) {
+        lock_recover(&self.spawn_trees).remove(service_name);
+    }
+
     /// Associates a service PID with its service name.
     pub fn register_service_pid(&self, service_name: String, pid: u32) {
         let mut service_pids = lock_recover(&self.service_pids);

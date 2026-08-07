@@ -5906,8 +5906,8 @@ fn progress_target(command: &ControlCommand) -> String {
         ControlCommand::AddProject { .. } => ("Starting", None, None),
         _ => ("Working", None, None),
     };
-    let target = project
-        .or(service)
+    let target = service
+        .or(project)
         .map(|name| format!(" '{name}'"))
         .unwrap_or_default();
     format!("{head}{target}")
