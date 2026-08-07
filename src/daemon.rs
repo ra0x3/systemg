@@ -7749,6 +7749,17 @@ impl Daemon {
         self.wait_for_monitor();
     }
 
+    /// Bounces the monitor thread so it captures the daemon's current config.
+    ///
+    /// The monitor clones the config `Arc` when it spawns, so a config swapped
+    /// underneath it — a targeted restart adopting the target's changed
+    /// definition — would otherwise be supervised under the stale one: a crash
+    /// after the swap respawned the OLD command.
+    pub fn refresh_monitor(&self) -> Result<(), ProcessManagerError> {
+        self.shutdown_monitor();
+        self.spawn_monitor_thread()
+    }
+
     /// Monitors all running services and restarts them if they exit unexpectedly.
     fn monitor_loop(ctx: DaemonContext) {
         // Probes are paced independently of the monitor tick: liveness is cheap

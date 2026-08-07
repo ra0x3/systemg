@@ -319,15 +319,24 @@ struct OpWatch {
 
 impl Drop for OpWatch {
     fn drop(&mut self) {
-        let journal = self
-            .journals
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.op);
-        if let Some(journal) = journal {
-            let (started, failed) = journal.tally();
-            journal.push(BootFrame::Done { started, failed });
-        }
+        remove_and_seal_journal(&self.journals, &self.op);
+    }
+}
+
+/// Removes an operation's journal and seals it with a terminal frame.
+///
+/// Sealing is not optional: a subscriber holds its own clone of the journal,
+/// so removal alone leaves it waiting forever on frames that can no longer
+/// arrive. Every path that retires a journal — completion, a failed enqueue,
+/// a supervisor that died before replying — must go through this.
+fn remove_and_seal_journal(journals: &RwLock<HashMap<String, BootJournal>>, op: &str) {
+    let journal = journals
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(op);
+    if let Some(journal) = journal {
+        let (started, failed) = journal.tally();
+        journal.push(BootFrame::Done { started, failed });
     }
 }
 
@@ -2673,6 +2682,19 @@ impl Supervisor {
             return;
         }
 
+        // The journal is registered HERE, at enqueue, not when the event loop
+        // dequeues the mutation: a command queued behind a slow one waits
+        // longer than the subscriber's registration timeout, and its watching
+        // client rendered a bare spinner with no tree at all.
+        let queued_op = Self::op_id(&command);
+        if let Some(op) = &queued_op {
+            read_ctx
+                .op_journals
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(op.clone())
+                .or_default();
+        }
         let (reply_tx, reply_rx) = mpsc::channel();
         let (delivered_tx, delivered_rx) = mpsc::channel();
         let request = MutationRequest {
@@ -2681,6 +2703,9 @@ impl Supervisor {
             delivered: delivered_rx,
         };
         if mutation_tx.send(request).is_err() {
+            if let Some(op) = &queued_op {
+                remove_and_seal_journal(&read_ctx.op_journals, op);
+            }
             let _ = ipc::write_response(
                 &mut stream,
                 &ControlResponse::Error("supervisor is shutting down".into()),
@@ -2693,6 +2718,9 @@ impl Supervisor {
                 let _ = delivered_tx.send(delivered);
             }
             Err(_) => {
+                if let Some(op) = &queued_op {
+                    remove_and_seal_journal(&read_ctx.op_journals, op);
+                }
                 let delivered = ipc::write_response(
                     &mut stream,
                     &ControlResponse::Error(
@@ -3718,11 +3746,16 @@ impl Supervisor {
             // seals on its terminal frame, so reusing it would silently discard
             // the progress of everything after the first boot.
             let _watch = Self::op_id(&command).map(|op| {
-                let journal = crate::start::BootJournal::new();
-                self.op_journals
+                // Reuses the journal the connection thread registered at
+                // enqueue; subscribers may already be streaming it, so a fresh
+                // one here would strand them on an object nobody writes to.
+                let journal = self
+                    .op_journals
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(op.clone(), journal.clone());
+                    .entry(op.clone())
+                    .or_default()
+                    .clone();
                 // Published for the length of the command so a handler that
                 // spawns work outliving it — `AddProject` queues its boots onto
                 // their own threads — can attach those daemons to this journal
@@ -3895,16 +3928,25 @@ impl Supervisor {
             .or_else(|| service.and_then(|s| split_project_selector(s).map(|(p, _)| p)))
     }
 
-    /// Splits a target into head line and nested unit: the project owns the head
-    /// line when one is named, and the service nests beneath it.
+    /// Splits a target into head line and nested unit: the service owns the
+    /// head line when one is named — a targeted restart must never read as a
+    /// project-wide one — and the project heads the line only for project-wide
+    /// operations.
     fn target_parts(verb: &str, service: Option<&str>, project: Option<&str>) -> OpParts {
         match (project, service) {
-            (Some(project), unit) => OpParts {
+            (Some(project), Some(service)) => OpParts {
+                verb: verb.to_string(),
+                target: service.to_string(),
+                unit: None,
+                project: Some(project.to_string()),
+                service: Some(service.to_string()),
+            },
+            (Some(project), None) => OpParts {
                 verb: verb.to_string(),
                 target: project.to_string(),
-                unit: unit.map(str::to_string),
+                unit: None,
                 project: Some(project.to_string()),
-                service: unit.map(str::to_string),
+                service: None,
             },
             (None, Some(service)) => OpParts {
                 verb: verb.to_string(),
@@ -5649,16 +5691,18 @@ impl Supervisor {
 
         let primary_project = self.daemon.config().project.id.clone();
         if target_project == primary_project {
-            let old = self.daemon.config();
-            let diff = crate::restart::ManifestDiff::compute(old.as_ref(), &config);
-            if !diff.is_empty() {
-                let affected = Self::reconcile_targets(&config, &diff)?;
-                self.reconcile_primary_project(config)?;
-                self.config_path = resolved;
-                ipc::write_config_hint(&self.config_path)?;
-                if affected.contains(service_name) {
-                    return Ok(());
-                }
+            if let Some(adopted) =
+                Self::adopt_service_config(&self.daemon.config(), &config, service_name)
+            {
+                Self::validate_adoption(&self.daemon.config(), &adopted, service_name)?;
+                Self::sync_adopted_spawn_limits(
+                    &self.spawn_manager,
+                    &adopted,
+                    service_name,
+                )?;
+                self.daemon.set_config(adopted);
+                self.daemon.refresh_monitor()?;
+                self.respawn_metrics_collector()?;
             }
             let live = self.daemon.config();
             return Self::cascade_restart(
@@ -5672,28 +5716,19 @@ impl Supervisor {
         if !self.extra_projects.contains_key(&target_project) {
             return self.add_extra_project(config, resolved);
         }
-        let old = self
-            .extra_projects
-            .get(&target_project)
-            .map(|runtime| runtime.daemon.config())
-            .ok_or_else(|| {
-                ProcessManagerError::Diag(Box::new(crate::stop::project_not_found(
-                    &target_project,
-                )))
-            })?;
-        let diff = crate::restart::ManifestDiff::compute(old.as_ref(), &config);
-        if !diff.is_empty() {
-            let affected = Self::reconcile_targets(&config, &diff)?;
-            self.reconcile_extra_project(config, resolved)?;
-            if affected.contains(service_name) {
-                return Ok(());
-            }
-        }
         let runtime = self.extra_projects.get(&target_project).ok_or_else(|| {
             ProcessManagerError::Diag(Box::new(crate::stop::project_not_found(
                 &target_project,
             )))
         })?;
+        if let Some(adopted) =
+            Self::adopt_service_config(&runtime.daemon.config(), &config, service_name)
+        {
+            Self::validate_adoption(&runtime.daemon.config(), &adopted, service_name)?;
+            Self::sync_adopted_spawn_limits(&self.spawn_manager, &adopted, service_name)?;
+            runtime.daemon.set_config(adopted);
+            runtime.daemon.refresh_monitor()?;
+        }
         let live = runtime.daemon.config();
         Self::cascade_restart(
             &runtime.daemon,
@@ -5701,6 +5736,131 @@ impl Supervisor {
             service_name,
             &target_project,
         )
+    }
+
+    /// Refuses an adoption that would change the project's structure rather
+    /// than one service's own definition.
+    ///
+    /// The adopted config is live-plus-target, so a manifest that also ADDED
+    /// a new dependency produces a hybrid where the dependency exists on disk
+    /// but not in the running set — starting the target against it would wait
+    /// on a service nothing is going to run. The same goes for a service that
+    /// switched between cron and plain kinds (the scheduler's routing would go
+    /// stale), and for a dependency graph the hybrid can no longer order.
+    /// Structural changes belong to a project-wide restart, and the refusal
+    /// says so before anything is touched.
+    fn validate_adoption(
+        live: &Config,
+        adopted: &Config,
+        service: &str,
+    ) -> Result<(), SupervisorError> {
+        let Some(declared) = adopted.services.get(service) else {
+            return Ok(());
+        };
+        let was_cron = live
+            .services
+            .get(service)
+            .is_some_and(|running| running.cron.is_some());
+        if was_cron != declared.cron.is_some() {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::manifest_rejected(format!(
+                    "service '{service}' changed between cron and plain kinds; \
+restart the project to apply structural changes"
+                )),
+            ))
+            .into());
+        }
+        if let Some(dependencies) = &declared.depends_on {
+            for dependency in dependencies {
+                let name = dependency.service();
+                if !adopted.services.contains_key(name) {
+                    return Err(ProcessManagerError::Diag(Box::new(
+                        crate::restart::manifest_rejected(format!(
+                            "service '{service}' now depends on '{name}', which the \
+running project does not declare; restart the project to apply structural changes"
+                        )),
+                    ))
+                    .into());
+                }
+            }
+        }
+        adopted.service_start_order().map_err(|err| {
+            ProcessManagerError::Diag(Box::new(crate::restart::manifest_rejected(
+                err.to_string(),
+            )))
+        })?;
+        Ok(())
+    }
+
+    /// Brings the spawn manager in line with the adopted service definition:
+    /// new limits replace the old tree, and a definition that dropped its
+    /// limits — or its dynamic mode — retires the tree instead of leaving the
+    /// stale authorization behind.
+    fn sync_adopted_spawn_limits(
+        spawn_manager: &DynamicSpawnManager,
+        adopted: &Config,
+        service: &str,
+    ) -> Result<(), SupervisorError> {
+        let spawn = adopted
+            .services
+            .get(service)
+            .and_then(|declared| declared.spawn.as_ref());
+        let limits = spawn
+            .filter(|spawn| matches!(spawn.mode, Some(SpawnMode::Dynamic)))
+            .and_then(|spawn| spawn.limits.as_ref());
+        match limits {
+            Some(limits) => {
+                spawn_manager.register_service(service.to_string(), limits)?
+            }
+            None => spawn_manager.unregister_service(service),
+        }
+        Ok(())
+    }
+
+    /// Respawns the primary metrics collector so it samples with the current
+    /// config. The collector captures its `Arc<Config>` at spawn, so an
+    /// adoption that changed a unit's hash would otherwise leave it sampling
+    /// under the old identity. Deliberately does NOT touch the daemon monitor:
+    /// shutting that down without a path that respawns it is how services end
+    /// up unmanaged.
+    fn respawn_metrics_collector(&mut self) -> Result<(), SupervisorError> {
+        if let Some(collector) = self.metrics_collector.take() {
+            collector.stop();
+        }
+        self.metrics_collector = Some(MetricsCollector::spawn(
+            self.metrics_store.clone(),
+            self.daemon.config(),
+            self.daemon.pid_file_handle(),
+            self.daemon.service_state_handle(),
+        )?);
+        Ok(())
+    }
+
+    /// The live config with only `service`'s declaration replaced by its
+    /// definition in `manifest`, or `None` when the two already agree.
+    ///
+    /// A targeted restart adopts the target's own changed config on the bounce,
+    /// and nothing else: the selector decides the blast radius, the manifest
+    /// only supplies the target's definition. Adopting the rest of the manifest
+    /// here is what silently escalated `restart -s X` into a project-wide
+    /// reconcile whenever anything on disk had drifted.
+    fn adopt_service_config(
+        live: &Config,
+        manifest: &Config,
+        service: &str,
+    ) -> Option<Config> {
+        let declared = manifest.services.get(service)?;
+        let changed = live
+            .services
+            .get(service)
+            .is_none_or(|running| running.compute_hash() != declared.compute_hash());
+        changed.then(|| {
+            let mut adopted = live.clone();
+            adopted
+                .services
+                .insert(service.to_string(), declared.clone());
+            adopted
+        })
     }
 
     /// Stops one service in the selected project without touching unrelated projects.

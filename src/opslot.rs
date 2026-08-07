@@ -26,11 +26,12 @@ pub struct OpReport {
     /// prose fields, still deserializes against a newer CLI.
     #[serde(default)]
     pub verb: Option<String>,
-    /// What the operation acts on as a whole — the project when one is named,
-    /// otherwise the lone service.
+    /// What the operation acts on as a whole — the service when one is named,
+    /// otherwise the project, otherwise "all services".
     #[serde(default)]
     pub target: Option<String>,
-    /// The specific service currently being worked, nested under `target`.
+    /// The specific service currently being worked, nested under `target`
+    /// when the head line does not already name it.
     #[serde(default)]
     pub unit: Option<String>,
     /// What that unit is waiting on, with the unit's own name omitted.
@@ -138,9 +139,12 @@ impl Op {
 pub struct OpParts {
     /// Verb naming the mutation, e.g. "restarting".
     pub verb: String,
-    /// Project when one is named, otherwise the lone service.
+    /// Service when one is named — a targeted operation heads with its
+    /// target, never its project — otherwise the project, otherwise "all
+    /// services".
     pub target: String,
-    /// Service nested under `target`, when a project owns the head line.
+    /// Service nested under `target`, when the head line does not already
+    /// name it.
     pub unit: Option<String>,
     /// Project the command named, used to match details exactly.
     pub project: Option<String>,
