@@ -40,12 +40,33 @@ working stack is left untouched.
 | `-c` | `--config` | Path to the configuration file. When specified, reloads the configuration and restarts all services with the new settings |
 | `-s` | `--service` | Name of a specific service to restart. If not specified, all services are restarted |
 | `-p` | `--project` | Target a stable project id when restarting services |
-| `-` | `--daemonize` | Start the supervisor before restarting if it is not already running |
+| `-` | `--daemonize` | Start the supervisor first if none is running. No effect on supervision when one already is |
 | `-v` | `--verbose` | Print per-service operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--drop-privileges` | Drop child service privileges during spawn. In root/system mode, services without an explicit `user` run as `nobody` |
 | `-` | `--plain` | Disable terminal decoration for automation |
 | `-` | `--log-level` | Set logging verbosity for this invocation. Accepts named levels (`trace`, `debug`, `info`, `warn`, `error`, `off`) or numeric values (5-0) |
+
+<Info>
+**`--daemonize` only matters when no supervisor is running.** It decides how a
+restart recovers from a missing daemon, not how services are supervised
+afterward.
+
+- **No supervisor running.** Without the flag, the restart runs as a local
+  one-shot and leaves the box unsupervised. With it, systemg starts a
+  supervisor and restarts under it.
+- **Supervisor already running.** Both forms send the identical restart to the
+  resident supervisor. Services stay daemonized either way, so passing
+  `--daemonize` to an already-daemonized stack changes nothing about the
+  result. A version-drift recycle is also decided before the flag is read, so
+  it behaves the same with or without it.
+
+The flag is not free, though. A plain `restart` watches the operation, prints
+the progress tree, and waits for the real outcome. `--daemonize` sends
+fire-and-forget on a 250 ms acknowledgement and treats "accepted" as success —
+so it can exit `0` on a restart that fails moments later, and it prints no
+progress tree.
+</Info>
 
 ## Examples
 
@@ -126,13 +147,23 @@ restart instead of launching a candidate that cannot bind. Use blue-green slots
 when fixed-port zero downtime is required. Services without rolling deployment
 stop and then start.
 
-For deployment scripts, prefer:
+For deployment scripts, pick the form by what the exit code needs to mean:
 
 ```sh
 sysg restart --config <config> --daemonize
 ```
 
-This keeps restart behavior explicit when supervisor detection is unavailable.
+Use this when the supervisor may be down and the deploy must restore
+daemonized supervision regardless. It returns as soon as the supervisor accepts
+the request, so a `0` means "accepted", not "restarted".
+
+```sh
+sysg restart --config <config>
+```
+
+Use this when the supervisor is known to be up and the script should fail on a
+failed restart. It waits for the operation to finish and reports the real
+outcome.
 
 ## See also
 

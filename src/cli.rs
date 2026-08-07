@@ -255,6 +255,9 @@ pub enum Commands {
         project: Option<String>,
 
         /// Start the supervisor before restarting if it isn't already running.
+        /// No effect on supervision when one already is: the restart is sent to
+        /// the resident supervisor either way. Returns on acknowledgement
+        /// rather than waiting for the restart to finish.
         #[arg(long)]
         daemonize: bool,
     },
