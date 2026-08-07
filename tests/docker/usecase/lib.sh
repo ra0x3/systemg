@@ -83,6 +83,24 @@ http_get() {
 # stderr_has_code <code> <file> -> exit 0 if the captured stderr names the code.
 stderr_has_code() { grep -q "$1" "$2"; }
 
+# Dumps the evidence a RED run needs to be diagnosed from CI logs alone:
+# the supervisor log, the state files, and the live process table. A flaky
+# failure that prints only "FAIL: <label>" is unreproducible by the time
+# anyone reads it; the dump is what turns one CI occurrence into a diagnosis.
+dump_diagnostics() {
+  section "DIAGNOSTICS (RED run)"
+  echo "--- ps -eo pid,ppid,args ---"
+  ps -eo pid,ppid,args 2>/dev/null || true
+  local state_dir="$HOME/.local/share/systemg"
+  for f in "$state_dir"/projects/*/pid.xml "$state_dir"/projects/*/state.xml; do
+    [ -f "$f" ] || continue
+    echo "--- $f ---"
+    cat "$f"
+  done
+  echo "--- supervisor log (tail) ---"
+  sysg logs --supervisor 2>/dev/null | tail -100 || true
+}
+
 finish() {
   section "RESULT"
   echo "passed: $PASS  failed: $FAIL"
@@ -90,6 +108,7 @@ finish() {
     echo "=> GREEN"
     exit 0
   fi
+  dump_diagnostics
   echo "=> RED"
   exit 1
 }
