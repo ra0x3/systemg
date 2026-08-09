@@ -1,4 +1,4 @@
-//! Lightweight process manager for Unix services.
+//! An agent-friendly general process composer.
 
 #![warn(unused_crate_dependencies)]
 #[cfg(test)]
