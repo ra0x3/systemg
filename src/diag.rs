@@ -246,7 +246,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 51] = [
+    pub const ALL: [SgCode; 57] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -293,11 +293,17 @@ impl SgCode {
         SgCode::PurgeSupervisorActive,
         SgCode::PurgeIncomplete,
         SgCode::PurgeProjectNotFound,
+        SgCode::PurgeTargetInvalid,
         SgCode::UpgradeTargetInvalid,
         SgCode::UpgradeIncompatible,
         SgCode::UpgradeEnvironmentUnsafe,
         SgCode::UpgradeHandoffFailed,
         SgCode::UpgradeResumeFailed,
+        SgCode::MigrationRequired,
+        SgCode::MigrationSupervisorActive,
+        SgCode::MigrationAmbiguous,
+        SgCode::MigrationIncomplete,
+        SgCode::MigrationVerificationFailed,
     ];
 }
 
@@ -661,6 +667,29 @@ mod tests {
                 code.as_str()
             );
             assert_eq!(code.as_str().parse(), Ok(code));
+        }
+    }
+
+    #[test]
+    fn every_code_is_listed_in_all() {
+        // `FromStr` and `Deserialize` both search `ALL`, so a variant missing
+        // from it is unparseable even though `as_str` yields its code. Read the
+        // `as_str` arms straight from the source so a new variant that is never
+        // added to `ALL` fails here instead of at a caller.
+        let src = include_str!("diag.rs");
+        let declared: Vec<&str> = src
+            .lines()
+            .filter_map(|line| line.split_once("=> \"SG"))
+            .filter_map(|(_, rest)| rest.split_once('"'))
+            .map(|(code, _)| code)
+            .collect();
+        assert_eq!(declared.len(), SgCode::ALL.len());
+        for code in declared {
+            let code = format!("SG{code}");
+            assert!(
+                code.parse::<SgCode>().is_ok(),
+                "{code} is not reachable through SgCode::ALL"
+            );
         }
     }
 
