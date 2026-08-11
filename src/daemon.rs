@@ -1798,14 +1798,32 @@ fn wait_with_epoch(
         }) {
             return Ok(None);
         }
-        match child.try_wait()? {
-            Some(status) => return Ok(Some(status)),
-            None => {
+        if crate::runtime::init_mode()
+            && let Some(status) = crate::reaper::take(child.id() as i32)
+        {
+            return Ok(Some(status));
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {
                 if Instant::now() >= deadline {
                     return Ok(None);
                 }
                 thread::sleep(COMMAND_WAIT_POLL_INTERVAL);
             }
+            Err(err)
+                if crate::runtime::init_mode()
+                    && err.raw_os_error() == Some(libc::ECHILD) =>
+            {
+                if let Some(status) = crate::reaper::take(child.id() as i32) {
+                    return Ok(Some(status));
+                }
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                thread::sleep(COMMAND_WAIT_POLL_INTERVAL);
+            }
+            Err(err) => return Err(err),
         }
     }
 }
@@ -2057,16 +2075,49 @@ impl ManagedChild {
         self.pid
     }
 
-    /// Checks for process completion without blocking.
+    /// Checks for process completion without blocking. In container-init mode
+    /// the broker is the only reaper, so the mailbox is consulted first and an
+    /// ECHILD from the std handle means the broker got there first.
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
-        if let Some(child) = self.child.as_mut() {
-            return child.try_wait();
+        if crate::runtime::init_mode()
+            && let Some(status) = crate::reaper::take(self.pid as i32)
+        {
+            return Ok(Some(status));
         }
-        self.wait_with_flags(libc::WNOHANG)
+        let result = if let Some(child) = self.child.as_mut() {
+            child.try_wait()
+        } else {
+            self.wait_with_flags(libc::WNOHANG)
+        };
+        if crate::runtime::init_mode()
+            && let Err(err) = &result
+            && err.raw_os_error() == Some(libc::ECHILD)
+            && let Some(status) = crate::reaper::take(self.pid as i32)
+        {
+            return Ok(Some(status));
+        }
+        result
     }
 
-    /// Waits until the managed process exits and returns its status.
+    /// Waits until the managed process exits and returns its status. In
+    /// container-init mode this polls the broker mailbox alongside the handle
+    /// so a broker-reaped status is never lost.
     fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        if crate::runtime::init_mode() {
+            loop {
+                if let Some(status) = crate::reaper::take(self.pid as i32) {
+                    return Ok(status);
+                }
+                match self.try_wait() {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) => thread::sleep(Duration::from_millis(20)),
+                    Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
         if let Some(child) = self.child.as_mut() {
             return child.wait();
         }
@@ -8064,6 +8115,7 @@ impl Daemon {
                 Self::probe_declared_health(&ctx);
             }
 
+            crate::reaper::sweep_orphans();
             Self::wait_for_monitor_tick(&ctx, Duration::from_secs(2));
         }
 

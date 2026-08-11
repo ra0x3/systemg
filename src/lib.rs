@@ -71,6 +71,9 @@ pub mod test_utils;
 /// Runtime paths and modes.
 pub mod runtime;
 
+/// PID 1 wait broker for container-init mode.
+pub mod reaper;
+
 /// Per-project on-disk state layout.
 pub mod state_store;
 
