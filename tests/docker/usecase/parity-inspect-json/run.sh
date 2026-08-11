@@ -31,6 +31,23 @@ PY
   [ -s /tmp/shape.$MODE ]
   check "$?" "[$MODE] inspect JSON parsed with fields"
 
+  IPID="$(python3 - /tmp/inspect.$MODE.json <<'PY'
+import json,sys
+def pids(n):
+    if isinstance(n,dict):
+        for k,v in n.items():
+            if k=="pid" and isinstance(v,int): yield v
+            else: yield from pids(v)
+    elif isinstance(n,list):
+        for v in n: yield from pids(v)
+data=json.loads(open(sys.argv[1]).read())
+found=list(pids(data))
+print(found[0] if found else 0)
+PY
+)"
+  [ "$IPID" != "0" ] && pid_alive "$IPID"
+  check "$?" "[$MODE] inspect reports a live pid ($IPID)"
+
   mode_end
 done
 

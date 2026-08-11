@@ -7,9 +7,9 @@ use std::convert::TryInto;
 use std::fs;
 use std::{collections::HashMap, io, path::PathBuf};
 
-use libc::{RLIM_INFINITY, RLIMIT_MEMLOCK, c_int, id_t, rlimit};
 #[cfg(target_os = "linux")]
-use libc::{c_uint, size_t};
+use libc::size_t;
+use libc::{RLIM_INFINITY, RLIMIT_MEMLOCK, c_int, id_t, rlimit};
 #[cfg(target_os = "linux")]
 use nix::errno::Errno;
 use nix::unistd::{Group, Uid, User, getgid, getuid};
@@ -573,7 +573,7 @@ fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
     };
 
     #[cfg(target_os = "linux")]
-    let res = unsafe { libc::setrlimit(which as c_uint, &rlim as *const rlimit) };
+    let res = unsafe { libc::setrlimit(which as _, &rlim as *const rlimit) };
     #[cfg(not(target_os = "linux"))]
     let res = unsafe { libc::setrlimit(which, &rlim as *const rlimit) };
     if res != 0 {

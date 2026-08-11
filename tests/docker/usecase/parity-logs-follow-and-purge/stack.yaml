@@ -4,4 +4,4 @@ projects:
     name: Demo
     services:
       chatty:
-        command: "sh -c 'while true; do echo tick; sleep 1; done'"
+        command: "sh -c 'while true; do date +tick-%s%N; sleep 1; done'"

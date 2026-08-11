@@ -31,6 +31,12 @@ for MODE in user sys; do
   [ "$(unit_field "$S" ticker name)" = "ticker" ]
   check "$?" "[$MODE] cron unit visible in status"
 
+  N1="$(wc -l < /tmp/cron_fired.log)"
+  sleep 4
+  N2="$(wc -l < /tmp/cron_fired.log)"
+  [ "$N2" -gt "$N1" ]
+  check "$?" "[$MODE] cron keeps recording runs while live ($N1 -> $N2)"
+
   msysg stop --config "$CONFIG"
   check "$?" "[$MODE] stop exits 0"
   sleep 2
