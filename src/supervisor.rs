@@ -3708,6 +3708,13 @@ impl Supervisor {
                 delivered,
             } = request;
             if let ControlCommand::Upgrade { binary } = command {
+                if crate::runtime::init_mode() {
+                    let _ = reply.send(ControlResponse::Error(
+                        "SG0714: live upgrade is forbidden in container-init mode; a failed exec as PID 1 kills the container. Upgrade the image instead."
+                            .to_string(),
+                    ));
+                    continue;
+                }
                 let _op = self.op_slot.guard("upgrading supervisor");
                 match self.prepare_upgrade(Path::new(&binary), &runtime_lock, &listener) {
                     Ok(prepared) => {
