@@ -40,7 +40,10 @@ Each `report.md` records:
 2. Tool versions: cargo audit, cargo deny, fuzzer, kernel/test matrix
 3. Findings with dispositions (fixed / accepted-risk / deferred + issue link)
 4. Unsafe inventory delta since the previous report
-5. Dependency review delta (new crates in the root TCB get named review)
+5. Dependency review delta (new crates in the root TCB get named review).
+   `supply-chain/` (cargo-vet) starts from a 277-crate exemption baseline;
+   NEW dependencies must be vetted or get an explicit, justified exemption —
+   the baseline never grows silently
 6. Fuzz totals: duration, executions, crashes (triaged)
 7. Known limitations carried forward
 8. Release decision: ship / block, signed by the owner

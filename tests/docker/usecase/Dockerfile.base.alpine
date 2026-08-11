@@ -1,0 +1,24 @@
+# Alpine/musl variant of the shared use-case base: static musl build of sysg
+# on an Alpine runtime, so every case can also prove the Alpine lane (RFC 0001:
+# Alpine is a primary kernel-mode audience). Select it via
+# USECASE_BASE_DOCKERFILE=tests/docker/usecase/Dockerfile.base.alpine run_all.sh
+ARG RUST_IMAGE=rust:1.96.0-alpine3.21
+ARG RUNTIME_IMAGE=alpine:3.21
+FROM ${RUST_IMAGE} AS builder
+
+RUN apk add --no-cache musl-dev build-base perl make
+
+WORKDIR /app
+COPY . .
+RUN cargo build --release --bin sysg
+
+FROM ${RUNTIME_IMAGE}
+
+RUN apk add --no-cache bash python3 procps shadow coreutils grep util-linux iproute2 curl
+
+COPY --from=builder /app/target/release/sysg /usr/local/bin/sysg
+RUN chmod +x /usr/local/bin/sysg
+
+COPY tests/docker/usecase/lib.sh /usecase/lib.sh
+
+WORKDIR /usecase

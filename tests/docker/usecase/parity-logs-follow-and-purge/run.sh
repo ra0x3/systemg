@@ -21,21 +21,20 @@ for MODE in user sys; do
   sleep 4
 
   msysg logs --service chatty --no-follow --config "$CONFIG" > /tmp/logs.pre 2>&1
-  grep -q "tick" /tmp/logs.pre
+  grep -q "tick-" /tmp/logs.pre
   check "$?" "[$MODE] captured lines served before purge"
+  PRE_FIRST="$(grep -o 'tick-[0-9]*' /tmp/logs.pre | head -1)"
 
   msysg logs --purge --config "$CONFIG"
   check "$?" "[$MODE] logs --purge exits 0"
 
   msysg logs --service chatty --no-follow --config "$CONFIG" > /tmp/logs.post 2>&1
-  PRE_TICKS="$(grep -c tick /tmp/logs.pre)"
-  POST_TICKS="$(grep -c tick /tmp/logs.post || true)"
-  [ "${POST_TICKS:-0}" -lt "$PRE_TICKS" ]
-  check "$?" "[$MODE] purge dropped served lines (pre=$PRE_TICKS post=${POST_TICKS:-0})"
+  ! grep -q "$PRE_FIRST" /tmp/logs.post
+  check "$?" "[$MODE] purge removed pre-purge marker $PRE_FIRST from served logs"
 
   sleep 3
   msysg logs --service chatty --no-follow --config "$CONFIG" > /tmp/logs.new 2>&1
-  grep -q "tick" /tmp/logs.new
+  grep -q "tick-" /tmp/logs.new
   check "$?" "[$MODE] capture still live after purge"
 
   echo "served:pre=yes purge=drop capture=live" > /tmp/shape.$MODE

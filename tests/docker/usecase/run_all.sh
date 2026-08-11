@@ -25,8 +25,9 @@ fi
 JOBS="${USECASE_JOBS:-${DEFAULT_JOBS}}"
 [ "${JOBS}" -ge 1 ] 2>/dev/null || JOBS=1
 
-echo "== building shared base image (sysg-usecase-base) =="
-if ! docker build -f tests/docker/usecase/Dockerfile.base -t sysg-usecase-base .; then
+BASE_DOCKERFILE="${USECASE_BASE_DOCKERFILE:-tests/docker/usecase/Dockerfile.base}"
+echo "== building shared base image (sysg-usecase-base) from ${BASE_DOCKERFILE} =="
+if ! docker build -f "${BASE_DOCKERFILE}" -t sysg-usecase-base .; then
   echo "base image build failed"
   exit 1
 fi

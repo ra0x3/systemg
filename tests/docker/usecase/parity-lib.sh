@@ -1,20 +1,35 @@
 # Shared helpers for parity-* cases: run the same scenario in user mode and
 # system mode (--sys), capture a canonical shape per lane, then require the
-# shapes to be identical. Containers run as root, so the user-mode lane is
-# root-without---sys (SG0701 warns to stderr and proceeds by design).
+# shapes to be identical. The user-mode lane runs as a real non-root user
+# (`parity`, created on first use); the sys lane runs as root with --sys.
 
 SYSG_MODE_FLAGS=""
+
+parity_user_ensure() {
+  id parity >/dev/null 2>&1 && return 0
+  useradd -m -s /bin/bash parity 2>/dev/null || adduser -D -s /bin/bash parity
+}
 
 mode_begin() {
   MODE="$1"
   case "$MODE" in
-    user) SYSG_MODE_FLAGS="" ;;
+    user)
+      SYSG_MODE_FLAGS=""
+      parity_user_ensure
+      chmod 644 "$CONFIG"
+      ;;
     sys) SYSG_MODE_FLAGS="--sys" ;;
   esac
   section "lane: $MODE mode"
 }
 
-msysg() { sysg $SYSG_MODE_FLAGS "$@"; }
+msysg() {
+  if [ "$MODE" = "user" ]; then
+    su parity -s /bin/bash -c "sysg $(printf '%q ' "$@")"
+  else
+    sysg $SYSG_MODE_FLAGS "$@"
+  fi
+}
 
 mode_end() {
   msysg stop --config "$CONFIG" >/dev/null 2>&1
