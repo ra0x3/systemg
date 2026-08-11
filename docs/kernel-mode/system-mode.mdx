@@ -1,0 +1,72 @@
+---
+title: System Mode
+---
+
+# System Mode
+
+System mode (`--sys`) runs one root-owned supervisor for the machine's
+services, with per-service privilege drops. It is the same sysg with the same
+commands — only the runtime it targets changes.
+
+## Runtimes
+
+| | User mode | System mode (`--sys`) |
+|---|---|---|
+| State | `~/.local/share/systemg/` | `/var/lib/systemg/` |
+| Logs | `~/.local/share/systemg/logs/` | `/var/log/systemg/` |
+| Config search | `~/.config/systemg/` | `/etc/systemg/` |
+| Owner | invoking user | root |
+
+`--sys` is always explicit. sysg never guesses the runtime from your EUID or
+from what exists on disk — it tells you when the modes cross:
+
+- [SG0701](/how-it-works/dialog/codes#sg0701) — running as root *without*
+  `--sys`: warns that state will land in root's user-mode paths.
+- [SG0702](/how-it-works/dialog/codes#sg0702) — system-mode state exists but
+  the command targets the user runtime: refuses rather than touch the wrong
+  supervisor.
+- [SG0704](/how-it-works/dialog/codes#sg0704) — `--sys` without root: refused.
+
+## Running services as other users
+
+```yaml
+version: "2"
+services:
+  db:
+    command: "postgres -D /var/lib/postgresql/data"
+    user: "postgres"
+    group: "postgres"
+  cache:
+    command: "redis-server"
+    user: "redis"
+```
+
+The identity drop is strictly ordered — rlimits, capability trimming,
+`setgroups` → `setgid` → `setuid`, ambient caps — with supplementary groups
+always reset before the UID switch and the environment cleared and rebuilt
+for the target account. Namespace unshare failures can warn and proceed
+(EPERM under nested containers), and cgroup attach happens post-spawn; see
+[Sandboxing](/kernel-mode/sandboxing) for what is and is not enforced.
+
+## Boot integration (systemd)
+
+`scripts/install-systemg.sh` installs `/etc/systemd/system/sysg.service`.
+Every sysg invocation in a unit must carry `--sys` — including `ExecStop`:
+
+```ini
+[Service]
+ExecStart=/usr/bin/sysg --sys start --config /etc/systemg/systemg.yaml --daemonize
+ExecStop=/usr/bin/sysg --sys stop --config /etc/systemg/systemg.yaml
+```
+
+Every sysg self-exec (supervisor boot, live upgrade, recycle) forwards the
+mode across the exec boundary; the `parity-supervisor-recycle` lane guards
+this invariant.
+
+## Operator access
+
+The control socket is owned by root with `0600` permissions and kernel peer
+credentials checked on every connection. In system mode this means all
+control — including `status` and `logs` — requires root (`sudo`). This is a
+deliberate, documented cost; finer-grained read-only access is tracked in
+[RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md).

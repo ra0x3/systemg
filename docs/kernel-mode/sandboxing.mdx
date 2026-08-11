@@ -1,0 +1,49 @@
+---
+title: Kernel-Enforced Sandboxing
+---
+
+# Kernel-Enforced Sandboxing
+
+sysg configures kernel enforcement mechanisms per service: today that means
+rlimits, capabilities, namespaces, and cgroups (Linux, root); the roadmap
+completes seccomp, `no_new_privs`, and Landlock.
+
+## What enforces today
+
+```yaml
+services:
+  worker:
+    command: "./worker"
+    user: "worker"
+    limits:
+      nofile: 4096
+      cgroup:
+        memory_max: "512M"
+    capabilities: ["CAP_NET_BIND_SERVICE"]
+    isolation:
+      network: true
+```
+
+## Honest limits — read this
+
+`isolation.seccomp` and `isolation.apparmor_profile` are accepted by the
+config schema today but **warn and run the service unenforced**. Treat them
+as documentation, not protection.
+
+The planned semantics
+([RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md))
+are uniformly **fail-closed**: any security key that cannot be enforced
+refuses to start the service. Because that flips behavior for manifests that
+run today, it lands behind a deprecation release that warns loudly with the
+refusal date, then a manifest schema bump.
+
+## Planned diagnostics
+
+- [SG0721](/how-it-works/dialog/codes#sg0721) — sandbox capability
+  unsupported on this platform
+- [SG0722](/how-it-works/dialog/codes#sg0722) — seccomp filter could not be
+  built or applied; service refused
+- [SG0723](/how-it-works/dialog/codes#sg0723) — `no_new_privs` could not be
+  set; service refused
+- [SG0724](/how-it-works/dialog/codes#sg0724) — Landlock requested but the
+  kernel ABI is unavailable or insufficient; service refused

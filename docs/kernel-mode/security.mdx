@@ -1,0 +1,51 @@
+---
+title: Security & Audits
+---
+
+# Security & Audits
+
+A root supervisor is worth attacking. Kernel mode's security posture is
+therefore auditable in the repository, not asserted in prose: if kernel mode
+were exploitable, it would ruin the product — so the evidence lives where
+you can check it.
+
+## Trust boundary
+
+Trusted: the manifest (operator-controlled — its commands are intended
+execution) and a same-UID or root socket peer. Untrusted: everything else —
+socket frame contents, service names, IPC-supplied config paths, filesystem
+state in service-writable directories, and, in system mode, every non-root
+local user. The full model is
+[`audits/threat-model.md`](https://github.com/ra0x3/systemg/blob/main/audits/threat-model.md).
+
+## Standing mitigations
+
+- Control socket: `0700` runtime dir, `0600` socket, kernel peer credentials
+  (`SO_PEERCRED` / `getpeereid`) verified on every accept, before any read
+- IPC frames: 1 MiB cap, typed decode, fuzzed on a weekly CI schedule
+  (`fuzz/fuzz_targets/ipc_frame.rs`)
+- Config: `O_NOFOLLOW` open + same-fd `fstat` + parse (no TOCTOU window)
+- Privilege drops: ordered transaction; supplementary groups always reset;
+  environment cleared and rebuilt
+- Descriptors: `FD_CLOEXEC` by default; handoff FDs cleared briefly and
+  restored
+- Identity: PID + start time + session; no signal is ever sent on the basis
+  of command-string matching
+
+## Audit records
+
+| Record | What it is |
+|---|---|
+| [`audits/README.md`](https://github.com/ra0x3/systemg/blob/main/audits/README.md) | Audit policy and index |
+| [`audits/threat-model.md`](https://github.com/ra0x3/systemg/blob/main/audits/threat-model.md) | Living threat model |
+| [`audits/unsafe-inventory.md`](https://github.com/ra0x3/systemg/blob/main/audits/unsafe-inventory.md) | Generated `unsafe` inventory |
+| [`reports/`](https://github.com/ra0x3/systemg/tree/main/reports) | Historical security reviews |
+
+Every release-candidate milestone of a root-facing phase ships an immutable
+audit report under `audits/v*/` before it tags, with an external reviewer in
+addition to maintainer self-review. Supply-chain gates run in CI: `cargo
+audit`, `cargo deny`, and `cargo vet` (whose exemption baseline is frozen —
+new dependencies must be vetted).
+
+The canonical trust model for all of systemg remains
+[Security](/security); this page covers what kernel mode adds.
