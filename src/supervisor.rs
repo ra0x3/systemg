@@ -3134,14 +3134,17 @@ impl Supervisor {
 
     /// Executes the validated replacement binary in the current supervisor PID.
     fn execute_upgrade(prepared: &PreparedUpgrade) -> io::Result<()> {
-        let values = [
-            prepared.target.path.to_string_lossy().to_string(),
+        let mut values = vec![prepared.target.path.to_string_lossy().to_string()];
+        if crate::runtime::mode() == crate::runtime::RuntimeMode::System {
+            values.push("--sys".to_string());
+        }
+        values.extend([
             "supervise".to_string(),
             "--config".to_string(),
             prepared.config.to_string_lossy().to_string(),
             "--handoff".to_string(),
             prepared.path.to_string_lossy().to_string(),
-        ];
+        ]);
         let args = values
             .iter()
             .map(|value| {

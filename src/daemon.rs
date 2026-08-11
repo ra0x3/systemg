@@ -9176,10 +9176,6 @@ fi
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "flaky in CI: races the boot verdict against the auto-restart. \
-                The fixture exits 1 on its first run by design, so a slow runner \
-                can surface that first-run failure from start_services before the \
-                restart lands. Run with --ignored once the deadline is widened."]
     fn automatic_restart_keeps_restarted_service_alive() {
         with_temp_home(|dir| {
             let restarted_pid_path = dir.join("restarted.pid");
@@ -9208,9 +9204,9 @@ sleep 30
             services.insert("flaky".into(), service);
 
             let daemon = create_daemon(dir, services);
-            daemon.start_services().unwrap();
+            let _ = daemon.start_services();
 
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let restarted_pid = loop {
                 if let Ok(contents) = fs::read_to_string(&restarted_pid_path)
                     && let Ok(pid) = contents.trim().parse::<u32>()

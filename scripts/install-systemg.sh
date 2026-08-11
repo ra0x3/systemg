@@ -74,7 +74,7 @@ After=network.target
 
 [Service]
 ExecStart=/usr/bin/sysg --sys start --config /etc/systemg/systemg.yaml --daemonize
-ExecStop=/usr/bin/sysg stop --config /etc/systemg/systemg.yaml
+ExecStop=/usr/bin/sysg --sys stop --config /etc/systemg/systemg.yaml
 Restart=on-failure
 RestartSec=5
 

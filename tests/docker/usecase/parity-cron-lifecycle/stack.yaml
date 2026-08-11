@@ -1,0 +1,10 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      ticker:
+        command: "sh -c 'echo CRON_FIRED >> /tmp/cron_fired.log'"
+        restart_policy: never
+        cron:
+          expression: "* * * * * *"
