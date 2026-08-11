@@ -723,21 +723,18 @@ fn stream_frames(
     }
 }
 
-/// Utility to read a command from a `UnixStream`. Used by the supervisor event loop.
-pub fn read_command(stream: &mut UnixStream) -> Result<ControlCommand, ControlError> {
-    let cap = crate::constants::MAX_CONTROL_LINE;
-    let mut reader = BufReader::new(stream).take(cap + 1);
-    let mut buf = Vec::new();
-    reader.read_until(b'\n', &mut buf)?;
-
-    if buf.len() as u64 > cap {
+/// Decodes one raw control frame (a single newline-delimited line, cap
+/// already enforced by the reader) into a [`ControlCommand`]. Pure so the
+/// fuzz harness exercises the exact production path.
+pub fn decode_control_frame(buf: &[u8]) -> Result<ControlCommand, ControlError> {
+    if buf.len() as u64 > crate::constants::MAX_CONTROL_LINE {
         return Err(ControlError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             "control command exceeds maximum length",
         )));
     }
 
-    let line = String::from_utf8(buf)
+    let line = std::str::from_utf8(buf)
         .map_err(|e| ControlError::Io(io::Error::new(io::ErrorKind::InvalidData, e)))?;
 
     if line.trim().is_empty() {
@@ -748,6 +745,16 @@ pub fn read_command(stream: &mut UnixStream) -> Result<ControlCommand, ControlEr
     }
 
     Ok(serde_json::from_str(line.trim())?)
+}
+
+/// Utility to read a command from a `UnixStream`. Used by the supervisor event loop.
+pub fn read_command(stream: &mut UnixStream) -> Result<ControlCommand, ControlError> {
+    let cap = crate::constants::MAX_CONTROL_LINE;
+    let mut reader = BufReader::new(stream).take(cap + 1);
+    let mut buf = Vec::new();
+    reader.read_until(b'\n', &mut buf)?;
+
+    decode_control_frame(&buf)
 }
 
 /// Writes a response to the connected CLI client.
@@ -1293,5 +1300,40 @@ mod tests {
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    #[test]
+    fn decode_control_frame_rejects_over_cap() {
+        let cap = crate::constants::MAX_CONTROL_LINE as usize;
+        assert!(decode_control_frame(&vec![b' '; cap + 1]).is_err());
+    }
+
+    #[test]
+    fn decode_control_frame_accepts_exact_cap_with_padding() {
+        let cap = crate::constants::MAX_CONTROL_LINE as usize;
+        let json = serde_json::to_string(&ControlCommand::CurrentOp).unwrap();
+        let mut buf = json.into_bytes();
+        buf.resize(cap, b' ');
+        assert!(decode_control_frame(&buf).is_ok());
+    }
+
+    #[test]
+    fn decode_control_frame_accepts_newline_terminated() {
+        let mut buf = serde_json::to_string(&ControlCommand::CurrentOp)
+            .unwrap()
+            .into_bytes();
+        buf.push(b'\n');
+        assert!(decode_control_frame(&buf).is_ok());
+    }
+
+    #[test]
+    fn decode_control_frame_rejects_invalid_utf8() {
+        assert!(decode_control_frame(&[0xff, 0xfe, b'{', b'}']).is_err());
+    }
+
+    #[test]
+    fn decode_control_frame_rejects_empty_and_whitespace() {
+        assert!(decode_control_frame(b"").is_err());
+        assert!(decode_control_frame(b"   \n").is_err());
     }
 }

@@ -1,0 +1,7 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      chatty:
+        command: "sh -c 'while true; do echo tick; sleep 1; done'"

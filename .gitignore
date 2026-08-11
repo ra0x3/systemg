@@ -7,3 +7,8 @@ AGENTS.md
 CLAUDE.md
 .pytest_cache
 test-output/
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/Cargo.lock

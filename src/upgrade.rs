@@ -241,14 +241,17 @@ pub fn rollback_handoff(path: &Path, reason: impl Into<String>) -> io::Result<()
     // which times out and reports a version mismatch instead of the actual
     // failure. This side-record survives the rollback for the CLI to read.
     let _ = write_rollback_result(&reason);
-    let values = [
-        state.source_binary.to_string_lossy().to_string(),
+    let mut values = vec![state.source_binary.to_string_lossy().to_string()];
+    if crate::runtime::mode() == crate::runtime::RuntimeMode::System {
+        values.push("--sys".to_string());
+    }
+    values.extend([
         "supervise".to_string(),
         "--config".to_string(),
         state.primary.config_path.to_string_lossy().to_string(),
         "--handoff".to_string(),
         path.to_string_lossy().to_string(),
-    ];
+    ]);
     let args = values
         .iter()
         .map(|value| {

@@ -356,3 +356,30 @@ migrated. Re-run `sysg migrate-state` to resume from the recorded phase.
 
 A migrated artifact did not match the checksum recorded when it was archived.
 Nothing was removed; re-run the migration to retry.
+
+## System mode
+
+### [SG0701](/how-it-works/dialog/codes#sg0701)
+
+Running as root without `--sys`. State would be stored in root's user-mode
+paths (`~/.local/share/systemg`), not the system runtime at
+`/var/lib/systemg`. If the system runtime is the target, re-run the same
+command with `--sys`.
+
+### [SG0702](/how-it-works/dialog/codes#sg0702)
+
+On-disk state belongs to the other runtime mode than the one this command
+targets. Most commonly: system-mode state exists at `/var/lib/systemg` but the
+command ran as root without `--sys`. systemg refuses rather than target the
+wrong runtime; add `--sys` (or drop it) so the mode matches the state.
+
+### [SG0703](/how-it-works/dialog/codes#sg0703)
+
+System-mode integration is broken: the installed systemd unit or launchd job
+is missing, points at a different binary, or predates the installed version.
+Re-run the installer to regenerate it.
+
+### [SG0704](/how-it-works/dialog/codes#sg0704)
+
+`--sys` targets the root-owned system runtime and requires root privileges.
+Re-run under `sudo`, or drop `--sys` to operate on the per-user runtime.

@@ -99,10 +99,10 @@ never a warning that proceeds — where it is not.
 | Capability | linux-gnu | linux-musl | macOS |
 |---|---|---|---|
 | System mode | ✓ systemd unit | ✓ (incl. Alpine OpenRC docs) | ✓ launchd, `/Library/Application Support/systemg`, `/Library/Logs/systemg` — see red-team callout below |
-| Container-init (PID 1) | ✓ | ✓ primary audience | SG0711 refusal |
-| `no_new_privs` + seccomp | ✓ (well below 5.10) | ✓ (raw prctl/seccomp syscalls; audit-arch per ISA) | SG0721 refusal |
-| Landlock | ✓ 5.13+, recommend 5.15 LTS; fail closed below | same | SG0721 refusal |
-| Kernel-assisted (Aya eBPF) | ✓ 5.10 LTS + kernel BTF; CAP_BPF+CAP_PERFMON (CAP_SYS_ADMIN fallback) | ✓ loader is libc-independent; caveats are BTF availability/memlock, not musl | SG0731 refusal |
+| Container-init (PID 1) | ✓ | ✓ primary audience | [SG0711](/how-it-works/dialog/codes#sg0711) refusal |
+| `no_new_privs` + seccomp | ✓ (well below 5.10) | ✓ (raw prctl/seccomp syscalls; audit-arch per ISA) | [SG0721](/how-it-works/dialog/codes#sg0721) refusal |
+| Landlock | ✓ 5.13+, recommend 5.15 LTS; fail closed below | same | [SG0721](/how-it-works/dialog/codes#sg0721) refusal |
+| Kernel-assisted (Aya eBPF) | ✓ 5.10 LTS + kernel BTF; CAP_BPF+CAP_PERFMON (CAP_SYS_ADMIN fallback) | ✓ loader is libc-independent; caveats are BTF availability/memlock, not musl | [SG0731](/how-it-works/dialog/codes#sg0731) refusal |
 
 Feature-specific kernel floors, detected independently: system mode never
 implies eBPF availability.
@@ -121,10 +121,10 @@ implies eBPF availability.
 
 - Fix `scripts/install-systemg.sh` systemd unit: `ExecStop` must pass `--sys`;
   revisit `Type=` vs `--daemonize`.
-- Root-without-`--sys` becomes typed diagnostic SG0701 with the exact retry
+- Root-without-`--sys` becomes typed diagnostic [SG0701](/how-it-works/dialog/codes#sg0701) with the exact retry
   command, replacing the log warning at `src/bin/main.rs:977`.
 - `--sys` stays explicit. Detection of system-mode state while in user mode (and
-  vice versa) produces SG0702 guidance, never silent retargeting.
+  vice versa) produces [SG0702](/how-it-works/dialog/codes#sg0702) guidance, never silent retargeting.
 - Parameterize mode-neutral UAT scenarios to run in both modes; keep documented
   mode-specific lanes.
 
@@ -144,7 +144,7 @@ implies eBPF availability.
 - Same-PID re-exec works without a parent (live upgrade already execs in
   place); raw `fork()` after thread creation stays forbidden (the recycle-wedge
   lesson).
-- Prerequisite probes (`/proc` mounted, controlling env) fail with SG0712, not
+- Prerequisite probes (`/proc` mounted, controlling env) fail with [SG0712](/how-it-works/dialog/codes#sg0712), not
   undefined behavior.
 
 > [!CAUTION]
@@ -159,9 +159,9 @@ implies eBPF availability.
 ### 6.3 Kernel-enforced sandboxing (Phase 3)
 
 - `isolation.seccomp` and `no_new_privs` become enforced; configuration that
-  cannot be enforced refuses to start the service (fail closed, SG0722/SG0723).
+  cannot be enforced refuses to start the service (fail closed, [SG0722](/how-it-works/dialog/codes#sg0722)/[SG0723](/how-it-works/dialog/codes#sg0723)).
 - Landlock filesystem rules follow; unavailable or insufficient Landlock ABI
-  under an explicit config fails closed with SG0724.
+  under an explicit config fails closed with [SG0724](/how-it-works/dialog/codes#sg0724).
 - `no_new_privs` is mandatory whenever seccomp or Landlock is configured.
 - Fail-closed applies uniformly: explicit AppArmor/SELinux/private-tmp/
   private-devices configuration that cannot be enforced refuses to start the
@@ -182,8 +182,8 @@ implies eBPF availability.
   → ringbuf → supervisor event loop. Replaces polling *latency*, not
   `waitpid` semantics, and never becomes the source of truth for reaping.
 - Config: `observation: auto | required | off`. `auto` degrades to polling
-  with SG0732 logged once; `required` fails start with SG0731; event loss
-  (ringbuf overrun) forces a `/proc` reconciliation pass and SG0733.
+  with [SG0732](/how-it-works/dialog/codes#sg0732) logged once; `required` fails start with [SG0731](/how-it-works/dialog/codes#sg0731); event loss
+  (ringbuf overrun) forces a `/proc` reconciliation pass and [SG0733](/how-it-works/dialog/codes#sg0733).
 
 > [!CAUTION]
 > **Red-team objection (eBPF ROI, Codex 2026-08-11):** the red team ranks this
@@ -199,20 +199,20 @@ implies eBPF availability.
 
 | Code | Meaning |
 |---|---|
-| SG0701 | Running as root without `--sys`; state would land in user paths (exact retry command included) |
-| SG0702 | Mode/state mismatch: on-disk state belongs to the other runtime mode |
-| SG0703 | Install/doctor: system-mode integration broken (unit/plist missing, wrong, or stale) |
-| SG0704 | `--sys` requested without root privileges |
-| SG0711 | Container-init unsupported on this platform |
-| SG0712 | PID 1 prerequisites missing (e.g. `/proc` not mounted) |
-| SG0713 | PID 1 shutdown incomplete: services survived reverse-order teardown |
-| SG0721 | Sandbox capability unsupported on this platform |
-| SG0722 | seccomp filter could not be built/applied; service refused (fail closed) |
-| SG0723 | `no_new_privs` could not be set; service refused |
-| SG0724 | Landlock requested but ABI unavailable/insufficient; service refused |
-| SG0731 | eBPF required but unavailable (kernel/BTF/capabilities as evidence); start refused |
-| SG0732 | eBPF unavailable; degraded to polling (auto mode; missing capabilities as evidence) |
-| SG0733 | eBPF event loss; forced /proc reconciliation |
+| [SG0701](/how-it-works/dialog/codes#sg0701) | Running as root without `--sys`; state would land in user paths (exact retry command included) |
+| [SG0702](/how-it-works/dialog/codes#sg0702) | Mode/state mismatch: on-disk state belongs to the other runtime mode |
+| [SG0703](/how-it-works/dialog/codes#sg0703) | Install/doctor: system-mode integration broken (unit/plist missing, wrong, or stale) |
+| [SG0704](/how-it-works/dialog/codes#sg0704) | `--sys` requested without root privileges |
+| [SG0711](/how-it-works/dialog/codes#sg0711) | Container-init unsupported on this platform |
+| [SG0712](/how-it-works/dialog/codes#sg0712) | PID 1 prerequisites missing (e.g. `/proc` not mounted) |
+| [SG0713](/how-it-works/dialog/codes#sg0713) | PID 1 shutdown incomplete: services survived reverse-order teardown |
+| [SG0721](/how-it-works/dialog/codes#sg0721) | Sandbox capability unsupported on this platform |
+| [SG0722](/how-it-works/dialog/codes#sg0722) | seccomp filter could not be built/applied; service refused (fail closed) |
+| [SG0723](/how-it-works/dialog/codes#sg0723) | `no_new_privs` could not be set; service refused |
+| [SG0724](/how-it-works/dialog/codes#sg0724) | Landlock requested but ABI unavailable/insufficient; service refused |
+| [SG0731](/how-it-works/dialog/codes#sg0731) | eBPF required but unavailable (kernel/BTF/capabilities as evidence); start refused |
+| [SG0732](/how-it-works/dialog/codes#sg0732) | eBPF unavailable; degraded to polling (auto mode; missing capabilities as evidence) |
+| [SG0733](/how-it-works/dialog/codes#sg0733) | eBPF event loss; forced /proc reconciliation |
 
 Codes are stable, get permanent docs anchors, and join `SgCode::ALL`.
 
@@ -317,7 +317,7 @@ New top-level Mintlify nav group `docs/kernel-mode/`:
 | Phase | Content | Gate |
 |---|---|---|
 | 0 | Threat model, audits/ scaffolding, cargo deny/vet, IPC fuzzing, unsafe review | First audit report lands |
-| 1a | Mode parity: ExecStop fix, SG0701/0702, parity UAT matrix, enable musl release builds + Alpine CI lanes | Parity matrix green both modes |
+| 1a | Mode parity: ExecStop fix, [SG0701](/how-it-works/dialog/codes#sg0701)/0702, parity UAT matrix, enable musl release builds + Alpine CI lanes | Parity matrix green both modes |
 | 1b | Container-init: reaper, signals, shutdown, same-PID reexec | PID1 UAT green on gnu+musl |
 | 2 | System integration: systemd unit hardening + socket activation, launchd + /Library paths + state migration | Boot-start UAT green; macOS native lane green |
 | 3 | Sandboxing: no_new_privs + seccomp fail-closed, then Landlock | Sandbox UAT green; audit updated |
@@ -340,7 +340,7 @@ UAT, add Alpine user/system/PID1 lanes, macOS parity on native runners.
   daemonization under an init system.
 - `observation: auto | required | off` is supervisor-level config, default
   `auto`.
-- SG0732 (degraded observation) surfaces in logs *and* status metadata.
+- [SG0732](/how-it-works/dialog/codes#sg0732) (degraded observation) surfaces in logs *and* status metadata.
 - Container-init ships as `sysg init`: requires actually being PID 1, implies
   system mode, and routes all wait statuses through a centralized wait broker
   (managed children to their monitors, adopted orphans reaped).
@@ -352,8 +352,8 @@ UAT, add Alpine user/system/PID1 lanes, macOS parity on native runners.
 
 - 2026-08-10: Initial draft frozen with Codex agreement (platform matrix,
   Aya choice, fail-closed semantics, priority D→A→C→B).
-- 2026-08-10: Codex review round applied — SG07xx decades accepted (SG0704
-  added, SG0734 folded into SG0731/0732 evidence), uniform fail-closed for all
+- 2026-08-10: Codex review round applied — SG07xx decades accepted ([SG0704](/how-it-works/dialog/codes#sg0704)
+  added, [SG0734](/how-it-works/dialog/codes#sg0734) folded into [SG0731](/how-it-works/dialog/codes#sg0731)/0732 evidence), uniform fail-closed for all
   security keys, `sysg init` + wait broker, `Type=notify` foreground, test
   renames + fault-injection lanes.
 - 2026-08-11: Independent Codex red-team review embedded as callouts

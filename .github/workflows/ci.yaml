@@ -50,6 +50,19 @@ jobs:
         with:
           token: ${{ github.token }}
 
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    needs: cancel-previous
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check Advisories, Bans, Licenses, Sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
@@ -342,10 +355,10 @@ jobs:
   # Docker UAT tests run in parallel with cargo-test
   # Tests both user mode and kernel mode scenarios
   docker-uat-tests:
-    name: Docker UAT Tests (disabled)
+    name: Docker UAT Tests
     runs-on: ubuntu-latest
     needs: [changes, clippy]
-    if: false
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -544,20 +557,20 @@ jobs:
             cross_dockerfile: ci/Dockerfile.debian-x86_64-unknown-linux-gnu-clang
             features: linux
             artifact_suffix: -debian
-#          - os: ubuntu-latest
-#            platform: alpine
-#            target: x86_64-unknown-linux-musl
-#            cross_image: x86_64-linux-musl
-#            cross_dockerfile: ci/Dockerfile.x86_64-unknown-linux-musl-clang
-#            features: linux
-#            artifact_suffix: -alpine
-#          - os: ubuntu-latest
-#            platform: alpine-arm
-#            target: aarch64-unknown-linux-musl
-#            cross_image: aarch64-linux-musl
-#            cross_dockerfile: ci/Dockerfile.aarch64-unknown-linux-musl-clang
-#            features: linux
-#            artifact_suffix: -alpine
+          - os: ubuntu-latest
+            platform: alpine
+            target: x86_64-unknown-linux-musl
+            cross_image: x86_64-linux-musl
+            cross_dockerfile: ci/Dockerfile.x86_64-unknown-linux-musl-clang
+            features: linux
+            artifact_suffix: -alpine
+          - os: ubuntu-latest
+            platform: alpine-arm
+            target: aarch64-unknown-linux-musl
+            cross_image: aarch64-linux-musl
+            cross_dockerfile: ci/Dockerfile.aarch64-unknown-linux-musl-clang
+            features: linux
+            artifact_suffix: -alpine
           - os: macos-latest
             platform: darwin
             target: x86_64-apple-darwin

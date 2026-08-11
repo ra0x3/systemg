@@ -174,6 +174,17 @@ pub enum SgCode {
     MigrationIncomplete,
     /// SG0605 — a migrated artifact did not match its recorded checksum.
     MigrationVerificationFailed,
+    /// SG0701 — running as root without `--sys`, so state would land in
+    /// user-mode paths instead of the system runtime.
+    SystemModeNotSelected,
+    /// SG0702 — on-disk state belongs to the other runtime mode than the one
+    /// this command targets.
+    RuntimeModeMismatch,
+    /// SG0703 — system-mode integration (unit or plist) is missing, wrong, or
+    /// stale for the installed binary.
+    SystemIntegrationBroken,
+    /// SG0704 — `--sys` was requested without root privileges.
+    SystemModeRequiresRoot,
 }
 
 impl SgCode {
@@ -237,6 +248,10 @@ impl SgCode {
             SgCode::MigrationAmbiguous => "SG0603",
             SgCode::MigrationIncomplete => "SG0604",
             SgCode::MigrationVerificationFailed => "SG0605",
+            SgCode::SystemModeNotSelected => "SG0701",
+            SgCode::RuntimeModeMismatch => "SG0702",
+            SgCode::SystemIntegrationBroken => "SG0703",
+            SgCode::SystemModeRequiresRoot => "SG0704",
         }
     }
 
@@ -246,7 +261,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 57] = [
+    pub const ALL: [SgCode; 61] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -304,6 +319,10 @@ impl SgCode {
         SgCode::MigrationAmbiguous,
         SgCode::MigrationIncomplete,
         SgCode::MigrationVerificationFailed,
+        SgCode::SystemModeNotSelected,
+        SgCode::RuntimeModeMismatch,
+        SgCode::SystemIntegrationBroken,
+        SgCode::SystemModeRequiresRoot,
     ];
 }
 

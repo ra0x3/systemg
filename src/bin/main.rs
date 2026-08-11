@@ -182,6 +182,9 @@ fn run_inspect_stream_control_action(
 
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
     let mut child = process::Command::new(current_exe);
+    if runtime::mode() == RuntimeMode::System {
+        child.arg("--sys");
+    }
     child.args([command, "--config", config, "--service", service]);
     if let Some(project) = project {
         child.args(["--project", project]);
@@ -936,11 +939,16 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let runtime_mode = if args.sys {
         if !euid.is_root() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "--sys requires root privileges",
-            )
-            .into());
+            use systemg::diag::{Diagnostic, SgCode};
+            return Err(Box::new(DiagError(Box::new(
+                Diagnostic::error(
+                    SgCode::SystemModeRequiresRoot,
+                    "--sys targets the system runtime and requires root",
+                )
+                .note("the system runtime lives in /var/lib/systemg and is owned by root")
+                .help_cmd("re-run as root", "sudo sysg --sys ...")
+                .help_docs(),
+            ))));
         }
         RuntimeMode::System
     } else {
@@ -975,14 +983,29 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     if euid.is_root() && runtime_mode == RuntimeMode::User {
-        warn!("Running as root without --sys; state will be stored in userspace paths");
+        use systemg::diag::{Diagnostic, SgCode};
         if system_mode_state_detected() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Detected system-mode state at /var/lib/systemg while running as root without --sys. Re-run with --sys to avoid targeting the wrong runtime.",
-            )
-            .into());
+            return Err(Box::new(DiagError(Box::new(
+                Diagnostic::error(
+                    SgCode::RuntimeModeMismatch,
+                    "system-mode state exists but this command targets the user runtime",
+                )
+                .note("state at /var/lib/systemg belongs to a --sys supervisor; running without --sys would target the wrong runtime")
+                .help_cmd("target the system runtime", "sudo sysg --sys <command>")
+                .help_docs(),
+            ))));
         }
+        eprintln!(
+            "{}",
+            Diagnostic::warn(
+                SgCode::SystemModeNotSelected,
+                "running as root without --sys",
+            )
+            .note("state will be stored in root's user-mode paths (~/.local/share/systemg), not the system runtime")
+            .help_cmd("use the system runtime", "sudo sysg --sys <command>")
+            .help_docs()
+            .render_for_terminal()
+        );
     }
 
     let verbose = args.verbose;
@@ -6726,6 +6749,9 @@ fn reexec_supervisor(
         }
     };
     push(&mut args, &exe.to_string_lossy());
+    if runtime::mode() == RuntimeMode::System {
+        push(&mut args, "--sys");
+    }
     push(&mut args, "supervise");
     push(&mut args, "--config");
     push(&mut args, &config.to_string_lossy());

@@ -1259,7 +1259,11 @@ fn run_status_child_view(
 
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sysg"));
 
-    let _ = process::Command::new(&current_exe)
+    let mut child = process::Command::new(&current_exe);
+    if systemg::runtime::mode() == systemg::runtime::RuntimeMode::System {
+        child.arg("--sys");
+    }
+    let _ = child
         .args(args)
         .stdin(process::Stdio::inherit())
         .stdout(process::Stdio::inherit())
