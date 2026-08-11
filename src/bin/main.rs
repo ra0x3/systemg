@@ -2116,6 +2116,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 ));
             }
             runtime::set_init_mode();
+            install_init_signal_bridge();
             run_supervisor_in_process(
                 PathBuf::from(config),
                 None,
@@ -2146,6 +2147,32 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// PID 1 signal bridge: TERM/INT handlers may only set a flag
+/// (async-signal-safe); a watcher thread turns the flag into the supervisor's
+/// own graceful Shutdown command, reusing the verified teardown path.
+fn install_init_signal_bridge() {
+    static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn request_shutdown(_sig: libc::c_int) {
+        SHUTDOWN_REQUESTED.store(true, Ordering::Release);
+    }
+    let handler =
+        request_shutdown as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t;
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+    thread::spawn(|| {
+        loop {
+            if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+                info!("init received shutdown signal; stopping services");
+                let _ = ipc::send_command_detached(&ControlCommand::Shutdown);
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
 }
 
 /// Handles drop privileges applies to command.
