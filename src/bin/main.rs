@@ -4715,23 +4715,23 @@ fn execute_purge(plan: systemg::purge::PurgePlan) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// Asks a resident supervisor to exit before its state is deleted, so a full
-/// purge can never orphan a live (and, in system mode, root-owned) supervisor
-/// whose socket and pidfile were removed out from under it.
+/// Asks a resident supervisor to exit before its state is deleted, so a purge
+/// (full or config-scoped) can never orphan a live (and, in system mode,
+/// root-owned) supervisor whose socket and pidfile were removed out from
+/// under it. A stale pidfile never overrides a live authenticated socket.
 fn shutdown_resident_supervisor() -> Result<(), Box<dyn Error>> {
-    let pid = ipc::read_supervisor_pid().ok().flatten();
-    let alive = match pid {
-        Some(pid) => {
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
-        }
-        None => supervisor_running(),
-    };
-    if !alive {
+    let socket_live = supervisor_running();
+    let live_pid = ipc::read_supervisor_pid().ok().flatten().filter(|pid| {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(*pid), None).is_ok()
+    });
+    if !socket_live && live_pid.is_none() {
         return Ok(());
     }
     let _ = ipc::send_command_detached(&ControlCommand::Shutdown);
-    let exited = match pid {
-        Some(pid) => wait_for_supervisor_exit(pid, Duration::from_secs(5)),
+    let exited = match live_pid {
+        Some(pid) => {
+            wait_for_supervisor_exit(pid, Duration::from_secs(5)) && !supervisor_running()
+        }
         None => {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -4749,7 +4749,7 @@ fn shutdown_resident_supervisor() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     use systemg::diag::{Diagnostic, SgCode};
-    let who = pid.map_or("unknown pid".to_string(), |p| format!("pid {p}"));
+    let who = live_pid.map_or("unknown pid".to_string(), |p| format!("pid {p}"));
     Err(Box::new(DiagError(Box::new(
         Diagnostic::error(
             SgCode::PurgeSupervisorShutdownTimeout,
