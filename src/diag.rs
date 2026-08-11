@@ -188,6 +188,9 @@ pub enum SgCode {
     SystemIntegrationBroken,
     /// SG0704 — `--sys` was requested without root privileges.
     SystemModeRequiresRoot,
+    /// SG0705 — the manifest declares root-only keys and is not startable in
+    /// user mode.
+    ManifestRequiresSystemMode,
 }
 
 impl SgCode {
@@ -256,6 +259,7 @@ impl SgCode {
             SgCode::RuntimeModeMismatch => "SG0702",
             SgCode::SystemIntegrationBroken => "SG0703",
             SgCode::SystemModeRequiresRoot => "SG0704",
+            SgCode::ManifestRequiresSystemMode => "SG0705",
         }
     }
 
@@ -265,7 +269,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 62] = [
+    pub const ALL: [SgCode; 63] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -328,6 +332,7 @@ impl SgCode {
         SgCode::RuntimeModeMismatch,
         SgCode::SystemIntegrationBroken,
         SgCode::SystemModeRequiresRoot,
+        SgCode::ManifestRequiresSystemMode,
     ];
 }
 

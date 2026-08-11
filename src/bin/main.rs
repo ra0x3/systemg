@@ -938,7 +938,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         args.drop_privileges && drop_privileges_applies_to_command(&args.command);
 
     let runtime_mode = if args.sys {
-        if !euid.is_root() {
+        if !euid.is_root() && !matches!(args.command, Commands::Validate { .. }) {
             use systemg::diag::{Diagnostic, SgCode};
             return Err(Box::new(DiagError(Box::new(
                 Diagnostic::error(
@@ -982,7 +982,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    if euid.is_root() && runtime_mode == RuntimeMode::User {
+    if euid.is_root()
+        && runtime_mode == RuntimeMode::User
+        && !matches!(args.command, Commands::Validate { .. })
+    {
         use systemg::diag::{Diagnostic, SgCode};
         if system_mode_state_detected() {
             return Err(Box::new(DiagError(Box::new(
@@ -1995,7 +1998,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             format,
             no_color,
         } => {
-            let (report, content) = validate::validate(&config);
+            let (report, content) =
+                validate::validate(&config, runtime_mode == RuntimeMode::System);
             let use_color = !(no_color || agent_mode());
             match format {
                 Some(fmt) => {
@@ -2005,7 +2009,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                     render_validation_report(&report, content.as_deref(), use_color);
                 }
             }
-            process::exit(if report.valid { 0 } else { 1 });
+            process::exit(if report.valid && report.startable {
+                0
+            } else {
+                1
+            });
         }
         Commands::Migrate { config, in_place } => {
             let content = fs::read_to_string(&config)
@@ -2109,7 +2117,7 @@ fn render_validation_report(
     };
 
     println!();
-    if report.valid {
+    if report.valid && report.startable && report.diagnostics.is_empty() {
         println!(
             "  {}  {}",
             paint(GREEN_BOLD, "✓ valid"),
@@ -2119,6 +2127,38 @@ fn render_validation_report(
             "  {}",
             paint(GRAY, "This manifest parses and resolves cleanly.")
         );
+        println!();
+        return;
+    }
+
+    if report.valid {
+        let verdict = if report.startable {
+            (GREEN_BOLD, "✓ valid", "Well-formed; warnings below.")
+        } else {
+            (
+                RED_BOLD,
+                "✗ not startable in this mode",
+                "Well-formed, but this mode cannot start it.",
+            )
+        };
+        println!(
+            "  {}  {}",
+            paint(verdict.0, verdict.1),
+            paint(BRIGHT_WHITE, &report.config)
+        );
+        println!("  {}", paint(GRAY, verdict.2));
+        for diagnostic in &report.diagnostics {
+            println!();
+            let tag = if diagnostic.severity == "error" {
+                paint(RED_BOLD, "error")
+            } else {
+                paint(YELLOW_BOLD, "warning")
+            };
+            println!("  {tag}: {}", diagnostic.message);
+            println!("    {}", paint(GRAY, &diagnostic.why));
+            println!("    {} {}", paint(GRAY, "fix:"), diagnostic.suggestion);
+            println!("    {} {}", paint(GRAY, "docs:"), diagnostic.doc);
+        }
         println!();
         return;
     }

@@ -41,7 +41,7 @@ A clean file reports success and exits `0`:
 | `-` | `--format` | Emit machine-readable output (`json` or `xml`) |
 | `-v` | `--verbose` | Print operation progress |
 | `-` | `--no-color` | Disable ANSI colors |
-| `-` | `--sys` | Opt into privileged system mode. Requires root |
+| `-` | `--sys` | Validate against the system runtime (see below). Unlike every other command, validate with `--sys` does **not** require root |
 | `-` | `--drop-privileges` | Accepted globally but ignored; validate does not spawn services |
 | `-` | `--plain` | Agent-friendly output (also disables color) |
 | `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
@@ -55,13 +55,28 @@ A clean file reports success and exits `0`:
 - **Dependencies** — `depends_on` references exist and form no cycle.
 - **Project id** — every named project has a valid, non-empty id.
 - **Environment** — `${VAR}` interpolations resolve from the environment or env file.
+- **Mode enforceability** — whether the mode you validated against could
+  actually start this manifest (see below).
+
+<Info>
+**Validation is mode-aware.** `sysg validate` judges the manifest against
+**user mode**: root-only keys (`user`, `group`, `capabilities`,
+`limits.cgroup`, `isolation`, non-empty `supplementary_groups`) produce an
+error finding ([SG0705](/how-it-works/dialog/codes#sg0705)) — the file is
+well-formed (`valid: true`) but not startable in that mode
+(`startable: false`, exit 1). `sysg validate --sys` judges against
+**system (kernel) mode**, where those keys pass; accounts missing on the
+validating host surface as warnings (your deploy target may differ), and
+Linux-only keys on a non-Linux host remain errors. `--sys` here needs no
+root — validating reads, it never exercises privilege.
+</Info>
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| `0` | Configuration is valid |
-| `1` | Configuration has one or more problems |
+| `0` | Configuration is valid and startable in the validated mode |
+| `1` | Configuration has problems, or is not startable in the validated mode |
 
 ## JSON output
 

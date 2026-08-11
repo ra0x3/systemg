@@ -443,3 +443,11 @@ Planned — kernel-assisted observation unavailable; degraded to polling.
 
 Planned — kernel-assisted event loss; a `/proc` reconciliation pass was
 forced.
+
+### [SG0705](/how-it-works/dialog/codes#sg0705)
+
+The manifest declares root-only keys (`user`, `group`, `capabilities`,
+`limits.cgroup`, `isolation`, non-empty `supplementary_groups`) and was
+validated against — or started in — user mode, which cannot enforce them.
+Validate against the system runtime with `sysg validate --sys` (no root
+needed), start with `sudo sysg --sys start`, or remove the keys.
