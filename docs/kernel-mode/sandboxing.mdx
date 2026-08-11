@@ -33,9 +33,17 @@ as documentation, not protection.
 The planned semantics
 ([RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md))
 are uniformly **fail-closed**: any security key that cannot be enforced
-refuses to start the service. Because that flips behavior for manifests that
-run today, it lands behind a deprecation release that warns loudly with the
-refusal date, then a manifest schema bump.
+refuses to start the service.
+
+<Warning>
+**Deprecation in progress.** As of v0.63, every unenforceable security key
+(`seccomp`, `apparmor_profile`, `selinux_context`, `private_devices`,
+`private_tmp`) logs a deprecation warning at service start: a future release
+will refuse these keys with
+[SG0721](/how-it-works/dialog/codes#sg0721)/[SG0722](/how-it-works/dialog/codes#sg0722)
+instead of running unprotected. Remove the keys or plan for the refusal —
+the flip lands behind a manifest schema bump.
+</Warning>
 
 ## Planned diagnostics
 

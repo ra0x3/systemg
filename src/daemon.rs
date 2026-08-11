@@ -2016,12 +2016,40 @@ struct ManagedChild {
     pid: u32,
     /// Standard-library handle available before the first supervisor re-exec.
     child: Option<Child>,
+    /// Linux pidfd for poll-based exit readiness. `None` when unsupported or
+    /// when `pidfd_open` failed — the monitor then falls back to its timed
+    /// tick. Readiness only: `try_wait`/`waitpid` stays authoritative.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pidfd: Option<std::os::fd::OwnedFd>,
+}
+
+/// Opens a pidfd for `pid` on Linux, returning `None` on any failure so the
+/// caller falls back to timed polling. pidfds are CLOEXEC by construction.
+fn open_pidfd(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::FromRawFd;
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+        if fd < 0 {
+            return None;
+        }
+        Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 impl ManagedChild {
     /// Reconstructs a waitable handle after same-PID supervisor re-execution.
     fn adopt(pid: u32) -> Self {
-        Self { pid, child: None }
+        Self {
+            pid,
+            child: None,
+            pidfd: open_pidfd(pid),
+        }
     }
 
     /// Returns the managed process identifier.
@@ -2065,9 +2093,11 @@ impl ManagedChild {
 impl From<Child> for ManagedChild {
     /// Wraps a newly spawned service process.
     fn from(child: Child) -> Self {
+        let pid = child.id();
         Self {
-            pid: child.id(),
+            pid,
             child: Some(child),
+            pidfd: open_pidfd(pid),
         }
     }
 }
@@ -8034,10 +8064,54 @@ impl Daemon {
                 Self::probe_declared_health(&ctx);
             }
 
-            thread::sleep(Duration::from_secs(2));
+            Self::wait_for_monitor_tick(&ctx, Duration::from_secs(2));
         }
 
         debug!("Monitor loop terminating.");
+    }
+
+    /// Sleeps until the next monitor tick, waking early the instant any
+    /// managed service with a pidfd exits (POLLIN on a pidfd fires on process
+    /// exit). Falls back to a plain timed sleep when no pidfds are available.
+    /// Readiness only — the tick's `try_wait` sweep remains the authority.
+    fn wait_for_monitor_tick(ctx: &DaemonContext, timeout: Duration) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = ctx;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fds: Vec<libc::pollfd> = match ctx.lock_processes() {
+                Ok(processes) => processes
+                    .values()
+                    .filter_map(|child| child.pidfd.as_ref())
+                    .map(|fd| libc::pollfd {
+                        fd: fd.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            if !fds.is_empty() {
+                let mut fds = fds;
+                let rc = unsafe {
+                    libc::poll(
+                        fds.as_mut_ptr(),
+                        fds.len() as libc::nfds_t,
+                        timeout.as_millis() as libc::c_int,
+                    )
+                };
+                if rc >= 0 {
+                    return;
+                }
+                let interrupted =
+                    std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR);
+                if interrupted {
+                    return;
+                }
+            }
+        }
+        thread::sleep(timeout);
     }
 
     /// Restarts services that died during startup and were reaped out of the
@@ -9176,6 +9250,32 @@ fi
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn pidfd_signals_exit_within_a_second() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.2")
+            .spawn()
+            .expect("spawn short-lived child");
+        let pidfd = open_pidfd(child.id()).expect("pidfd_open supported");
+        use std::os::fd::AsRawFd;
+        let started = Instant::now();
+        let mut fds = [libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, 5000) };
+        let elapsed = started.elapsed();
+        assert_eq!(rc, 1, "poll must report the exit");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "pidfd exit readiness took {elapsed:?}"
+        );
+        let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn automatic_restart_keeps_restarted_service_alive() {
         with_temp_home(|dir| {
             let restarted_pid_path = dir.join("restarted.pid");
@@ -9541,12 +9641,19 @@ sleep 30
 
             thread::sleep(Duration::from_millis(50));
             daemon.stop_service("test_service").unwrap();
-            assert!(
-                daemon
-                    .manual_stop_flags
+            let flagged_or_consumed = daemon
+                .manual_stop_flags
+                .lock()
+                .unwrap()
+                .contains("test_service")
+                || !daemon
+                    .processes
                     .lock()
                     .unwrap()
-                    .contains("test_service")
+                    .contains_key("test_service");
+            assert!(
+                flagged_or_consumed,
+                "manual stop must flag the service or already have consumed the exit"
             );
             assert!(
                 daemon
