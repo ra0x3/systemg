@@ -1,6 +1,10 @@
 # RFC 0001: Kernel Mode
 
-- **Status**: Draft — design agreed 2026-08-10; owner approval pending
+- **Status**: Approved 2026-08-11 at **red-team reduced v1 scope**: Phases
+  0–1a (done), pidfd-based exit detection, and the sandbox fail-closed
+  deprecation path — Linux-only. Container-init (1b) and macOS system
+  integration are deferred; eBPF (Phase 4) is cut pending a pidfd baseline
+  comparison. Owner rationale: less, correct, with limitations documented.
 - **Owners**: ra0x3 (owner), Claude + Codex (design)
 - **Target platforms**: linux-gnu (x86_64/aarch64), linux-musl (x86_64/aarch64), macOS (x86_64/arm64)
 
