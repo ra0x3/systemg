@@ -1,10 +1,16 @@
 # RFC 0001: Kernel Mode
 
-- **Status**: Approved 2026-08-11 at **red-team reduced v1 scope**: Phases
-  0–1a (done), pidfd-based exit detection, and the sandbox fail-closed
-  deprecation path — Linux-only. Container-init (1b) and macOS system
-  integration are deferred; eBPF (Phase 4) is cut pending a pidfd baseline
-  comparison. Owner rationale: less, correct, with limitations documented.
+- **Status**: Approved 2026-08-11 at **full scope with red-team gates**.
+  Owner decision (amending the earlier reduced-v1 cut): the minor release
+  ships the entire capability family — container-init (1b), macOS launchd
+  (2), Landlock + the fail-closed flip (3), and kernel-assisted observation
+  (4) — no track ships marked "deferred". The red-team analysis is retained
+  as quality gates, not scope cuts: green privileged CI + both-base parity
+  after every track; PID1 live-upgrade forbidden; eBPF ships only if it
+  beats the pidfd baseline (else pidfd is the story and eBPF is dropped);
+  external audit at RC before the tag; fail-closed lands with the schema
+  bump. Phases 0, 1a, pidfd, deprecation warnings, mode-aware validate:
+  done.
 - **Owners**: ra0x3 (owner), Claude + Codex (design)
 - **Target platforms**: linux-gnu (x86_64/aarch64), linux-musl (x86_64/aarch64), macOS (x86_64/arm64)
 

@@ -402,15 +402,26 @@ them.
 
 ### [SG0711](/how-it-works/dialog/codes#sg0711)
 
-Planned — container-init is not supported on this platform.
+Container-init was requested where it cannot work: `sysg init` on a non-Linux
+platform, or in a process that is not actually PID 1. Run it as a container's
+`ENTRYPOINT` (without Docker's `--init` flag, which installs its own init).
 
 ### [SG0712](/how-it-works/dialog/codes#sg0712)
 
-Planned — PID 1 prerequisites are missing (for example `/proc` not mounted).
+PID 1 prerequisites are missing: procfs is not mounted at `/proc`, or init is
+not running as root. Fix the container image or runtime flags and retry.
 
 ### [SG0713](/how-it-works/dialog/codes#sg0713)
 
-Planned — PID 1 shutdown incomplete: services survived reverse-order teardown.
+PID 1 shutdown incomplete: one or more services survived reverse-order
+teardown, so init exited nonzero rather than pretend the container wound down
+cleanly. The surviving units are named in the log.
+
+### [SG0714](/how-it-works/dialog/codes#sg0714)
+
+Live supervisor upgrade is forbidden in container-init mode: a failed exec in
+PID 1 kills the container and every service in it. Upgrade the container
+image instead.
 
 ### [SG0721](/how-it-works/dialog/codes#sg0721)
 

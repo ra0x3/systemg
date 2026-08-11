@@ -563,6 +563,18 @@ pub enum Commands {
         handoff: Option<String>,
     },
 
+    /// Run as a container's PID 1: boot the manifest, reap adopted orphans,
+    /// handle shutdown signals, and exit with the teardown verdict.
+    Init {
+        /// Path to the manifest to boot.
+        #[arg(short, long, default_value = "/etc/systemg/systemg.yaml")]
+        config: String,
+
+        /// Pipe service stderr through the supervisor.
+        #[arg(long)]
+        pipe_stderr: bool,
+    },
+
     /// DEPRECATED: Spawn a dynamic child process from a parent service.
     #[command(hide = true)]
     Spawn {
@@ -607,6 +619,7 @@ impl Commands {
             Commands::UpgradeInfo => "upgrade-info",
             Commands::UpgradeSupervisor { .. } => "upgrade-supervisor",
             Commands::Supervise { .. } => "supervise",
+            Commands::Init { .. } => "init",
             Commands::Spawn { .. } => "spawn",
         }
     }

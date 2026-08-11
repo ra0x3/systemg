@@ -191,6 +191,18 @@ pub enum SgCode {
     /// SG0705 — the manifest declares root-only keys and is not startable in
     /// user mode.
     ManifestRequiresSystemMode,
+    /// SG0711 — container-init was requested on a platform or process that
+    /// cannot be PID 1 (not Linux, or not actually PID 1).
+    ContainerInitUnsupported,
+    /// SG0712 — PID 1 prerequisites are missing (procfs not mounted, not
+    /// root).
+    ContainerInitPrereqMissing,
+    /// SG0713 — PID 1 shutdown incomplete: services survived reverse-order
+    /// teardown, so init exited nonzero.
+    ContainerInitShutdownIncomplete,
+    /// SG0714 — live supervisor upgrade is forbidden in container-init mode: a
+    /// failed exec as PID 1 kills the container and every service in it.
+    ContainerInitUpgradeForbidden,
 }
 
 impl SgCode {
@@ -260,6 +272,10 @@ impl SgCode {
             SgCode::SystemIntegrationBroken => "SG0703",
             SgCode::SystemModeRequiresRoot => "SG0704",
             SgCode::ManifestRequiresSystemMode => "SG0705",
+            SgCode::ContainerInitUnsupported => "SG0711",
+            SgCode::ContainerInitPrereqMissing => "SG0712",
+            SgCode::ContainerInitShutdownIncomplete => "SG0713",
+            SgCode::ContainerInitUpgradeForbidden => "SG0714",
         }
     }
 
@@ -269,7 +285,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 63] = [
+    pub const ALL: [SgCode; 67] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -333,6 +349,10 @@ impl SgCode {
         SgCode::SystemIntegrationBroken,
         SgCode::SystemModeRequiresRoot,
         SgCode::ManifestRequiresSystemMode,
+        SgCode::ContainerInitUnsupported,
+        SgCode::ContainerInitPrereqMissing,
+        SgCode::ContainerInitShutdownIncomplete,
+        SgCode::ContainerInitUpgradeForbidden,
     ];
 }
 

@@ -937,7 +937,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     let drop_privileges_effective =
         args.drop_privileges && drop_privileges_applies_to_command(&args.command);
 
-    let runtime_mode = if args.sys {
+    let runtime_mode = if matches!(args.command, Commands::Init { .. }) {
+        RuntimeMode::System
+    } else if args.sys {
         if !euid.is_root() && !matches!(args.command, Commands::Validate { .. }) {
             use systemg::diag::{Diagnostic, SgCode};
             return Err(Box::new(DiagError(Box::new(
@@ -2070,6 +2072,56 @@ fn run() -> Result<(), Box<dyn Error>> {
                 pipe_stderr,
                 mode,
                 handoff.map(PathBuf::from),
+            );
+        }
+        Commands::Init {
+            config,
+            pipe_stderr,
+        } => {
+            use systemg::diag::{Diagnostic, SgCode};
+            let refuse = |code, title: &str, note: String| {
+                Box::new(DiagError(Box::new(
+                    Diagnostic::error(code, title).note(note).help_docs(),
+                )))
+            };
+            if !cfg!(target_os = "linux") {
+                return Err(refuse(
+                    SgCode::ContainerInitUnsupported,
+                    "container-init is Linux-only",
+                    "sysg init supervises a Linux container as PID 1; this platform cannot".into(),
+                ));
+            }
+            let pid = std::process::id();
+            if pid != 1 {
+                return Err(refuse(
+                    SgCode::ContainerInitUnsupported,
+                    "sysg init must run as PID 1",
+                    format!(
+                        "this process is pid {pid}; run sysg init as the container ENTRYPOINT without docker's --init flag"
+                    ),
+                ));
+            }
+            if !euid.is_root() {
+                return Err(refuse(
+                    SgCode::ContainerInitPrereqMissing,
+                    "container-init requires root",
+                    "PID 1 must reap and signal arbitrary processes; run the container as root".into(),
+                ));
+            }
+            if !Path::new("/proc/self/stat").exists() {
+                return Err(refuse(
+                    SgCode::ContainerInitPrereqMissing,
+                    "procfs is not mounted",
+                    "sysg init needs /proc for process supervision; mount procfs in the container".into(),
+                ));
+            }
+            runtime::set_init_mode();
+            run_supervisor_in_process(
+                PathBuf::from(config),
+                None,
+                pipe_stderr,
+                ProjectRunMode::Foreground,
+                None,
             );
         }
         Commands::Spawn {

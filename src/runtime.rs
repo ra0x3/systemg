@@ -88,6 +88,19 @@ impl RuntimeContext {
     }
 }
 
+static INIT_MODE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Marks this process as a container-init (PID 1) supervisor. One-way.
+pub fn set_init_mode() {
+    INIT_MODE.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether this process runs as container-init (PID 1).
+pub fn init_mode() -> bool {
+    INIT_MODE.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Sets runtime mode. Can be called multiple times (e.g., supervisor forks).
 pub fn init(mode: RuntimeMode) {
     let mut guard = context_lock()
