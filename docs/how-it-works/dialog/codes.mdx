@@ -277,7 +277,7 @@ resolved before the first deletion, so nothing was deleted.
 
 ### [SG0405](/how-it-works/dialog/codes#sg0405)
 
-A full purge was refused because the resident supervisor did not exit after a
+A purge was refused because the resident supervisor did not exit after a
 shutdown request. Deleting the state and socket out from under a live
 supervisor would leave it running as an unreachable orphan (root-owned in
 system mode), so nothing was deleted. Inspect the supervisor process and stop
