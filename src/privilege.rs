@@ -445,23 +445,27 @@ impl PrivilegeContext {
 
             if isolation.private_devices.unwrap_or(false) {
                 warn!(
-                    "PrivateDevices requested; additional mount setup not yet implemented"
+                    "PrivateDevices requested; additional mount setup not yet implemented. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
                 );
             }
             if isolation.private_tmp.unwrap_or(false) {
-                warn!("PrivateTmp requested; additional mount setup not yet implemented");
+                warn!(
+                    "PrivateTmp requested; additional mount setup not yet implemented. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
+                );
             }
             if isolation.seccomp.is_some() {
-                warn!("Seccomp profiles not yet implemented; running without filters");
+                warn!(
+                    "Seccomp profiles not yet implemented; running WITHOUT filters. DEPRECATION: a future release refuses unenforceable security keys (SG0721/SG0722, fail-closed) instead of running unprotected"
+                );
             }
             if isolation.apparmor_profile.is_some() {
                 warn!(
-                    "AppArmor profiles not yet implemented; running without confinement"
+                    "AppArmor profiles not yet implemented; running WITHOUT confinement. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
                 );
             }
             if isolation.selinux_context.is_some() {
                 warn!(
-                    "SELinux contexts not yet implemented; running without adjustments"
+                    "SELinux contexts not yet implemented; running WITHOUT adjustments. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
                 );
             }
         }
