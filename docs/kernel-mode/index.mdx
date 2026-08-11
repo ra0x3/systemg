@@ -17,9 +17,17 @@ capabilities where the kernel — not the user session — is the counterparty.
 | Capability | What executes where | Status |
 |---|---|---|
 | [System mode](/kernel-mode/system-mode) | Userspace, root; drops privileges per service | Shipping (`--sys`, Linux; macOS integration is roadmap) |
-| [Container-init](/kernel-mode/container-init) | Userspace, PID 1 duties | Designed ([RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md)) |
+| [Container-init](/kernel-mode/container-init) | Userspace, PID 1 duties | Deferred ([RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md), reduced v1) |
 | [Kernel-enforced sandboxing](/kernel-mode/sandboxing) | Kernel enforces; sysg configures | Partial — see honest limits |
-| [Kernel-assisted observation](/kernel-mode/kernel-assisted) | eBPF verified/executed by the kernel; loader in userspace | Designed (RFC 0001) |
+| [Kernel-assisted observation](/kernel-mode/kernel-assisted) | pidfd first; eBPF cut from v1 | In progress (pidfd), RFC 0001 |
+
+<Info>
+**Scope decision (2026-08-11).** Kernel mode v1 deliberately ships less:
+system-mode parity, pidfd exit detection, and fail-closed sandboxing
+groundwork, on Linux only. Container-init and macOS system integration are
+deferred; eBPF is cut until it beats a pidfd baseline. Less, correct, and
+audited — over more, buggy.
+</Info>
 
 ## Mode parity contract
 
