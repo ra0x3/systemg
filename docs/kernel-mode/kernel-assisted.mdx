@@ -1,0 +1,31 @@
+---
+title: Kernel-Assisted Observation
+---
+
+# Kernel-Assisted Observation
+
+<Warning>
+Design stage — specified in
+[RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md);
+not yet shipped. An independent red-team review requires this track to first
+justify itself against a `pidfd`-based baseline before any eBPF lands.
+</Warning>
+
+Today sysg observes service exits by polling. The kernel can push those
+events instead: process exit, fork, and exec surfaced to the supervisor with
+no polling latency and no PID-reuse window.
+
+Two candidate mechanisms, in evaluation order:
+
+1. **pidfd** (`pidfd_open` + poll, Linux 5.3+): event-driven exit detection
+   with no extra privileges, no BTF requirement, and no new dependencies in
+   the root supervisor's trust base.
+2. **eBPF** (Aya, Linux 5.10+ with kernel BTF, `CAP_BPF`+`CAP_PERFMON`):
+   adds fork/exec lineage of non-descendants. Event data is advisory —
+   reconciliation cross-checks `/proc`, and `waitpid` semantics stay
+   authoritative for reaping.
+
+In every design, observation degrades — never lies: if the kernel-assisted
+source is unavailable or loses events, sysg falls back to polling and says
+so ([SG0731](/how-it-works/dialog/codes#sg0731)–[SG0733](/how-it-works/dialog/codes#sg0733)
+are reserved for these transitions).

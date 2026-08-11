@@ -174,6 +174,9 @@ pub enum SgCode {
     MigrationIncomplete,
     /// SG0605 — a migrated artifact did not match its recorded checksum.
     MigrationVerificationFailed,
+    /// SG0405 — a purge was refused because the resident supervisor did not
+    /// exit after a shutdown request; deleting its state would orphan it.
+    PurgeSupervisorShutdownTimeout,
     /// SG0701 — running as root without `--sys`, so state would land in
     /// user-mode paths instead of the system runtime.
     SystemModeNotSelected,
@@ -248,6 +251,7 @@ impl SgCode {
             SgCode::MigrationAmbiguous => "SG0603",
             SgCode::MigrationIncomplete => "SG0604",
             SgCode::MigrationVerificationFailed => "SG0605",
+            SgCode::PurgeSupervisorShutdownTimeout => "SG0405",
             SgCode::SystemModeNotSelected => "SG0701",
             SgCode::RuntimeModeMismatch => "SG0702",
             SgCode::SystemIntegrationBroken => "SG0703",
@@ -261,7 +265,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 61] = [
+    pub const ALL: [SgCode; 62] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -319,6 +323,7 @@ impl SgCode {
         SgCode::MigrationAmbiguous,
         SgCode::MigrationIncomplete,
         SgCode::MigrationVerificationFailed,
+        SgCode::PurgeSupervisorShutdownTimeout,
         SgCode::SystemModeNotSelected,
         SgCode::RuntimeModeMismatch,
         SgCode::SystemIntegrationBroken,

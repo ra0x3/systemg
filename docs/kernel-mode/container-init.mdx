@@ -1,0 +1,38 @@
+---
+title: Container-Init (PID 1)
+---
+
+# Container-Init (PID 1)
+
+<Warning>
+Design stage — specified in
+[RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md)
+and not yet shipped. Running today's sysg as a container `ENTRYPOINT` does
+not give you PID 1 semantics.
+</Warning>
+
+The goal: `sysg init` as a container's PID 1 on linux-gnu and linux-musl
+(Alpine is a first-class target), replacing tini/s6/supervisord combinations
+with one supervisor that already owns lifecycle, logs, and diagnostics.
+
+## What PID 1 changes
+
+PID 1 inherits every orphaned process in the container and must reap them;
+default signal dispositions differ; shutdown means tearing down every service
+in reverse dependency order and exiting with a meaningful status. The design
+routes all wait statuses through a centralized broker so an adopted orphan's
+exit can never be mistaken for a managed service's.
+
+## Planned diagnostics
+
+- [SG0711](/how-it-works/dialog/codes#sg0711) — container-init unsupported on
+  this platform (e.g. macOS)
+- [SG0712](/how-it-works/dialog/codes#sg0712) — PID 1 prerequisites missing
+  (e.g. `/proc` not mounted)
+- [SG0713](/how-it-works/dialog/codes#sg0713) — shutdown incomplete: services
+  survived reverse-order teardown
+
+## Known constraint
+
+Live supervisor upgrade is forbidden in container-init mode: a failed exec in
+PID 1 kills the container and everything in it. Upgrade the image instead.

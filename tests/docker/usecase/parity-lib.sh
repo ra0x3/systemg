@@ -32,13 +32,21 @@ msysg() {
 }
 
 mode_end() {
+  SUP_PID=""
+  for PF in /var/lib/systemg/sysg.pid /home/parity/.local/share/systemg/sysg.pid; do
+    [ -f "$PF" ] && SUP_PID="$(tr -cd '0-9' < "$PF")"
+  done
   msysg stop --config "$CONFIG" >/dev/null 2>&1
   sleep 2
   msysg purge >/dev/null 2>&1
   check "$?" "[$MODE] purge exits 0"
   msysg status --config "$CONFIG" >/dev/null 2>/tmp/postpurge.err
   grep -qiE "SG0206|no supervisor" /tmp/postpurge.err
-  check "$?" "[$MODE] supervisor is down after purge"
+  check "$?" "[$MODE] no supervisor answers after purge"
+  if [ -n "$SUP_PID" ]; then
+    ! kill -0 "$SUP_PID" 2>/dev/null
+    check "$?" "[$MODE] supervisor pid $SUP_PID is dead after purge"
+  fi
   pkill -x sleep 2>/dev/null
   sleep 1
 }

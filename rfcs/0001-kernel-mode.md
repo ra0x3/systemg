@@ -343,7 +343,10 @@ UAT, add Alpine user/system/PID1 lanes, macOS parity on native runners.
 - [SG0732](/how-it-works/dialog/codes#sg0732) (degraded observation) surfaces in logs *and* status metadata.
 - Container-init ships as `sysg init`: requires actually being PID 1, implies
   system mode, and routes all wait statuses through a centralized wait broker
-  (managed children to their monitors, adopted orphans reaped).
+  (managed children to their monitors, adopted orphans reaped). Live
+  supervisor upgrade is forbidden in container-init mode (red-team decision,
+  reflected in docs); the earlier same-PID-reexec allowance applies only to
+  non-PID1 supervisors.
 - `no_new_privs` is set whenever seccomp or Landlock is configured.
 - Manifest schema shapes for `isolation.landlock:` and `observation:` freeze
   before owner approval of this RFC.

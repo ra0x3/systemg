@@ -4689,10 +4689,12 @@ fn execute_purge(plan: systemg::purge::PurgePlan) -> Result<(), Box<dyn Error>> 
     use systemg::purge::PurgePlan;
     match plan {
         PurgePlan::Everything => {
+            shutdown_resident_supervisor()?;
             purge_state_root()?;
             println!("All systemg state has been purged");
         }
         PurgePlan::Config { projects } => {
+            shutdown_resident_supervisor()?;
             purge_projects(&projects)?;
             purge_runtime_files();
             println!("Purged state for {} project(s)", projects.len());
@@ -4711,6 +4713,53 @@ fn execute_purge(plan: systemg::purge::PurgePlan) -> Result<(), Box<dyn Error>> 
         }
     }
     Ok(())
+}
+
+/// Asks a resident supervisor to exit before its state is deleted, so a full
+/// purge can never orphan a live (and, in system mode, root-owned) supervisor
+/// whose socket and pidfile were removed out from under it.
+fn shutdown_resident_supervisor() -> Result<(), Box<dyn Error>> {
+    let pid = ipc::read_supervisor_pid().ok().flatten();
+    let alive = match pid {
+        Some(pid) => {
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+        }
+        None => supervisor_running(),
+    };
+    if !alive {
+        return Ok(());
+    }
+    let _ = ipc::send_command_detached(&ControlCommand::Shutdown);
+    let exited = match pid {
+        Some(pid) => wait_for_supervisor_exit(pid, Duration::from_secs(5)),
+        None => {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if !supervisor_running() {
+                    break true;
+                }
+                if Instant::now() >= deadline {
+                    break false;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+    if exited {
+        return Ok(());
+    }
+    use systemg::diag::{Diagnostic, SgCode};
+    let who = pid.map_or("unknown pid".to_string(), |p| format!("pid {p}"));
+    Err(Box::new(DiagError(Box::new(
+        Diagnostic::error(
+            SgCode::PurgeSupervisorShutdownTimeout,
+            "resident supervisor did not exit; purge refused",
+        )
+        .note(format!(
+            "supervisor ({who}) is still alive after a shutdown request; purging its state would orphan it. Nothing was deleted."
+        ))
+        .help_docs(),
+    ))))
 }
 
 /// Removes the whole state root plus the out-of-root system-mode log dir.

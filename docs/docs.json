@@ -90,7 +90,6 @@
           "how-it-works/hooks",
           "how-it-works/state",
           "how-it-works/logs",
-          "how-it-works/privileged-mode",
           {
             "group": "Commands",
             "pages": [
@@ -118,6 +117,17 @@
           }
         ]
       },
+      {
+        "group": "Kernel Mode",
+        "pages": [
+          "kernel-mode/index",
+          "kernel-mode/system-mode",
+          "kernel-mode/container-init",
+          "kernel-mode/sandboxing",
+          "kernel-mode/kernel-assisted",
+          "kernel-mode/security"
+        ]
+      },
       "security",
       "philosophy",
       {
@@ -142,6 +152,10 @@
     {
       "source": "/docs/:slug*",
       "destination": "/:slug*"
+    },
+    {
+      "source": "/how-it-works/privileged-mode",
+      "destination": "/kernel-mode/system-mode"
     }
   ]
 }

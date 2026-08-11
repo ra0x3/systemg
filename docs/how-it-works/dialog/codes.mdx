@@ -275,6 +275,14 @@ segment: an empty id resolves to the projects root and a traversing or absolute
 id escapes it, so either would delete more than the target named. Every target is
 resolved before the first deletion, so nothing was deleted.
 
+### [SG0405](/how-it-works/dialog/codes#sg0405)
+
+A full purge was refused because the resident supervisor did not exit after a
+shutdown request. Deleting the state and socket out from under a live
+supervisor would leave it running as an unreachable orphan (root-owned in
+system mode), so nothing was deleted. Inspect the supervisor process and stop
+it before retrying.
+
 ## Upgrade
 
 ### [SG0501](/how-it-works/dialog/codes#sg0501)
@@ -383,3 +391,55 @@ Re-run the installer to regenerate it.
 
 `--sys` targets the root-owned system runtime and requires root privileges.
 Re-run under `sudo`, or drop `--sys` to operate on the per-user runtime.
+
+## Reserved: kernel mode (planned)
+
+These codes are reserved by
+[RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md)
+for capabilities that are designed but not yet shipped. They are listed so
+their anchors and meanings are stable before the first release that emits
+them.
+
+### [SG0711](/how-it-works/dialog/codes#sg0711)
+
+Planned — container-init is not supported on this platform.
+
+### [SG0712](/how-it-works/dialog/codes#sg0712)
+
+Planned — PID 1 prerequisites are missing (for example `/proc` not mounted).
+
+### [SG0713](/how-it-works/dialog/codes#sg0713)
+
+Planned — PID 1 shutdown incomplete: services survived reverse-order teardown.
+
+### [SG0721](/how-it-works/dialog/codes#sg0721)
+
+Planned — sandbox capability unsupported on this platform.
+
+### [SG0722](/how-it-works/dialog/codes#sg0722)
+
+Planned — a seccomp filter could not be built or applied; the service is
+refused rather than run unprotected.
+
+### [SG0723](/how-it-works/dialog/codes#sg0723)
+
+Planned — `no_new_privs` could not be set; the service is refused.
+
+### [SG0724](/how-it-works/dialog/codes#sg0724)
+
+Planned — Landlock was requested but the kernel ABI is unavailable or
+insufficient; the service is refused.
+
+### [SG0731](/how-it-works/dialog/codes#sg0731)
+
+Planned — kernel-assisted observation is required by configuration but
+unavailable; start refused with the missing prerequisites as evidence.
+
+### [SG0732](/how-it-works/dialog/codes#sg0732)
+
+Planned — kernel-assisted observation unavailable; degraded to polling.
+
+### [SG0733](/how-it-works/dialog/codes#sg0733)
+
+Planned — kernel-assisted event loss; a `/proc` reconciliation pass was
+forced.
