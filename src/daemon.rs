@@ -2845,6 +2845,16 @@ impl Daemon {
     fn reap_child_if_ready(pid: u32) {
         use nix::sys::wait::{WaitPidFlag, waitpid};
 
+        // In container-init mode the broker is the sole reaper (waitpid(-1)).
+        // A targeted waitpid here would race it and, if it won, strip the
+        // status out from under the monitor that expects to find it in the
+        // mailbox — so defer to the broker instead of competing.
+        if crate::runtime::init_mode() {
+            crate::reaper::reap_pending();
+            let _ = crate::reaper::take(pid as i32);
+            return;
+        }
+
         let target = nix::unistd::Pid::from_raw(pid as i32);
         match waitpid(target, Some(WaitPidFlag::WNOHANG)) {
             Ok(_) => {}

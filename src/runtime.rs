@@ -71,11 +71,23 @@ impl RuntimeContext {
         }
     }
 
-    /// Handles system directories.
+    /// Handles system directories. Linux follows the FHS; macOS uses its
+    /// native system locations under `/Library`, since launchd (not systemd)
+    /// owns system daemons there and `/var/lib`/`/etc` are not the platform
+    /// convention.
     fn system_directories() -> Self {
-        let state_dir = PathBuf::from("/var/lib/systemg");
-        let log_dir = PathBuf::from("/var/log/systemg");
-        let config_dir = PathBuf::from("/etc/systemg");
+        #[cfg(target_os = "macos")]
+        let (state_dir, log_dir, config_dir) = (
+            PathBuf::from("/Library/Application Support/systemg"),
+            PathBuf::from("/Library/Logs/systemg"),
+            PathBuf::from("/Library/Application Support/systemg/etc"),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let (state_dir, log_dir, config_dir) = (
+            PathBuf::from("/var/lib/systemg"),
+            PathBuf::from("/var/log/systemg"),
+            PathBuf::from("/etc/systemg"),
+        );
 
         Self {
             mode: RuntimeMode::System,
@@ -435,6 +447,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn system_mode_uses_var_directories() {
         let _guard = env_lock();
@@ -444,6 +457,25 @@ mod tests {
         assert_eq!(state_dir(), PathBuf::from("/var/lib/systemg"));
         assert_eq!(log_dir(), PathBuf::from("/var/log/systemg"));
         assert_eq!(config_dirs(), vec![PathBuf::from("/etc/systemg")]);
+        assert!(!should_drop_privileges());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_mode_uses_library_directories() {
+        let _guard = env_lock();
+        set_drop_privileges(false);
+        init(RuntimeMode::System);
+
+        assert_eq!(
+            state_dir(),
+            PathBuf::from("/Library/Application Support/systemg")
+        );
+        assert_eq!(log_dir(), PathBuf::from("/Library/Logs/systemg"));
+        assert_eq!(
+            config_dirs(),
+            vec![PathBuf::from("/Library/Application Support/systemg/etc")]
+        );
         assert!(!should_drop_privileges());
     }
 
