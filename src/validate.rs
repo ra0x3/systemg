@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn unsupported_version_is_classified() {
         let (_dir, path) =
-            write_config("version: \"3\"\nservices:\n  api:\n    command: \"echo ok\"\n");
+            write_config("version: \"9\"\nservices:\n  api:\n    command: \"echo ok\"\n");
         let (report, _) = validate(&path, false);
         assert!(!report.valid);
         assert_eq!(report.diagnostics[0].kind, "unsupported-version");

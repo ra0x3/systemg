@@ -4488,6 +4488,7 @@ impl Supervisor {
                 crate::privilege::PrivilegeContext::from_service(
                     &spawn_auth.root_service.clone().unwrap_or_default(),
                     &service_config,
+                    false,
                 )
             })
             .transpose()
