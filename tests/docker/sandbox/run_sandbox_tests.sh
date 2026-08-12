@@ -43,10 +43,22 @@ else
   check "$?" "no landlock: confined service is not running (refused)"
 fi
 
+# seccomp: the baseline-v1 allowlist excludes chmod, so the seccombed service
+# can run (echo hello) but chmod is blocked (EPERM). Runs on any kernel with
+# seccomp, which is effectively universal.
+SLOG="$(sysg --sys logs --service seccombed --no-follow -c /etc/systemg/systemg.yaml 2>/dev/null)"
+echo "--- seccomp service log ---"; echo "$SLOG"
+echo "$SLOG" | grep -q "hello"
+check "$?" "seccomp-confined service runs allowed syscalls"
+echo "$SLOG" | grep -q "CHMOD_BLOCKED"
+check "$?" "seccomp blocks a denied syscall (chmod -> EPERM)"
+! echo "$SLOG" | grep -q "CHMOD_OK"
+check "$?" "no bypass: chmod did not succeed under seccomp"
+
 sysg --sys stop -c /etc/systemg/systemg.yaml >/dev/null 2>&1
 sysg --sys purge >/dev/null 2>&1
 
-# fail-closed: a v3 service with an unenforceable seccomp key must refuse.
+# fail-closed: a v3 service with an unenforceable key (apparmor) must refuse.
 cat > /tmp/failclosed.yaml <<EOF
 version: "3"
 projects:
@@ -56,13 +68,13 @@ projects:
       blocked:
         command: "sleep 300"
         isolation:
-          seccomp: "baseline"
+          apparmor_profile: "docker-default"
 EOF
 OUT="$(sysg --sys start -c /tmp/failclosed.yaml --daemonize 2>&1)"
 sleep 2
 STATUS="$(sysg --sys status --service blocked -c /tmp/failclosed.yaml --format json 2>&1)"
-echo "$OUT $STATUS" | grep -qiE "isolation.seccomp|cannot enforce|not startable|SG0"
-check "$?" "v3 unenforceable seccomp refuses the service (fail-closed)"
+echo "$OUT $STATUS" | grep -qiE "isolation.apparmor|cannot enforce|not startable|SG0"
+check "$?" "v3 unenforceable apparmor refuses the service (fail-closed)"
 ! echo "$STATUS" | grep -qi '"state":"running"'
 check "$?" "blocked service is not running (no unprotected process)"
 sysg --sys purge >/dev/null 2>&1
