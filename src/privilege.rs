@@ -98,10 +98,59 @@ pub struct PrivilegeContext {
     pub isolation: Option<IsolationConfig>,
 }
 
+/// Names the first security key a service declares that systemg cannot yet
+/// enforce, or `None` if every declared key is enforceable. seccomp, AppArmor,
+/// SELinux, and the private-devices/tmp mounts are not yet enforced, so under
+/// fail-closed they refuse rather than run unprotected.
+fn unenforceable_security_key(service: &ServiceConfig) -> Option<&'static str> {
+    let isolation = service.isolation.as_ref()?;
+    if isolation.seccomp.as_ref().is_some_and(|v| !v.is_empty()) {
+        return Some("isolation.seccomp");
+    }
+    if isolation
+        .apparmor_profile
+        .as_ref()
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Some("isolation.apparmor_profile");
+    }
+    if isolation
+        .selinux_context
+        .as_ref()
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Some("isolation.selinux_context");
+    }
+    if isolation.private_devices.unwrap_or(false) {
+        return Some("isolation.private_devices");
+    }
+    if isolation.private_tmp.unwrap_or(false) {
+        return Some("isolation.private_tmp");
+    }
+    None
+}
+
 impl PrivilegeContext {
     /// Analyses a service definition and records the privilege adjustments that
     /// should be applied before `exec` (e.g. UID/GID switch, limits, caps).
-    pub fn from_service(service_name: &str, service: &ServiceConfig) -> io::Result<Self> {
+    ///
+    /// `fail_closed` (manifest schema v3): a security key that systemg cannot
+    /// yet enforce refuses the service here, in the parent, before any spawn —
+    /// rather than warning in the child and running unprotected.
+    pub fn from_service(
+        service_name: &str,
+        service: &ServiceConfig,
+        fail_closed: bool,
+    ) -> io::Result<Self> {
+        if fail_closed && let Some(unenforceable) = unenforceable_security_key(service) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "service '{service_name}' declares '{unenforceable}', which this build cannot enforce; schema v3 refuses it rather than run unprotected (remove the key or pin the manifest to version 2)"
+                ),
+            ));
+        }
+
         let mut context = PrivilegeContext {
             service_name: service_name.to_string(),
             service_hash: service.compute_hash(),
@@ -678,7 +727,7 @@ mod tests {
     fn from_service_succeeds_without_privilege_changes() {
         runtime::set_drop_privileges(false);
         let service = base_service();
-        let ctx = PrivilegeContext::from_service("demo", &service)
+        let ctx = PrivilegeContext::from_service("demo", &service, false)
             .expect("context should build without privilege requests");
         assert!(ctx.user.uid.is_none());
         assert!(ctx.capabilities.is_empty());
@@ -694,7 +743,7 @@ mod tests {
         let mut service = base_service();
         service.user = Some("nobody".into());
 
-        let err = PrivilegeContext::from_service("demo", &service)
+        let err = PrivilegeContext::from_service("demo", &service, false)
             .expect_err("user switch should fail without root");
         assert_eq!(err.kind(), ErrorKind::PermissionDenied);
     }
@@ -784,6 +833,43 @@ mod tests {
             }
             .drops_privileges()
         );
+    }
+
+    #[test]
+    fn fail_closed_refuses_unenforceable_seccomp() {
+        runtime::set_drop_privileges(false);
+        let mut service = base_service();
+        service.isolation = Some(IsolationConfig {
+            seccomp: Some("baseline".into()),
+            ..IsolationConfig::default()
+        });
+        let err = PrivilegeContext::from_service("demo", &service, true)
+            .expect_err("v3 must refuse unenforceable seccomp");
+        assert_eq!(err.kind(), ErrorKind::Unsupported);
+        assert!(err.to_string().contains("isolation.seccomp"));
+    }
+
+    #[test]
+    fn v2_permits_unenforceable_seccomp() {
+        runtime::set_drop_privileges(false);
+        let mut service = base_service();
+        service.isolation = Some(IsolationConfig {
+            seccomp: Some("baseline".into()),
+            ..IsolationConfig::default()
+        });
+        assert!(PrivilegeContext::from_service("demo", &service, false).is_ok());
+    }
+
+    #[test]
+    fn fail_closed_ignores_enforceable_isolation() {
+        runtime::set_drop_privileges(false);
+        let mut service = base_service();
+        service.isolation = Some(IsolationConfig {
+            network: Some(true),
+            seccomp: Some(String::new()),
+            ..IsolationConfig::default()
+        });
+        assert!(PrivilegeContext::from_service("demo", &service, true).is_ok());
     }
 }
 

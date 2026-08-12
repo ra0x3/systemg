@@ -3802,6 +3802,9 @@ impl Daemon {
         _detach_children: bool,
         pipe_stderr: bool,
         log_settings: EffectiveLogsConfig,
+        // Manifest schema v3: refuse services declaring unenforceable security
+        // keys rather than spawning them unprotected.
+        fail_closed: bool,
     ) -> Result<(u32, Option<libc::pid_t>), ProcessManagerError> {
         let command = &service_config.command;
         debug!("Launching service: '{service_name}' with command: `{command}`");
@@ -3832,6 +3835,7 @@ impl Daemon {
         let privilege = crate::privilege::PrivilegeContext::from_service(
             service_name,
             service_config,
+            fail_closed,
         )
         .map_err(|source| ProcessManagerError::PrivilegeSetupFailed {
             service: service_name.to_string(),
@@ -4003,6 +4007,7 @@ impl Daemon {
         let detach_children = ctx.detach_children;
         let pipe_stderr = ctx.pipe_stderr.load(Ordering::SeqCst);
         let project_id = ctx.config.project.id.clone();
+        let fail_closed = ctx.config.version.is_fail_closed();
         let service_name_for_thread = service_name.clone();
         let service_name_for_cleanup = service_name.clone();
 
@@ -4021,6 +4026,7 @@ impl Daemon {
                 detach_children,
                 pipe_stderr,
                 log_settings,
+                fail_closed,
             );
 
             match launch_result {
@@ -7044,6 +7050,7 @@ impl Daemon {
         let working_dir = self.project_root.clone();
         let pipe_stderr = self.pipe_stderr.load(Ordering::SeqCst);
         let config = self.cfg();
+        let fail_closed = config.version.is_fail_closed();
         let project_id = config.project.id.clone();
         let log_settings = service.effective_logs(&config.logs);
 
@@ -7061,6 +7068,7 @@ impl Daemon {
                     detach_children,
                     pipe_stderr,
                     log_settings,
+                    fail_closed,
                 ) {
                     Ok((pid, pgid)) => {
                         let mut pid_guard = pid_file.lock()?;

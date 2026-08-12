@@ -37,23 +37,34 @@ pub const CURRENT_MANIFEST_VERSION: Version = Version::V2;
 /// Supported manifest schema versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Version {
-    /// The current Systemg manifest schema.
+    /// The Systemg manifest schema with warn-and-run sandbox keys (legacy
+    /// behaviour retained for backward compatibility).
     V2,
+    /// The fail-closed schema: unenforceable security keys refuse to start the
+    /// service instead of running unprotected.
+    V3,
 }
 
 impl Version {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "2" => Ok(Self::V2),
+            "3" => Ok(Self::V3),
             "1" => Err(
                 "manifest version '1' is no longer supported; bump `version` to \"2\" \
                  (run `sysg migrate` and `sysg purge` before upgrading)"
                     .to_string(),
             ),
             other => Err(format!(
-                "unsupported manifest version '{other}'; supported versions: 2"
+                "unsupported manifest version '{other}'; supported versions: 2, 3"
             )),
         }
+    }
+
+    /// Whether this schema enforces sandbox keys fail-closed: an unenforceable
+    /// security request refuses the service rather than running it unprotected.
+    pub fn is_fail_closed(self) -> bool {
+        matches!(self, Version::V3)
     }
 }
 
@@ -61,6 +72,7 @@ impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::V2 => f.write_str("2"),
+            Self::V3 => f.write_str("3"),
         }
     }
 }
@@ -203,9 +215,9 @@ impl TryFrom<ConfigV1> for Config {
     type Error = String;
 
     fn try_from(value: ConfigV1) -> Result<Self, Self::Error> {
-        if value.version != Version::V2 {
+        if !matches!(value.version, Version::V2 | Version::V3) {
             return Err(format!(
-                "unsupported manifest version {}; expected version 2",
+                "unsupported manifest version {}; expected version 2 or 3",
                 value.version
             ));
         }
@@ -255,6 +267,10 @@ impl ConfigV1 {
             );
         }
 
+        // The declared schema version rides into every resulting Config so the
+        // privilege layer can decide fail-closed enforcement per manifest.
+        let version = self.version;
+
         let mut configs = Vec::new();
 
         if let Some(projects) = self.projects {
@@ -264,7 +280,7 @@ impl ConfigV1 {
                 let mut project_services = entry.services;
                 tag_project_scope(&mut project_services, &id);
                 configs.push(Config {
-                    version: CURRENT_MANIFEST_VERSION,
+                    version,
                     project: ProjectConfig {
                         name: entry.name.unwrap_or_else(|| id.clone()),
                         id,
@@ -283,7 +299,7 @@ impl ConfigV1 {
                 let mut loose = self.services;
                 tag_project_scope(&mut loose, LOOSE_PROJECT_SCOPE);
                 configs.push(Config {
-                    version: CURRENT_MANIFEST_VERSION,
+                    version,
                     project: ProjectConfig::default(),
                     services: loose,
                     project_dir: self.project_dir,
@@ -298,7 +314,7 @@ impl ConfigV1 {
         }
 
         configs.push(Config {
-            version: CURRENT_MANIFEST_VERSION,
+            version,
             project: self.project.map(Into::into).unwrap_or_default(),
             services: self.services,
             project_dir: self.project_dir,
@@ -1595,8 +1611,10 @@ fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
 /// current runtime configuration shape.
 pub fn parse_config_manifest(content: &str) -> Result<Config, serde_yaml::Error> {
     let header: ManifestHeader = serde_yaml::from_str(content)?;
+    // V2 and V3 share the same manifest shape; the version only changes
+    // whether unenforceable sandbox keys fail closed at spawn time.
     match header.version {
-        Version::V2 => {
+        Version::V2 | Version::V3 => {
             let config: ConfigV1 = serde_yaml::from_str(content)?;
             config.try_into().map_err(serde_yaml::Error::custom)
         }
@@ -1616,7 +1634,7 @@ fn parse_config_projects_with_legacy(
 ) -> Result<(Vec<Config>, bool), serde_yaml::Error> {
     let header: ManifestHeader = serde_yaml::from_str(content)?;
     match header.version {
-        Version::V2 => {
+        Version::V2 | Version::V3 => {
             let config: ConfigV1 = serde_yaml::from_str(content)?;
             let legacy = config.projects.is_none() && uses_legacy_project_shape(&config);
             let configs = config.into_configs().map_err(serde_yaml::Error::custom)?;
@@ -2346,7 +2364,7 @@ services:
     fn parse_manifest_rejects_unsupported_version() {
         let err = parse_config_manifest(
             r#"
-version: "3"
+version: "9"
 services:
   api:
     command: "echo ok"
@@ -2356,9 +2374,24 @@ services:
 
         assert!(
             err.to_string()
-                .contains("unsupported manifest version '3'; supported versions: 2"),
+                .contains("unsupported manifest version '9'; supported versions: 2, 3"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn parse_manifest_accepts_v3_and_marks_fail_closed() {
+        let config = parse_config_manifest(
+            r#"
+version: "3"
+services:
+  api:
+    command: "echo ok"
+"#,
+        )
+        .expect("v3 manifest parses");
+        assert_eq!(config.version, Version::V3);
+        assert!(config.version.is_fail_closed());
     }
 
     #[test]
