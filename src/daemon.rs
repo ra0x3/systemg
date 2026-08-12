@@ -7645,7 +7645,20 @@ impl Daemon {
         };
         services.extend(self.processes.lock()?.keys().cloned());
         let mut services: Vec<String> = services.into_iter().collect();
-        services.sort_unstable();
+        // Reverse dependency order: dependents go down before what they
+        // depend on. Units outside the manifest's graph (dynamic/stale) have
+        // no dependents and stop first; name order breaks ties for stability.
+        let start_order = self.config().service_start_order().unwrap_or_default();
+        let rank: HashMap<&str, usize> = start_order
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.as_str(), idx))
+            .collect();
+        services.sort_unstable_by(|a, b| {
+            let ra = rank.get(a.as_str()).copied().unwrap_or(usize::MAX);
+            let rb = rank.get(b.as_str()).copied().unwrap_or(usize::MAX);
+            rb.cmp(&ra).then_with(|| a.cmp(b))
+        });
         let mut first_error = None;
 
         for service in services {
