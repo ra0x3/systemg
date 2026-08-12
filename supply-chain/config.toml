@@ -191,6 +191,14 @@ criteria = "safe-to-deploy"
 version = "0.8.35"
 criteria = "safe-to-deploy"
 
+[[exemptions.enumflags2]]
+version = "0.7.12"
+criteria = "safe-to-deploy"
+
+[[exemptions.enumflags2_derive]]
+version = "0.7.12"
+criteria = "safe-to-deploy"
+
 [[exemptions.equivalent]]
 version = "1.0.2"
 criteria = "safe-to-deploy"
@@ -379,12 +387,16 @@ criteria = "safe-to-deploy"
 version = "0.3.82"
 criteria = "safe-to-deploy"
 
+[[exemptions.landlock]]
+version = "0.4.7"
+criteria = "safe-to-deploy"
+
 [[exemptions.lazy_static]]
 version = "1.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.libc]]
-version = "0.2.177"
+version = "0.2.189"
 criteria = "safe-to-deploy"
 
 [[exemptions.linux-raw-sys]]
@@ -651,6 +663,10 @@ criteria = "safe-to-deploy"
 version = "1.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.seccompiler]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.security-framework]]
 version = "2.11.1"
 criteria = "safe-to-deploy"
@@ -743,6 +759,10 @@ criteria = "safe-to-deploy"
 version = "2.0.108"
 criteria = "safe-to-deploy"
 
+[[exemptions.syn]]
+version = "3.0.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.sync_wrapper]]
 version = "1.0.2"
 criteria = "safe-to-deploy"
@@ -783,8 +803,16 @@ criteria = "safe-to-run"
 version = "1.0.69"
 criteria = "safe-to-deploy"
 
+[[exemptions.thiserror]]
+version = "2.0.20"
+criteria = "safe-to-deploy"
+
 [[exemptions.thiserror-impl]]
 version = "1.0.69"
+criteria = "safe-to-deploy"
+
+[[exemptions.thiserror-impl]]
+version = "2.0.20"
 criteria = "safe-to-deploy"
 
 [[exemptions.thread_local]]
