@@ -1,0 +1,12 @@
+version: "2"
+projects:
+  boot:
+    name: Boot
+    services:
+      db:
+        command: "sleep 3000"
+      api:
+        command: "sleep 3000"
+        depends_on: [db]
+      orphaner:
+        command: "sh -c 'sh -c \"sleep 2 & disown; exit 0\" ; sleep 3000'"

@@ -2104,19 +2104,35 @@ impl ManagedChild {
     /// so a broker-reaped status is never lost.
     fn wait(&mut self) -> std::io::Result<ExitStatus> {
         if crate::runtime::init_mode() {
-            loop {
+            // The broker (or a targeted waitpid in the terminate path) may
+            // already hold or have consumed this pid's status. Poll briefly for
+            // a routed status, but stop the moment the pid is no longer alive:
+            // a consumed status will never arrive, and blocking for it forever
+            // would wedge teardown. A vanished, unclaimed pid reports ECHILD,
+            // the same "already reaped" signal the non-init path returns.
+            for _ in 0..50 {
                 if let Some(status) = crate::reaper::take(self.pid as i32) {
                     return Ok(status);
                 }
                 match self.try_wait() {
                     Ok(Some(status)) => return Ok(status),
-                    Ok(None) => thread::sleep(Duration::from_millis(20)),
+                    Ok(None) => {}
                     Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {
-                        thread::sleep(Duration::from_millis(20));
+                        return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
                     }
                     Err(err) => return Err(err),
                 }
+                let alive = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(self.pid as i32),
+                    None,
+                )
+                .is_ok();
+                if !alive {
+                    return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+                }
+                thread::sleep(Duration::from_millis(20));
             }
+            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
         }
         if let Some(child) = self.child.as_mut() {
             return child.wait();
@@ -2891,8 +2907,17 @@ impl Daemon {
 
             thread::sleep(interval);
 
+            // As container-init the monitor's reap loop may already be down
+            // (teardown), so drain the broker here: SIGKILL'd children linger
+            // as zombies until someone calls waitpid, and a zombie answers
+            // kill(pid, 0) as alive. Reaping clears them so the wait converges.
+            crate::reaper::reap_pending();
+
             let mut survivors = HashSet::new();
             for pid in pending.iter().copied() {
+                if crate::runtime::init_mode() {
+                    let _ = crate::reaper::take(pid as i32);
+                }
                 if Self::signal_pid(service_name, pid, None)? {
                     survivors.insert(pid);
                 }
