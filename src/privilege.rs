@@ -104,9 +104,9 @@ pub struct PrivilegeContext {
 /// fail-closed they refuse rather than run unprotected.
 fn unenforceable_security_key(service: &ServiceConfig) -> Option<&'static str> {
     let isolation = service.isolation.as_ref()?;
-    if isolation.seccomp.as_ref().is_some_and(|v| !v.is_empty()) {
-        return Some("isolation.seccomp");
-    }
+    // isolation.seccomp and isolation.landlock are now enforced (see
+    // crate::sandbox), so they are NOT listed here — under v3 they enforce
+    // rather than refuse. Only the keys with no enforcement path remain.
     if isolation
         .apparmor_profile
         .as_ref()
@@ -836,25 +836,25 @@ mod tests {
     }
 
     #[test]
-    fn fail_closed_refuses_unenforceable_seccomp() {
+    fn fail_closed_refuses_unenforceable_apparmor() {
         runtime::set_drop_privileges(false);
         let mut service = base_service();
         service.isolation = Some(IsolationConfig {
-            seccomp: Some("baseline".into()),
+            apparmor_profile: Some("docker-default".into()),
             ..IsolationConfig::default()
         });
         let err = PrivilegeContext::from_service("demo", &service, true)
-            .expect_err("v3 must refuse unenforceable seccomp");
+            .expect_err("v3 must refuse unenforceable apparmor");
         assert_eq!(err.kind(), ErrorKind::Unsupported);
-        assert!(err.to_string().contains("isolation.seccomp"));
+        assert!(err.to_string().contains("isolation.apparmor_profile"));
     }
 
     #[test]
-    fn v2_permits_unenforceable_seccomp() {
+    fn v2_permits_unenforceable_apparmor() {
         runtime::set_drop_privileges(false);
         let mut service = base_service();
         service.isolation = Some(IsolationConfig {
-            seccomp: Some("baseline".into()),
+            apparmor_profile: Some("docker-default".into()),
             ..IsolationConfig::default()
         });
         assert!(PrivilegeContext::from_service("demo", &service, false).is_ok());
@@ -864,9 +864,13 @@ mod tests {
     fn fail_closed_ignores_enforceable_isolation() {
         runtime::set_drop_privileges(false);
         let mut service = base_service();
+        // seccomp and landlock now have enforcement paths, so they do not
+        // refuse under fail-closed at the privilege layer; the sandbox layer
+        // handles them. apparmor left empty is not an effective request.
         service.isolation = Some(IsolationConfig {
             network: Some(true),
-            seccomp: Some(String::new()),
+            seccomp: Some("baseline-v1".into()),
+            apparmor_profile: Some(String::new()),
             ..IsolationConfig::default()
         });
         assert!(PrivilegeContext::from_service("demo", &service, true).is_ok());

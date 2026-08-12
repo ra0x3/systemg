@@ -3891,6 +3891,10 @@ impl Daemon {
                 .isolation
                 .as_ref()
                 .and_then(|i| i.landlock.as_ref()),
+            service_config
+                .isolation
+                .as_ref()
+                .and_then(|i| i.seccomp.as_deref()),
         )
         .map_err(|source| ProcessManagerError::PrivilegeSetupFailed {
             service: service_name.to_string(),

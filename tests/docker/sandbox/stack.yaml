@@ -8,3 +8,7 @@ projects:
         isolation:
           landlock:
             ro_paths: ["/allowed", "/bin", "/lib", "/usr"]
+      seccombed:
+        command: "sh -c 'echo hello && (chmod 777 /allowed/ok.txt 2>/dev/null && echo CHMOD_OK || echo CHMOD_BLOCKED) ; sleep 300'"
+        isolation:
+          seccomp: "baseline-v1"

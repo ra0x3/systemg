@@ -24,11 +24,37 @@ services:
       network: true
 ```
 
-## Honest limits — read this
+## Enforced today (schema v3, Linux)
 
-`isolation.seccomp` and `isolation.apparmor_profile` are accepted by the
-config schema today but **warn and run the service unenforced**. Treat them
-as documentation, not protection.
+Under `version: "3"`, these are really enforced by the kernel:
+
+- **`isolation.landlock: { ro_paths, rw_paths }`** — a Landlock filesystem
+  sandbox (Linux 5.13+). Paths not listed become inaccessible.
+- **`isolation.seccomp: "baseline-v1"`** — a frozen, deny-by-default syscall
+  allowlist; unlisted syscalls return `EPERM`. `no_new_privs` is set alongside.
+
+```yaml
+version: "3"
+services:
+  worker:
+    command: "./worker"
+    isolation:
+      seccomp: "baseline-v1"
+      landlock:
+        ro_paths: ["/usr", "/lib", "/etc/worker"]
+        rw_paths: ["/var/lib/worker"]
+```
+
+An unsupported kernel or a malformed policy **refuses the service**
+([SG0722](/how-it-works/dialog/codes#sg0722)/[SG0724](/how-it-works/dialog/codes#sg0724))
+rather than running it unprotected. `baseline-v1` is frozen; a different or
+stricter policy will ship as `baseline-v2`, never as a silent edit.
+
+## Still unenforced — read this
+
+`isolation.apparmor_profile` and `isolation.selinux_context` are accepted by
+the schema but **warn and run the service unenforced** under v2. Treat them as
+documentation, not protection.
 
 The planned semantics
 ([RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md))

@@ -429,8 +429,10 @@ Planned — sandbox capability unsupported on this platform.
 
 ### [SG0722](/how-it-works/dialog/codes#sg0722)
 
-Planned — a seccomp filter could not be built or applied; the service is
-refused rather than run unprotected.
+A seccomp filter could not be built (unknown profile, unsupported CPU
+architecture) or applied in the child. systemg refuses the service rather than
+run it without the requested syscall filter. The only built-in profile is
+`baseline-v1` (a frozen deny-by-default allowlist).
 
 ### [SG0723](/how-it-works/dialog/codes#sg0723)
 
