@@ -1,0 +1,106 @@
+---
+title: How sysg Meets the Kernel
+---
+
+# How sysg Meets the Kernel
+
+The sysg supervisor is a userspace program. Kernel mode is the set of kernel
+interfaces it *calls* — no sysg code runs in ring 0. This diagram shows which
+interface each capability uses to cross the userspace→kernel boundary, and how
+the same manifest is enforced on Linux versus refused on macOS.
+
+<figure>
+<svg viewBox="0 0 720 470" role="img" aria-label="How sysg crosses the userspace-kernel boundary: on Linux the supervisor configures cgroups, opens pidfds, and installs Landlock and seccomp filters in the child before exec; on macOS the same requests are refused with typed diagnostics while launchd bootstraps the supervisor." xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;font-family:ui-sans-serif,system-ui,sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="currentColor"/>
+    </marker>
+    <marker id="arG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#2f9e5c"/>
+    </marker>
+    <marker id="arR" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#d1495b"/>
+    </marker>
+  </defs>
+
+  <text x="360" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="currentColor">One manifest · two platforms</text>
+  <text x="185" y="52" text-anchor="middle" font-size="13" font-weight="700" fill="currentColor">Linux (system mode, --sys)</text>
+  <text x="545" y="52" text-anchor="middle" font-size="13" font-weight="700" fill="currentColor">macOS (system mode, --sys)</text>
+  <line x1="360" y1="40" x2="360" y2="460" stroke="currentColor" stroke-opacity="0.25" stroke-dasharray="4 4"/>
+  <rect x="20" y="66" width="680" height="150" rx="8" fill="currentColor" fill-opacity="0.04" stroke="currentColor" stroke-opacity="0.35"/>
+  <text x="30" y="84" font-size="11" font-weight="700" fill="currentColor" fill-opacity="0.6">USERSPACE</text>
+  <rect x="60" y="92" width="250" height="42" rx="6" fill="currentColor" fill-opacity="0.06" stroke="currentColor"/>
+  <text x="185" y="112" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">sysg supervisor (root)</text>
+  <text x="185" y="127" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.7">parses manifest · builds plan in parent</text>
+
+  <rect x="420" y="92" width="250" height="42" rx="6" fill="currentColor" fill-opacity="0.06" stroke="currentColor"/>
+  <text x="545" y="112" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">sysg supervisor (root)</text>
+  <text x="545" y="127" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.7">parses manifest · builds plan in parent</text>
+  <rect x="60" y="158" width="250" height="46" rx="6" fill="currentColor" fill-opacity="0.06" stroke="currentColor"/>
+  <text x="185" y="176" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">forked child (pre-exec)</text>
+  <text x="185" y="192" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.7">no_new_privs → Landlock → seccomp → exec</text>
+  <rect x="420" y="158" width="250" height="46" rx="6" fill="currentColor" fill-opacity="0.06" stroke="currentColor"/>
+  <text x="545" y="180" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">launchd</text>
+  <text x="545" y="196" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.7">RunAtLoad bootstraps sysg (KeepAlive off)</text>
+  <path d="M545 158 L545 134" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="551" y="149" font-size="9" fill="currentColor" fill-opacity="0.7">boots</text>
+  <path d="M185 134 L185 158" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="191" y="149" font-size="9" fill="currentColor" fill-opacity="0.7">fork</text>
+  <rect x="20" y="300" width="680" height="180" rx="8" fill="currentColor" fill-opacity="0.04" stroke="currentColor" stroke-opacity="0.35"/>
+  <text x="30" y="318" font-size="11" font-weight="700" fill="currentColor" fill-opacity="0.6">KERNEL</text>
+  <line x1="20" y1="258" x2="700" y2="258" stroke="currentColor" stroke-width="1.5"/>
+  <text x="30" y="252" font-size="10" font-weight="700" fill="currentColor" fill-opacity="0.7">syscall boundary</text>
+  <rect x="45"  y="332" width="130" height="40" rx="5" fill="#2f9e5c" fill-opacity="0.12" stroke="#2f9e5c"/>
+  <text x="110" y="350" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor">cgroups v2</text>
+  <text x="110" y="364" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity="0.75">limits · post-spawn</text>
+
+  <rect x="185" y="332" width="130" height="40" rx="5" fill="#2f9e5c" fill-opacity="0.12" stroke="#2f9e5c"/>
+  <text x="250" y="350" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor">pidfd</text>
+  <text x="250" y="364" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity="0.75">instant exit wake</text>
+
+  <rect x="45"  y="410" width="130" height="40" rx="5" fill="#2f9e5c" fill-opacity="0.12" stroke="#2f9e5c"/>
+  <text x="110" y="428" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor">Landlock LSM</text>
+  <text x="110" y="442" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity="0.75">filesystem confine</text>
+
+  <rect x="185" y="410" width="130" height="40" rx="5" fill="#2f9e5c" fill-opacity="0.12" stroke="#2f9e5c"/>
+  <text x="250" y="428" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor">seccomp-bpf</text>
+  <text x="250" y="442" text-anchor="middle" font-size="9" fill="currentColor" fill-opacity="0.75">syscall allowlist</text>
+  <path d="M110 204 L110 332" fill="none" stroke="#2f9e5c" stroke-width="1.5" marker-end="url(#arG)"/>
+  <path d="M250 204 L250 332" fill="none" stroke="#2f9e5c" stroke-width="1.5" marker-end="url(#arG)"/>
+  <path d="M110 372 L110 410" fill="none" stroke="#2f9e5c" stroke-width="1.5" marker-end="url(#arG)"/>
+  <path d="M250 372 L250 410" fill="none" stroke="#2f9e5c" stroke-width="1.5" marker-end="url(#arG)"/>
+  <text x="180" y="248" text-anchor="middle" font-size="9" fill="#2f9e5c" font-weight="700">configures / installs</text>
+  <rect x="430" y="360" width="230" height="80" rx="6" fill="#d1495b" fill-opacity="0.10" stroke="#d1495b" stroke-dasharray="5 4"/>
+  <text x="545" y="384" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor">no Linux LSM / cgroup / pidfd</text>
+  <text x="545" y="404" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.8">container-init → SG0711</text>
+  <text x="545" y="420" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.8">seccomp / Landlock → SG0721/0722</text>
+  <path d="M545 258 L545 204" fill="none" stroke="#d1495b" stroke-width="1.5" stroke-dasharray="5 4" marker-start="url(#arR)"/>
+  <text x="600" y="235" text-anchor="middle" font-size="9" fill="#d1495b" font-weight="700">refused above</text>
+  <text x="600" y="248" text-anchor="middle" font-size="9" fill="#d1495b" font-weight="700">the boundary</text>
+</svg>
+<figcaption>
+On Linux, the supervisor builds each policy in the parent and the forked child
+installs it in a fixed order (<code>no_new_privs</code> → Landlock → seccomp)
+before <code>exec</code>; cgroups attach post-spawn and pidfd wakes the monitor
+on exit. On macOS the same manifest keys have no kernel mechanism to call, so
+they are refused with typed diagnostics rather than silently ignored — and
+launchd only bootstraps the supervisor.
+</figcaption>
+</figure>
+
+## Reading the diagram
+
+- **Green paths (Linux)** are the kernel interfaces sysg actually calls: cgroup
+  v2 for limits, `pidfd` for instant exit detection, Landlock for filesystem
+  confinement, and seccomp-bpf for syscall filtering. The child installs the
+  confinement steps in a fixed order immediately before `exec`.
+- **Red paths (macOS)** stop at the syscall boundary: those Linux mechanisms do
+  not exist, so requesting them is a typed refusal
+  ([SG0711](/how-it-works/dialog/codes#sg0711),
+  [SG0721](/how-it-works/dialog/codes#sg0721),
+  [SG0722](/how-it-works/dialog/codes#sg0722),
+  [SG0724](/how-it-works/dialog/codes#sg0724)) — the
+  [mode-parity contract](/kernel-mode): identical behavior where a capability
+  exists, an honest refusal where it does not.
+- The supervisor never enters the kernel itself. It **configures** kernel
+  mechanisms; the kernel enforces.

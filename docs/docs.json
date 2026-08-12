@@ -121,6 +121,7 @@
         "group": "Kernel Mode",
         "pages": [
           "kernel-mode/index",
+          "kernel-mode/how-sysg-meets-the-kernel",
           "kernel-mode/system-mode",
           "kernel-mode/container-init",
           "kernel-mode/sandboxing",
