@@ -4,28 +4,49 @@ title: Kernel-Assisted Observation
 
 # Kernel-Assisted Observation
 
-<Warning>
-Design stage — specified in
-[RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md);
-not yet shipped. An independent red-team review requires this track to first
-justify itself against a `pidfd`-based baseline before any eBPF lands.
-</Warning>
+sysg observes service lifecycle with **pidfd** on Linux: at spawn it opens a
+`pidfd` for the service, and the monitor `poll()`s those descriptors, so a
+process exit wakes supervision **instantly** rather than at the next poll
+tick. `waitpid` remains authoritative for reaping; the pidfd only supplies
+readiness. This needs Linux 5.3+, no elevated capabilities, no kernel BTF, and
+adds no dependencies to the supervisor.
 
-Today sysg observes service exits by polling. The kernel can push those
-events instead: process exit, fork, and exec surfaced to the supervisor with
-no polling latency and no PID-reuse window.
+<Info>
+**eBPF was evaluated for v1 and deliberately declined.** The red-team gate
+required eBPF (Aya) to beat the shipped pidfd baseline before landing. It does
+not, so kernel mode uses pidfd as its kernel-assisted mechanism and does not
+ship eBPF. The reasoning is recorded below so the decision is auditable.
+</Info>
 
-Two candidate mechanisms, in evaluation order:
+## Why not eBPF (yet)
 
-1. **pidfd** (`pidfd_open` + poll, Linux 5.3+): event-driven exit detection
-   with no extra privileges, no BTF requirement, and no new dependencies in
-   the root supervisor's trust base.
-2. **eBPF** (Aya, Linux 5.10+ with kernel BTF, `CAP_BPF`+`CAP_PERFMON`):
-   adds fork/exec lineage of non-descendants. Event data is advisory —
-   reconciliation cross-checks `/proc`, and `waitpid` semantics stay
-   authoritative for reaping.
+- **Exit detection is already instant.** pidfd wakes the monitor the moment a
+  managed service exits. eBPF's `sched_process_exit` tracepoint adds nothing
+  here.
+- **Descendants are already tracked.** Service process trees are owned via
+  their private session (SID), the generational provenance ledger, and — when
+  sysg is PID 1 — the wait broker. eBPF's fork/exec lineage is redundant for
+  the processes sysg actually manages.
+- **eBPF's only residual value is narrow and it can't deliver it reliably.**
+  The one real gap is a service that `fork()`s, calls `setsid()`, and
+  re-parents into a new session outside sysg's tree. But tracepoint events are
+  advisory and lossy: after a dropped fork event, `/proc` cannot reconstruct
+  ownership, so eBPF would not authoritatively close this gap. If containment
+  of escaped descendants ever becomes a requirement, **cgroup v2 is the
+  correct authoritative boundary**, not tracepoint lineage.
+- **The cost is real.** eBPF would add the Aya dependency tree to the root
+  supervisor's trust base, require `CAP_BPF`/`CAP_PERFMON` and kernel BTF at
+  `/sys/kernel/btf/vmlinux`, and fail to load on primary targets (minimal
+  musl-static containers, and the Landlock-less kernels we already test on) —
+  enlarging the root attack surface for a narrow, unreliable gain.
 
-In every design, observation degrades — never lies: if the kernel-assisted
-source is unavailable or loses events, sysg falls back to polling and says
-so ([SG0731](/how-it-works/dialog/codes#sg0731)–[SG0733](/how-it-works/dialog/codes#sg0733)
-are reserved for these transitions).
+## Known limitation
+
+v1 supervises the process sysg spawns and the private session it retains.
+A service that deliberately escapes into a **new session** (double-fork +
+`setsid`) and outlives its launcher is not tracked. Run services in the
+foreground (let sysg own the process) rather than self-daemonizing.
+
+The [SG0731](/how-it-works/dialog/codes#sg0731)–[SG0733](/how-it-works/dialog/codes#sg0733)
+codes remain reserved for a future kernel-assisted mechanism, to be revisited
+only with demonstrated user demand.

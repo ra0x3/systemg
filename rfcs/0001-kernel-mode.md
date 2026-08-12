@@ -112,7 +112,7 @@ never a warning that proceeds — where it is not.
 | Container-init (PID 1) | ✓ | ✓ primary audience | [SG0711](/how-it-works/dialog/codes#sg0711) refusal |
 | `no_new_privs` + seccomp | ✓ (well below 5.10) | ✓ (raw prctl/seccomp syscalls; audit-arch per ISA) | [SG0721](/how-it-works/dialog/codes#sg0721) refusal |
 | Landlock | ✓ 5.13+, recommend 5.15 LTS; fail closed below | same | [SG0721](/how-it-works/dialog/codes#sg0721) refusal |
-| Kernel-assisted (Aya eBPF) | ✓ 5.10 LTS + kernel BTF; CAP_BPF+CAP_PERFMON (CAP_SYS_ADMIN fallback) | ✓ loader is libc-independent; caveats are BTF availability/memlock, not musl | [SG0731](/how-it-works/dialog/codes#sg0731) refusal |
+| Kernel-assisted (pidfd; eBPF declined) | ✓ pidfd 5.3+, no caps/BTF | ✓ pidfd 5.3+ | polling fallback |
 
 Feature-specific kernel floors, detected independently: system mode never
 implies eBPF availability.
@@ -184,26 +184,32 @@ implies eBPF availability.
 > Required before Phase 3: a deprecation release that warns loudly with the
 > future refusal date, then a manifest schema bump when refusal lands.
 
-### 6.4 Kernel-assisted observation (Phase 4)
+### 6.4 Kernel-assisted observation (Phase 4) — RESOLVED: pidfd ships, eBPF declined
 
-- Aya (pure Rust; no libbpf C toolchain; musl-safe) over libbpf-rs and the
-  lossy, config-dependent netlink proc connector.
-- Tracepoints: `sched_process_exit`, `sched_process_fork`, `sched_process_exec`
-  → ringbuf → supervisor event loop. Replaces polling *latency*, not
-  `waitpid` semantics, and never becomes the source of truth for reaping.
-- Config: `observation: auto | required | off`. `auto` degrades to polling
-  with [SG0732](/how-it-works/dialog/codes#sg0732) logged once; `required` fails start with [SG0731](/how-it-works/dialog/codes#sg0731); event loss
-  (ringbuf overrun) forces a `/proc` reconciliation pass and [SG0733](/how-it-works/dialog/codes#sg0733).
+**Outcome (2026-08-12): pidfd is the kernel-assisted mechanism; eBPF is not
+shipped.** The Phase 4 red-team gate required eBPF to beat the shipped pidfd
+baseline before landing. It does not.
 
-> [!CAUTION]
-> **Red-team objection (eBPF ROI, Codex 2026-08-11):** the red team ranks this
-> track last by value/risk and recommends *cutting it from v1*. The design
-> hole: `pidfd_open(2)` + poll (Linux 5.3+) gives event-driven exit detection
-> with no BTF requirement, no CAP_BPF/CAP_PERFMON, and no aya dependency tree
-> inside a root supervisor's TCB — solving the 2s-poll latency this track
-> exists to remove. eBPF's residual value (fork/exec lineage of
-> non-descendants) does not justify enlarging the root attack surface. If
-> Phase 4 survives, it must first justify itself against a pidfd baseline.
+Shipped: `pidfd_open` at spawn for every managed service; the monitor
+`poll()`s the pidfds so exit wakes supervision instantly. `waitpid` stays
+authoritative for reaping. Linux 5.3+, no caps, no BTF, no new dependencies.
+
+Evaluated and declined — eBPF (Aya):
+- Exit detection is already instant via pidfd; the `sched_process_exit`
+  tracepoint adds nothing.
+- Managed descendants are already owned via SID + provenance ledger + (as
+  PID 1) the wait broker.
+- The one residual gap — a service that `fork()`s, `setsid()`s, and re-parents
+  into a new session — is **not reliably closable by eBPF** (advisory, lossy
+  events; `/proc` cannot reconstruct ownership after a dropped event). If
+  containment of escaped descendants ever becomes a requirement, cgroup v2 is
+  the authoritative boundary, not tracepoint lineage.
+- Cost: Aya dependency tree in the root TCB, `CAP_BPF`/`CAP_PERFMON`, kernel
+  BTF — absent on primary targets (musl-static containers, our test kernels).
+
+Documented limitation: v1 supervises the spawned process and its retained
+session; deliberate new-session escape is unsupported. [SG0731](/how-it-works/dialog/codes#sg0731)–[SG0733](/how-it-works/dialog/codes#sg0733) remain
+reserved for a future revisit gated on demonstrated demand.
 
 ## 7. Diagnostics: SG07xx family
 
@@ -369,6 +375,7 @@ UAT, add Alpine user/system/PID1 lanes, macOS parity on native runners.
   added, [SG0734](/how-it-works/dialog/codes#sg0734) folded into [SG0731](/how-it-works/dialog/codes#sg0731)/0732 evidence), uniform fail-closed for all
   security keys, `sysg init` + wait broker, `Type=notify` foreground, test
   renames + fault-injection lanes.
+- 2026-08-12: Phase 4 resolved — pidfd ships as the kernel-assisted mechanism; eBPF evaluated and declined (does not beat the pidfd baseline; residual gap not reliably closable by eBPF, cgroup v2 is the authoritative boundary). the SG073x codes reserved. All four phases complete.
 - 2026-08-11: Independent Codex red-team review embedded as callouts
   (foundation stability, demand evidence, pidfd-vs-eBPF, audit economics,
   fail-closed migration, PID1 reexec, macOS double supervision, naming, ops
