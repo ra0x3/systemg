@@ -41,6 +41,8 @@ for MODE in user sys; do
   [ "${SLEEPS:-0}" = "0" ]
   check "$?" "[$MODE] no service processes survive stop"
 
+  teardown_oracle_ok
+
   mode_end
 done
 
