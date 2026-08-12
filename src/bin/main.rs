@@ -2125,6 +2125,16 @@ fn run() -> Result<(), Box<dyn Error>> {
                 None,
             );
         }
+        Commands::Doctor { format, strict } => {
+            let report = systemg::doctor::check_world();
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{report}");
+            }
+            let fail = report.has_errors() || (strict && !report.is_clean());
+            process::exit(if fail { 1 } else { 0 });
+        }
         Commands::Spawn {
             name,
             ttl,

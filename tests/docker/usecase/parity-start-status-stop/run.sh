@@ -31,6 +31,8 @@ for MODE in user sys; do
   [ "$RUNNING" = "2" ]
   check "$?" "[$MODE] both units running"
 
+  oracle_ok
+
   msysg stop --config "$CONFIG"
   check "$?" "[$MODE] stop exits 0"
   sleep 3

@@ -51,6 +51,20 @@ mode_end() {
   sleep 1
 }
 
+# Runs the invariant oracle and fails the case on any error-severity finding.
+# Call this whenever the world is expected to be fully consistent (all declared
+# services up, or fully torn down) — it catches the whole "status lied" /
+# ghost-state class without a bespoke assertion per scenario.
+oracle_ok() {
+  msysg doctor --format json > /tmp/oracle.json 2>/tmp/oracle.err
+  RC=$?
+  if [ "$RC" != "0" ]; then
+    echo "--- doctor findings ---"; cat /tmp/oracle.json /tmp/oracle.err
+  fi
+  [ "$RC" = "0" ]
+  check "$?" "[$MODE] invariant oracle: world is consistent"
+}
+
 shape_units() {
   python3 - "$1" <<'PY'
 import json,sys
