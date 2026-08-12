@@ -575,6 +575,17 @@ pub enum Commands {
         pipe_stderr: bool,
     },
 
+    /// Check the persisted runtime state against the invariant oracle.
+    Doctor {
+        /// Output format (`text` or `json`).
+        #[arg(long, default_value = "text")]
+        format: String,
+
+        /// Exit non-zero on any finding, not just errors.
+        #[arg(long)]
+        strict: bool,
+    },
+
     /// DEPRECATED: Spawn a dynamic child process from a parent service.
     #[command(hide = true)]
     Spawn {
@@ -620,6 +631,7 @@ impl Commands {
             Commands::UpgradeSupervisor { .. } => "upgrade-supervisor",
             Commands::Supervise { .. } => "supervise",
             Commands::Init { .. } => "init",
+            Commands::Doctor { .. } => "doctor",
             Commands::Spawn { .. } => "spawn",
         }
     }

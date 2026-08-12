@@ -74,6 +74,9 @@ pub mod runtime;
 /// PID 1 wait broker for container-init mode.
 pub mod reaper;
 
+/// Invariant oracle: check_world() and `sysg doctor`.
+pub mod doctor;
+
 /// Kernel-enforced sandboxing (no_new_privs, Landlock).
 pub mod sandbox;
 
