@@ -254,7 +254,7 @@ mod imp {
     /// never as an edit here, so a manifest's guarantee cannot change under it.
     fn baseline_v1_syscalls() -> Vec<i64> {
         use libc::*;
-        let mut v: Vec<i64> = [
+        let v: Vec<i64> = [
             // process / exec (portable across x86_64 and aarch64)
             SYS_execve,
             SYS_exit,
@@ -341,15 +341,21 @@ mod imp {
 
         // Syscalls present only on x86_64 (aarch64 dropped the legacy
         // multiplexed/`arch_prctl` forms in favour of clone/ppoll/epoll_pwait).
+        // Extend through a same-arch closure so neither the mutation nor the
+        // `mut` binding exists on aarch64 (no unused-mut / dead-return lint).
         #[cfg(target_arch = "x86_64")]
-        v.extend([
-            SYS_fork,
-            SYS_vfork,
-            SYS_arch_prctl,
-            SYS_poll,
-            SYS_epoll_wait,
-            SYS_gettimeofday,
-        ]);
+        let v = {
+            let mut v = v;
+            v.extend([
+                SYS_fork,
+                SYS_vfork,
+                SYS_arch_prctl,
+                SYS_poll,
+                SYS_epoll_wait,
+                SYS_gettimeofday,
+            ]);
+            v
+        };
 
         v
     }
@@ -357,8 +363,7 @@ mod imp {
     fn set_no_new_privs() -> io::Result<()> {
         let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
         if rc != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "prctl(PR_SET_NO_NEW_PRIVS) failed (SG0723)",
             ));
         }
