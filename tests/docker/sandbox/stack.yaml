@@ -1,0 +1,10 @@
+version: "3"
+projects:
+  boxed:
+    name: Boxed
+    services:
+      confined:
+        command: "sh -c 'cat /allowed/ok.txt && (cat /secret/deny.txt 2>/dev/null && echo LEAK || echo DENIED) ; sleep 300'"
+        isolation:
+          landlock:
+            ro_paths: ["/allowed", "/bin", "/lib", "/usr"]

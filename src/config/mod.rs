@@ -1066,6 +1066,20 @@ pub struct IsolationConfig {
     pub private_devices: Option<bool>,
     /// Restrict temporary directories similar to `PrivateTmp`.
     pub private_tmp: Option<bool>,
+    /// Landlock filesystem sandbox: confine the service to the listed paths.
+    pub landlock: Option<LandlockConfig>,
+}
+
+/// Landlock filesystem confinement. Paths not covered here become inaccessible
+/// to the service. Enforced fail-closed under schema v3.
+#[derive(Debug, Deserialize, Clone, serde::Serialize, Default, PartialEq)]
+pub struct LandlockConfig {
+    /// Paths the service may read (and traverse).
+    #[serde(default)]
+    pub ro_paths: Vec<PathBuf>,
+    /// Paths the service may read and write.
+    #[serde(default)]
+    pub rw_paths: Vec<PathBuf>,
 }
 
 impl ServiceConfig {

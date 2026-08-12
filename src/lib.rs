@@ -74,6 +74,9 @@ pub mod runtime;
 /// PID 1 wait broker for container-init mode.
 pub mod reaper;
 
+/// Kernel-enforced sandboxing (no_new_privs, Landlock).
+pub mod sandbox;
+
 /// Per-project on-disk state layout.
 pub mod state_store;
 

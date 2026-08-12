@@ -3883,6 +3883,20 @@ impl Daemon {
 
         let privilege_clone = privilege.clone();
 
+        // Build the kernel-enforced sandbox plan in the PARENT so an
+        // unenforceable request refuses the spawn here, before fork. The plan
+        // owns the O_PATH descriptors it will enforce and moves into the child.
+        let sandbox_plan = crate::sandbox::SandboxPlan::prepare(
+            service_config
+                .isolation
+                .as_ref()
+                .and_then(|i| i.landlock.as_ref()),
+        )
+        .map_err(|source| ProcessManagerError::PrivilegeSetupFailed {
+            service: service_name.to_string(),
+            source,
+        })?;
+
         unsafe {
             cmd.pre_exec(move || {
                 // Every service leads its own session. This detaches it from the
@@ -3905,6 +3919,13 @@ impl Daemon {
 
                 privilege_clone.apply_pre_exec().map_err(|err| {
                     eprintln!("systemg pre_exec: privilege setup failed: {}", err);
+                    err
+                })?;
+
+                // Enforcement is the last thing before exec, after the UID/GID
+                // switch and capability trimming: no_new_privs, then Landlock.
+                sandbox_plan.apply().map_err(|err| {
+                    eprintln!("systemg pre_exec: sandbox enforcement failed: {}", err);
                     err
                 })
             });
