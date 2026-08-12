@@ -6976,7 +6976,26 @@ fn run_supervisor_in_process(
 
 fn exit_supervisor(result: Result<(), SupervisorError>) -> ! {
     match result {
-        Ok(()) => process::exit(0),
+        Ok(()) => {
+            if runtime::init_mode() {
+                let survivors = init_shutdown_survivors();
+                if !survivors.is_empty() {
+                    use systemg::diag::{Diagnostic, SgCode};
+                    eprintln!(
+                        "{}",
+                        Diagnostic::error(
+                            SgCode::ContainerInitShutdownIncomplete,
+                            "services survived init teardown",
+                        )
+                        .note(format!("still alive: {}", survivors.join(", ")))
+                        .help_docs()
+                        .render_for_terminal()
+                    );
+                    process::exit(1);
+                }
+            }
+            process::exit(0)
+        }
         Err(SupervisorError::Control(ControlError::RuntimeBusy)) => {
             info!("Another supervisor acquired the runtime first");
             process::exit(0);
@@ -6986,6 +7005,33 @@ fn exit_supervisor(result: Result<(), SupervisorError>) -> ! {
             process::exit(1);
         }
     }
+}
+
+/// Names any recorded service pids still alive after init teardown, across
+/// every project's pid file.
+fn init_shutdown_survivors() -> Vec<String> {
+    let root = runtime::state_dir().join(systemg::state_store::PROJECTS_DIR);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut survivors = Vec::new();
+    for entry in entries.flatten() {
+        let store = StateStore::at(entry.path());
+        let Ok(guard) = systemg::daemon::PidFile::load(store) else {
+            continue;
+        };
+        for (name, pid) in guard.services() {
+            let alive = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(*pid as libc::pid_t),
+                None,
+            )
+            .is_ok();
+            if alive {
+                survivors.push(format!("{name} (pid {pid})"));
+            }
+        }
+    }
+    survivors
 }
 
 fn install_supervisor_panic_hook() {
