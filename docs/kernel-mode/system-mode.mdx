@@ -10,12 +10,17 @@ commands — only the runtime it targets changes.
 
 ## Runtimes
 
-| | User mode | System mode (`--sys`) |
-|---|---|---|
-| State | `~/.local/share/systemg/` | `/var/lib/systemg/` |
-| Logs | `~/.local/share/systemg/logs/` | `/var/log/systemg/` |
-| Config search | `~/.config/systemg/` | `/etc/systemg/` |
-| Owner | invoking user | root |
+| | User mode | System mode — Linux | System mode — macOS |
+|---|---|---|---|
+| State | `~/.local/share/systemg/` | `/var/lib/systemg/` | `/Library/Application Support/systemg/` |
+| Logs | `~/.local/share/systemg/logs/` | `/var/log/systemg/` | `/Library/Logs/systemg/` |
+| Config search | `~/.config/systemg/` | `/etc/systemg/` | `/Library/Application Support/systemg/etc/` |
+| Boot integration | — | systemd unit | launchd daemon |
+| Owner | invoking user | root | root |
+
+System mode uses each platform's native locations: the FHS on Linux, the
+`/Library` hierarchy on macOS where launchd — not systemd — owns system
+daemons.
 
 `--sys` is always explicit. sysg never guesses the runtime from your EUID or
 from what exists on disk — it tells you when the modes cross:
@@ -62,6 +67,26 @@ ExecStop=/usr/bin/sysg --sys stop --config /etc/systemg/systemg.yaml
 Every sysg self-exec (supervisor boot, live upgrade, recycle) forwards the
 mode across the exec boundary; the `parity-supervisor-recycle` lane guards
 this invariant.
+
+## Boot integration (macOS launchd)
+
+`scripts/install-systemg.sh` on macOS installs a launchd daemon at
+`/Library/LaunchDaemons/dev.sysg.supervisor.plist`:
+
+```bash
+$ sudo ./scripts/install-systemg.sh ./sysg
+$ sudo launchctl load -w /Library/LaunchDaemons/dev.sysg.supervisor.plist
+```
+
+<Info>
+**launchd bootstraps; sysg supervises.** The plist sets `KeepAlive: false` on
+purpose. launchd starts sysg once at boot (`RunAtLoad`); sysg then owns every
+service's lifecycle, restarts, and health — exactly as on Linux. Letting
+launchd also restart sysg would be double supervision with conflicting
+restart policies. macOS system mode is boot integration plus native paths; the
+Linux-only kernel mechanisms (container-init, seccomp, Landlock, cgroups,
+namespaces) are refused with typed diagnostics, not silently ignored.
+</Info>
 
 ## Operator access
 
