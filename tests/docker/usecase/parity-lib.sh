@@ -51,6 +51,17 @@ mode_end() {
   sleep 1
 }
 
+# After stop+purge, the invariant oracle must report a clean or empty world:
+# no lingering Running service, no live recorded pid. This is the empty-
+# teardown invariant, checked without a bespoke per-case assertion.
+teardown_oracle_ok() {
+  msysg doctor 2>/tmp/td-oracle.err
+  RC=$?
+  [ "$RC" = "0" ]
+  if [ "$RC" != "0" ]; then cat /tmp/td-oracle.err; fi
+  check "$?" "[$MODE] oracle: world is clean after teardown"
+}
+
 # Runs the invariant oracle and fails the case on any error-severity finding.
 # Call this whenever the world is expected to be fully consistent (all declared
 # services up, or fully torn down) — it catches the whole "status lied" /

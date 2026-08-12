@@ -427,7 +427,7 @@ where
 
 /// Returns the kernel start-time identity for a Linux process.
 #[cfg(target_os = "linux")]
-pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
+pub fn process_start_time(pid: u32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close = stat.rfind(')')?;
     stat[close + 1..]
@@ -439,7 +439,7 @@ pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
 
 /// Returns the kernel start-time identity for a macOS process.
 #[cfg(target_os = "macos")]
-pub(crate) fn process_start_time(pid: u32) -> Option<u64> {
+pub fn process_start_time(pid: u32) -> Option<u64> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
     let read = unsafe {
@@ -664,7 +664,9 @@ impl PidFile {
         self.service_groups.get(service).copied()
     }
 
-    fn start_for(&self, service: &str) -> Option<u64> {
+    /// Returns the recorded kernel start-time for a service's pid, used to
+    /// detect PID reuse (a live pid whose start-time no longer matches).
+    pub fn start_for(&self, service: &str) -> Option<u64> {
         self.service_starts.get(service).copied()
     }
 
@@ -677,6 +679,12 @@ impl PidFile {
     /// Intended for constructing snapshots in tests.
     pub fn insert_in_memory(&mut self, service: &str, pid: u32) {
         self.services.insert(service.to_string(), pid);
+    }
+
+    /// Sets a service's recorded start-time. Intended for constructing
+    /// pid-reuse fixtures in tests.
+    pub fn set_start_for_test(&mut self, service: &str, start: u64) {
+        self.service_starts.insert(service.to_string(), start);
     }
 
     /// Records spawn metadata in memory only, without persisting to disk.

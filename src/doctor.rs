@@ -16,7 +16,7 @@ use std::{fmt, fs};
 use serde::Serialize;
 
 use crate::{
-    daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile},
+    daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile, process_start_time},
     runtime::{self, RuntimeMode},
     state_store::{PROJECTS_DIR, StateStore},
 };
@@ -238,8 +238,10 @@ fn check_project(project: &str, store: StateStore, findings: &mut Vec<Finding>) 
         }
     }
 
-    // Invariant: every pid in the pid map must be addressable. A stale pidfile
-    // entry for a dead process is the "ghost"/stale-state class.
+    // Invariant: every pid in the pid map must be addressable, and its recorded
+    // kernel start-time must still match — a recorded pid whose start-time
+    // changed was reused by a different process (the PID-reuse correctness
+    // class, deadlier as root: signalling the wrong process).
     if let Some(pids) = &pid_file {
         for (service, pid) in pids.services() {
             if !pid_addressable(*pid) {
@@ -249,6 +251,20 @@ fn check_project(project: &str, store: StateStore, findings: &mut Vec<Finding>) 
                     "pidfile-stale-entry",
                     Some(service),
                     format!("pid map lists {pid} which is not alive"),
+                );
+                continue;
+            }
+            if let Some(recorded) = pids.start_for(service)
+                && process_start_time(*pid).is_some_and(|actual| actual != recorded)
+            {
+                push(
+                    findings,
+                    Severity::Error,
+                    "pid-reuse",
+                    Some(service),
+                    format!(
+                        "pid {pid} is alive but its start-time changed: recorded {recorded}, the pid was reused"
+                    ),
                 );
             }
         }
@@ -337,6 +353,26 @@ mod tests {
         assert!(
             findings.is_empty(),
             "a live Running service should be clean, got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn pid_reuse_is_an_error() {
+        let (_dir, store) = temp_store();
+        let mut pids = PidFile::load(store.clone()).expect("load pids");
+        // Record our own live pid but with a bogus start-time, simulating a pid
+        // that was reused since it was recorded.
+        pids.insert_in_memory("web", std::process::id());
+        pids.set_start_for_test("web", 1);
+        pids.save().expect("save pids");
+
+        let mut findings = Vec::new();
+        check_project("demo", store, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "pid-reuse" && f.severity == Severity::Error),
+            "expected pid-reuse error, got {findings:?}"
         );
     }
 
