@@ -70,7 +70,7 @@ trap cleanup EXIT INT TERM
 log_test "Scenario 0: --sys and --drop-privileges contract"
 
 cat > /tmp/priv-flags.yaml <<EOF
-version: "1"
+version: "2"
 services:
   privilege_probe:
     command: "sh -lc 'id -un > /tmp/privilege_probe_user; sleep 30'"
@@ -115,7 +115,7 @@ log_test "Scenario 1: Managing production system services"
 
 # Create production-like service configuration
 cat > /etc/systemg/systemg.yaml <<EOF
-version: "1"
+version: "2"
 
 services:
   postgres:
@@ -463,7 +463,7 @@ log_test "Scenario 9: Performance under load"
 log_info "Testing with high service count..."
 timeout 20 sysg --sys purge || true
 cat > /tmp/load-test.yaml <<EOF
-version: "1"
+version: "2"
 services:
 EOF
 
@@ -500,7 +500,7 @@ log_test "Scenario 10: Hardening guarantees at the privilege boundary"
 sysg --sys purge 2>/dev/null || true
 
 cat > /tmp/hardening.yaml <<EOF
-version: "1"
+version: "2"
 services:
   dropped:
     command: "sh -lc 'id -un > /tmp/hardening_user; env > /tmp/hardening_env; sleep 60'"

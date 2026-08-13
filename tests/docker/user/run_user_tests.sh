@@ -142,7 +142,7 @@ chmod +x services/processor.sh
 # Create systemg configuration
 log_info "Writing systemg.yaml configuration..."
 cat > systemg.yaml <<'EOF'
-version: "1"
+version: "2"
 
 services:
   backend:

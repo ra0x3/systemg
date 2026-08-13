@@ -21,6 +21,14 @@ fd=libc.syscall(444, ctypes.byref(a), ctypes.sizeof(a), 0)
 import sys; sys.exit(0 if fd>=0 else 1)
 PY
 
+# On a lane that is KNOWN to have Landlock (a real 5.13+ kernel), refuse to
+# self-skip the enforcement assertions — a missing Landlock there is a CI
+# regression, not an accepted skip. Set REQUIRE_LANDLOCK=1 on such lanes.
+if [ "${REQUIRE_LANDLOCK:-0}" = "1" ] && [ "$LANDLOCK_OK" != "1" ]; then
+  echo "FAIL: REQUIRE_LANDLOCK set but Landlock is unavailable on this kernel ($(uname -r))"
+  exit 1
+fi
+
 sysg --sys start -c /etc/systemg/systemg.yaml --daemonize >/dev/null 2>&1
 sleep 4
 LOG="$(sysg --sys logs --service confined --no-follow -c /etc/systemg/systemg.yaml 2>/dev/null)"

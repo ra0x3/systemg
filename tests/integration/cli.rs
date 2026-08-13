@@ -186,22 +186,28 @@ fn purge_stops_running_supervisor() {
 
     wait_for_path(&pid_path);
 
-    Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
+    // The recorded pid is a bare `sleep`, not a verified sysg supervisor.
+    // Purge must NOT signal an unverified process (that would let a stale or
+    // forged pidfile make purge kill an arbitrary pid), and rather than orphan
+    // a supervisor it cannot confirm dead, it refuses with SG0405. The safe,
+    // correct outcome is: purge is refused AND the sleeper is untouched.
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sysg"))
         .arg("purge")
-        .assert()
-        .success();
+        .output()
+        .expect("failed to invoke purge");
 
-    let kill_result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if kill_result == 0 {
-        // Process still responds to signal 0; purge should still have attempted termination.
-    }
-
-    let _ = sleeper.wait();
-
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !runtime_dir.exists(),
-        "runtime directory should be removed after purge"
+        !output.status.success() && stderr.contains("SG0405"),
+        "purge should refuse rather than orphan an unverified recorded pid: {stderr}"
     );
+    assert!(
+        is_process_alive(pid),
+        "purge must never signal an unverified (non-supervisor) recorded pid"
+    );
+
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
 }
 
 #[test]
@@ -222,7 +228,7 @@ fn sys_flag_requires_root_privileges() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("--sys requires root"),
+        stderr.contains("SG0704") || stderr.contains("requires root"),
         "stderr should mention missing root privileges: {stderr}"
     );
 }
