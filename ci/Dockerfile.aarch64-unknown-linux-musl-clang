@@ -12,7 +12,6 @@ RUN apt-get update && \
     libclang-dev \
     lld \
     llvm \
-    musl-tools \
     pkg-config \
     tzdata \
     wget \
