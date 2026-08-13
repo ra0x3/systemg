@@ -480,26 +480,18 @@ jobs:
             -e REQUIRE_LANDLOCK=1 \
             sysg-sandbox
 
-  # Kernel-version matrix via virtme-ng: boots real kernels in a lightweight VM
-  # so the version floors (Landlock 5.13+, seccomp, pidfd 5.3+, cgroups v2) are
-  # exercised on the actual kernels, not the single runner kernel. Older kernels
-  # assert the fail-closed REFUSAL; new kernels assert ENFORCEMENT.
-  kernel-matrix:
-    name: Kernel Matrix (${{ matrix.kernel }})
+  # Native-kernel enforcement lane: runs the kernel-facing sandbox checks
+  # directly on the GitHub runner's real kernel (Ubuntu 24.04 ships 6.x with
+  # Landlock enabled), against the release binary — no Docker, no VM. This is
+  # where Landlock ENFORCEMENT actually runs (the Docker Desktop kernel used in
+  # local dev lacks Landlock, so those assertions self-skip there).
+  # REQUIRE_LANDLOCK=1 makes a missing Landlock a CI failure, not a silent skip.
+  kernel-native:
+    name: Kernel Native Enforcement
     runs-on: ubuntu-24.04
     needs: [changes, clippy]
     if: ${{ needs.changes.outputs.rust == 'true' }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - kernel: "5.10"
-            require_landlock: "0"
-          - kernel: "5.15"
-            require_landlock: "1"
-          - kernel: "6.6"
-            require_landlock: "1"
+    timeout-minutes: 30
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -507,23 +499,19 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install virtme-ng and deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y virtme-ng qemu-system-x86 python3
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Print runner kernel
+        run: uname -r
 
       - name: Build release binary
         run: cargo build --release
 
-      - name: Boot kernel ${{ matrix.kernel }} and run sandbox suite
+      - name: Run kernel-facing sandbox checks (Landlock required)
         env:
-          REQUIRE_LANDLOCK: ${{ matrix.require_landlock }}
-        run: |
-          vng --run \
-            --kdir-download ${{ matrix.kernel }} \
-            --user root \
-            --rw \
-            -- tests/kernel/run_in_vm.sh
+          REQUIRE_LANDLOCK: "1"
+        run: sudo -E env "PATH=$PATH" REQUIRE_LANDLOCK=1 tests/kernel/run_in_vm.sh
 
   # Model-based sequence harness: drives random lifecycle operation sequences
   # against a real system-mode supervisor and asserts the invariant oracle is
@@ -707,6 +695,7 @@ jobs:
       - docker-pid1-tests
       - docker-sandbox-tests
       - docker-model-tests
+      - kernel-native
       - macos-system-mode
       - extract-version
       - detect-version-bump

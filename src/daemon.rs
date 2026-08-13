@@ -9420,19 +9420,26 @@ fi
     fn automatic_restart_keeps_restarted_service_alive() {
         with_temp_home(|dir| {
             let restarted_pid_path = dir.join("restarted.pid");
+            // The marker is anchored to an absolute path so it is isolated from
+            // any working-directory assumption, and the first-run failure sleeps
+            // long enough that a loaded CI runner still observes the service
+            // running before it exits 1 — otherwise the monitor could miss the
+            // running->exited transition and never trigger the restart.
+            let marker = dir.join("first-run.done");
             fs::write(
                 dir.join("flaky.sh"),
                 format!(
                     r#"
-if [ ! -f first-run.done ]; then
-  touch first-run.done
-  sleep 0.3
+if [ ! -f "{marker}" ]; then
+  touch "{marker}"
+  sleep 1
   exit 1
 fi
-echo $$ > "{}"
+echo $$ > "{pid}"
 sleep 30
 "#,
-                    restarted_pid_path.display()
+                    marker = marker.display(),
+                    pid = restarted_pid_path.display()
                 ),
             )
             .unwrap();
