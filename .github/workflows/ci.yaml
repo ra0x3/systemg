@@ -28,9 +28,24 @@ env:
   RUSTC_VERSION: 1.96.0
 
 jobs:
+  check-commit-message:
+    name: Check Commit Message
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # On PRs, check the PR's head commit, not the synthetic merge commit
+          # GitHub checks out by default (whose subject is "Merge ... into ...").
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Validate commit message format
+        run: ci/check-commit-message.sh
+
   cancel-previous:
     name: Cancel Previous Runs
     runs-on: ubuntu-latest
+    needs: check-commit-message
     steps:
       - name: Cancel Previous Runs
         uses: styfle/cancel-workflow-action@0.12.1
@@ -40,7 +55,7 @@ jobs:
   cargo-audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
-    needs: cancel-previous
+    needs: [check-commit-message, cancel-previous]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -53,7 +68,7 @@ jobs:
   cargo-deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
-    needs: cancel-previous
+    needs: [check-commit-message, cancel-previous]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -66,7 +81,7 @@ jobs:
   cargo-vet:
     name: Cargo Vet
     runs-on: ubuntu-latest
-    needs: cancel-previous
+    needs: [check-commit-message, cancel-previous]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
