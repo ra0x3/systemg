@@ -651,13 +651,17 @@ jobs:
   sync-plugin-version:
     name: Sync Claude Plugin Version
     runs-on: ubuntu-latest
+    # The Claude plugin is version-stamped and pushed only AFTER the crate is
+    # published to crates.io, so the plugin never advertises a version that is
+    # not yet installable.
     needs:
       - extract-version
       - detect-version-bump
+      - cargo-publish
     permissions:
       contents: write
     if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-version-bump.outputs.bumped == 'true'
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-version-bump.outputs.bumped == 'true' && needs.cargo-publish.result == 'success'
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
