@@ -39,7 +39,7 @@ mkdir -p /tmp/test-project
 cd /tmp/test-project
 
 cat > systemg.yaml <<'EOF'
-version: "1"
+version: "2"
 
 services:
   test_service:

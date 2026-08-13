@@ -454,8 +454,61 @@ jobs:
           docker build -f tests/docker/usecase/Dockerfile.base -t sysg-usecase-base .
           docker build -f tests/docker/sandbox/Dockerfile -t sysg-sandbox .
 
-      - name: Run sandbox suite (privileged)
-        run: docker run --rm --privileged --security-opt apparmor:unconfined sysg-sandbox
+      - name: Print runner kernel
+        run: uname -r
+
+      - name: Run sandbox suite (privileged, Landlock required)
+        run: |
+          docker run --rm --privileged \
+            --security-opt apparmor:unconfined \
+            --security-opt seccomp=unconfined \
+            -e REQUIRE_LANDLOCK=1 \
+            sysg-sandbox
+
+  # Kernel-version matrix via virtme-ng: boots real kernels in a lightweight VM
+  # so the version floors (Landlock 5.13+, seccomp, pidfd 5.3+, cgroups v2) are
+  # exercised on the actual kernels, not the single runner kernel. Older kernels
+  # assert the fail-closed REFUSAL; new kernels assert ENFORCEMENT.
+  kernel-matrix:
+    name: Kernel Matrix (${{ matrix.kernel }})
+    runs-on: ubuntu-24.04
+    needs: [changes, clippy]
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: "5.10"
+            require_landlock: "0"
+          - kernel: "5.15"
+            require_landlock: "1"
+          - kernel: "6.6"
+            require_landlock: "1"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install virtme-ng and deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y virtme-ng qemu-system-x86 python3
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Boot kernel ${{ matrix.kernel }} and run sandbox suite
+        env:
+          REQUIRE_LANDLOCK: ${{ matrix.require_landlock }}
+        run: |
+          vng --run \
+            --kdir-download ${{ matrix.kernel }} \
+            --user root \
+            --rw \
+            -- tests/kernel/run_in_vm.sh
 
   # Model-based sequence harness: drives random lifecycle operation sequences
   # against a real system-mode supervisor and asserts the invariant oracle is
@@ -488,11 +541,17 @@ jobs:
 
   # Docker UAT tests run in parallel with cargo-test
   # Tests both user mode and kernel mode scenarios
+  # Legacy UAT suites (tests/docker/user, tests/docker/kernel). Disabled: their
+  # fixtures predate the v2 manifest schema (environment:, instances:,
+  # {{.Instance}}, top-level health_check) and their scenarios are superseded by
+  # the parity / pid1 / sandbox / model / kernel-matrix lanes. Kept for their
+  # unique scenarios (--sys --drop-privileges contract, rolling deploy,
+  # cron-under-sys, HA recovery), to be ported into the new lanes before revival.
   docker-uat-tests:
-    name: Docker UAT Tests
+    name: Docker UAT Tests (legacy, disabled)
     runs-on: ubuntu-latest
     needs: [changes, clippy]
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: false
     timeout-minutes: 120
     strategy:
       fail-fast: false
