@@ -28,9 +28,19 @@ env:
   RUSTC_VERSION: 1.96.0
 
 jobs:
+  cancel-previous:
+    name: Cancel Previous Runs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Previous Runs
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
   check-commit-message:
     name: Check Commit Message
     runs-on: ubuntu-latest
+    needs: cancel-previous
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -42,20 +52,10 @@ jobs:
       - name: Validate commit message format
         run: ci/check-commit-message.sh
 
-  cancel-previous:
-    name: Cancel Previous Runs
-    runs-on: ubuntu-latest
-    needs: check-commit-message
-    steps:
-      - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.12.1
-        with:
-          access_token: ${{ github.token }}
-
   cargo-audit:
     name: Cargo Audit
     runs-on: ubuntu-latest
-    needs: [check-commit-message, cancel-previous]
+    needs: [cancel-previous, check-commit-message]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -68,7 +68,7 @@ jobs:
   cargo-deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
-    needs: [check-commit-message, cancel-previous]
+    needs: [cancel-previous, check-commit-message]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -81,7 +81,7 @@ jobs:
   cargo-vet:
     name: Cargo Vet
     runs-on: ubuntu-latest
-    needs: [check-commit-message, cancel-previous]
+    needs: [cancel-previous, check-commit-message]
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
