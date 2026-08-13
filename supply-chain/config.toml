@@ -5,7 +5,7 @@
 version = "0.10"
 
 [policy.systemg]
-audit-as-crates-io = true
+audit-as-crates-io = false
 
 [[exemptions.aho-corasick]]
 version = "1.1.4"
