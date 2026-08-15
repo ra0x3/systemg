@@ -44,7 +44,7 @@ operation controls its runtime. Let the named operation settle, then retry.
 
 A service failed to start without a more specific diagnosis. Read the attached
 reason and service logs; specific failures use
-[`SG0102`](/how-it-works/dialog/codes#sg0102)–[`SG0109`](/how-it-works/dialog/codes#sg0109)
+[`SG0102`](/how-it-works/dialog/codes#sg0102)–[`SG0110`](/how-it-works/dialog/codes#sg0110)
 instead.
 
 ### [SG0009](/how-it-works/dialog/codes#sg0009)
@@ -188,6 +188,23 @@ A service was not started because a declared dependency did not reach its
 required `running` or `completed` condition. Resolve the dependency's earlier
 diagnostic first; downstream services remain stopped rather than starting into
 an invalid dependency state.
+
+### [SG0110](/how-it-works/dialog/codes#sg0110)
+
+Automatic restarts for a service were stopped because it exhausted its restart
+budget without ever staying up. The breaker opens when a unit either burns its
+whole budget inside a 15-minute window or never survives 60 seconds across that
+many consecutive attempts — reaching a running state and dying seconds later
+counts as a failure, not a success.
+
+The budget defaults to 8 attempts and is overridden per service with
+`max_restarts`. Backoff grows exponentially from the configured `backoff`, up to
+five minutes.
+
+There is no automatic retry after the breaker opens: restarting a unit that has
+failed identically N times only repeats the failure. Fix the underlying cause,
+then re-arm it explicitly with `sysg restart --service <name> --project <id>` —
+an explicit start or restart is the only thing that clears the breaker.
 
 ## Selectors, status &amp; stop
 

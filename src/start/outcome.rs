@@ -126,6 +126,34 @@ pub fn dependency_unavailable(
     .help_docs()
 }
 
+/// Builds the SG0110 diagnostic for a unit whose restart breaker opened.
+///
+/// `threshold` states the budget that was actually crossed; it is never a
+/// guess. Automatic restarts stay off until an explicit start or restart.
+pub fn restart_breaker_open(
+    service: &str,
+    project: &str,
+    threshold: impl Into<String>,
+    source: &str,
+) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::RestartBreakerOpen,
+        format!("automatic restarts stopped for `{service}`"),
+    )
+    .note(format!("crossed {} ({source})", threshold.into()))
+    .note(
+        "the unit never stayed up long enough to be considered healthy, so \
+         restarting it again would repeat the same failure",
+    )
+    .note("next automatic probe: none — restart it explicitly to try again")
+    .help_cmd(
+        "restart it",
+        format!("sysg restart --service {service} --project {project}"),
+    )
+    .help_cmd("view logs", format!("sysg logs -s {service} -p {project}"))
+    .help_docs()
+}
+
 /// Builds the SG0106 diagnostic for a project whose boot left units down.
 pub fn project_services_not_up(project: &str, services: &[String]) -> Diagnostic {
     Diagnostic::error(
