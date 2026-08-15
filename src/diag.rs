@@ -106,6 +106,9 @@ pub enum SgCode {
     /// SG0109 - a service was not started because one of its declared
     /// dependencies did not reach the condition required by the manifest.
     DependencyUnavailable,
+    /// SG0110 — automatic restarts for a service were stopped because it
+    /// exhausted its restart budget without ever staying up.
+    RestartBreakerOpen,
     /// SG0201 — the `-p` project does not match the resolved config.
     TargetConfigMismatch,
     /// SG0202 — the command names a service or project that does not exist.
@@ -240,6 +243,7 @@ impl SgCode {
             SgCode::SupervisorBusy => "SG0107",
             SgCode::PreStartTimeout => "SG0108",
             SgCode::DependencyUnavailable => "SG0109",
+            SgCode::RestartBreakerOpen => "SG0110",
             SgCode::TargetConfigMismatch => "SG0201",
             SgCode::TargetNotFound => "SG0202",
             SgCode::ConfigFileUnreadable => "SG0203",
@@ -285,7 +289,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 67] = [
+    pub const ALL: [SgCode; 68] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -317,6 +321,7 @@ impl SgCode {
         SgCode::SupervisorBusy,
         SgCode::PreStartTimeout,
         SgCode::DependencyUnavailable,
+        SgCode::RestartBreakerOpen,
         SgCode::TargetConfigMismatch,
         SgCode::TargetNotFound,
         SgCode::ConfigFileUnreadable,

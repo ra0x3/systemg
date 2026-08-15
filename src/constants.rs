@@ -76,8 +76,12 @@ pub enum DaemonLock {
 
     /// Lock for tracking dependents stopped as casualties of a crashed dependency,
     /// so they can be revived once every felling dependency recovers.
-    /// Priority: 8 (must be acquired last)
+    /// Priority: 8
     StoppedForDependency = 8,
+
+    /// Lock for per-service automatic-restart budgets and breaker state.
+    /// Priority: 9 (must be acquired last)
+    RestartGate = 9,
 }
 
 impl DaemonLock {
@@ -98,6 +102,7 @@ impl DaemonLock {
             Self::RestartSuppressed => "restart_suppressed",
             Self::RestartInFlight => "restart_in_flight",
             Self::StoppedForDependency => "stopped_for_dependency",
+            Self::RestartGate => "restart_gate",
         }
     }
 

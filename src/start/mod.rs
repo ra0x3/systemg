@@ -21,7 +21,7 @@ pub mod tree;
 pub use boot::{BootFrame, BootJournal, StepState};
 pub use outcome::{
     Liveness, Outcome, ambiguous_service, dependency_unavailable, outcome_of,
-    project_mismatch, project_services_not_up, unit_start_failed,
+    project_mismatch, project_services_not_up, restart_breaker_open, unit_start_failed,
 };
 pub use plan::{ProjectMismatch, StartPlan, resolve_plan};
 pub use render::{BootReport, render_boot};

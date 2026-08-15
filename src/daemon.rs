@@ -56,6 +56,18 @@ const HEALTH_RESULT_CAPACITY: usize = 1;
 const MONITOR_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// Delay used when a service does not declare restart backoff.
 const DEFAULT_RESTART_BACKOFF: Duration = Duration::from_secs(5);
+/// Automatic starts allowed before the restart breaker opens, when a service
+/// does not declare `max_restarts`.
+const DEFAULT_RESTART_BUDGET: u32 = 8;
+/// Sliding window over which [`DEFAULT_RESTART_BUDGET`] automatic starts trip
+/// the breaker. Catches fast crashloops.
+const RESTART_BUDGET_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// Continuous uptime an automatic restart must reach before it counts as
+/// stable. A unit that reaches readiness and dies sooner never resets its
+/// budget, which is how a slow flapper is caught.
+const RESTART_STABLE_AFTER: Duration = Duration::from_secs(60);
+/// Ceiling for the exponentially growing restart backoff.
+const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(5 * 60);
 /// Thread name for service launch workers.
 const SERVICE_LAUNCH_THREAD: &str = "sysg-service-launch";
 /// Thread name for foreground stderr forwarding.
@@ -1365,6 +1377,105 @@ mod pidfile_tests {
     }
 }
 
+/// Why a service's restart breaker opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartTripCause {
+    /// The budget was spent inside the sliding burst window.
+    Burst,
+    /// Every attempt died before reaching the stability threshold.
+    Flapping,
+}
+
+impl RestartTripCause {
+    /// Renders the threshold that opened the breaker, for SG0110.
+    fn describe(self, budget: u32) -> String {
+        match self {
+            Self::Burst => format!(
+                "{budget} automatic starts within {}m",
+                RESTART_BUDGET_WINDOW.as_secs() / 60
+            ),
+            Self::Flapping => format!(
+                "{budget} consecutive starts that never stayed up for {}s",
+                RESTART_STABLE_AFTER.as_secs()
+            ),
+        }
+    }
+}
+
+/// Per-service automatic-restart accounting behind the breaker.
+///
+/// Deliberately separate from `restart_suppressed`: that set means "a human
+/// stopped this" and is cleared by any start, so storing trip state there would
+/// let an unrelated start silently re-arm a unit the breaker condemned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RestartTracker {
+    /// Ages of automatic starts inside the sliding window, oldest first.
+    #[serde(skip)]
+    starts: VecDeque<Instant>,
+    /// Consecutive automatic starts that never reached stability.
+    unstable: u32,
+    /// When the current generation reached a running state, if it has.
+    #[serde(skip)]
+    ready_at: Option<Instant>,
+    /// Why the breaker opened, or `None` while it is closed.
+    tripped: Option<RestartTripCause>,
+}
+
+impl RestartTracker {
+    /// Records an automatic start attempt and returns whether the breaker is
+    /// now open. `budget` is the service's effective `max_restarts`.
+    fn record_start(&mut self, now: Instant, budget: u32) -> Option<RestartTripCause> {
+        self.starts
+            .retain(|at| now.duration_since(*at) < RESTART_BUDGET_WINDOW);
+        self.starts.push_back(now);
+        self.ready_at = None;
+        self.unstable = self.unstable.saturating_add(1);
+
+        if self.tripped.is_none() {
+            if self.starts.len() as u32 >= budget {
+                self.tripped = Some(RestartTripCause::Burst);
+            } else if self.unstable >= budget {
+                self.tripped = Some(RestartTripCause::Flapping);
+            }
+        }
+        self.tripped
+    }
+
+    /// Notes that the current generation reached a running state. This alone
+    /// does NOT clear the budget — a unit that reaches readiness and dies
+    /// seconds later is exactly the flapper the breaker exists to catch.
+    fn note_ready(&mut self, now: Instant) {
+        self.ready_at.get_or_insert(now);
+    }
+
+    /// Settles the outcome of the current generation once it exits or is
+    /// observed. Only a generation that stayed up for
+    /// the stability threshold clears the consecutive-failure count.
+    fn settle(&mut self, now: Instant) {
+        if self
+            .ready_at
+            .is_some_and(|at| now.duration_since(at) >= RESTART_STABLE_AFTER)
+        {
+            self.unstable = 0;
+            self.starts.clear();
+        }
+        self.ready_at = None;
+    }
+
+    /// Returns whether automatic restarts are currently blocked.
+    fn is_open(&self) -> bool {
+        self.tripped.is_some()
+    }
+
+    /// Backoff for the next attempt: the service's base doubled per
+    /// consecutive unstable start, capped at the maximum restart backoff.
+    fn backoff(&self, base: Duration) -> Duration {
+        let shift = self.unstable.saturating_sub(1).min(16);
+        base.saturating_mul(1u32 << shift).min(RESTART_BACKOFF_CAP)
+    }
+}
+
 /// Service lifecycle states.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -2338,6 +2449,10 @@ struct DaemonContext {
     manual_stop_flags: Arc<Mutex<HashSet<String>>>,
     /// Services whose automatic restarts are temporarily suppressed.
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
+    /// Automatic-restart budgets and breaker state, keyed by service. Kept
+    /// apart from `restart_suppressed` so an unrelated start cannot re-arm a
+    /// unit the breaker condemned.
+    restart_gate: Arc<Mutex<HashMap<String, RestartTracker>>>,
     /// Services with a reconcile-triggered restart currently in flight, so the
     /// monitor does not spawn overlapping restart threads for the same unit.
     restart_in_flight: Arc<Mutex<HashSet<String>>>,
@@ -2421,6 +2536,14 @@ impl DaemonContext {
         acquire_lock(&self.restart_in_flight, DaemonLock::RestartInFlight)
     }
 
+    /// Acquires the restart_gate lock with ordering enforcement.
+    fn lock_restart_gate(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashMap<String, RestartTracker>>, ProcessManagerError>
+    {
+        acquire_lock(&self.restart_gate, DaemonLock::RestartGate)
+    }
+
     /// Acquires the stopped_for_dependency lock with ordering enforcement.
     fn lock_stopped_for_dependency(
         &self,
@@ -2501,6 +2624,8 @@ pub struct Daemon {
     manual_stop_flags: Arc<Mutex<HashSet<String>>>,
     /// Suppressed auto-restarts.
     restart_suppressed: Arc<Mutex<HashSet<String>>>,
+    /// Automatic-restart budgets and breaker state.
+    restart_gate: Arc<Mutex<HashMap<String, RestartTracker>>>,
     /// Reconcile-triggered restarts currently in flight.
     restart_in_flight: Arc<Mutex<HashSet<String>>>,
     /// Dependents stopped as casualties of a crashed dependency.
@@ -2574,6 +2699,7 @@ impl Daemon {
             restart_counts: Arc::clone(&self.restart_counts),
             manual_stop_flags: Arc::clone(&self.manual_stop_flags),
             restart_suppressed: Arc::clone(&self.restart_suppressed),
+            restart_gate: Arc::clone(&self.restart_gate),
             restart_in_flight: Arc::clone(&self.restart_in_flight),
             stopped_for_dependency: Arc::clone(&self.stopped_for_dependency),
             running: Arc::clone(&self.running),
@@ -2608,6 +2734,7 @@ impl Daemon {
             restart_counts: Arc::clone(&ctx.restart_counts),
             manual_stop_flags: Arc::clone(&ctx.manual_stop_flags),
             restart_suppressed: Arc::clone(&ctx.restart_suppressed),
+            restart_gate: Arc::clone(&ctx.restart_gate),
             restart_in_flight: Arc::clone(&ctx.restart_in_flight),
             stopped_for_dependency: Arc::clone(&ctx.stopped_for_dependency),
             #[cfg(target_os = "linux")]
@@ -3202,6 +3329,7 @@ impl Daemon {
             restart_counts: Arc::new(Mutex::new(HashMap::new())),
             manual_stop_flags: Arc::new(Mutex::new(HashSet::new())),
             restart_suppressed: Arc::new(Mutex::new(HashSet::new())),
+            restart_gate: Arc::new(Mutex::new(HashMap::new())),
             restart_in_flight: Arc::new(Mutex::new(HashSet::new())),
             stopped_for_dependency: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(target_os = "linux")]
@@ -4347,6 +4475,9 @@ impl Daemon {
     fn start_all_services(&self) -> Result<(), ProcessManagerError> {
         info!("Starting all services...");
 
+        // An explicit project start is a fresh mandate: every breaker re-arms.
+        self.clear_all_restart_gates();
+
         // Clear anything a previous supervisor left running BEFORE starting
         // replacements. A survivor still owns whatever its predecessor owned,
         // so starting on top of it just produces a second instance that fails
@@ -5308,6 +5439,11 @@ impl Daemon {
     ) -> Result<(), RestartFailure> {
         info!("Restarting all services...");
 
+        // Explicit operator intent re-arms every breaker in the subset.
+        for service_name in services {
+            self.clear_restart_gate(service_name);
+        }
+
         let config = self.cfg();
         // Ordering fails before anything is touched. `UnknownDependency` knows
         // which unit is at fault, so keep that identity instead of flattening it
@@ -5542,12 +5678,34 @@ impl Daemon {
         })
     }
 
+    /// Re-arms a service's restart breaker and clears its budget.
+    ///
+    /// Only explicit operator intent calls this. The automatic restart path
+    /// deliberately does NOT, or a flapping unit would re-arm itself on every
+    /// cycle and the breaker would never hold.
+    pub(crate) fn clear_restart_gate(&self, service_name: &str) {
+        if let Ok(mut gate) = self.restart_gate.lock() {
+            gate.remove(service_name);
+        }
+    }
+
+    /// Re-arms every service's restart breaker in this project.
+    pub(crate) fn clear_all_restart_gates(&self) {
+        if let Ok(mut gate) = self.restart_gate.lock() {
+            gate.clear();
+        }
+    }
+
     /// Restarts a single service, honoring its deployment strategy.
     pub fn restart_service(
         &self,
         name: &str,
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
+        // Explicit operator intent re-arms the breaker: the user is asking for
+        // this attempt, having presumably addressed the cause.
+        self.clear_restart_gate(name);
+
         let strategy_str = service
             .deployment
             .as_ref()
@@ -8070,6 +8228,10 @@ impl Daemon {
                         if let Ok(mut counts) = ctx.lock_restart_counts() {
                             counts.remove(&name);
                         }
+                        // A human stopping the unit is not a flap.
+                        if let Ok(mut gate) = ctx.lock_restart_gate() {
+                            gate.remove(&name);
+                        }
                     } else if restart_suppressed_for_service {
                         info!(
                             "Automatic restart suppressed for service '{name}' after exit."
@@ -8093,6 +8255,11 @@ impl Daemon {
                     } else if !exit_success {
                         failed_services.push(name.clone());
                         Self::log_port_conflict_if_evident(&ctx.config, &name);
+                        // Settle the generation that just died: it clears the
+                        // budget only if it stayed up long enough to count.
+                        if let Ok(mut gate) = ctx.lock_restart_gate() {
+                            gate.entry(name.clone()).or_default().settle(Instant::now());
+                        }
                         let should_restart = ctx
                             .config
                             .services
@@ -8623,6 +8790,21 @@ impl Daemon {
 
     /// Handles restarting a service if its restart policy allows.
     fn handle_restart(name: &str, service: &ServiceConfig, ctx: DaemonContext) {
+        // An open breaker refuses the attempt outright. Only an explicit
+        // operator start/restart re-arms it; nothing here does.
+        let breaker_open = ctx
+            .restart_gate
+            .lock()
+            .map(|gate| gate.get(name).is_some_and(RestartTracker::is_open))
+            .unwrap_or(false);
+        if breaker_open {
+            debug!("Automatic restart of '{name}' refused: the restart breaker is open.");
+            if let Ok(mut guard) = ctx.lock_restart_in_flight() {
+                guard.remove(name);
+            }
+            return;
+        }
+
         if let Some(dependency) = Self::unmet_restart_dependency(&ctx, service) {
             debug!(
                 "Deferring automatic restart of '{name}' until dependency '{dependency}' reaches its required state."
@@ -8635,30 +8817,9 @@ impl Daemon {
 
         let name = name.to_string();
         let service_clone = service.clone();
-        let max_restarts = service.max_restarts;
-        {
-            let mut counts = ctx
-                .restart_counts
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let count = counts.entry(name.clone()).or_insert(0);
-            *count += 1;
+        let budget = service.max_restarts.unwrap_or(DEFAULT_RESTART_BUDGET);
 
-            if let Some(max) = max_restarts
-                && *count > max
-            {
-                error!(
-                    "Service '{name}' has reached maximum restart attempts ({max}). Giving up."
-                );
-                ctx.restart_in_flight
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&name);
-                return;
-            }
-        }
-
-        let backoff = match service.backoff.as_deref() {
+        let base_backoff = match service.backoff.as_deref() {
             Some(raw) => match Self::parse_duration(raw) {
                 Ok(duration) => duration,
                 Err(err) => {
@@ -8669,6 +8830,42 @@ impl Daemon {
                 }
             },
             None => DEFAULT_RESTART_BACKOFF,
+        };
+
+        // The breaker is evaluated BEFORE the attempt is dispatched. Readiness
+        // no longer clears the budget on its own — a unit that reaches running
+        // and dies seconds later is the flapper this exists to stop.
+        let backoff = {
+            let mut gate = ctx
+                .restart_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let tracker = gate.entry(name.clone()).or_default();
+            let tripped = tracker.record_start(Instant::now(), budget);
+            let backoff = tracker.backoff(base_backoff);
+
+            if let Some(cause) = tripped {
+                let source = if service_clone.max_restarts.is_some() {
+                    "configured max_restarts"
+                } else {
+                    "default restart budget"
+                };
+                error!(
+                    "{}",
+                    crate::start::restart_breaker_open(
+                        &name,
+                        &ctx.config.project.id,
+                        cause.describe(budget),
+                        source,
+                    )
+                );
+                ctx.restart_in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&name);
+                return;
+            }
+            backoff
         };
 
         let in_flight = Arc::clone(&ctx.restart_in_flight);
@@ -8737,30 +8934,38 @@ impl Daemon {
                     return;
                 }
 
-                let restart_succeeded = match &restart_result {
+                // `Running` means the unit reached its readiness gates, NOT
+                // that it stayed up. Only a generation that survives
+                // RESTART_STABLE_AFTER clears the budget; the monitor settles
+                // that verdict when it observes the exit.
+                match &restart_result {
                     Ok(ServiceReadyState::Running) => {
                         info!(
                             "Service '{name}' restarted and passed its readiness gates."
                         );
-                        true
+                        if let Ok(mut gate) = ctx.lock_restart_gate() {
+                            gate.entry(name.clone())
+                                .or_default()
+                                .note_ready(Instant::now());
+                        }
                     }
+                    // A finite unit that exits cleanly is a completed run, not
+                    // a flap: it has nothing left to stay up for.
                     Ok(ServiceReadyState::CompletedSuccess) => {
                         info!("Service '{name}' completed successfully during restart.");
-                        true
+                        if let Ok(mut gate) = ctx.lock_restart_gate() {
+                            gate.remove(&name);
+                        }
                     }
                     Ok(ServiceReadyState::Skipped) => {
                         info!("Service '{name}' is skipped after restart evaluation.");
-                        true
+                        if let Ok(mut gate) = ctx.lock_restart_gate() {
+                            gate.remove(&name);
+                        }
                     }
                     Err(err) => {
                         error!("Failed to restart '{name}': {err}");
-                        false
                     }
-                };
-
-                if restart_succeeded && let Ok(mut counts) = ctx.lock_restart_counts()
-                {
-                    counts.insert(name.clone(), 0);
                 }
             })
         {
@@ -9267,6 +9472,119 @@ mod tests {
                     .contains("\n  <active_slot_index>1</active_slot_index>")
             );
         });
+    }
+
+    /// The gamecast_agent regression: a unit that reaches readiness and dies
+    /// seconds later reset its budget every cycle, so 2634 restarts in four
+    /// hours never tripped anything. Readiness alone must not clear it.
+    #[test]
+    fn breaker_trips_when_readiness_never_becomes_stability() {
+        let mut tracker = RestartTracker::default();
+        let start = Instant::now();
+
+        for attempt in 0..(DEFAULT_RESTART_BUDGET - 1) {
+            let at = start + Duration::from_secs(u64::from(attempt) * 3);
+            assert!(
+                tracker.record_start(at, DEFAULT_RESTART_BUDGET).is_none(),
+                "breaker opened early on attempt {attempt}"
+            );
+            // Reaches running, then dies 3s later — well under stability.
+            tracker.note_ready(at);
+            tracker.settle(at + Duration::from_secs(3));
+        }
+
+        let last = start + Duration::from_secs(u64::from(DEFAULT_RESTART_BUDGET) * 3);
+        assert!(
+            tracker.record_start(last, DEFAULT_RESTART_BUDGET).is_some(),
+            "breaker never opened despite repeated sub-stability crashes"
+        );
+        assert!(tracker.is_open());
+    }
+
+    /// A slow flapper spaced beyond the burst window still trips, because the
+    /// consecutive-instability count is not time-bounded.
+    #[test]
+    fn breaker_trips_on_slow_flapping_outside_the_burst_window() {
+        let mut tracker = RestartTracker::default();
+        let mut at = Instant::now();
+
+        for _ in 0..(DEFAULT_RESTART_BUDGET - 1) {
+            assert!(tracker.record_start(at, DEFAULT_RESTART_BUDGET).is_none());
+            tracker.note_ready(at);
+            tracker.settle(at + Duration::from_secs(5));
+            at += RESTART_BUDGET_WINDOW + Duration::from_secs(60);
+        }
+
+        let cause = tracker.record_start(at, DEFAULT_RESTART_BUDGET);
+        assert_eq!(cause, Some(RestartTripCause::Flapping));
+    }
+
+    /// A unit that genuinely stays up clears its budget and never trips.
+    #[test]
+    fn stable_generation_clears_the_budget() {
+        let mut tracker = RestartTracker::default();
+        let mut at = Instant::now();
+
+        for _ in 0..(DEFAULT_RESTART_BUDGET * 3) {
+            assert!(
+                tracker.record_start(at, DEFAULT_RESTART_BUDGET).is_none(),
+                "a unit that stays up must never trip the breaker"
+            );
+            tracker.note_ready(at);
+            at += RESTART_STABLE_AFTER + Duration::from_secs(1);
+            tracker.settle(at);
+        }
+
+        assert!(!tracker.is_open());
+    }
+
+    /// An explicit `max_restarts` overrides the default budget.
+    #[test]
+    fn explicit_budget_overrides_the_default() {
+        let mut tracker = RestartTracker::default();
+        let at = Instant::now();
+
+        assert!(tracker.record_start(at, 2).is_none());
+        assert_eq!(tracker.record_start(at, 2), Some(RestartTripCause::Burst));
+    }
+
+    /// Backoff grows exponentially from the configured base and stops at the cap.
+    #[test]
+    fn backoff_grows_exponentially_and_saturates_at_the_cap() {
+        let mut tracker = RestartTracker::default();
+        let base = Duration::from_secs(5);
+        let at = Instant::now();
+
+        tracker.record_start(at, u32::MAX);
+        assert_eq!(tracker.backoff(base), base);
+        tracker.record_start(at, u32::MAX);
+        assert_eq!(tracker.backoff(base), base * 2);
+        tracker.record_start(at, u32::MAX);
+        assert_eq!(tracker.backoff(base), base * 4);
+
+        for _ in 0..40 {
+            tracker.record_start(at, u32::MAX);
+        }
+        assert_eq!(tracker.backoff(base), RESTART_BACKOFF_CAP);
+    }
+
+    /// Starts older than the window are pruned, so a slow, healthy-enough unit
+    /// does not accumulate ancient failures into a trip.
+    #[test]
+    fn starts_outside_the_window_are_pruned() {
+        let mut tracker = RestartTracker::default();
+        let start = Instant::now();
+
+        for _ in 0..(DEFAULT_RESTART_BUDGET - 1) {
+            tracker.record_start(start, DEFAULT_RESTART_BUDGET);
+        }
+        // Long after the window, the burst threshold must not fire on the
+        // strength of starts that have aged out.
+        let later = start + RESTART_BUDGET_WINDOW + Duration::from_secs(1);
+        let mut fresh = RestartTracker::default();
+        fresh.record_start(start, DEFAULT_RESTART_BUDGET);
+        fresh.settle(start + RESTART_STABLE_AFTER + Duration::from_secs(1));
+        assert!(fresh.record_start(later, DEFAULT_RESTART_BUDGET).is_none());
     }
 
     #[test]
