@@ -968,6 +968,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     runtime::init(runtime_mode);
     runtime::set_drop_privileges(drop_privileges_effective);
     runtime::capture_socket_activation();
+    warn_on_retired_command_timeout_env(&args.command);
 
     // A `start` (daemonized OR foreground) becomes/feeds a supervisor whose
     // internal tracing must NOT spray onto the user's terminal — the foreground
@@ -7890,6 +7891,31 @@ fn send_control_message(command: ControlCommand) -> Result<String, Box<dyn Error
     }
 }
 
+/// Warns that `SYSG_COMMAND_TIMEOUT` is set but no longer read.
+///
+/// The variable shipped in v0.63.3 as the only way to move the command wait
+/// budget; the budget now lives in `supervisor.xml` so there is one authority
+/// for it. Honouring the variable would restore two, so it is ignored — but
+/// silently ignoring a timeout someone deliberately raised would hand them the
+/// old 15-minute cutoff back without a word. Drop this once the release that
+/// introduced it is well behind us.
+///
+/// Skipped for `supervise`, whose stderr belongs to the resident supervisor
+/// rather than to a person who could act on the advice.
+fn warn_on_retired_command_timeout_env(command: &Commands) {
+    if matches!(command, Commands::Supervise { .. })
+        || std::env::var_os("SYSG_COMMAND_TIMEOUT").is_none()
+    {
+        return;
+    }
+    let note = "Warn: SYSG_COMMAND_TIMEOUT is no longer read; set timeouts.command_wait_secs in supervisor.xml instead";
+    if agent_mode() {
+        eprintln!("{note}");
+    } else {
+        eprintln!("{YELLOW}{note}{RESET}");
+    }
+}
+
 /// The diagnostic for a control error that ended a wait rather than a command,
 /// or `None` for errors that carry their own reporting.
 fn wait_diag(err: &ControlError) -> Option<Box<systemg::diag::Diagnostic>> {
@@ -7922,7 +7948,9 @@ fn command_still_running_diag() -> Box<systemg::diag::Diagnostic> {
     }
     Box::new(
         diag.note("the supervisor accepted it and has NOT cancelled it; only the wait ended")
-            .note("raise the budget with SYSG_COMMAND_TIMEOUT=<seconds>, or 0 to wait indefinitely")
+            .note(
+                "raise the budget with timeouts.command_wait_secs in supervisor.xml, or 0 to wait indefinitely",
+            )
             .help_cmd("see what it is doing", "sysg status")
             .help_docs(),
     )

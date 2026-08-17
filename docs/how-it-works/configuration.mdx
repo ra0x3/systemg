@@ -100,6 +100,7 @@ in `~/.local/share/systemg/supervisor.xml`, or
     <startup_stability_ms>250</startup_stability_ms>
     <stop_verify_secs>10</stop_verify_secs>
     <start_settle_secs>360</start_settle_secs>
+    <command_wait_secs>900</command_wait_secs>
   </timeouts>
 </supervisor>
 ```
@@ -108,6 +109,10 @@ in `~/.local/share/systemg/supervisor.xml`, or
 - `startup_stability_ms`: survival window for services without a health check.
 - `stop_verify_secs`: time allowed to confirm that a terminated process is gone.
 - `start_settle_secs`: maximum wait for an unresolved queued project start.
+- `command_wait_secs`: how long a CLI command waits for the supervisor's reply
+  before reporting [SG0111](/how-it-works/dialog/codes#sg0111). `0` waits
+  indefinitely. Raise it when a project is large enough that a restart runs
+  longer than the default; the command is never cancelled by the wait ending.
 
 The file is created on first supervisor start. Existing compact XML remains
 compatible and is rewritten in the indented form after it parses successfully.
@@ -115,8 +120,9 @@ compatible and is rewritten in the indented form after it parses successfully.
 
 <Info>
   Health-check `attempt_timeout` and `total_timeout` remain in the project
-  manifest because readiness is workload-specific. IPC polling and live-upgrade
-  deadlines are protocol invariants and are not operator settings.
+  manifest because readiness is workload-specific. The IPC poll slice, liveness
+  probe window, unresponsive grace and live-upgrade deadlines are protocol
+  invariants and are not operator settings.
 </Info>
 
 ## Registered manifests

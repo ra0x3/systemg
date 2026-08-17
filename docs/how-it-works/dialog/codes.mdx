@@ -225,11 +225,13 @@ Everything except a cached `status`, `version`, `current-op` and `inspect` is
 queued onto the single owner thread and answered when it completes, so the wait
 is as long as the work: restarting a project of twenty units with health checks
 legitimately runs for minutes. The client waits for as long as the supervisor
-keeps answering, up to a 15-minute backstop — a deadlocked owner thread would
-otherwise hang the CLI forever, since the socket stays responsive either way.
+keeps answering, up to a backstop that defaults to 15 minutes — a deadlocked
+owner thread would otherwise hang the CLI forever, since the socket stays
+responsive either way.
 
-Raise or remove the backstop with `SYSG_COMMAND_TIMEOUT=<seconds>`, where `0`
-waits indefinitely. `sysg status` shows what the operation is doing.
+Raise or remove the backstop with `timeouts.command_wait_secs` in
+[`supervisor.xml`](/how-it-works/configuration#supervisor-configuration), where
+`0` waits indefinitely. `sysg status` shows what the operation is doing.
 
 ## Selectors, status &amp; stop
 
