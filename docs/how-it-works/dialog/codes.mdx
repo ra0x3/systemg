@@ -171,9 +171,17 @@ log.
 
 ### [SG0107](/how-it-works/dialog/codes#sg0107)
 
-The supervisor is busy with another mutation, such as start, stop, restart,
-reconcile, or upgrade. The diagnostic names the active operation; wait for it
-to finish, then retry instead of issuing overlapping mutations.
+Reserved, and no longer emitted. It reported the supervisor as having *refused*
+a command because it was busy with another mutation. That was never what
+happened: mutations are queued onto the owner thread, not rejected, so a command
+this code blamed had in fact been accepted, and a long restart that outran the
+client's wait went on to finish while the CLI called it unapplied.
+
+The two things it conflated are now reported separately —
+[`SG0111`](/how-it-works/dialog/codes#sg0111) when the supervisor is answering
+and still working, and
+[`SG0205`](/how-it-works/dialog/codes#sg0205) when it has stopped answering at
+all. The code is kept so a published diagnostic is not withdrawn.
 
 ### [SG0108](/how-it-works/dialog/codes#sg0108)
 
@@ -206,6 +214,23 @@ failed identically N times only repeats the failure. Fix the underlying cause,
 then re-arm it explicitly with `sysg restart --service <name> --project <id>` —
 an explicit start or restart is the only thing that clears the breaker.
 
+### [SG0111](/how-it-works/dialog/codes#sg0111)
+
+The supervisor is answering its control socket and is still working on the
+command, but has not finished within the client's budget. The command was
+accepted and keeps running — only the wait was abandoned, and nothing about
+this cancels it.
+
+Everything except a cached `status`, `version`, `current-op` and `inspect` is
+queued onto the single owner thread and answered when it completes, so the wait
+is as long as the work: restarting a project of twenty units with health checks
+legitimately runs for minutes. The client waits for as long as the supervisor
+keeps answering, up to a 15-minute backstop — a deadlocked owner thread would
+otherwise hang the CLI forever, since the socket stays responsive either way.
+
+Raise or remove the backstop with `SYSG_COMMAND_TIMEOUT=<seconds>`, where `0`
+waits indefinitely. `sysg status` shows what the operation is doing.
+
 ## Selectors, status &amp; stop
 
 ### [SG0006](/how-it-works/dialog/codes#sg0006)
@@ -232,8 +257,11 @@ or two `logs` modes).
 
 ### [SG0205](/how-it-works/dialog/codes#sg0205)
 
-The supervisor's process is alive but not answering its control socket, so the
-command was refused instead of routed into a dying daemon.
+The supervisor's process is alive but not answering its control socket. Raised
+before a command is sent, it was refused rather than routed into a dying daemon.
+Raised while one is in flight, the supervisor stopped answering after taking it,
+so whether it was applied is unknown — check `sysg status` once the daemon is
+back rather than assuming either way.
 
 ### [SG0206](/how-it-works/dialog/codes#sg0206)
 

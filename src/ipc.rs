@@ -16,10 +16,37 @@ use crate::{
     status::{ProjectRunMode, StatusSnapshot, UnitStatus},
 };
 
-/// Upper bound on how long a CLI command waits for the supervisor to reply
-/// before giving up, so a wedged supervisor surfaces as an error instead of an
-/// unbounded spinner.
-const COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a read slice waits before the client pauses to check that the
+/// supervisor is still alive.
+///
+/// A flat deadline on the whole command was wrong: everything except the four
+/// cached reads is queued onto the single owner thread and answered only once
+/// it completes, so a restart of enough units outran the clock and the client
+/// declared a command that went on to succeed "not applied". Liveness, not
+/// elapsed time, is what separates a slow mutation from a dead supervisor.
+const COMMAND_POLL_SLICE: Duration = Duration::from_secs(5);
+
+/// Hard bound on one liveness probe, connect included.
+const PROBE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Ceiling on a single accumulated response, guarding only against unbounded
+/// growth from a peer that never terminates its line.
+const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+/// How long the supervisor may fail every liveness probe before the client
+/// stops waiting, so a genuinely dead socket still surfaces as an error.
+const UNRESPONSIVE_GRACE: Duration = Duration::from_secs(30);
+
+/// Ceiling on one command, overridable with `SYSG_COMMAND_TIMEOUT`.
+///
+/// The probe proves the control socket answers, not that the owner thread is
+/// making progress — a deadlocked owner would keep answering forever — so the
+/// wait still needs a backstop. It is generous rather than tight because
+/// exceeding it is reported as "still running", not as a failure.
+const COMMAND_BUDGET: Duration = Duration::from_secs(900);
+
+/// Env var overriding [`COMMAND_BUDGET`], in whole seconds. `0` waits forever.
+const COMMAND_BUDGET_ENV: &str = "SYSG_COMMAND_TIMEOUT";
 
 /// Short bound for the diagnostic current-op probe, which must never itself hang.
 const CURRENT_OP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -373,9 +400,15 @@ pub enum ControlError {
     /// Control socket not available or supervisor not running.
     #[error("control socket not available")]
     NotAvailable,
-    /// The supervisor accepted the command but did not reply in time.
+    /// The supervisor stopped answering its control socket while the command
+    /// was in flight.
     #[error("supervisor did not respond in time")]
     Timeout,
+    /// The supervisor is answering, and still working on the command, but has
+    /// not finished within the client's budget. The command was accepted and
+    /// is not cancelled by this.
+    #[error("supervisor is still running the command")]
+    StillRunning,
     /// Another supervisor owns the runtime.
     #[error("another supervisor owns the runtime")]
     RuntimeBusy,
@@ -488,33 +521,144 @@ pub fn authenticate_peer(stream: &UnixStream) -> Result<(), ControlError> {
     }
 }
 
+/// How long the client is willing to wait on one command, and on what terms.
+#[derive(Debug, Clone, Copy)]
+struct WaitPolicy {
+    /// How long one read blocks before pausing to probe for liveness.
+    slice: Duration,
+    /// How long one liveness probe may take before it counts as unanswered.
+    probe_window: Duration,
+    /// How long the supervisor may fail every probe before the wait is over.
+    unresponsive_grace: Duration,
+    /// Backstop against a deadlocked owner thread; `None` waits forever.
+    budget: Option<Duration>,
+}
+
+impl WaitPolicy {
+    /// The default policy, with the budget overridden by `SYSG_COMMAND_TIMEOUT`.
+    /// An unparseable value keeps the default rather than silently waiting
+    /// forever.
+    fn from_env() -> Self {
+        let budget = match std::env::var(COMMAND_BUDGET_ENV) {
+            Ok(raw) => match raw.trim().parse::<u64>() {
+                Ok(0) => None,
+                Ok(secs) => Some(Duration::from_secs(secs)),
+                Err(_) => Some(COMMAND_BUDGET),
+            },
+            Err(_) => Some(COMMAND_BUDGET),
+        };
+        Self {
+            slice: COMMAND_POLL_SLICE,
+            probe_window: PROBE_WINDOW,
+            unresponsive_grace: UNRESPONSIVE_GRACE,
+            budget,
+        }
+    }
+}
+
 /// Sends a command to the supervisor and waits for a response.
+///
+/// The wait is bounded by the supervisor's liveness rather than by the
+/// command's duration: a queued mutation holds the socket open for as long as
+/// the owner thread takes, and abandoning it mid-flight would report a command
+/// that is still running — and will still be applied — as one that failed.
 pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, ControlError> {
+    send_command_with_policy(command, WaitPolicy::from_env())
+}
+
+fn send_command_with_policy(
+    command: &ControlCommand,
+    policy: WaitPolicy,
+) -> Result<ControlResponse, ControlError> {
     let stream = connect_stream()?;
-    stream.set_read_timeout(Some(COMMAND_READ_TIMEOUT))?;
+    stream.set_read_timeout(Some(policy.slice))?;
     let mut stream = stream;
     write_command(&mut stream, command)?;
 
     let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    match reader.read_line(&mut response_line) {
-        Ok(_) => {}
-        Err(err)
-            if matches!(
-                err.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            return Err(ControlError::Timeout);
+    let mut response = Vec::new();
+    let started = std::time::Instant::now();
+    let mut unresponsive_since: Option<std::time::Instant> = None;
+
+    loop {
+        // One `fill_buf` is one underlying read, so the slice bounds each pass
+        // and the checks below always get to run. `read_until` would keep
+        // looping inside itself on a peer that trickles bytes without a
+        // newline, and neither the probe nor the budget would ever be reached.
+        // Bytes already taken stay in `response`, so a reply split across
+        // slices is resumed rather than corrupted — which `read_line` could not
+        // promise for a partial multi-byte character.
+        let taken = match reader.fill_buf() {
+            Ok(buffered) => {
+                let end = buffered
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map(|at| at + 1);
+                let take = end.unwrap_or(buffered.len());
+                response.extend_from_slice(&buffered[..take]);
+                (take, end.is_some(), buffered.is_empty())
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                (0, false, false)
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let (take, complete, eof) = taken;
+        reader.consume(take);
+        if complete || eof {
+            break;
         }
-        Err(err) => return Err(err.into()),
+        // Only an out-of-memory guard, set far above any real reply: a status
+        // snapshot has no declared size limit, so a tight cap here would turn a
+        // large but legitimate response into a failure. What actually bounds a
+        // dribbling peer is the budget below.
+        if response.len() > MAX_RESPONSE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "supervisor response exceeded the maximum size",
+            )
+            .into());
+        }
+
+        // Bytes arriving are themselves proof of life, so the probe is only
+        // spent on a silent slice. The budget is checked either way: a peer
+        // trickling bytes without a newline would otherwise be bounded only by
+        // the cap above, which at a slow enough drip is no bound at all.
+        let responsive = take > 0 || probe_within(policy.probe_window).is_ok();
+        if responsive {
+            unresponsive_since = None;
+        } else {
+            let since = *unresponsive_since.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() >= policy.unresponsive_grace {
+                return Err(ControlError::Timeout);
+            }
+        }
+
+        // Only a supervisor that just answered can be reported as still
+        // working. With a probe outstanding the honest outcome is unknown, so
+        // the wait continues until the grace above resolves it either way.
+        if responsive
+            && policy
+                .budget
+                .is_some_and(|budget| started.elapsed() >= budget)
+        {
+            return Err(ControlError::StillRunning);
+        }
     }
 
-    if response_line.trim().is_empty() {
+    let response = String::from_utf8(response).map_err(|err| {
+        io::Error::new(io::ErrorKind::InvalidData, err.utf8_error().to_string())
+    })?;
+    if response.trim().is_empty() {
         return Err(ControlError::NotAvailable);
     }
 
-    let response: ControlResponse = serde_json::from_str(response_line.trim())?;
+    let response: ControlResponse = serde_json::from_str(response.trim())?;
     if let ControlResponse::Error(message) = &response {
         return Err(ControlError::Server(message.clone()));
     }
@@ -522,20 +666,59 @@ pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, Control
     Ok(response)
 }
 
+/// Runs the liveness probe under a hard wall-clock bound.
+///
+/// The socket timeouts inside the probe cover the write and the read but not
+/// `UnixStream::connect`, which has no timeout of its own and blocks while the
+/// listener's accept backlog is full — exactly the state a saturated supervisor
+/// is in. Handing the probe to a thread and bounding the join makes "did not
+/// answer inside the window" the answer in every case, including that one. The
+/// thread is abandoned rather than cancelled; it ends on its own when the
+/// connect resolves.
+fn probe_within(
+    window: Duration,
+) -> Result<Option<crate::opslot::OpReport>, ControlError> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("sysg-liveness-probe".into())
+        .spawn(move || {
+            let _ = tx.send(probe_current_op());
+        })
+        .map_err(ControlError::Io)?;
+    match rx.recv_timeout(window) {
+        Ok(result) => result,
+        Err(_) => Err(ControlError::Timeout),
+    }
+}
+
+/// Asks the supervisor what it is working on, distinguishing "idle" from
+/// "unreachable" so a liveness check can tell the two apart.
+///
+/// Any well-formed reply counts as alive, an error response included: a
+/// supervisor old enough to reject `CurrentOp` outright is still answering its
+/// socket, and reading that as wedged would abandon a healthy command.
+pub fn probe_current_op() -> Result<Option<crate::opslot::OpReport>, ControlError> {
+    let stream = connect_stream()?;
+    stream.set_read_timeout(Some(CURRENT_OP_TIMEOUT))?;
+    stream.set_write_timeout(Some(CURRENT_OP_TIMEOUT))?;
+    let mut stream = stream;
+    write_command(&mut stream, &ControlCommand::CurrentOp)?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    if line.trim().is_empty() {
+        return Err(ControlError::NotAvailable);
+    }
+    match serde_json::from_str(line.trim())? {
+        ControlResponse::CurrentOp(report) => Ok(report),
+        _ => Ok(None),
+    }
+}
+
 /// Fetches the supervisor's current operation without disturbing an in-flight
 /// command. Returns `None` when the supervisor is idle or unreachable.
 pub fn current_op() -> Option<crate::opslot::OpReport> {
-    let stream = connect_stream().ok()?;
-    stream.set_read_timeout(Some(CURRENT_OP_TIMEOUT)).ok()?;
-    let mut stream = stream;
-    write_command(&mut stream, &ControlCommand::CurrentOp).ok()?;
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    match serde_json::from_str(line.trim()).ok()? {
-        ControlResponse::CurrentOp(report) => report,
-        _ => None,
-    }
+    probe_current_op().ok().flatten()
 }
 
 /// Sends a command to the supervisor without waiting for a response.
@@ -899,7 +1082,13 @@ pub fn cleanup_runtime_owned(owner_pid: libc::pid_t) -> Result<(), ControlError>
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::net::UnixListener;
+    use std::{
+        os::unix::net::UnixListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     use tempfile::tempdir;
 
@@ -932,6 +1121,347 @@ mod tests {
         }
         crate::runtime::init(crate::runtime::RuntimeMode::User);
         crate::runtime::set_drop_privileges(false);
+    }
+
+    /// A supervisor stand-in: answers `CurrentOp` however `probe_reply` says,
+    /// and replies to the one mutation after `delay` — or never, when
+    /// `mutation_reply` is `None`.
+    struct FakeSupervisor {
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl FakeSupervisor {
+        fn spawn(
+            listener: UnixListener,
+            probe_reply: Option<ControlResponse>,
+            delay: Duration,
+            mutation_reply: Option<Vec<u8>>,
+        ) -> Self {
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                let mut held = Vec::new();
+                while !worker_stop.load(Ordering::Relaxed) {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(_) => break,
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let command = match read_command(&mut stream) {
+                        Ok(command) => command,
+                        Err(_) => continue,
+                    };
+                    if matches!(command, ControlCommand::CurrentOp) {
+                        if let Some(reply) = &probe_reply {
+                            let _ = write_response(&mut stream, reply);
+                        }
+                        continue;
+                    }
+                    match &mutation_reply {
+                        Some(reply) => {
+                            let reply = reply.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(delay);
+                                let _ = stream.write_all(&reply);
+                                let _ = stream.flush();
+                            });
+                        }
+                        // Held open, never answered: the owner thread is wedged
+                        // but the socket is not.
+                        None => held.push(stream),
+                    }
+                }
+            });
+            Self {
+                stop,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for FakeSupervisor {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn test_policy(budget: Option<Duration>) -> WaitPolicy {
+        WaitPolicy {
+            slice: Duration::from_millis(50),
+            probe_window: Duration::from_millis(500),
+            unresponsive_grace: Duration::from_millis(200),
+            budget,
+        }
+    }
+
+    /// Binds the runtime control socket under a temp `HOME`, returning the
+    /// listener and a guard that restores the environment.
+    fn fake_runtime(temp: &tempfile::TempDir) -> (UnixListener, Option<String>) {
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+        (
+            bind_control_socket().expect("bind control socket"),
+            original_home,
+        )
+    }
+
+    fn restore_home(original_home: Option<String>) {
+        match original_home {
+            Some(val) => unsafe { std::env::set_var("HOME", val) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+    }
+
+    fn restart_all() -> ControlCommand {
+        ControlCommand::Restart {
+            service: None,
+            project: None,
+            config: None,
+            watch: None,
+        }
+    }
+
+    #[test]
+    fn a_reply_slower_than_one_slice_is_still_awaited() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let (listener, original_home) = fake_runtime(&temp);
+        let reply = {
+            let mut bytes =
+                serde_json::to_vec(&ControlResponse::Message("done".into())).unwrap();
+            bytes.push(b'\n');
+            bytes
+        };
+        let _supervisor = FakeSupervisor::spawn(
+            listener,
+            Some(ControlResponse::CurrentOp(None)),
+            Duration::from_millis(400),
+            Some(reply),
+        );
+
+        let result = send_command_with_policy(&restart_all(), test_policy(None));
+
+        assert!(
+            matches!(&result, Ok(ControlResponse::Message(message)) if message == "done"),
+            "a mutation that outlasts a read slice must not be abandoned: {result:?}"
+        );
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn a_reply_split_across_slices_is_not_corrupted() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let (listener, original_home) = fake_runtime(&temp);
+        // Split mid-way through the multi-byte character, so a resumed read
+        // that dropped its partial bytes would produce invalid UTF-8.
+        let message = "réstarted ✓";
+        let mut reply =
+            serde_json::to_vec(&ControlResponse::Message(message.into())).unwrap();
+        reply.push(b'\n');
+        let split = reply.len() / 2;
+        let (head, tail) = reply.split_at(split);
+        let (head, tail) = (head.to_vec(), tail.to_vec());
+
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                stream.set_nonblocking(false).unwrap();
+                let command = match read_command(&mut stream) {
+                    Ok(command) => command,
+                    Err(_) => continue,
+                };
+                if matches!(command, ControlCommand::CurrentOp) {
+                    let _ =
+                        write_response(&mut stream, &ControlResponse::CurrentOp(None));
+                    continue;
+                }
+                let head = head.clone();
+                let tail = tail.clone();
+                std::thread::spawn(move || {
+                    let _ = stream.write_all(&head);
+                    let _ = stream.flush();
+                    std::thread::sleep(Duration::from_millis(200));
+                    let _ = stream.write_all(&tail);
+                    let _ = stream.flush();
+                });
+            }
+        });
+
+        let result = send_command_with_policy(&restart_all(), test_policy(None));
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = worker.join();
+        assert!(
+            matches!(&result, Ok(ControlResponse::Message(got)) if got == message),
+            "a reply split across slices must be resumed, not truncated: {result:?}"
+        );
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn a_supervisor_that_stops_answering_ends_the_wait() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let (listener, original_home) = fake_runtime(&temp);
+        let _supervisor =
+            FakeSupervisor::spawn(listener, None, Duration::from_secs(60), None);
+
+        let result = send_command_with_policy(&restart_all(), test_policy(None));
+
+        assert!(
+            matches!(result, Err(ControlError::Timeout)),
+            "a socket that answers nothing is a dead supervisor: {result:?}"
+        );
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn an_error_reply_to_the_probe_still_counts_as_alive() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let (listener, original_home) = fake_runtime(&temp);
+        // A supervisor old enough to reject CurrentOp is still answering; the
+        // wait must not read that as wedged.
+        let _supervisor = FakeSupervisor::spawn(
+            listener,
+            Some(ControlResponse::Error("unknown command".into())),
+            Duration::from_secs(60),
+            None,
+        );
+
+        let result = send_command_with_policy(
+            &restart_all(),
+            test_policy(Some(Duration::from_millis(400))),
+        );
+
+        assert!(
+            matches!(result, Err(ControlError::StillRunning)),
+            "a responsive supervisor must exhaust the budget, not the grace: {result:?}"
+        );
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn a_wedged_owner_thread_reports_the_command_as_still_running() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let (listener, original_home) = fake_runtime(&temp);
+        let _supervisor = FakeSupervisor::spawn(
+            listener,
+            Some(ControlResponse::CurrentOp(None)),
+            Duration::from_secs(60),
+            None,
+        );
+
+        let result = send_command_with_policy(
+            &restart_all(),
+            test_policy(Some(Duration::from_millis(400))),
+        );
+
+        assert!(
+            matches!(result, Err(ControlError::StillRunning)),
+            "an answering supervisor that never finishes is not a refusal: {result:?}"
+        );
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn a_peer_dribbling_bytes_forever_still_hits_the_budget() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let (listener, original_home) = fake_runtime(&temp);
+
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let writer_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                stream.set_nonblocking(false).unwrap();
+                if read_command(&mut stream).is_err() {
+                    continue;
+                }
+                // Never a newline: the reply never completes, but the stream is
+                // never silent either, so nothing about it looks unresponsive.
+                let writer_stop = Arc::clone(&writer_stop);
+                std::thread::spawn(move || {
+                    while !writer_stop.load(Ordering::Relaxed) {
+                        if stream.write_all(b" ").is_err() {
+                            return;
+                        }
+                        let _ = stream.flush();
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                });
+            }
+        });
+
+        let result = send_command_with_policy(
+            &restart_all(),
+            test_policy(Some(Duration::from_millis(300))),
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = worker.join();
+        assert!(
+            matches!(result, Err(ControlError::StillRunning)),
+            "an unterminated reply must still be bounded by the budget: {result:?}"
+        );
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn the_budget_env_var_overrides_the_default() {
+        let _guard = crate::test_utils::env_lock();
+        let original = std::env::var(COMMAND_BUDGET_ENV).ok();
+
+        unsafe { std::env::set_var(COMMAND_BUDGET_ENV, "0") };
+        assert_eq!(WaitPolicy::from_env().budget, None);
+
+        unsafe { std::env::set_var(COMMAND_BUDGET_ENV, "30") };
+        assert_eq!(WaitPolicy::from_env().budget, Some(Duration::from_secs(30)));
+
+        unsafe { std::env::set_var(COMMAND_BUDGET_ENV, "soon") };
+        assert_eq!(WaitPolicy::from_env().budget, Some(COMMAND_BUDGET));
+
+        match original {
+            Some(val) => unsafe { std::env::set_var(COMMAND_BUDGET_ENV, val) },
+            None => unsafe { std::env::remove_var(COMMAND_BUDGET_ENV) },
+        }
     }
 
     #[test]
