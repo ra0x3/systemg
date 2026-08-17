@@ -1,7 +1,7 @@
 {
   "name": "systemg",
   "description": "Teaches Claude the sysg process manager: CLI commands, YAML config schema, deployments, cron units, and log inspection.",
-  "version": "0.63.3",
+  "version": "0.64.1",
   "author": {
     "name": "ra0x3"
   },
