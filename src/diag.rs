@@ -89,11 +89,13 @@ pub enum SgCode {
     HealthUnmet,
     /// SG0105 — a service could not bind its port because it is already in use.
     PortInUse,
-    /// SG0107 — the supervisor was busy with another mutation and rejected this
-    /// command. Expected and recoverable: the supervisor serialises mutations
-    /// through one owner thread, so a concurrent restart/start/stop is refused
-    /// rather than interleaved. Distinct from a real failure — retrying once the
-    /// in-flight operation finishes is the correct response.
+    /// SG0107 — reserved, no longer emitted. It reported the supervisor as
+    /// having *refused* a command it was too busy to take, but mutations are
+    /// queued onto the owner thread rather than refused, so the command it
+    /// blamed had in fact been accepted and usually went on to succeed. The
+    /// code is kept so a published diagnostic is not withdrawn; the conditions
+    /// it was raised for are now [`SgCode::CommandStillRunning`] and
+    /// [`SgCode::SupervisorNotResponding`].
     SupervisorBusy,
     /// SG0106 — a project was registered but one or more of its services never
     /// came up. Reported by an attaching `start`, which returns as soon as the
@@ -109,6 +111,10 @@ pub enum SgCode {
     /// SG0110 — automatic restarts for a service were stopped because it
     /// exhausted its restart budget without ever staying up.
     RestartBreakerOpen,
+    /// SG0111 — the supervisor is answering and still working on the command,
+    /// but has not finished within the client's budget. The command was
+    /// accepted and keeps running; only the wait was abandoned.
+    CommandStillRunning,
     /// SG0201 — the `-p` project does not match the resolved config.
     TargetConfigMismatch,
     /// SG0202 — the command names a service or project that does not exist.
@@ -244,6 +250,7 @@ impl SgCode {
             SgCode::PreStartTimeout => "SG0108",
             SgCode::DependencyUnavailable => "SG0109",
             SgCode::RestartBreakerOpen => "SG0110",
+            SgCode::CommandStillRunning => "SG0111",
             SgCode::TargetConfigMismatch => "SG0201",
             SgCode::TargetNotFound => "SG0202",
             SgCode::ConfigFileUnreadable => "SG0203",
@@ -289,7 +296,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 68] = [
+    pub const ALL: [SgCode; 69] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -322,6 +329,7 @@ impl SgCode {
         SgCode::PreStartTimeout,
         SgCode::DependencyUnavailable,
         SgCode::RestartBreakerOpen,
+        SgCode::CommandStillRunning,
         SgCode::TargetConfigMismatch,
         SgCode::TargetNotFound,
         SgCode::ConfigFileUnreadable,

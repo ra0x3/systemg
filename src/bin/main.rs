@@ -916,6 +916,14 @@ fn main() -> process::ExitCode {
         Err(err) => {
             if let Some(diag) = err.downcast_ref::<DiagError>() {
                 eprintln!("{}", diag.0.render_for_terminal());
+            } else if let Some(diag) =
+                err.downcast_ref::<ControlError>().and_then(wait_diag)
+            {
+                // Caught centrally rather than at each call site: most commands
+                // hand their ControlError straight to this renderer, and the
+                // SG0001 catchall would describe a command the supervisor is
+                // still working on as an unexplained failure.
+                eprintln!("{}", diag.render_for_terminal());
             } else {
                 eprintln!("{}", catchall_diag(&err.to_string()).render_for_terminal());
             }
@@ -7859,7 +7867,8 @@ fn send_control_command_inner(
         Ok(ControlResponse::Diag(diag)) => Err(Box::new(DiagError(diag))),
         Ok(ControlResponse::CurrentOp(_)) => Ok(()),
         Err(ControlError::NotAvailable) => Err(ControlError::NotAvailable.into()),
-        Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
+        // Timeout and StillRunning are rendered centrally in `main`, which
+        // catches them for every caller rather than only these two helpers.
         Err(err) => Err(err.into()),
     }
 }
@@ -7875,40 +7884,48 @@ fn send_control_message(command: ControlCommand) -> Result<String, Box<dyn Error
         ))
         .into()),
         Err(ControlError::NotAvailable) => Err(ControlError::NotAvailable.into()),
-        Err(ControlError::Timeout) => Err(supervisor_busy_error().into()),
+        // Timeout and StillRunning are rendered centrally in `main`, which
+        // catches them for every caller rather than only these two helpers.
         Err(err) => Err(err.into()),
     }
 }
 
-/// Builds the SG0107 diagnostic for a command the supervisor refused because it
-/// was already mid-mutation.
+/// The diagnostic for a control error that ended a wait rather than a command,
+/// or `None` for errors that carry their own reporting.
+fn wait_diag(err: &ControlError) -> Option<Box<systemg::diag::Diagnostic>> {
+    match err {
+        ControlError::Timeout => Some(Box::new(supervisor_not_responding_diag())),
+        ControlError::StillRunning => Some(command_still_running_diag()),
+        _ => None,
+    }
+}
+
+/// Builds the SG0111 diagnostic for a command the supervisor took and has not
+/// finished by the time the client's budget runs out.
 ///
-/// This is an EXPECTED, recoverable condition — the supervisor serialises
-/// mutations through a single owner thread, so a concurrent restart is rejected
-/// rather than interleaved. Reporting it as the SG0001 catch-all ("command
-/// failed") framed correct, defensive behaviour as an unexplained error, and
-/// "command not confirmed" implied uncertainty when the outcome is definite:
-/// the command did not run, and the fix is to retry.
-fn supervisor_busy_error() -> DiagError {
+/// The claim this replaces — SG0107's "this command was NOT applied" — was
+/// false. Mutations are queued onto the owner thread, never refused, so the
+/// command had been accepted; a restart that outran the old flat deadline went
+/// on to finish successfully while the CLI exited non-zero calling it rejected.
+/// What is known here is only that the socket still answers and the reply has
+/// not come, so the wording claims no more than that, and points at the knob
+/// that buys more time.
+fn command_still_running_diag() -> Box<systemg::diag::Diagnostic> {
     use systemg::diag::{Diagnostic, SgCode};
 
     let mut diag = Diagnostic::error(
-        SgCode::SupervisorBusy,
-        "the supervisor is busy with another operation",
+        SgCode::CommandStillRunning,
+        "the command is still pending; systemg stopped waiting for it",
     );
-    diag = match ipc::current_op() {
-        Some(op) => diag
-            .note(format!("in flight: {}", op.describe()))
-            .note("this command was NOT applied; the in-flight operation is unaffected"),
-        None => diag
-            .note("the supervisor did not answer in time")
-            .note("this command was NOT applied"),
-    };
-    DiagError(Box::new(
-        diag.note("retry once the operation above finishes")
+    if let Some(op) = ipc::current_op() {
+        diag = diag.note(format!("in flight: {}", op.describe()));
+    }
+    Box::new(
+        diag.note("the supervisor accepted it and has NOT cancelled it; only the wait ended")
+            .note("raise the budget with SYSG_COMMAND_TIMEOUT=<seconds>, or 0 to wait indefinitely")
             .help_cmd("see what it is doing", "sysg status")
             .help_docs(),
-    ))
+    )
 }
 
 /// Sends daemonized restart and recycles the supervisor when an old IPC schema rejects it.
@@ -8033,6 +8050,7 @@ fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {
         ControlError::MissingHome
         | ControlError::Unauthorized(_)
         | ControlError::Timeout
+        | ControlError::StillRunning
         | ControlError::RuntimeBusy => false,
         ControlError::Io(err) => matches!(
             err.kind(),
