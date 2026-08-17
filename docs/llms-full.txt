@@ -402,7 +402,9 @@ time budget are exhausted.
 Supervisor-wide defaults live outside project manifests in
 `~/.local/share/systemg/supervisor.xml`, or `/var/lib/systemg/supervisor.xml` in
 system mode. Its `logs` block sets `max_bytes` and `max_files`; its `timeouts`
-block sets `pre_start_secs`, `startup_stability_ms`, and `stop_verify_secs`.
+block sets `pre_start_secs`, `startup_stability_ms`, `stop_verify_secs`,
+`start_settle_secs`, and `command_wait_secs` (how long a CLI command waits for
+the supervisor's reply; `0` waits indefinitely).
 Compact legacy XML remains readable, while new XML output uses two-space
 indentation.
 

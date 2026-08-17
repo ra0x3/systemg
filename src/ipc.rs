@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    config::supervisor::SupervisorConfig,
     metrics::MetricSample,
     runtime,
     status::{ProjectRunMode, StatusSnapshot, UnitStatus},
@@ -36,17 +37,6 @@ const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// How long the supervisor may fail every liveness probe before the client
 /// stops waiting, so a genuinely dead socket still surfaces as an error.
 const UNRESPONSIVE_GRACE: Duration = Duration::from_secs(30);
-
-/// Ceiling on one command, overridable with `SYSG_COMMAND_TIMEOUT`.
-///
-/// The probe proves the control socket answers, not that the owner thread is
-/// making progress — a deadlocked owner would keep answering forever — so the
-/// wait still needs a backstop. It is generous rather than tight because
-/// exceeding it is reported as "still running", not as a failure.
-const COMMAND_BUDGET: Duration = Duration::from_secs(900);
-
-/// Env var overriding [`COMMAND_BUDGET`], in whole seconds. `0` waits forever.
-const COMMAND_BUDGET_ENV: &str = "SYSG_COMMAND_TIMEOUT";
 
 /// Short bound for the diagnostic current-op probe, which must never itself hang.
 const CURRENT_OP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -535,23 +525,20 @@ struct WaitPolicy {
 }
 
 impl WaitPolicy {
-    /// The default policy, with the budget overridden by `SYSG_COMMAND_TIMEOUT`.
-    /// An unparseable value keeps the default rather than silently waiting
-    /// forever.
-    fn from_env() -> Self {
-        let budget = match std::env::var(COMMAND_BUDGET_ENV) {
-            Ok(raw) => match raw.trim().parse::<u64>() {
-                Ok(0) => None,
-                Ok(secs) => Some(Duration::from_secs(secs)),
-                Err(_) => Some(COMMAND_BUDGET),
-            },
-            Err(_) => Some(COMMAND_BUDGET),
-        };
+    /// The default policy, with the budget taken from `supervisor.xml`.
+    ///
+    /// Read per command rather than cached, so raising the budget takes effect
+    /// on the next command instead of after a supervisor restart. The slice,
+    /// probe window and grace stay fixed: they describe how liveness is
+    /// detected, not how patient the operator is.
+    fn current() -> Self {
         Self {
             slice: COMMAND_POLL_SLICE,
             probe_window: PROBE_WINDOW,
             unresponsive_grace: UNRESPONSIVE_GRACE,
-            budget,
+            budget: SupervisorConfig::load_or_default()
+                .timeouts
+                .command_wait_budget(),
         }
     }
 }
@@ -563,7 +550,7 @@ impl WaitPolicy {
 /// the owner thread takes, and abandoning it mid-flight would report a command
 /// that is still running — and will still be applied — as one that failed.
 pub fn send_command(command: &ControlCommand) -> Result<ControlResponse, ControlError> {
-    send_command_with_policy(command, WaitPolicy::from_env())
+    send_command_with_policy(command, WaitPolicy::current())
 }
 
 fn send_command_with_policy(
@@ -1444,24 +1431,75 @@ mod tests {
         restore_home(original_home);
     }
 
-    #[test]
-    fn the_budget_env_var_overrides_the_default() {
-        let _guard = crate::test_utils::env_lock();
-        let original = std::env::var(COMMAND_BUDGET_ENV).ok();
-
-        unsafe { std::env::set_var(COMMAND_BUDGET_ENV, "0") };
-        assert_eq!(WaitPolicy::from_env().budget, None);
-
-        unsafe { std::env::set_var(COMMAND_BUDGET_ENV, "30") };
-        assert_eq!(WaitPolicy::from_env().budget, Some(Duration::from_secs(30)));
-
-        unsafe { std::env::set_var(COMMAND_BUDGET_ENV, "soon") };
-        assert_eq!(WaitPolicy::from_env().budget, Some(COMMAND_BUDGET));
-
-        match original {
-            Some(val) => unsafe { std::env::set_var(COMMAND_BUDGET_ENV, val) },
-            None => unsafe { std::env::remove_var(COMMAND_BUDGET_ENV) },
+    /// Points the runtime at a temp `HOME` and writes `supervisor.xml` there.
+    fn fake_supervisor_config(temp: &tempfile::TempDir, body: &str) -> Option<String> {
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", temp.path());
         }
+        crate::runtime::init(crate::runtime::RuntimeMode::User);
+        crate::runtime::set_drop_privileges(false);
+        let path = SupervisorConfig::path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, body).unwrap();
+        original_home
+    }
+
+    #[test]
+    fn the_budget_comes_from_the_supervisor_config() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = fake_supervisor_config(
+            &temp,
+            "<supervisor><timeouts><command_wait_secs>30</command_wait_secs></timeouts></supervisor>",
+        );
+
+        assert_eq!(WaitPolicy::current().budget, Some(Duration::from_secs(30)));
+
+        restore_home(original_home);
+    }
+
+    #[test]
+    fn a_zero_budget_in_the_config_waits_forever() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = fake_supervisor_config(
+            &temp,
+            "<supervisor><timeouts><command_wait_secs>0</command_wait_secs></timeouts></supervisor>",
+        );
+
+        assert_eq!(WaitPolicy::current().budget, None);
+
+        restore_home(original_home);
+    }
+
+    #[test]
+    /// A config predating the setting — or none at all — keeps the built-in
+    /// backstop rather than waiting forever.
+    fn a_config_without_the_setting_keeps_the_default_budget() {
+        let _guard = crate::test_utils::env_lock();
+        let temp = tempdir().unwrap();
+        let original_home = fake_supervisor_config(
+            &temp,
+            // A parseable file that simply predates the setting: a malformed
+            // one would fall back to defaults wholesale and prove nothing
+            // about the field's own default.
+            "<supervisor><logs><max_bytes>42</max_bytes><max_files>7</max_files></logs></supervisor>",
+        );
+
+        assert_eq!(
+            WaitPolicy::current().budget,
+            Some(crate::constants::COMMAND_WAIT_BUDGET)
+        );
+
+        fs::remove_file(SupervisorConfig::path()).unwrap();
+        assert_eq!(
+            WaitPolicy::current().budget,
+            Some(crate::constants::COMMAND_WAIT_BUDGET),
+            "a missing config must not be read as a missing backstop"
+        );
+
+        restore_home(original_home);
     }
 
     #[test]

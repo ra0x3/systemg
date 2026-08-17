@@ -7,7 +7,12 @@
 //! does not override them. The file is created with sensible defaults on first
 //! supervisor start if absent, so the supervisor is zero-config by default.
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock, PoisonError},
+    time::Duration,
+};
 
 use quick_xml::de::from_str as xml_from_str;
 use serde::{Deserialize, Serialize};
@@ -15,14 +20,46 @@ use serde::{Deserialize, Serialize};
 use super::{LOGS_DEFAULT_MAX_BYTES, LOGS_DEFAULT_MAX_FILES};
 use crate::{
     constants::{
-        PRE_START_TIMEOUT, SERVICE_START_STABILITY, START_SETTLE_GRACE,
-        STOP_VERIFY_TIMEOUT,
+        COMMAND_WAIT_BUDGET, PRE_START_TIMEOUT, SERVICE_START_STABILITY,
+        START_SETTLE_GRACE, STOP_VERIFY_TIMEOUT,
     },
     runtime, xml,
 };
 
+fn default_pre_start_secs() -> u64 {
+    PRE_START_TIMEOUT.as_secs()
+}
+
+fn default_startup_stability_ms() -> u64 {
+    SERVICE_START_STABILITY.as_millis() as u64
+}
+
+fn default_stop_verify_secs() -> u64 {
+    STOP_VERIFY_TIMEOUT.as_secs()
+}
+
 fn default_start_settle_secs() -> u64 {
     START_SETTLE_GRACE.as_secs()
+}
+
+fn default_command_wait_secs() -> u64 {
+    COMMAND_WAIT_BUDGET.as_secs()
+}
+
+/// Warns that a supervisor config was unusable, at most once per path per
+/// process, so a client that reads the file on every command says it once.
+fn warn_unusable_once(path: &Path, reason: &str) {
+    static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let mut warned = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if warned.insert(path.to_path_buf()) {
+        tracing::warn!(
+            "supervisor config {} {reason}; using defaults",
+            path.display()
+        );
+    }
 }
 
 /// File name of the supervisor config in the state directory.
@@ -46,28 +83,42 @@ impl Default for SupervisorLogDefaults {
     }
 }
 
-/// Operator-controlled lifecycle timeouts shared by supervised projects.
+/// Operator-controlled timeouts: the lifecycle windows shared by every
+/// supervised project, plus how long a CLI command waits on the supervisor.
+///
+/// Every field defaults independently, so editing one timeout does not oblige
+/// the operator to restate the rest — a partial block that failed to parse
+/// would drop the whole file back to built-in defaults without changing what
+/// they asked to change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorTimeouts {
     /// Default maximum runtime for a deployment pre-start command.
+    #[serde(default = "default_pre_start_secs")]
     pub pre_start_secs: u64,
     /// Survival window for services without an explicit health check.
+    #[serde(default = "default_startup_stability_ms")]
     pub startup_stability_ms: u64,
     /// Maximum wait for a terminated process to disappear.
+    #[serde(default = "default_stop_verify_secs")]
     pub stop_verify_secs: u64,
     /// Maximum wait for a queued project boot to settle.
     #[serde(default = "default_start_settle_secs")]
     pub start_settle_secs: u64,
+    /// Maximum wait for the supervisor's reply to one CLI command. `0` waits
+    /// indefinitely.
+    #[serde(default = "default_command_wait_secs")]
+    pub command_wait_secs: u64,
 }
 
 impl Default for SupervisorTimeouts {
     /// Returns the built-in lifecycle timeout policy.
     fn default() -> Self {
         Self {
-            pre_start_secs: PRE_START_TIMEOUT.as_secs(),
-            startup_stability_ms: SERVICE_START_STABILITY.as_millis() as u64,
-            stop_verify_secs: STOP_VERIFY_TIMEOUT.as_secs(),
+            pre_start_secs: default_pre_start_secs(),
+            startup_stability_ms: default_startup_stability_ms(),
+            stop_verify_secs: default_stop_verify_secs(),
             start_settle_secs: default_start_settle_secs(),
+            command_wait_secs: default_command_wait_secs(),
         }
     }
 }
@@ -91,6 +142,15 @@ impl SupervisorTimeouts {
     /// Returns the configured queued-start settle timeout.
     pub fn start_settle_timeout(&self) -> Duration {
         Duration::from_secs(self.start_settle_secs.max(1))
+    }
+
+    /// Returns the configured command wait budget, or `None` to wait forever.
+    ///
+    /// Unlike the lifecycle timeouts this is not floored at one second: `0` is
+    /// a meaningful setting here — an operator who never wants a command
+    /// abandoned mid-flight — rather than a value to be corrected.
+    pub fn command_wait_budget(&self) -> Option<Duration> {
+        (self.command_wait_secs > 0).then(|| Duration::from_secs(self.command_wait_secs))
     }
 }
 
@@ -158,6 +218,36 @@ impl SupervisorConfig {
         }
     }
 
+    /// Loads the supervisor config without creating or rewriting it, falling
+    /// back to defaults for a missing or malformed file.
+    ///
+    /// Separate from [`Self::load_or_create`] because a client reading one
+    /// timeout out of the file must not write to the state directory as a side
+    /// effect — every CLI command consults this, including ones run against a
+    /// supervisor that is not theirs to reconfigure.
+    ///
+    /// A file that exists but cannot be used is reported: falling back to
+    /// defaults silently would apply timeouts the operator did not choose and
+    /// give them no way to notice. Only its absence is silent — that is the
+    /// zero-config case, not a mistake.
+    pub fn load_or_default() -> Self {
+        let path = Self::path();
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match xml_from_str::<Self>(&contents) {
+                Ok(config) => config,
+                Err(err) => {
+                    warn_unusable_once(&path, &format!("is invalid ({err})"));
+                    Self::default()
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(err) => {
+                warn_unusable_once(&path, &format!("could not be read ({err})"));
+                Self::default()
+            }
+        }
+    }
+
     /// Writes the config to its on-disk path (owner-only).
     pub fn write(&self) -> std::io::Result<()> {
         let path = Self::path();
@@ -182,6 +272,10 @@ mod tests {
         assert_eq!(cfg.timeouts.pre_start_timeout(), PRE_START_TIMEOUT);
         assert_eq!(cfg.timeouts.startup_stability(), SERVICE_START_STABILITY);
         assert_eq!(cfg.timeouts.stop_verify_timeout(), STOP_VERIFY_TIMEOUT);
+        assert_eq!(
+            cfg.timeouts.command_wait_budget(),
+            Some(COMMAND_WAIT_BUDGET)
+        );
     }
 
     #[test]
@@ -197,6 +291,7 @@ mod tests {
                 startup_stability_ms: 90,
                 stop_verify_secs: 10,
                 start_settle_secs: 11,
+                command_wait_secs: 12,
             },
         };
         let output = xml::to_string(&cfg).unwrap();
@@ -207,6 +302,7 @@ mod tests {
         assert_eq!(back.timeouts.startup_stability_ms, 90);
         assert_eq!(back.timeouts.stop_verify_secs, 10);
         assert_eq!(back.timeouts.start_settle_secs, 11);
+        assert_eq!(back.timeouts.command_wait_secs, 12);
     }
 
     #[test]
@@ -218,6 +314,25 @@ mod tests {
 
         assert_eq!(config.timeouts.pre_start_timeout(), PRE_START_TIMEOUT);
         assert_eq!(config.timeouts.startup_stability(), SERVICE_START_STABILITY);
+        assert_eq!(config.timeouts.stop_verify_timeout(), STOP_VERIFY_TIMEOUT);
+        assert_eq!(
+            config.timeouts.command_wait_budget(),
+            Some(COMMAND_WAIT_BUDGET)
+        );
+    }
+
+    #[test]
+    /// Verifies a zero budget means "wait forever" rather than "give up now",
+    /// and that a partial `<timeouts>` block leaves its siblings at defaults
+    /// instead of failing to parse.
+    fn a_zero_command_wait_waits_forever() {
+        let config: SupervisorConfig = xml_from_str(
+            "<supervisor><timeouts><command_wait_secs>0</command_wait_secs></timeouts></supervisor>",
+        )
+        .unwrap();
+
+        assert_eq!(config.timeouts.command_wait_budget(), None);
+        assert_eq!(config.timeouts.pre_start_timeout(), PRE_START_TIMEOUT);
         assert_eq!(config.timeouts.stop_verify_timeout(), STOP_VERIFY_TIMEOUT);
     }
 }

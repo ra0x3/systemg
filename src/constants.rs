@@ -238,6 +238,15 @@ pub const PROJECT_PID_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// ports; the wait covers a slow shutdown without hiding a failed kill.
 pub const STOP_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default ceiling on how long a CLI command waits for the supervisor's reply.
+///
+/// The liveness probe proves the control socket answers, not that the owner
+/// thread is making progress — a deadlocked owner would keep answering forever
+/// — so the wait still needs a backstop. Generous rather than tight because
+/// exceeding it is reported as "still running", not as a failure. Operators
+/// raise or remove it with `timeouts.command_wait_secs` in `supervisor.xml`.
+pub const COMMAND_WAIT_BUDGET: Duration = Duration::from_secs(900);
+
 /// Narrowest terminal width the progress spinner will believe. Anything smaller
 /// is treated as a failed probe rather than a real terminal, so a zero/unset
 /// winsize cannot truncate the status line down to a useless stub.
