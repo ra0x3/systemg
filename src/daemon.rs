@@ -1221,6 +1221,111 @@ mod pidfile_tests {
         );
     }
 
+    /// Loads a state file backed by `temp`, holding `status` for `svc`.
+    fn state_with(
+        temp: &tempfile::TempDir,
+        status: ServiceLifecycleStatus,
+        pid: Option<u32>,
+        exit_code: Option<i32>,
+    ) -> ServiceStateFile {
+        let store = StateStore::at(temp.path().to_path_buf());
+        let mut state = ServiceStateFile::load(store).expect("load lifecycle state");
+        state
+            .set("v2:test:svc", status, pid, exit_code, None)
+            .expect("seed lifecycle state");
+        state
+    }
+
+    #[test]
+    /// A unit retired as skipped keeps that verdict when the monitor reaps the
+    /// process the skip just killed. Losing it reported the unit `stopped`,
+    /// which dependency resolution reads as a hard failure.
+    fn an_intentional_stop_does_not_overwrite_a_skipped_record() {
+        let temp = tempdir().expect("tempdir");
+        let mut state = state_with(&temp, ServiceLifecycleStatus::Skipped, None, None);
+
+        state
+            .set_stopped_preserving_terminal("v2:test:svc", Some(143), Some(15))
+            .expect("record stop");
+
+        let entry = state.get("v2:test:svc").expect("entry");
+        assert_eq!(entry.status, ServiceLifecycleStatus::Skipped);
+        assert_eq!(
+            entry.exit_code, None,
+            "a unit that never ran must not acquire an exit code"
+        );
+    }
+
+    #[test]
+    /// A completed one-shot keeps its own exit code rather than the signal that
+    /// tore down whatever was left of it.
+    fn an_intentional_stop_does_not_overwrite_a_completed_record() {
+        let temp = tempdir().expect("tempdir");
+        let mut state = state_with(
+            &temp,
+            ServiceLifecycleStatus::ExitedSuccessfully,
+            None,
+            Some(0),
+        );
+
+        state
+            .set_stopped_preserving_terminal("v2:test:svc", Some(143), Some(15))
+            .expect("record stop");
+
+        let entry = state.get("v2:test:svc").expect("entry");
+        assert_eq!(entry.status, ServiceLifecycleStatus::ExitedSuccessfully);
+        assert_eq!(entry.exit_code, Some(0));
+    }
+
+    #[test]
+    /// A running unit becomes stopped, and its pid is cleared either way — a
+    /// record that keeps a pid for a dead process reads as `lost`.
+    fn an_intentional_stop_records_a_running_unit_as_stopped() {
+        let temp = tempdir().expect("tempdir");
+        let mut state =
+            state_with(&temp, ServiceLifecycleStatus::Running, Some(42), None);
+
+        state
+            .set_stopped_preserving_terminal("v2:test:svc", Some(143), Some(15))
+            .expect("record stop");
+
+        let entry = state.get("v2:test:svc").expect("entry");
+        assert_eq!(entry.status, ServiceLifecycleStatus::Stopped);
+        assert_eq!(entry.exit_code, Some(143));
+        assert_eq!(entry.pid, None);
+    }
+
+    #[test]
+    /// The verdict is read from DISK, not from the caller's stale memory: the
+    /// skip that raced the monitor wrote through a different handle.
+    fn an_intentional_stop_sees_a_skip_written_by_another_handle() {
+        let temp = tempdir().expect("tempdir");
+        let mut monitor =
+            state_with(&temp, ServiceLifecycleStatus::Running, Some(42), None);
+
+        let store = StateStore::at(temp.path().to_path_buf());
+        let mut skipper = ServiceStateFile::load(store).expect("load second handle");
+        skipper
+            .set(
+                "v2:test:svc",
+                ServiceLifecycleStatus::Skipped,
+                None,
+                None,
+                None,
+            )
+            .expect("mark skipped");
+
+        monitor
+            .set_stopped_preserving_terminal("v2:test:svc", Some(143), Some(15))
+            .expect("record stop");
+
+        assert_eq!(
+            monitor.get("v2:test:svc").map(|entry| entry.status),
+            Some(ServiceLifecycleStatus::Skipped),
+            "the monitor still held `running` in memory and must not act on it"
+        );
+    }
+
     #[test]
     /// Removes spawn subtree in memory prunes all descendants.
     fn remove_spawn_subtree_in_memory_prunes_all_descendants() {
@@ -1721,6 +1826,59 @@ impl ServiceStateFile {
                 health,
             },
         );
+        self.save()
+    }
+
+    /// Records that a service is no longer running, KEEPING a terminal record
+    /// that already explains why it is not running.
+    ///
+    /// `ExitedSuccessfully` and `Skipped` each say something `Stopped` cannot,
+    /// and neither is a failure: a completed one-shot satisfies its dependents,
+    /// a skipped unit makes them skip in turn. `Stopped` is read as a hard
+    /// dependency FAILURE, so overwriting either turns a clean outcome into a
+    /// broken one and strands everything downstream.
+    ///
+    /// The decision is made HERE, after the file lock and reload, because that
+    /// is the only point where the record being overwritten is the current one.
+    /// A caller that read the status first and then called [`Self::set`] was
+    /// racing the reload inside it: a `Skipped` written between the two — by a
+    /// skip retiring a unit whose process the monitor is reaping at that very
+    /// moment — was read as `Running` and clobbered back to `Stopped`.
+    ///
+    /// The pid is always cleared: whatever the record says, the process is
+    /// gone, and a lingering pid makes status report the unit `lost`.
+    pub fn set_stopped_preserving_terminal(
+        &mut self,
+        service_hash: &str,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<(), ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
+        let terminal = self.services.get(service_hash).filter(|entry| {
+            matches!(
+                entry.status,
+                ServiceLifecycleStatus::ExitedSuccessfully
+                    | ServiceLifecycleStatus::Skipped
+            )
+        });
+        let entry = match terminal {
+            Some(entry) => ServiceStateEntry {
+                status: entry.status,
+                pid: None,
+                exit_code: entry.exit_code,
+                signal: entry.signal,
+                health: None,
+            },
+            None => ServiceStateEntry {
+                status: ServiceLifecycleStatus::Stopped,
+                pid: None,
+                exit_code,
+                signal,
+                health: None,
+            },
+        };
+        self.services.insert(service_hash.to_string(), entry);
         self.save()
     }
 
@@ -5325,24 +5483,28 @@ impl Daemon {
             .starts_with('Z')
     }
 
-    /// Chooses the terminal state for a service the monitor saw exit while a
+    /// Records the teardown of a service the monitor saw exit while a
     /// manual-stop or restart-suppress flag was set.
     ///
     /// A restart sets those flags to tear the old instance down, so the flag
-    /// alone does not mean the user stopped the service. A unit already recorded
-    /// as successfully completed must remain completed; every other intentional
-    /// teardown is stopped regardless of the process's signal-handling exit code.
-    fn stopped_or_completed(ctx: &DaemonContext, name: &str) -> ServiceLifecycleStatus {
-        let completed = ctx.state_file.lock().ok().and_then(|state| {
-            state
-                .get(&ctx.config.state_key(name))
-                .map(|entry| entry.status)
-        }) == Some(ServiceLifecycleStatus::ExitedSuccessfully);
-        if completed {
-            ServiceLifecycleStatus::ExitedSuccessfully
-        } else {
-            ServiceLifecycleStatus::Stopped
+    /// alone does not mean the user stopped the service. Which record survives
+    /// is decided inside
+    /// [`ServiceStateFile::set_stopped_preserving_terminal`], under the lock
+    /// that makes the choice honest.
+    fn persist_intentional_stop(
+        ctx: &DaemonContext,
+        name: &str,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<(), ProcessManagerError> {
+        if !ctx.config.services.contains_key(name) {
+            return Ok(());
         }
+        let key = ctx.config.state_key(name);
+        ctx.state_file
+            .lock()?
+            .set_stopped_preserving_terminal(&key, exit_code, signal)?;
+        Ok(())
     }
 
     /// Attempts to determine the current state of a tracked service without blocking.
@@ -7591,27 +7753,18 @@ impl Daemon {
 
         if config.services.contains_key(service_name) {
             let key = config.state_key(service_name);
-            let mut state_guard = state_file.lock()?;
             // A one-shot that already RAN TO COMPLETION is `done`, and stopping
             // a project must not rewrite that history into `stopped`. Doing so
             // reported finished builds/migrations as stopped+warn after a
             // restart, dragged the project to WARN, and — worse — made them read
             // as FAILED dependencies (a `Stopped` dep is a hard failure below),
             // so anything downstream refused to come up. There is no process
-            // left to stop in this case; only the record would change.
-            let already_completed = matches!(
-                state_guard.get(&key).map(|entry| entry.status),
-                Some(ServiceLifecycleStatus::ExitedSuccessfully)
-            );
-            if !already_completed {
-                state_guard.set(
-                    &key,
-                    ServiceLifecycleStatus::Stopped,
-                    None,
-                    None,
-                    None,
-                )?;
-            }
+            // left to stop in this case; only the record would change. The same
+            // holds for a skipped unit, and the check belongs under the write's
+            // own lock rather than in a read that precedes it.
+            state_file
+                .lock()?
+                .set_stopped_preserving_terminal(&key, None, None)?;
         }
 
         debug!("Service '{service_name}' stopped successfully.");
@@ -8212,15 +8365,9 @@ impl Daemon {
                                 "Failed to clear PID entry for '{name}' after manual stop: {err}"
                             );
                         }
-                        if let Err(err) = Self::persist_service_state(
-                            &ctx.config,
-                            &ctx.state_file,
-                            &name,
-                            Self::stopped_or_completed(&ctx, &name),
-                            None,
-                            None,
-                            None,
-                        ) {
+                        if let Err(err) =
+                            Self::persist_intentional_stop(&ctx, &name, None, None)
+                        {
                             warn!(
                                 "Failed to persist stopped state for '{name}' after manual stop: {err}"
                             );
@@ -8236,15 +8383,9 @@ impl Daemon {
                         info!(
                             "Automatic restart suppressed for service '{name}' after exit."
                         );
-                        if let Err(err) = Self::persist_service_state(
-                            &ctx.config,
-                            &ctx.state_file,
-                            &name,
-                            Self::stopped_or_completed(&ctx, &name),
-                            None,
-                            exit_code,
-                            signal,
-                        ) {
+                        if let Err(err) =
+                            Self::persist_intentional_stop(&ctx, &name, exit_code, signal)
+                        {
                             warn!(
                                 "Failed to persist suppressed state for '{name}': {err}"
                             );
