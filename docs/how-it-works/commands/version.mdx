@@ -1,0 +1,56 @@
+---
+title: version
+---
+
+# version
+
+Report the version of the binary you just ran **and** the version the resident
+supervisor is actually serving. These are not the same thing.
+
+```sh
+$ sysg version
+```
+
+```text
+sysg 0.64.1 (this binary)
+supervisor 0.63.3 (pid 4311)
+  executing /usr/lib/systemg/versions/0.63.3/sysg
+  drift: the supervisor is still serving 0.63.3; rerun the installer to activate 0.64.1
+```
+
+## Why the two differ
+
+Installing sysg replaces the binary on disk and then asks the resident
+supervisor to re-exec into it. If that activation step is skipped or fails, the
+supervisor keeps serving the build it booted with — from the same PID, with the
+same start time. `sysg --version` reads the binary on disk and will happily
+report the new number while the old code is still running every service on the
+box.
+
+`sysg version` asks the supervisor directly over the control socket, so the
+answer describes what is running, not what is installed.
+
+## Options
+
+| Short | Long | Description |
+|-------|------|-------------|
+| `-` | `--format` | Emit machine-readable output (`json`) |
+
+```sh
+$ sysg version --format json
+```
+
+```json
+{
+  "cli": "0.64.1",
+  "supervisor": "0.63.3",
+  "supervisor_pid": 4311,
+  "supervisor_binary": "/usr/lib/systemg/versions/0.63.3/sysg"
+}
+```
+
+`supervisor` is `null` when no supervisor answers the socket.
+`supervisor_binary` is resolved from `/proc/<pid>/exe` and is `null` where the
+kernel does not expose it.
+
+`sysg doctor` prints the same report above its invariant findings.

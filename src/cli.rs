@@ -521,6 +521,13 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Report this binary's version and the resident supervisor's.
+    Version {
+        /// Output format (`text` or `json`).
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
     /// INTERNAL: report live-upgrade protocol metadata for installer preflight.
     #[command(hide = true)]
     UpgradeInfo,
@@ -627,6 +634,7 @@ impl Commands {
             Commands::Migrate { .. } => "migrate",
             Commands::MigrateState { .. } => "migrate-state",
             Commands::Purge { .. } => "purge",
+            Commands::Version { .. } => "version",
             Commands::UpgradeInfo => "upgrade-info",
             Commands::UpgradeSupervisor { .. } => "upgrade-supervisor",
             Commands::Supervise { .. } => "supervise",

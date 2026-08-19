@@ -55,9 +55,20 @@ pub struct WorldReport {
     pub projects: usize,
     /// All findings, most severe first.
     pub findings: Vec<Finding>,
+    /// Build this binary and the resident supervisor are each running, attached
+    /// by the CLI. Internal callers sweeping invariants leave it unset.
+    pub versions: Option<crate::version::VersionReport>,
 }
 
 impl WorldReport {
+    /// Attaches the build report. Purely informational: it never changes what
+    /// the sweep found, so exit codes stay driven by invariants alone.
+    #[must_use]
+    pub fn with_versions(mut self, versions: crate::version::VersionReport) -> Self {
+        self.versions = Some(versions);
+        self
+    }
+
     /// Whether any `Error`-severity invariant is violated.
     pub fn has_errors(&self) -> bool {
         self.findings.iter().any(|f| f.severity == Severity::Error)
@@ -71,6 +82,9 @@ impl WorldReport {
 
 impl fmt::Display for WorldReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(versions) = &self.versions {
+            writeln!(f, "{versions}")?;
+        }
         if self.is_clean() {
             return write!(
                 f,
@@ -157,6 +171,7 @@ pub fn check_world() -> WorldReport {
                 mode: mode.into(),
                 projects: 0,
                 findings,
+                versions: None,
             };
         }
     };
@@ -181,6 +196,7 @@ pub fn check_world() -> WorldReport {
         mode: mode.into(),
         projects: project_count,
         findings,
+        versions: None,
     }
 }
 

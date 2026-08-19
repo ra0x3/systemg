@@ -5,6 +5,7 @@ set -u
 CONFIG=/usecase/stack.yaml
 
 launch_threads() {
+  [ -d "/proc/$1" ] || { echo "no-supervisor"; return; }
   ps -T -p "$1" -o comm= | grep -c '^sysg-service-la' || true
 }
 
@@ -22,6 +23,8 @@ check "$?" "blue/green service starts on slot zero"
 sleep 2
 SUPERVISOR="$(cat "$HOME/.local/share/systemg/sysg.pid")"
 THREADS_BEFORE="$(launch_threads "$SUPERVISOR")"
+[ "$THREADS_BEFORE" = "0" ]
+check "$?" "supervisor parks no per-launch threads"
 OLD="$(http_get http://127.0.0.1:18082/health)"
 
 sysg restart -p demo -s web >/tmp/first.out 2>/tmp/first.err

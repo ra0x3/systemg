@@ -719,19 +719,42 @@ pub fn send_command_with_timeout(
     command: &ControlCommand,
     timeout: Duration,
 ) -> Result<CommandAck, ControlError> {
-    let mut stream = connect_stream()?;
+    exchange(connect_stream()?, command, timeout)
+}
+
+/// Sends a command and reports the PID that answered it. Both come off the same
+/// connection, so a reply can never be attributed to a supervisor other than the
+/// one that produced it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn send_command_with_peer(
+    command: &ControlCommand,
+    timeout: Duration,
+) -> Result<(CommandAck, Option<u32>), ControlError> {
+    let stream = connect_stream()?;
+    let peer = peer_pid(&stream).ok();
+    exchange(stream, command, timeout).map(|ack| (ack, peer))
+}
+
+/// Writes one command on `stream` and reads its response under `timeout`.
+fn exchange(
+    mut stream: UnixStream,
+    command: &ControlCommand,
+    timeout: Duration,
+) -> Result<CommandAck, ControlError> {
     stream.set_write_timeout(Some(timeout))?;
     write_command(&mut stream, command)?;
     stream.set_read_timeout(Some(timeout))?;
 
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
-    match reader.read_line(&mut response_line) {
-        Ok(0) => Err(ControlError::NotAvailable),
-        Ok(_) if response_line.trim().is_empty() => Err(ControlError::NotAvailable),
+    let ack = match reader.read_line(&mut response_line) {
+        Ok(0) => return Err(ControlError::NotAvailable),
+        Ok(_) if response_line.trim().is_empty() => {
+            return Err(ControlError::NotAvailable);
+        }
         Ok(_) => {
             let response: ControlResponse = serde_json::from_str(response_line.trim())?;
-            Ok(CommandAck::Response(response))
+            CommandAck::Response(response)
         }
         Err(err)
             if matches!(
@@ -739,10 +762,11 @@ pub fn send_command_with_timeout(
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
             ) =>
         {
-            Ok(CommandAck::Pending)
+            CommandAck::Pending
         }
-        Err(err) => Err(err.into()),
-    }
+        Err(err) => return Err(err.into()),
+    };
+    Ok(ack)
 }
 
 fn connect_stream() -> Result<UnixStream, ControlError> {

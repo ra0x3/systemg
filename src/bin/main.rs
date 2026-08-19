@@ -2134,8 +2134,18 @@ fn run() -> Result<(), Box<dyn Error>> {
                 None,
             );
         }
+        Commands::Version { format } => {
+            let report = systemg::version::VersionReport::collect();
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{report}");
+            }
+            process::exit(0);
+        }
         Commands::Doctor { format, strict } => {
-            let report = systemg::doctor::check_world();
+            let report = systemg::doctor::check_world()
+                .with_versions(systemg::version::VersionReport::collect());
             if format == "json" {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
