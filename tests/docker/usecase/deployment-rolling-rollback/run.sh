@@ -5,6 +5,7 @@ set -u
 CONFIG=/usecase/stack.yaml
 
 launch_threads() {
+  [ -d "/proc/$1" ] || { echo "no-supervisor"; return; }
   ps -T -p "$1" -o comm= | grep -c '^sysg-service-la' || true
 }
 
@@ -14,6 +15,8 @@ check "$?" "rolling service starts"
 sleep 2
 SUPERVISOR="$(cat "$HOME/.local/share/systemg/sysg.pid")"
 THREADS_BEFORE="$(launch_threads "$SUPERVISOR")"
+[ "$THREADS_BEFORE" = "0" ]
+check "$?" "supervisor parks no per-launch threads"
 OLD="$(tail -1 /tmp/server-pids)"
 
 echo fail > /tmp/mode

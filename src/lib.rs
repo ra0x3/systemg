@@ -115,3 +115,6 @@ pub mod inspect;
 
 /// Privilege dropping.
 pub mod privilege;
+
+/// Reports this binary's version alongside the resident supervisor's.
+pub mod version;
