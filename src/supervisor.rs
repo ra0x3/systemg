@@ -3424,6 +3424,8 @@ impl Supervisor {
                             if let Err(err) = thread::Builder::new()
                                 .name(format!("sysg-cron-{job_name_clone}"))
                                 .spawn(move || {
+                                let _completion_claim =
+                                    daemon.claim_completion(&job_name_clone);
                                 match daemon
                                     .start_service(&job_name_clone, &service_config)
                                 {
@@ -7302,7 +7304,7 @@ services:
             .start_services()
             .expect("boot primary services");
 
-        let pids_before: Vec<(String, u32)> = {
+        let pids_before: BTreeMap<String, u32> = {
             let guard = supervisor.daemon.pid_file_handle();
             let locked = guard.lock().unwrap();
             locked
@@ -7320,7 +7322,7 @@ services:
                 watch: None,
             })
             .expect("redundant add of same primary config");
-        let pids_after: Vec<(String, u32)> = {
+        let pids_after: BTreeMap<String, u32> = {
             let guard = supervisor.daemon.pid_file_handle();
             let locked = guard.lock().unwrap();
             locked

@@ -68,6 +68,7 @@ const RESTART_BUDGET_WINDOW: Duration = Duration::from_secs(15 * 60);
 const RESTART_STABLE_AFTER: Duration = Duration::from_secs(60);
 /// Ceiling for the exponentially growing restart backoff.
 const RESTART_BACKOFF_CAP: Duration = Duration::from_secs(5 * 60);
+
 /// Thread name for foreground stderr forwarding.
 const SERVICE_STDERR_THREAD: &str = "sysg-service-stderr";
 /// Thread name for captured stdout readers.
@@ -861,9 +862,13 @@ impl PidFile {
             // so it can vouch for nothing — claiming it would authorize
             // signalling processes this supervisor never spawned.
             let root_reused = !root_identity_matches && live_start.is_some();
+            // An unreadable process table is not an empty session. Keeping the
+            // generation costs a retry next sweep; dropping it forgets a
+            // survivor for good.
             let session_alive = !root_reused
                 && generation.sid > 0
-                && !Daemon::collect_session_members(generation.sid).is_empty();
+                && Daemon::try_collect_session_members(generation.sid)
+                    .is_none_or(|live| !live.is_empty());
 
             // The root being gone does NOT mean the unit is gone: a wrapper
             // exits while the payload it launched keeps running and keeps
@@ -919,7 +924,63 @@ impl PidFile {
 
         let path = self.path();
         self.reload_into(&path)?;
+        self.remove_locked(service, &path)
+    }
 
+    /// Removes a service's ownership records only while they still describe the
+    /// process the caller sampled.
+    ///
+    /// Reconciliation decides a record is stale, then writes that decision;
+    /// between the two a fresh run can register its own pid under the same
+    /// name, and an unconditional removal would forget a live process nobody
+    /// can attribute afterwards. Identity is the whole record — pid, group and
+    /// start time — because a reused pid is not the same process.
+    ///
+    /// `may_remove` gets the final word, with the current record in hand and
+    /// the file lock held, so the caller's own reasons to keep it — a pid that
+    /// answers as alive, an owner that took the unit meanwhile — are read at
+    /// the instant of the removal rather than moments before it.
+    pub(crate) fn remove_if_unchanged<F>(
+        &mut self,
+        service: &str,
+        pid: Option<u32>,
+        pgid: Option<i32>,
+        started: Option<u64>,
+        may_remove: F,
+    ) -> Result<bool, PidFileError>
+    where
+        F: Fn(Option<u32>) -> bool,
+    {
+        let _lock = self.acquire_lock()?;
+
+        let path = self.path();
+        self.reload_into(&path)?;
+
+        if self.services.get(service).copied() != pid
+            || self.service_groups.get(service).copied() != pgid
+            || self.service_starts.get(service).copied() != started
+        {
+            return Ok(false);
+        }
+
+        if !may_remove(self.services.get(service).copied()) {
+            return Ok(false);
+        }
+
+        match self.remove_locked(service, &path) {
+            Ok(()) => Ok(true),
+            Err(PidFileError::ServiceNotFound) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Removes a service's records, with the file lock already held and the
+    /// on-disk copy already reloaded.
+    fn remove_locked(
+        &mut self,
+        service: &str,
+        path: &std::path::Path,
+    ) -> Result<(), PidFileError> {
         let removed_pid = self.services.remove(service);
         let removed_group = self.service_groups.get(service).copied();
         let known = removed_pid.is_some()
@@ -973,7 +1034,7 @@ impl PidFile {
             self.spawn_metadata.clear();
         }
 
-        self.write_at(&path)
+        self.write_at(path)
     }
 
     /// Gets the PID for a service.
@@ -1252,6 +1313,232 @@ mod pidfile_tests {
             entry.exit_code, None,
             "a unit that never ran must not acquire an exit code"
         );
+    }
+
+    #[test]
+    /// The monitor's repair of a `running` record with a dead pid must lose to
+    /// the record its owner already wrote. Deciding from a copy read before the
+    /// lock is what stamped `Stopped` over a cron run that had just succeeded.
+    fn a_stale_running_correction_loses_to_a_terminal_record() {
+        let temp = tempdir().expect("tempdir");
+        let mut monitor =
+            state_with(&temp, ServiceLifecycleStatus::Running, Some(4242), None);
+
+        let store = StateStore::at(temp.path().to_path_buf());
+        let mut owner = ServiceStateFile::load(store).expect("load owner handle");
+        owner
+            .set(
+                "v2:test:svc",
+                ServiceLifecycleStatus::ExitedSuccessfully,
+                None,
+                Some(0),
+                None,
+            )
+            .expect("owner records the outcome");
+
+        let corrected = monitor
+            .correct_stale_running(&["v2:test:svc"], |_, _| true)
+            .expect("attempt correction");
+
+        assert!(
+            corrected.is_empty(),
+            "nothing was stale by the time we held the lock"
+        );
+        assert_eq!(
+            monitor.get("v2:test:svc").expect("entry").status,
+            ServiceLifecycleStatus::ExitedSuccessfully
+        );
+    }
+
+    #[test]
+    /// A record still claiming `running` with a pid that is gone is repaired,
+    /// so a crashed unit cannot sit in status as `lost` forever.
+    fn a_running_record_with_a_dead_pid_is_corrected() {
+        let temp = tempdir().expect("tempdir");
+        let mut state =
+            state_with(&temp, ServiceLifecycleStatus::Running, Some(4242), None);
+
+        let corrected = state
+            .correct_stale_running(&["v2:test:svc"], |_, _| true)
+            .expect("attempt correction");
+
+        assert_eq!(corrected, vec![("v2:test:svc".to_string(), 4242)]);
+        let entry = state.get("v2:test:svc").expect("entry");
+        assert_eq!(entry.status, ServiceLifecycleStatus::Stopped);
+        assert_eq!(entry.pid, None, "a corrected record must not keep a pid");
+    }
+
+    #[test]
+    /// A live pid is not damage: the unit is running and its record is right.
+    fn a_running_record_with_a_live_pid_is_left_alone() {
+        let temp = tempdir().expect("tempdir");
+        let mut state =
+            state_with(&temp, ServiceLifecycleStatus::Running, Some(4242), None);
+
+        let corrected = state
+            .correct_stale_running(&["v2:test:svc"], |_, _| false)
+            .expect("attempt correction");
+
+        assert!(corrected.is_empty());
+        assert_eq!(
+            state.get("v2:test:svc").expect("entry").status,
+            ServiceLifecycleStatus::Running
+        );
+    }
+
+    /// Backdates the grace spent on `record` so it reads as overdue.
+    fn expire_grace(claims: &CompletionClaims, service: &str, record: Option<u32>) {
+        claims
+            .lock()
+            .expect("claims")
+            .get_mut(service)
+            .expect("slot")
+            .deferred_since
+            .insert(record, Instant::now() - COMPLETION_CLAIM_STALL_GRACE * 2);
+    }
+
+    #[test]
+    /// A record is forfeit when its process died AND when the pid came back as
+    /// somebody else's. Refusing the second case strands the unit: HEAD cleared
+    /// it, and a start refuses to replace ownership it cannot recognise.
+    fn a_recorded_pid_handed_to_a_stranger_is_forfeit() {
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn a process to own");
+        let pid = child.id();
+        let start = process_start_time(pid);
+
+        assert!(
+            !Daemon::record_is_forfeit(Some(pid), start),
+            "a live process whose start time still matches is the unit's own"
+        );
+        assert!(
+            Daemon::record_is_forfeit(Some(pid), start.map(|value| value + 1)),
+            "the same pid with a different start time belongs to a stranger"
+        );
+        assert!(Daemon::record_is_forfeit(None, start));
+
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+        assert!(
+            Daemon::record_is_forfeit(Some(pid), start),
+            "a dead process leaves its record forfeit"
+        );
+    }
+
+    #[test]
+    /// A claim defers reconciliation for as long as its owner holds it, and
+    /// releases the unit the moment the owner is done.
+    fn a_completion_claim_defers_until_its_owner_releases_it() {
+        let claims: CompletionClaims = Arc::new(Mutex::new(HashMap::new()));
+
+        {
+            let _claim = install_completion_claim(&claims, "svc");
+            assert!(completion_claim_defers(&claims, "svc", Some(4242)));
+        }
+
+        assert!(
+            !completion_claim_defers(&claims, "svc", Some(4242)),
+            "a released claim must not keep deferring the repair"
+        );
+    }
+
+    #[test]
+    /// An owner that stalled after its process ended cannot hold the records
+    /// hostage: the grace starts when the repair came due, and then expires.
+    fn a_claim_stops_deferring_once_the_repair_is_overdue() {
+        let claims: CompletionClaims = Arc::new(Mutex::new(HashMap::new()));
+        let _claim = install_completion_claim(&claims, "svc");
+
+        assert!(
+            completion_claim_defers(&claims, "svc", Some(4242)),
+            "the first look starts the grace rather than ending it"
+        );
+
+        expire_grace(&claims, "svc", Some(4242));
+
+        assert!(!completion_claim_defers(&claims, "svc", Some(4242)));
+        assert!(
+            completion_claim_defers(&claims, "svc", Some(5150)),
+            "a record this owner has not been sitting on gets its own grace"
+        );
+
+        retire_completion_defer(&claims, "svc", Some(4242));
+        assert!(
+            completion_claim_defers(&claims, "svc", Some(4242)),
+            "once the record is repaired the pid may name someone else, and \
+             that someone gets a grace of their own"
+        );
+    }
+
+    #[test]
+    /// A run taking the unit does not wipe the grace already spent waiting on a
+    /// record nobody has repaired: overlapping runs would otherwise renew it
+    /// forever and the stalled record would never be fixed.
+    fn a_new_owner_does_not_renew_an_overdue_grace() {
+        let claims: CompletionClaims = Arc::new(Mutex::new(HashMap::new()));
+        let older = install_completion_claim(&claims, "svc");
+
+        assert!(completion_claim_defers(&claims, "svc", Some(4242)));
+        expire_grace(&claims, "svc", Some(4242));
+
+        let _younger = install_completion_claim(&claims, "svc");
+        drop(older);
+        assert!(
+            !completion_claim_defers(&claims, "svc", Some(4242)),
+            "a newer owner must not buy the same record another grace"
+        );
+
+        retire_completion_defer(&claims, "svc", Some(4242));
+        assert!(
+            completion_claim_defers(&claims, "svc", Some(4242)),
+            "once repaired the pid may name a new generation, entitled to its own grace"
+        );
+    }
+
+    #[test]
+    /// Owners can finish out of order. A younger run leaving while an older one
+    /// is still working must not take the unit's history with it — a third run
+    /// would then find a clean slate and renew the overdue record's grace.
+    fn a_younger_owner_leaving_first_does_not_reset_the_unit() {
+        let claims: CompletionClaims = Arc::new(Mutex::new(HashMap::new()));
+        let older = install_completion_claim(&claims, "svc");
+
+        assert!(completion_claim_defers(&claims, "svc", Some(4242)));
+        expire_grace(&claims, "svc", Some(4242));
+
+        let younger = install_completion_claim(&claims, "svc");
+        drop(younger);
+
+        let _third = install_completion_claim(&claims, "svc");
+        assert!(
+            !completion_claim_defers(&claims, "svc", Some(4242)),
+            "the overdue record must stay overdue across a handover"
+        );
+
+        drop(older);
+    }
+
+    #[test]
+    /// Two runs of one unit can overlap. The older owner must not release the
+    /// unit while the younger one is still holding it.
+    fn an_older_owner_cannot_release_a_unit_a_younger_one_holds() {
+        let claims: CompletionClaims = Arc::new(Mutex::new(HashMap::new()));
+        let older = install_completion_claim(&claims, "svc");
+        let younger = install_completion_claim(&claims, "svc");
+
+        drop(older);
+        assert!(
+            completion_claim_defers(&claims, "svc", Some(4242)),
+            "the younger owner still holds the unit"
+        );
+
+        drop(younger);
+        assert!(!completion_claim_defers(&claims, "svc", Some(4242)));
     }
 
     #[test]
@@ -1878,6 +2165,65 @@ impl ServiceStateFile {
         };
         self.services.insert(service_hash.to_string(), entry);
         self.save()
+    }
+
+    /// Corrects the entries that still claim `Running` with a pid the caller
+    /// finds dead, deciding under the file lock so a write cannot land on top
+    /// of a terminal record written meanwhile.
+    ///
+    /// A read-then-[`Self::set`] is racy for the same reason spelled out on
+    /// [`Self::set_stopped_preserving_terminal`]: the caller's copy can say
+    /// `Running` while the thread that launched the unit has already written
+    /// `ExitedSuccessfully` to disk, and `set` reloads that record only to
+    /// overwrite it — turning a clean cron run into a stop. Re-reading HERE,
+    /// after the lock and reload, is the only point where the record being
+    /// replaced is the current one.
+    ///
+    /// Reads every hash under ONE lock and reload, so a whole project costs a
+    /// single pass rather than one per unit per monitor tick.
+    ///
+    /// Returns the records it corrected, each with the dead pid it replaced.
+    pub fn correct_stale_running<F>(
+        &mut self,
+        service_hashes: &[&str],
+        should_correct: F,
+    ) -> Result<Vec<(String, u32)>, ServiceStateError>
+    where
+        F: Fn(&str, u32) -> bool,
+    {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
+
+        let stale: Vec<(String, u32)> = service_hashes
+            .iter()
+            .filter_map(|hash| {
+                let entry = self.services.get(*hash)?;
+                if !matches!(entry.status, ServiceLifecycleStatus::Running) {
+                    return None;
+                }
+                let pid = entry.pid?;
+                should_correct(hash, pid).then(|| ((*hash).to_string(), pid))
+            })
+            .collect();
+
+        if stale.is_empty() {
+            return Ok(stale);
+        }
+
+        for (hash, _) in &stale {
+            self.services.insert(
+                hash.clone(),
+                ServiceStateEntry {
+                    status: ServiceLifecycleStatus::Stopped,
+                    pid: None,
+                    exit_code: None,
+                    signal: None,
+                    health: None,
+                },
+            );
+        }
+        self.save()?;
+        Ok(stale)
     }
 
     /// Records the outcome of a health probe without disturbing the lifecycle.
@@ -2575,6 +2921,160 @@ impl Drop for WatchGuard {
     }
 }
 
+/// How long reconciliation waits for a claim holder to write down an outcome
+/// that is already due, before repairing the records itself.
+const COMPLETION_CLAIM_STALL_GRACE: Duration = Duration::from_secs(30);
+
+/// The owners holding one unit, and when each repair they are holding off first
+/// came due.
+struct ClaimSlot {
+    /// Every owner currently holding the unit, by token. A set rather than one
+    /// token because runs overlap and can finish out of order: whoever leaves
+    /// takes only their own token, so the unit is released by the last one out
+    /// — and the record below survives every handover in between.
+    owners: HashSet<u64>,
+    /// When reconciliation first deferred a repair, keyed by the dead record it
+    /// wanted to fix. Per record, because one claim can outlive several: a run
+    /// that takes the unit while a PREVIOUS run's record is still lying around
+    /// would otherwise spend its own grace on that stranger's repair, and have
+    /// none left when its own process finally exits.
+    deferred_since: HashMap<Option<u32>, Instant>,
+}
+
+/// Units whose terminal outcome is still being settled, mapped to the owner
+/// holding each one.
+///
+/// Keyed by unit but stamped with the owner's token, because two runs of the
+/// same unit can overlap: a cron execution that outlives its schedule is still
+/// finishing while the next one starts. Without the token the older owner's
+/// release would retire the younger one's claim.
+type CompletionClaims = Arc<Mutex<HashMap<String, ClaimSlot>>>;
+
+/// Hands out the token that tells two owners of the same unit apart.
+static COMPLETION_CLAIM_TOKENS: AtomicU64 = AtomicU64::new(0);
+
+/// Holds the right to record one unit's terminal outcome.
+///
+/// The monitor reads "recorded running, pid dead" as damage to repair, which
+/// is right for a crash and wrong for the instant between a child exiting and
+/// the thread that launched it writing down why. A claim marks that instant so
+/// the repair defers to the owner instead of racing it — otherwise a cron run
+/// that finished cleanly is stamped `Stopped` moments before its own
+/// `ExitedSuccessfully` lands.
+///
+/// Dropped on every path out of the run, unwinding included, so a claim cannot
+/// outlive what it describes.
+pub struct CompletionClaim {
+    claims: CompletionClaims,
+    service: String,
+    token: u64,
+}
+
+/// Reports whether an owner still holds `service`, and has not been sitting on
+/// the repair of `record` for longer than [`COMPLETION_CLAIM_STALL_GRACE`].
+///
+/// The clock starts when reconciliation first finds work to do on that exact
+/// record — the process it names already gone, its bookkeeping not yet settled
+/// — not when the run began. That distinction is the whole design: a lease measured from the start
+/// expires under healthy runs, because an owner's synchronous phases (a slow
+/// `pre_start`, an `onstart` hook, a settle wait) report no progress, and
+/// expiring there hands the monitor a unit that is very much in flight. Nothing
+/// is due while the process lives, so a long run is never rushed.
+///
+/// Ownership normally ends with the guard, which releases on every path out
+/// including a panic. The grace covers the one case that cannot: a bookkeeping
+/// thread that stalls without unwinding AFTER its process exited — the run is
+/// over, its records are wrong, and no drop is coming to release them.
+fn completion_claim_defers(
+    claims: &CompletionClaims,
+    service: &str,
+    record: Option<u32>,
+) -> bool {
+    let mut guard = claims
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(slot) = guard.get_mut(service) else {
+        return false;
+    };
+    if slot.owners.is_empty() {
+        return false;
+    }
+    let due_since = *slot
+        .deferred_since
+        .entry(record)
+        .or_insert_with(Instant::now);
+    due_since.elapsed() < COMPLETION_CLAIM_STALL_GRACE
+}
+
+/// Installs a claim on `service`, keeping whatever grace has already been spent
+/// waiting on its unrepaired records.
+///
+/// Runs overlap — a cron execution that outlives its schedule is still
+/// finishing when the next one starts — so a fresh map per run would let that
+/// succession renew the same record's grace forever, which is the one thing the
+/// grace exists to prevent.
+///
+/// The token is drawn while the map is locked, so tokens and installs share one
+/// order.
+fn install_completion_claim(claims: &CompletionClaims, service: &str) -> CompletionClaim {
+    let mut guard = claims
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let token = COMPLETION_CLAIM_TOKENS.fetch_add(1, Ordering::SeqCst);
+    guard
+        .entry(service.to_string())
+        .or_insert_with(|| ClaimSlot {
+            owners: HashSet::new(),
+            deferred_since: HashMap::new(),
+        })
+        .owners
+        .insert(token);
+    drop(guard);
+
+    CompletionClaim {
+        claims: Arc::clone(claims),
+        service: service.to_string(),
+        token,
+    }
+}
+
+/// Forgets the grace spent waiting on `record`, now that it has been repaired.
+///
+/// A pid is only as unique as the kernel lets it be. Once a record is repaired
+/// the pid naming it can come back as somebody else's child, and leaving the
+/// spent stamp behind would hand that new record an already expired grace — the
+/// very race this defers. Retiring on repair, and only on repair, keeps a grace
+/// unrenewable for the record it was spent on.
+fn retire_completion_defer(
+    claims: &CompletionClaims,
+    service: &str,
+    record: Option<u32>,
+) {
+    if let Some(slot) = claims
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_mut(service)
+    {
+        slot.deferred_since.remove(&record);
+    }
+}
+
+impl Drop for CompletionClaim {
+    fn drop(&mut self) {
+        let mut guard = self
+            .claims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(slot) = guard.get_mut(&self.service) else {
+            return;
+        };
+        slot.owners.remove(&self.token);
+        if slot.owners.is_empty() {
+            guard.remove(&self.service);
+        }
+    }
+}
+
 /// Shared context for daemon operations to reduce function parameters and ensure
 /// consistent lock ordering.
 ///
@@ -2633,6 +3133,8 @@ struct DaemonContext {
     timeouts: Arc<RwLock<SupervisorTimeouts>>,
     /// Services currently being replaced through an explicit deployment strategy.
     replacements: Arc<Mutex<HashSet<String>>>,
+    /// Units whose terminal outcome their launcher is still settling.
+    completion_claims: CompletionClaims,
 }
 
 impl DaemonContext {
@@ -2704,6 +3206,28 @@ impl DaemonContext {
             DaemonLock::StoppedForDependency,
         )
     }
+
+    /// Reports whether a launcher is still settling this unit's outcome, and
+    /// still deserves to be waited for over `record` — the dead pid this pass
+    /// wants to clean up after.
+    ///
+    /// Only call this once a repair is genuinely due: the first call for a
+    /// record starts the grace that eventually overrides a stalled owner.
+    fn completion_claimed(&self, service_name: &str, record: Option<u32>) -> bool {
+        completion_claim_defers(&self.completion_claims, service_name, record)
+    }
+
+    /// Forgets the grace spent waiting on `record`, now that it has been
+    /// repaired.
+    ///
+    /// A pid is only as unique as the kernel lets it be. Once a record is
+    /// repaired the pid naming it can come back as somebody else's child, and
+    /// leaving the spent stamp behind would hand that new record an already
+    /// expired grace — the very race this defers. Retiring on repair, and only
+    /// on repair, keeps the grace unrenewable for the record it was spent on.
+    fn retire_completion_defer(&self, service_name: &str, record: Option<u32>) {
+        retire_completion_defer(&self.completion_claims, service_name, record);
+    }
 }
 
 /// Service manager daemon.
@@ -2756,6 +3280,8 @@ pub struct Daemon {
     boot_epoch: Arc<AtomicU64>,
     boot_cancelled: Arc<AtomicBool>,
     replacements: Arc<Mutex<HashSet<String>>>,
+    /// Units whose terminal outcome their launcher is still settling.
+    completion_claims: CompletionClaims,
 }
 
 impl Daemon {
@@ -2816,6 +3342,7 @@ impl Daemon {
             op_journal: Arc::clone(&self.op_journal),
             timeouts: Arc::clone(&self.timeouts),
             replacements: Arc::clone(&self.replacements),
+            completion_claims: Arc::clone(&self.completion_claims),
         }
     }
 
@@ -2847,6 +3374,7 @@ impl Daemon {
             boot_epoch: Arc::clone(&ctx.boot_epoch),
             boot_cancelled: Arc::clone(&ctx.boot_cancelled),
             replacements: Arc::clone(&ctx.replacements),
+            completion_claims: Arc::clone(&ctx.completion_claims),
         })
     }
 
@@ -2891,15 +3419,28 @@ impl Daemon {
         if sid >= 0 { Some(sid) } else { None }
     }
 
-    /// Returns all live process IDs currently assigned to `pgid`.
+    /// Returns all live process IDs currently assigned to `pgid`, or `None`
+    /// when the process table could not be read at all.
+    ///
+    /// The distinction matters to every caller that reads an empty set as
+    /// "nothing owns this group any more": a listing that never happened says
+    /// nothing about ownership, and treating it as proof of absence forgets
+    /// processes that are still running. A listing that broke partway and found
+    /// nothing is reported the same way, since it cannot tell an empty group
+    /// from the part it failed to read. Only a process that vanished mid-scan
+    /// is exempt: it really is gone. Anything else — a permission error, an IO
+    /// error — is a gap in the answer, not an answer.
     #[cfg(target_os = "linux")]
-    fn collect_process_group_members(pgid: libc::pid_t) -> HashSet<u32> {
+    fn try_collect_process_group_members(pgid: libc::pid_t) -> Option<HashSet<u32>> {
         let mut members = HashSet::new();
-        let Ok(entries) = fs::read_dir("/proc") else {
-            return members;
-        };
+        let mut listing_failed = false;
+        let entries = fs::read_dir("/proc").ok()?;
 
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries {
+            let Ok(entry) = entry else {
+                listing_failed = true;
+                continue;
+            };
             let Some(pid) = entry
                 .file_name()
                 .to_str()
@@ -2909,8 +3450,14 @@ impl Daemon {
             };
 
             let stat_path = entry.path().join("stat");
-            let Ok(stat) = fs::read_to_string(stat_path) else {
-                continue;
+            let stat = match fs::read_to_string(stat_path) {
+                Ok(stat) => stat,
+                Err(err) => {
+                    if err.kind() != ErrorKind::NotFound {
+                        listing_failed = true;
+                    }
+                    continue;
+                }
             };
             let Some(close_paren) = stat.rfind(')') else {
                 continue;
@@ -2934,19 +3481,25 @@ impl Daemon {
             }
         }
 
-        members
+        if members.is_empty() && listing_failed {
+            return None;
+        }
+
+        Some(members)
     }
 
-    /// Returns all live process IDs currently assigned to `pgid`.
+    /// Returns all live process IDs currently assigned to `pgid`, or `None`
+    /// when the process table could not be read at all.
     #[cfg(not(target_os = "linux"))]
-    fn collect_process_group_members(pgid: libc::pid_t) -> HashSet<u32> {
+    fn try_collect_process_group_members(pgid: libc::pid_t) -> Option<HashSet<u32>> {
         let mut members = HashSet::new();
-        let Ok(output) = Command::new("ps")
+        let output = Command::new("ps")
             .args(["-axo", "pid=,pgid=,stat="])
             .output()
-        else {
-            return members;
-        };
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
 
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let mut fields = line.split_whitespace();
@@ -2966,7 +3519,7 @@ impl Daemon {
             }
         }
 
-        members
+        Some(members)
     }
 
     /// Returns all live process IDs currently in session `sid`.
@@ -2977,13 +3530,16 @@ impl Daemon {
     /// fresh group leaves that payload outside the recorded group, which is how
     /// a live process survived a teardown that only signalled the group.
     #[cfg(target_os = "linux")]
-    fn collect_session_members(sid: libc::pid_t) -> HashSet<u32> {
+    fn try_collect_session_members(sid: libc::pid_t) -> Option<HashSet<u32>> {
         let mut members = HashSet::new();
-        let Ok(entries) = fs::read_dir("/proc") else {
-            return members;
-        };
+        let mut listing_failed = false;
+        let entries = fs::read_dir("/proc").ok()?;
 
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries {
+            let Ok(entry) = entry else {
+                listing_failed = true;
+                continue;
+            };
             let Some(pid) = entry
                 .file_name()
                 .to_str()
@@ -2992,8 +3548,14 @@ impl Daemon {
                 continue;
             };
 
-            let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
-                continue;
+            let stat = match fs::read_to_string(entry.path().join("stat")) {
+                Ok(stat) => stat,
+                Err(err) => {
+                    if err.kind() != ErrorKind::NotFound {
+                        listing_failed = true;
+                    }
+                    continue;
+                }
             };
             let Some(close_paren) = stat.rfind(')') else {
                 continue;
@@ -3018,7 +3580,11 @@ impl Daemon {
             }
         }
 
-        members
+        if members.is_empty() && listing_failed {
+            return None;
+        }
+
+        Some(members)
     }
 
     /// Returns all live process IDs currently in session `sid`.
@@ -3027,11 +3593,15 @@ impl Daemon {
     /// `sess=` column on macOS reports the kernel session address (0 for every
     /// process), so parsing it silently matches nothing.
     #[cfg(not(target_os = "linux"))]
-    fn collect_session_members(sid: libc::pid_t) -> HashSet<u32> {
+    fn try_collect_session_members(sid: libc::pid_t) -> Option<HashSet<u32>> {
         let mut members = HashSet::new();
-        let Ok(output) = Command::new("ps").args(["-axo", "pid=,stat="]).output() else {
-            return members;
-        };
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,stat="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
 
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let mut fields = line.split_whitespace();
@@ -3048,7 +3618,7 @@ impl Daemon {
             }
         }
 
-        members
+        Some(members)
     }
 
     /// Signals process. None = liveness check. Also detects Linux zombies.
@@ -3265,18 +3835,25 @@ impl Daemon {
             }
         };
 
+        let membership_unknown = std::cell::Cell::new(false);
         let merge_group_members = |pending: &mut HashSet<u32>| {
             if let Some(target_pgid) = group_target
                 && target_pgid > 0
                 && target_pgid != supervisor_pgid
             {
-                pending.extend(Self::collect_process_group_members(target_pgid));
+                match Self::try_collect_process_group_members(target_pgid) {
+                    Some(members) => pending.extend(members),
+                    None => membership_unknown.set(true),
+                }
             }
             // Session members are swept in the same pass so a payload that
             // re-grouped itself is still caught, and re-swept after each
             // escalation because a survivor can fork while we are signalling.
             if let Some(target_sid) = session_target {
-                pending.extend(Self::collect_session_members(target_sid));
+                match Self::try_collect_session_members(target_sid) {
+                    Some(members) => pending.extend(members),
+                    None => membership_unknown.set(true),
+                }
             }
         };
 
@@ -3292,7 +3869,7 @@ impl Daemon {
         )?;
         merge_group_members(&mut pending);
 
-        if pending.is_empty() {
+        if pending.is_empty() && !membership_unknown.get() {
             return Ok(());
         }
 
@@ -3312,20 +3889,29 @@ impl Daemon {
             PROCESS_CHECK_INTERVAL,
         )?;
 
-        if pending.is_empty() {
-            Ok(())
-        } else {
-            Err(ProcessManagerError::ServiceStopError {
-                service: service_name.to_string(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "Failed to terminate process tree rooted at PID {} for '{}'",
-                        root_pid, service_name
-                    ),
-                ),
-            })
+        if pending.is_empty() && !membership_unknown.get() {
+            return Ok(());
         }
+
+        if pending.is_empty() {
+            return Err(ProcessManagerError::ServiceStopError {
+                service: service_name.to_string(),
+                source: std::io::Error::other(format!(
+                    "Could not read the process table while tearing down '{service_name}'; its process group cannot be declared dead"
+                )),
+            });
+        }
+
+        Err(ProcessManagerError::ServiceStopError {
+            service: service_name.to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "Failed to terminate process tree rooted at PID {} for '{}'",
+                    root_pid, service_name
+                ),
+            ),
+        })
     }
 
     /// Terminates any live members still lingering in a service's previous process group before
@@ -3344,17 +3930,19 @@ impl Daemon {
             return;
         }
 
-        let survivors = Self::collect_process_group_members(pgid);
-        if survivors.is_empty() {
-            return;
+        match Self::try_collect_process_group_members(pgid) {
+            Some(survivors) if survivors.is_empty() => return,
+            Some(survivors) => warn!(
+                "Found {} orphaned process(es) in previous group {} for '{}'; terminating before restart",
+                survivors.len(),
+                pgid,
+                service_name
+            ),
+            None => warn!(
+                "Could not read the process table to check group {} for '{}'; terminating it before restart rather than assuming it is empty",
+                pgid, service_name
+            ),
         }
-
-        warn!(
-            "Found {} orphaned process(es) in previous group {} for '{}'; terminating before restart",
-            survivors.len(),
-            pgid,
-            service_name
-        );
 
         if let Err(err) =
             Self::terminate_process_tree(service_name, pgid as u32, Some(pgid))
@@ -3440,7 +4028,17 @@ impl Daemon {
             boot_epoch: Arc::new(AtomicU64::new(0)),
             boot_cancelled: Arc::new(AtomicBool::new(false)),
             replacements: Arc::new(Mutex::new(HashSet::new())),
+            completion_claims: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Takes the right to record `service_name`'s terminal outcome.
+    ///
+    /// Held by whoever launched the run, for as long as it takes to write what
+    /// happened; while it is held the monitor will not repair the unit's
+    /// records out from under the caller. Released when the guard drops.
+    pub fn claim_completion(&self, service_name: &str) -> CompletionClaim {
+        install_completion_claim(&self.completion_claims, service_name)
     }
 
     /// Points the daemon at the supervisor's shared operation slot so blocking
@@ -5171,7 +5769,7 @@ impl Daemon {
         }
     }
 
-    /// Corrects a state entry that claims `Running` with a pid that is gone.
+    /// Corrects every state entry claiming `Running` with a pid that is gone.
     ///
     /// The last line of defence for the `lost`-forever bug. Whatever raced —
     /// concurrent restarts, a reap whose caller discarded the result, a crash
@@ -5180,49 +5778,55 @@ impl Daemon {
     /// and status must not keep reporting it as `lost` with nothing able to
     /// clear it. Runs every monitor tick, so recovery is automatic.
     ///
-    /// Only touches entries whose recorded pid is verifiably dead; a live
-    /// process keeps its record untouched.
-    fn clear_stale_running_state(ctx: &DaemonContext, name: &str) {
-        if !ctx.config.services.contains_key(name) {
+    /// Every question it asks is answered against the record on disk, under the
+    /// file lock: this handle's in-memory copy can be arbitrarily old, and
+    /// deciding from it would leave a `Running` written by another handle
+    /// unrepaired forever. Units with a live child handle are skipped, since a
+    /// fresh instance is starting under that name, as are units whose launcher
+    /// still holds a [`CompletionClaim`] — it knows the outcome, this path only
+    /// knows the pid is gone.
+    fn correct_stale_running_states(ctx: &DaemonContext, tracked: &HashSet<String>) {
+        let units: Vec<(String, String)> = ctx
+            .config
+            .services
+            .keys()
+            .filter(|name| !tracked.contains(*name))
+            .map(|name| (name.clone(), ctx.config.state_key(name)))
+            .collect();
+        if units.is_empty() {
             return;
         }
-        let key = ctx.config.state_key(name);
 
-        let stale_pid = {
-            let Ok(guard) = ctx.state_file.lock() else {
-                return;
-            };
-            match guard.get(&key) {
-                Some(entry)
-                    if matches!(entry.status, ServiceLifecycleStatus::Running) =>
-                {
-                    match entry.pid {
-                        Some(pid) if !Self::pid_is_alive(pid) => pid,
-                        _ => return,
-                    }
-                }
-                _ => return,
-            }
+        let names: HashMap<&str, &str> = units
+            .iter()
+            .map(|(name, key)| (key.as_str(), name.as_str()))
+            .collect();
+        let keys: Vec<&str> = units.iter().map(|(_, key)| key.as_str()).collect();
+
+        let Ok(mut guard) = ctx.state_file.lock() else {
+            return;
         };
+        let corrected = guard.correct_stale_running(&keys, |key, pid| {
+            if Self::pid_is_alive(pid) {
+                return false;
+            }
+            !names
+                .get(key)
+                .is_some_and(|name| ctx.completion_claimed(name, Some(pid)))
+        });
+        drop(guard);
 
-        // A live child handle means a fresh instance is starting under this
-        // name; leave the record for the start path to stamp.
-        if ctx
-            .lock_processes()
-            .map(|guard| guard.contains_key(name))
-            .unwrap_or(true)
-        {
-            return;
-        }
-
-        let corrected = ServiceLifecycleStatus::Stopped;
-        warn!(
-            "Service '{name}' was recorded running with pid {stale_pid}, which is gone; correcting to {corrected:?}."
-        );
-        if let Ok(mut guard) = ctx.state_file.lock()
-            && let Err(err) = guard.set(&key, corrected, None, None, None)
-        {
-            warn!("Failed to correct stale running state for '{name}': {err}");
+        match corrected {
+            Ok(corrected) => {
+                for (key, stale_pid) in corrected {
+                    let name = names.get(key.as_str()).copied().unwrap_or(key.as_str());
+                    ctx.retire_completion_defer(name, Some(stale_pid));
+                    warn!(
+                        "Service '{name}' was recorded running with pid {stale_pid}, which is gone; correcting to Stopped."
+                    );
+                }
+            }
+            Err(err) => warn!("Failed to correct stale running state: {err}"),
         }
     }
 
@@ -5317,9 +5921,16 @@ impl Daemon {
     /// Reports whether a pid is still alive. `kill(pid, 0)` succeeds for a live
     /// process and for a zombie the caller has yet to reap; a zombie holds no
     /// resources and no longer runs, so it is treated as dead here.
+    /// Reports whether `pid` names a process that is still there.
+    ///
+    /// `EPERM` counts as alive: refusing the signal is the kernel saying the
+    /// process exists and is not ours to touch, and reading that as death lets
+    /// every caller treat a live process as reclaimable.
     fn pid_is_alive(pid: u32) -> bool {
         let target = pid as libc::pid_t;
-        if unsafe { libc::kill(target, 0) } != 0 {
+        if unsafe { libc::kill(target, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+        {
             return false;
         }
         !Self::pid_is_zombie(target)
@@ -5338,18 +5949,28 @@ impl Daemon {
         )
     }
 
+    /// Reports whether `pgid` still holds a process that can do work.
+    ///
+    /// [`Self::process_group_is_alive`] answers with `killpg`, which counts an
+    /// unreaped zombie as a member. Reconciliation asks a different question:
+    /// is there anything here worth signalling? A corpse is not — signalling it
+    /// changes nothing, and the group then reads as having survived the attempt
+    /// forever, which is exactly what a per-minute cron unit did every time its
+    /// leader exited a moment before the tick.
+    fn process_group_has_live_member(pgid: libc::pid_t) -> bool {
+        if pgid <= 0 {
+            return false;
+        }
+        match Self::try_collect_process_group_members(pgid) {
+            Some(members) => !members.is_empty(),
+            None => Self::process_group_is_alive(pgid),
+        }
+    }
+
     /// Reports whether a pid is a reaped-pending zombie rather than a live
     /// process, so a stop is not held open waiting on a corpse.
     fn pid_is_zombie(pid: libc::pid_t) -> bool {
-        let Ok(output) = Command::new("ps")
-            .args(["-o", "state=", "-p", &pid.to_string()])
-            .output()
-        else {
-            return false;
-        };
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .starts_with('Z')
+        matches!(Self::read_proc_state(pid as u32), Some('Z'))
     }
 
     /// Records the teardown of a service the monitor saw exit while a
@@ -7461,11 +8082,21 @@ impl Daemon {
         // same "stopped but still running" report returns one level down.
         if let Some(session) = service_session {
             let deadline = Instant::now() + stop_verify_timeout;
-            let mut survivors = Self::collect_session_members(session);
-            while !survivors.is_empty() && Instant::now() < deadline {
+            let mut survivors = Self::try_collect_session_members(session);
+            while !survivors.as_ref().is_none_or(|live| live.is_empty())
+                && Instant::now() < deadline
+            {
                 thread::sleep(SERVICE_POLL_INTERVAL);
-                survivors = Self::collect_session_members(session);
+                survivors = Self::try_collect_session_members(session);
             }
+            let Some(survivors) = survivors else {
+                return Err(ProcessManagerError::ServiceStopError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::other(format!(
+                        "Could not read the process table to confirm session {session} for '{service_name}' is empty"
+                    )),
+                });
+            };
             if !survivors.is_empty() {
                 let mut listed: Vec<u32> = survivors.into_iter().collect();
                 listed.sort_unstable();
@@ -8518,8 +9149,8 @@ impl Daemon {
         // the whole project to WARN with nothing that could ever clear it.
         for name in ctx.config.services.keys() {
             Self::clear_stale_pid_entry(ctx, name);
-            Self::clear_stale_running_state(ctx, name);
         }
+        Self::correct_stale_running_states(ctx, &tracked);
 
         for (name, service) in &ctx.config.services {
             if tracked.contains(name) {
@@ -8598,7 +9229,31 @@ impl Daemon {
         to_restart
     }
 
+    /// Reports whether a recorded pid has stopped belonging to the unit that
+    /// recorded it.
+    ///
+    /// Two ways to lose a process, and reconciliation has to clear the record
+    /// for both: it died, or it is alive as somebody else's, the pid having
+    /// been handed on. Only a live process whose start time still matches the
+    /// record is genuinely the unit's own — and refusing to drop the other kind
+    /// strands the unit, because a start refuses to replace ownership it cannot
+    /// recognise.
+    fn record_is_forfeit(recorded: Option<u32>, recorded_start: Option<u64>) -> bool {
+        let Some(pid) = recorded else {
+            return true;
+        };
+        if !Self::pid_is_alive(pid) {
+            return true;
+        }
+        recorded_start.is_some_and(|start| process_start_time(pid) != Some(start))
+    }
+
     /// Reconciles stale process ownership without signaling a reused PID.
+    ///
+    /// Defers to a launcher still holding a [`CompletionClaim`], but only from
+    /// the point where the records are actually reconcilable — a live process
+    /// is nobody's stale record, and asking earlier would start the claim's
+    /// grace against a run that has not even finished.
     fn clear_stale_pid_entry(ctx: &DaemonContext, name: &str) {
         let (pid, pgid, started) = match ctx.lock_pid_file() {
             Ok(guard) => (guard.get(name), guard.pgid_for(name), guard.start_for(name)),
@@ -8626,9 +9281,13 @@ impl Daemon {
             reused = false;
         }
 
+        if ctx.completion_claimed(name, pid) {
+            return;
+        }
+
         if !reused
             && let Some(pgid) = pgid.map(|value| value as libc::pid_t)
-            && Self::process_group_is_alive(pgid)
+            && Self::process_group_has_live_member(pgid)
         {
             let Some(expected) = started else {
                 warn!(
@@ -8638,7 +9297,7 @@ impl Daemon {
             };
             if process_start_time(pgid as u32).is_none_or(|actual| actual == expected) {
                 Self::reap_orphaned_group_before_restart(name, Some(pgid));
-                if Self::process_group_is_alive(pgid) {
+                if Self::process_group_has_live_member(pgid) {
                     warn!("Process group {pgid} for '{name}' survived reconciliation");
                     return;
                 }
@@ -8646,8 +9305,17 @@ impl Daemon {
         }
 
         if let Ok(mut guard) = ctx.lock_pid_file() {
-            match guard.remove(name) {
-                Ok(_) => debug!("Cleared stale process ownership for '{name}'"),
+            match guard.remove_if_unchanged(name, pid, pgid, started, |recorded| {
+                !ctx.completion_claimed(name, recorded)
+                    && Self::record_is_forfeit(recorded, started)
+            }) {
+                Ok(true) => {
+                    ctx.retire_completion_defer(name, pid);
+                    debug!("Cleared stale process ownership for '{name}'");
+                }
+                Ok(false) => debug!(
+                    "Left process ownership for '{name}' alone: it no longer names the process this pass judged"
+                ),
                 Err(PidFileError::ServiceNotFound) => {}
                 Err(err) => warn!("Failed to clear stale PID entry for '{name}': {err}"),
             }
@@ -9105,7 +9773,8 @@ mod tests {
             let _ = leader.wait();
             thread::sleep(Duration::from_millis(300));
 
-            let orphan = Daemon::collect_session_members(session);
+            let orphan = Daemon::try_collect_session_members(session)
+                .expect("read the process table");
             assert!(
                 !orphan.is_empty(),
                 "payload should survive its parent and remain in the session"
@@ -9133,7 +9802,8 @@ mod tests {
             )
             .expect("terminate session");
 
-            let survivors = Daemon::collect_session_members(session);
+            let survivors = Daemon::try_collect_session_members(session)
+                .expect("read the process table");
             assert!(
                 survivors.is_empty(),
                 "session must be empty after teardown, saw {survivors:?}"
