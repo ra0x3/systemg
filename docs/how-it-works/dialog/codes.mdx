@@ -472,18 +472,21 @@ image instead.
 
 ### [SG0721](/how-it-works/dialog/codes#sg0721)
 
-Planned — sandbox capability unsupported on this platform.
+A security key was accepted by the schema but cannot be enforced, so the
+service runs unprotected. The diagnostic names the exact key:
+`apparmor_profile`, `selinux_context`, `private_devices`, or `private_tmp`. A
+future release refuses these keys instead of warning, behind a manifest schema
+bump.
 
 ### [SG0722](/how-it-works/dialog/codes#sg0722)
 
-A seccomp filter could not be built (unknown profile, unsupported CPU
-architecture) or applied in the child. systemg refuses the service rather than
-run it without the requested syscall filter. The only built-in profile is
-`baseline-v1` (a frozen deny-by-default allowlist).
+A seccomp filter could not be built, compiled, or applied. systemg refuses the
+service rather than run it without the requested syscall filter.
 
 ### [SG0723](/how-it-works/dialog/codes#sg0723)
 
-Planned — `no_new_privs` could not be set; the service is refused.
+`prctl(PR_SET_NO_NEW_PRIVS)` failed, so seccomp and Landlock cannot be applied
+safely. The service is refused.
 
 ### [SG0724](/how-it-works/dialog/codes#sg0724)
 
@@ -492,18 +495,29 @@ not support Landlock (needs Linux 5.13+) or could not fully enforce the
 ruleset. systemg refuses the service rather than run it unconfined. Run on a
 Landlock-capable kernel, or remove the `isolation.landlock` block.
 
+### [SG0725](/how-it-works/dialog/codes#sg0725)
+
+The manifest named a seccomp profile that does not exist. The only built-in is
+`baseline-v1`, a frozen deny-by-default allowlist. Checked in the parent, so
+the spawn is refused before fork.
+
+### [SG0726](/how-it-works/dialog/codes#sg0726)
+
+seccomp is only supported on x86_64 and aarch64. On any other architecture a
+manifest requesting `isolation.seccomp` is refused rather than run unfiltered.
+
 ### [SG0731](/how-it-works/dialog/codes#sg0731)
 
-Planned — kernel-assisted observation is required by configuration but
+Reserved — kernel-assisted observation is required by configuration but
 unavailable; start refused with the missing prerequisites as evidence.
 
 ### [SG0732](/how-it-works/dialog/codes#sg0732)
 
-Planned — kernel-assisted observation unavailable; degraded to polling.
+Reserved — kernel-assisted observation unavailable; degraded to polling.
 
 ### [SG0733](/how-it-works/dialog/codes#sg0733)
 
-Planned — kernel-assisted event loss; a `/proc` reconciliation pass was
+Reserved — kernel-assisted event loss; a `/proc` reconciliation pass would be
 forced.
 
 ### [SG0705](/how-it-works/dialog/codes#sg0705)

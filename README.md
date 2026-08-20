@@ -139,6 +139,7 @@ It sits in the gap between systemd and Docker Compose. systemd wants to own the 
 | **Dependencies** | Topological, health-aware | Unit chains | Manual ordering | Service links |
 | **Deployments** | Built-in rolling | External tooling | Manual restarts | Recreate/rolling |
 | **Runtime deps** | None | DBus, journal | Python | Docker daemon |
+| **Install / removal** | Rootless: ~12 MB executable + symlink; optional system service | OS-integrated; replacement is distro-wide | Python package + runtime | Compose plugin + local Docker Engine/daemon (Linux VM on macOS) |
 
 Full documentation lives at [sysg.dev](https://sysg.dev). Maintainers and
 agents investigating supervisor behavior should begin with

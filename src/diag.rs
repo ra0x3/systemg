@@ -212,6 +212,21 @@ pub enum SgCode {
     /// SG0714 — live supervisor upgrade is forbidden in container-init mode: a
     /// failed exec as PID 1 kills the container and every service in it.
     ContainerInitUpgradeForbidden,
+    /// SG0721 — a security key was accepted by the schema but cannot be
+    /// enforced on this platform; the diagnostic names the exact key.
+    SandboxKeyUnenforceable,
+    /// SG0722 — a seccomp filter could not be built, compiled, or applied.
+    SeccompFilterFailed,
+    /// SG0723 — `prctl(PR_SET_NO_NEW_PRIVS)` failed, so seccomp and Landlock
+    /// cannot be applied safely.
+    NoNewPrivsFailed,
+    /// SG0724 — Landlock was requested but the kernel ABI is unavailable or
+    /// insufficient to enforce the requested rules.
+    LandlockUnavailable,
+    /// SG0725 — the manifest named a seccomp profile that does not exist.
+    SeccompProfileUnknown,
+    /// SG0726 — seccomp is not supported on this CPU architecture.
+    SeccompArchUnsupported,
 }
 
 impl SgCode {
@@ -287,6 +302,12 @@ impl SgCode {
             SgCode::ContainerInitPrereqMissing => "SG0712",
             SgCode::ContainerInitShutdownIncomplete => "SG0713",
             SgCode::ContainerInitUpgradeForbidden => "SG0714",
+            SgCode::SandboxKeyUnenforceable => "SG0721",
+            SgCode::SeccompFilterFailed => "SG0722",
+            SgCode::NoNewPrivsFailed => "SG0723",
+            SgCode::LandlockUnavailable => "SG0724",
+            SgCode::SeccompProfileUnknown => "SG0725",
+            SgCode::SeccompArchUnsupported => "SG0726",
         }
     }
 
@@ -296,7 +317,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 69] = [
+    pub const ALL: [SgCode; 75] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -366,6 +387,12 @@ impl SgCode {
         SgCode::ContainerInitPrereqMissing,
         SgCode::ContainerInitShutdownIncomplete,
         SgCode::ContainerInitUpgradeForbidden,
+        SgCode::SandboxKeyUnenforceable,
+        SgCode::SeccompFilterFailed,
+        SgCode::NoNewPrivsFailed,
+        SgCode::LandlockUnavailable,
+        SgCode::SeccompProfileUnknown,
+        SgCode::SeccompArchUnsupported,
     ];
 }
 
