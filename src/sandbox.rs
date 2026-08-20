@@ -195,7 +195,7 @@ mod imp {
         {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "seccomp is only supported on x86_64 and aarch64 (SG0722)",
+                "seccomp is only supported on x86_64 and aarch64 (SG0726)",
             ))
         }
     }
@@ -215,7 +215,7 @@ mod imp {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "unknown seccomp profile '{other}'; the only built-in is 'baseline-v1' (SG0722)"
+                        "unknown seccomp profile '{other}'; the only built-in is 'baseline-v1' (SG0725)"
                     ),
                 ));
             }

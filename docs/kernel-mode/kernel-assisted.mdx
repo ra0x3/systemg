@@ -11,42 +11,31 @@ tick. `waitpid` remains authoritative for reaping; the pidfd only supplies
 readiness. This needs Linux 5.3+, no elevated capabilities, no kernel BTF, and
 adds no dependencies to the supervisor.
 
-<Info>
-**eBPF was evaluated for v1 and deliberately declined.** The red-team gate
-required eBPF (Aya) to beat the shipped pidfd baseline before landing. It does
-not, so kernel mode uses pidfd as its kernel-assisted mechanism and does not
-ship eBPF. The reasoning is recorded below so the decision is auditable.
-</Info>
+## Why pidfd and not eBPF
 
-## Why not eBPF (yet)
+sysg does not ship eBPF process-event observation. It buys nothing over pidfd
+here:
 
 - **Exit detection is already instant.** pidfd wakes the monitor the moment a
-  managed service exits. eBPF's `sched_process_exit` tracepoint adds nothing
-  here.
+  managed service exits; the `sched_process_exit` tracepoint adds nothing.
 - **Descendants are already tracked.** Service process trees are owned via
   their private session (SID), the generational provenance ledger, and — when
   sysg is PID 1 — the wait broker. eBPF's fork/exec lineage is redundant for
-  the processes sysg actually manages.
-- **eBPF's only residual value is narrow and it can't deliver it reliably.**
-  The one real gap is a service that `fork()`s, calls `setsid()`, and
-  re-parents into a new session outside sysg's tree. But tracepoint events are
-  advisory and lossy: after a dropped fork event, `/proc` cannot reconstruct
-  ownership, so eBPF would not authoritatively close this gap. If containment
-  of escaped descendants ever becomes a requirement, **cgroup v2 is the
-  correct authoritative boundary**, not tracepoint lineage.
-- **The cost is real.** eBPF would add the Aya dependency tree to the root
-  supervisor's trust base, require `CAP_BPF`/`CAP_PERFMON` and kernel BTF at
-  `/sys/kernel/btf/vmlinux`, and fail to load on primary targets (minimal
-  musl-static containers, and the Landlock-less kernels we already test on) —
-  enlarging the root attack surface for a narrow, unreliable gain.
+  the processes sysg manages.
+- **The one residual gap is not reliably closable by eBPF.** A service that
+  `fork()`s, calls `setsid()`, and re-parents into a new session leaves sysg's
+  tree. Tracepoint events are advisory and lossy: after a dropped fork event,
+  `/proc` cannot reconstruct ownership. cgroup v2 is the authoritative
+  boundary for containing escaped descendants, not tracepoint lineage.
+- **The cost is real.** eBPF adds the Aya dependency tree to the root
+  supervisor's trust base, requires `CAP_BPF`/`CAP_PERFMON` and kernel BTF at
+  `/sys/kernel/btf/vmlinux`, and fails to load on minimal musl-static
+  containers — a larger root attack surface for a narrow, unreliable gain.
 
 ## Known limitation
 
-v1 supervises the process sysg spawns and the private session it retains.
-A service that deliberately escapes into a **new session** (double-fork +
-`setsid`) and outlives its launcher is not tracked. Run services in the
-foreground (let sysg own the process) rather than self-daemonizing.
-
-The [SG0731](/how-it-works/dialog/codes#sg0731)–[SG0733](/how-it-works/dialog/codes#sg0733)
-codes remain reserved for a future kernel-assisted mechanism, to be revisited
-only with demonstrated user demand.
+sysg supervises the process it spawns and the private session that process
+retains. A service that deliberately escapes into a **new session**
+(double-fork + `setsid`) and outlives its launcher is not tracked. Run
+services in the foreground and let sysg own the process rather than
+self-daemonizing.

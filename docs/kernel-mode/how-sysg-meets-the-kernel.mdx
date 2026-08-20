@@ -10,7 +10,7 @@ interface each capability uses to cross the userspace→kernel boundary, and how
 the same manifest is enforced on Linux versus refused on macOS.
 
 <figure>
-<svg viewBox="0 0 720 470" role="img" aria-label="How sysg crosses the userspace-kernel boundary: on Linux the supervisor configures cgroups, opens pidfds, and installs Landlock and seccomp filters in the child before exec; on macOS the same requests are refused with typed diagnostics while launchd bootstraps the supervisor." xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;font-family:ui-sans-serif,system-ui,sans-serif">
+<svg viewBox="0 0 720 470" role="img" aria-label="How sysg crosses the userspace-kernel boundary: on Linux the supervisor configures cgroups, opens pidfds, and installs Landlock and seccomp filters in the child before exec; on macOS the same requests are refused with a diagnostic while launchd bootstraps the supervisor." xmlns="http://www.w3.org/2000/svg" style="max-width:100%;height:auto;font-family:ui-sans-serif,system-ui,sans-serif">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0 0L10 5L0 10z" fill="currentColor"/>
@@ -73,7 +73,7 @@ the same manifest is enforced on Linux versus refused on macOS.
   <rect x="430" y="360" width="230" height="80" rx="6" fill="#d1495b" fill-opacity="0.10" stroke="#d1495b" stroke-dasharray="5 4"/>
   <text x="545" y="384" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor">no Linux LSM / cgroup / pidfd</text>
   <text x="545" y="404" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.8">container-init, seccomp, Landlock:</text>
-  <text x="545" y="420" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.8">typed refusal (see SG codes below)</text>
+  <text x="545" y="420" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.8">refused (see SG codes below)</text>
   <path d="M545 258 L545 204" fill="none" stroke="#d1495b" stroke-width="1.5" stroke-dasharray="5 4" marker-start="url(#arR)"/>
   <text x="600" y="235" text-anchor="middle" font-size="9" fill="#d1495b" font-weight="700">refused above</text>
   <text x="600" y="248" text-anchor="middle" font-size="9" fill="#d1495b" font-weight="700">the boundary</text>
@@ -83,8 +83,8 @@ On Linux, the supervisor builds each policy in the parent and the forked child
 installs it in a fixed order (<code>no_new_privs</code> → Landlock → seccomp)
 before <code>exec</code>; cgroups attach post-spawn and pidfd wakes the monitor
 on exit. On macOS the same manifest keys have no kernel mechanism to call, so
-they are refused with typed diagnostics rather than silently ignored — and
-launchd only bootstraps the supervisor.
+they are refused with a diagnostic rather than silently ignored, and launchd
+only bootstraps the supervisor.
 </figcaption>
 </figure>
 
@@ -95,12 +95,12 @@ launchd only bootstraps the supervisor.
   confinement, and seccomp-bpf for syscall filtering. The child installs the
   confinement steps in a fixed order immediately before `exec`.
 - **Red paths (macOS)** stop at the syscall boundary: those Linux mechanisms do
-  not exist, so requesting them is a typed refusal
+  not exist, so requesting them is a refusal
   ([SG0711](/how-it-works/dialog/codes#sg0711),
   [SG0721](/how-it-works/dialog/codes#sg0721),
   [SG0722](/how-it-works/dialog/codes#sg0722),
   [SG0724](/how-it-works/dialog/codes#sg0724)) — the
   [mode-parity contract](/kernel-mode): identical behavior where a capability
-  exists, an honest refusal where it does not.
+  exists, a refusal where it does not.
 - The supervisor never enters the kernel itself. It **configures** kernel
   mechanisms; the kernel enforces.

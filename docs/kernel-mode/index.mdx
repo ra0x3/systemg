@@ -8,38 +8,29 @@ Kernel mode is systemg operating below the user session: as the machine's
 service supervisor, as a container's init process, and against kernel
 enforcement and observation interfaces.
 
-One claim stays precise: **the sysg supervisor is a userspace program.** No
-systemg code executes in ring 0. "Kernel mode" names the family of
-capabilities where the kernel — not the user session — is the counterparty.
+The sysg supervisor is a userspace program. No systemg code executes in
+ring 0. "Kernel mode" names the family of capabilities where the kernel —
+not the user session — is the counterparty.
 
 ## The capability family
 
 | Capability | What executes where | Status |
 |---|---|---|
-| [System mode](/kernel-mode/system-mode) | Userspace, root; drops privileges per service | Shipping (`--sys`, Linux; macOS integration is roadmap) |
-| [Container-init](/kernel-mode/container-init) | Userspace, PID 1 duties | Deferred ([RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md), reduced v1) |
-| [Kernel-enforced sandboxing](/kernel-mode/sandboxing) | Kernel enforces; sysg configures | Partial — see honest limits |
-| [Kernel-assisted observation](/kernel-mode/kernel-assisted) | pidfd (eBPF evaluated & declined) | Shipping (pidfd) |
-
-<Info>
-**Scope decision (2026-08-11).** Kernel mode v1 deliberately ships less:
-system-mode parity, pidfd exit detection, and fail-closed sandboxing
-groundwork, on Linux only. Container-init and macOS system integration are
-deferred; eBPF is cut until it beats a pidfd baseline. Less, correct, and
-audited — over more, buggy.
-</Info>
+| [System mode](/kernel-mode/system-mode) | Userspace, root; drops privileges per service | Linux and macOS (`--sys`) |
+| [Container-init](/kernel-mode/container-init) | Userspace, PID 1 duties | Linux (`sysg init`) |
+| [Kernel-enforced sandboxing](/kernel-mode/sandboxing) | Kernel enforces; sysg configures | Linux, schema v3 |
+| [Kernel-assisted observation](/kernel-mode/kernel-assisted) | pidfd | Linux 5.3+ |
 
 ## Mode parity contract
 
 User mode and system mode are peers: identical commands, identical output
 shapes, identical diagnostics wherever a capability is supported — and a
-typed refusal, never a warning that proceeds, where it is not. The parity
-contract is enforced by the `parity-*` use-case lanes, which run every
-scenario as a real non-root user and as root `--sys` on both glibc and
-Alpine/musl runtimes.
+refusal, never a warning that proceeds, where it is not. The parity contract
+is enforced by the `parity-*` use-case lanes, which run every scenario as a
+real non-root user and as root `--sys` on both glibc and Alpine/musl
+runtimes.
 
 ## Security
 
-Kernel mode's security posture is auditable, not asserted: see
-[Security & audits](/kernel-mode/security) for the threat model and the
+See [Security & audits](/kernel-mode/security) for the threat model and the
 per-milestone audit records in the repository.

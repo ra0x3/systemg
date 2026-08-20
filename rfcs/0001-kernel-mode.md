@@ -1,16 +1,14 @@
 # RFC 0001: Kernel Mode
 
-- **Status**: Approved 2026-08-11 at **full scope with red-team gates**.
-  Owner decision (amending the earlier reduced-v1 cut): the minor release
-  ships the entire capability family — container-init (1b), macOS launchd
-  (2), Landlock + the fail-closed flip (3), and kernel-assisted observation
-  (4) — no track ships marked "deferred". The red-team analysis is retained
-  as quality gates, not scope cuts: green privileged CI + both-base parity
-  after every track; PID1 live-upgrade forbidden; eBPF ships only if it
-  beats the pidfd baseline (else pidfd is the story and eBPF is dropped);
-  external audit at RC before the tag; fail-closed lands with the schema
-  bump. Phases 0, 1a, pidfd, deprecation warnings, mode-aware validate:
-  done.
+- **Status**: Implemented. Approved 2026-08-11 at full scope, amending an
+  earlier reduced-v1 cut; all four tracks shipped as of 2026-08-12 —
+  system-mode parity, container-init (`sysg init`), macOS launchd,
+  kernel-enforced sandboxing under schema v3, and pidfd observation. eBPF
+  was evaluated against the pidfd baseline and declined. The red-team
+  analysis below was retained as quality gates rather than scope cuts:
+  green privileged CI and both-base parity after every track, PID 1 live
+  upgrade forbidden, external audit at RC before the tag, and the
+  fail-closed flip landing with a schema bump.
 - **Owners**: ra0x3 (owner), Claude + Codex (design)
 - **Target platforms**: linux-gnu (x86_64/aarch64), linux-musl (x86_64/aarch64), macOS (x86_64/arm64)
 
@@ -18,26 +16,26 @@
 
 sysg today is a first-class *user-mode* supervisor with a second-class root mode
 (`--sys`). This RFC makes system-level operation a headline capability under the
-name **kernel mode**, defined precisely so the claim stays honest. It covers
-four tracks: system-mode parity, container-init (PID 1), kernel-enforced
-sandboxing, and kernel-assisted observation (eBPF). Security is the governing
-constraint: every phase gates on auditable evidence, because an exploitable
-kernel mode ruins the product.
+name **kernel mode**, defined in §2. It covers four tracks: system-mode
+parity, container-init (PID 1), kernel-enforced sandboxing, and
+kernel-assisted observation. Security is the governing constraint: every
+phase gates on auditable evidence.
 
-> [!CAUTION]
-> **Red-team verdict (Codex, 2026-08-11): the RFC as written overreaches.**
-> An independent Codex red-team session recommended rejecting the full scope
-> in favor of a Linux-only "system-mode hardening" v1: parity fixes, SG070x
-> diagnostics, musl + privileged CI lanes, pidfd-based exit detection, and a
-> deprecation window for security keys — deferring PID 1 and launchd, and
-> cutting eBPF. Specific objections appear as callouts in the sections they
-> attack. Owner decision on scope reduction is pending.
+> [!NOTE]
+> **Red-team review (2026-08-11), resolved.** An independent red-team session
+> recommended a reduced Linux-only v1: parity fixes, SG070x diagnostics, musl
+> and privileged CI lanes, pidfd exit detection, and a deprecation window for
+> security keys — deferring PID 1 and launchd, and cutting eBPF. The owner
+> rejected the scope reduction and kept the objections as quality gates. The
+> per-section callouts below are preserved as the record of what was
+> challenged; each was either satisfied before its track shipped or resolved
+> in §12.
 
 ## 2. Terminology
 
 The supervisor is and remains a userspace program. "Kernel mode" is the
-product-level name for the family of capabilities below — it never means sysg
-code executes in ring 0, and marketing must never claim that.
+product-level name for the family of capabilities below. It never means sysg
+code executes in ring 0.
 
 | Term | Meaning | What executes where |
 |---|---|---|
@@ -184,11 +182,11 @@ implies eBPF availability.
 > Required before Phase 3: a deprecation release that warns loudly with the
 > future refusal date, then a manifest schema bump when refusal lands.
 
-### 6.4 Kernel-assisted observation (Phase 4) — RESOLVED: pidfd ships, eBPF declined
+### 6.4 Kernel-assisted observation (Phase 4)
 
 **Outcome (2026-08-12): pidfd is the kernel-assisted mechanism; eBPF is not
-shipped.** The Phase 4 red-team gate required eBPF to beat the shipped pidfd
-baseline before landing. It does not.
+shipped.** The Phase 4 gate required eBPF to beat the shipped pidfd baseline
+before landing. It does not.
 
 Shipped: `pidfd_open` at spawn for every managed service; the monitor
 `poll()`s the pidfds so exit wakes supervision instantly. `waitpid` stays
@@ -342,8 +340,8 @@ New top-level Mintlify nav group `docs/kernel-mode/`:
 CI: enable both musl release builds (currently commented out), re-enable Docker
 UAT, add Alpine user/system/PID1 lanes, macOS parity on native runners.
 
-> [!CAUTION]
-> **Red-team reduced scope (Codex 2026-08-11):** defensible v1 = Phases 0–1a
+> [!NOTE]
+> **Red-team reduced scope (2026-08-11), not adopted:** defensible v1 = Phases 0–1a
 > only, Linux-only, plus pidfd exit detection and the sandbox deprecation
 > release. Defer 1b (PID1) and the macOS half of 2; cut 4 (eBPF) pending a
 > pidfd baseline comparison. Hard gates regardless of scope decision: green
@@ -375,8 +373,11 @@ UAT, add Alpine user/system/PID1 lanes, macOS parity on native runners.
   added, [SG0734](/how-it-works/dialog/codes#sg0734) folded into [SG0731](/how-it-works/dialog/codes#sg0731)/0732 evidence), uniform fail-closed for all
   security keys, `sysg init` + wait broker, `Type=notify` foreground, test
   renames + fault-injection lanes.
-- 2026-08-12: Phase 4 resolved — pidfd ships as the kernel-assisted mechanism; eBPF evaluated and declined (does not beat the pidfd baseline; residual gap not reliably closable by eBPF, cgroup v2 is the authoritative boundary). the SG073x codes reserved. All four phases complete.
-- 2026-08-11: Independent Codex red-team review embedded as callouts
-  (foundation stability, demand evidence, pidfd-vs-eBPF, audit economics,
-  fail-closed migration, PID1 reexec, macOS double supervision, naming, ops
-  UX, reduced v1 scope). Owner decision on scope reduction pending.
+- 2026-08-12: Phase 4 resolved — pidfd ships as the kernel-assisted mechanism;
+  eBPF evaluated and declined (does not beat the pidfd baseline; the residual
+  gap is not reliably closable by eBPF, and cgroup v2 is the authoritative
+  boundary). SG073x reserved. All four phases complete.
+- 2026-08-11: Independent red-team review embedded as callouts (foundation
+  stability, demand evidence, pidfd-vs-eBPF, audit economics, fail-closed
+  migration, PID 1 reexec, macOS double supervision, naming, ops UX, reduced
+  v1 scope). Scope reduction rejected; objections retained as quality gates.

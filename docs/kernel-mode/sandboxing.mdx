@@ -4,11 +4,12 @@ title: Kernel-Enforced Sandboxing
 
 # Kernel-Enforced Sandboxing
 
-sysg configures kernel enforcement mechanisms per service: today that means
-rlimits, capabilities, namespaces, and cgroups (Linux, root); the roadmap
-completes seccomp, `no_new_privs`, and Landlock.
+sysg configures kernel enforcement mechanisms per service: rlimits,
+capabilities, namespaces, cgroups, seccomp, `no_new_privs`, and Landlock.
+All of them are Linux, root, and enforced by the kernel — sysg only
+configures them.
 
-## What enforces today
+## Limits, capabilities, and namespaces
 
 ```yaml
 services:
@@ -24,9 +25,9 @@ services:
       network: true
 ```
 
-## Enforced today (schema v3, Linux)
+## Syscall and filesystem confinement (schema v3)
 
-Under `version: "3"`, these are really enforced by the kernel:
+Under `version: "3"`:
 
 - **`isolation.landlock: { ro_paths, rw_paths }`** — a Landlock filesystem
   sandbox (Linux 5.13+). Paths not listed become inaccessible.
@@ -50,34 +51,31 @@ An unsupported kernel or a malformed policy **refuses the service**
 rather than running it unprotected. `baseline-v1` is frozen; a different or
 stricter policy will ship as `baseline-v2`, never as a silent edit.
 
-## Still unenforced — read this
+## Keys that do not enforce
 
-`isolation.apparmor_profile` and `isolation.selinux_context` are accepted by
-the schema but **warn and run the service unenforced** under v2. Treat them as
-documentation, not protection.
-
-The planned semantics
-([RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md))
-are uniformly **fail-closed**: any security key that cannot be enforced
-refuses to start the service.
+`isolation.apparmor_profile`, `isolation.selinux_context`,
+`isolation.private_devices`, and `isolation.private_tmp` are accepted by the
+schema but **run the service unenforced**. Treat them as documentation, not
+protection.
 
 <Warning>
-**Deprecation in progress.** As of v0.63, every unenforceable security key
-(`seccomp`, `apparmor_profile`, `selinux_context`, `private_devices`,
-`private_tmp`) logs a deprecation warning at service start: a future release
-will refuse these keys with
-[SG0721](/how-it-works/dialog/codes#sg0721)/[SG0722](/how-it-works/dialog/codes#sg0722)
-instead of running unprotected. Remove the keys or plan for the refusal —
-the flip lands behind a manifest schema bump.
+**Deprecation window.** Each of these keys emits
+[SG0721](/how-it-works/dialog/codes#sg0721) at service start. A future release
+refuses them instead of running unprotected, behind a manifest schema bump.
+Remove the keys or plan for the refusal.
 </Warning>
 
-## Planned diagnostics
+## Diagnostics
 
-- [SG0721](/how-it-works/dialog/codes#sg0721) — sandbox capability
-  unsupported on this platform
+- [SG0721](/how-it-works/dialog/codes#sg0721) — a security key was accepted
+  but cannot be enforced; the service runs unprotected
 - [SG0722](/how-it-works/dialog/codes#sg0722) — seccomp filter could not be
-  built or applied; service refused
+  built, compiled, or applied; service refused
 - [SG0723](/how-it-works/dialog/codes#sg0723) — `no_new_privs` could not be
   set; service refused
 - [SG0724](/how-it-works/dialog/codes#sg0724) — Landlock requested but the
   kernel ABI is unavailable or insufficient; service refused
+- [SG0725](/how-it-works/dialog/codes#sg0725) — unknown seccomp profile; the
+  only built-in is `baseline-v1`
+- [SG0726](/how-it-works/dialog/codes#sg0726) — seccomp is unsupported on this
+  CPU architecture
