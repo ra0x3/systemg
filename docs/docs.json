@@ -13,6 +13,11 @@
     "light": "#679bfc",
     "dark": "#4463a0"
   },
+  "integrations": {
+    "gtm": {
+      "tagId": "GTM-TZ59MZS2"
+    }
+  },
   "navbar": {
     "links": [
       {
