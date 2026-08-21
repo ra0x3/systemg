@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # PARITY: start → status → stop must behave identically in user mode and
-# system mode (--sys). RFC 0001 §6.1 mode-parity contract.
+# system mode (--sys). Mode-parity contract.
 #
 # HARD INVARIANTS
 #   - both lanes boot 2 units to running,

@@ -4532,13 +4532,12 @@ impl Supervisor {
         if let Some(privilege) = privilege.clone() {
             let privilege_pre_exec = privilege.clone();
             unsafe {
+                // No logging here: this runs after fork, where allocating or
+                // taking the logger lock can deadlock the child.
                 cmd.pre_exec(move || {
-                    privilege_pre_exec.apply_pre_exec().map_err(|err| {
-                        eprintln!(
-                            "systemg spawn pre_exec: privilege setup failed: {err}"
-                        );
-                        err
-                    })
+                    privilege_pre_exec
+                        .apply_pre_exec()
+                        .map_err(|fault| std::io::Error::from_raw_os_error(fault.errno))
                 });
             }
         }

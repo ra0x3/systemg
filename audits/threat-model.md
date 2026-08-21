@@ -1,6 +1,6 @@
 # Threat Model
 
-Living document for RFC 0001 (kernel mode). Updated per phase; per-RC audit
+Living document for kernel mode. Updated as capabilities land; per-RC audit
 reports snapshot the version they audited.
 
 ## Trust boundary
@@ -55,4 +55,4 @@ output, and — in system mode — every non-root local user.
 
 Defending against a hostile root, a hostile manifest author, or kernel bugs.
 Seccomp/AppArmor/SELinux enforcement gaps are typed refusals, not silent
-acceptance (RFC 0001 §6.3).
+acceptance.

@@ -439,13 +439,12 @@ Re-run the installer to regenerate it.
 `--sys` targets the root-owned system runtime and requires root privileges.
 Re-run under `sudo`, or drop `--sys` to operate on the per-user runtime.
 
-## Reserved: kernel mode (planned)
+## Container-init and sandboxing
 
-These codes are reserved by
-[RFC 0001](https://github.com/ra0x3/systemg/blob/main/rfcs/0001-kernel-mode.md)
-for capabilities that are designed but not yet shipped. They are listed so
-their anchors and meanings are stable before the first release that emits
-them.
+Codes emitted by `sysg init` (container PID 1) and by kernel-enforced
+sandboxing. The last three are reserved: they have no callsites, and are
+listed so their anchors and meanings stay stable if kernel-assisted
+observation ever ships.
 
 ### [SG0711](/how-it-works/dialog/codes#sg0711)
 
@@ -505,6 +504,56 @@ the spawn is refused before fork.
 
 seccomp is only supported on x86_64 and aarch64. On any other architecture a
 manifest requesting `isolation.seccomp` is refused rather than run unfiltered.
+
+### [SG0727](/how-it-works/dialog/codes#sg0727)
+
+A namespace listed under `isolation` could not be unshared. `EPERM` and
+`EINVAL` are tolerated — a nested container often refuses namespaces the
+service runs fine without — so this code means the kernel failed the request
+for some other reason and the service is refused.
+
+## Privilege drop
+
+Codes emitted while a service's child process takes on its configured
+identity, between `fork` and `exec`. Each one means the service was refused
+rather than started with more privilege than it asked for.
+
+### [SG0741](/how-it-works/dialog/codes#sg0741)
+
+A resource limit (`nofile`, `nproc`, or `memlock`) could not be set.
+
+### [SG0742](/how-it-works/dialog/codes#sg0742)
+
+The scheduling priority from `limits.nice` could not be set.
+
+### [SG0743](/how-it-works/dialog/codes#sg0743)
+
+The CPU set from `limits.cpu_affinity` could not be applied — usually a CPU
+index that does not exist on this machine.
+
+### [SG0744](/how-it-works/dialog/codes#sg0744)
+
+The supplementary group list could not be installed. The service is refused:
+starting it would leave it holding the supervisor's groups.
+
+### [SG0745](/how-it-works/dialog/codes#sg0745)
+
+The primary group could not be switched to the configured `group`.
+
+### [SG0746](/how-it-works/dialog/codes#sg0746)
+
+The user could not be switched to the configured `user`. The service is
+refused rather than run with the supervisor's identity.
+
+### [SG0747](/how-it-works/dialog/codes#sg0747)
+
+The capabilities listed under `capabilities` could not be retained across the
+identity switch, so the service would have started without them.
+
+### [SG0748](/how-it-works/dialog/codes#sg0748)
+
+Capabilities could not be fully dropped, so the service would have kept more
+privilege than it was configured with.
 
 ### [SG0731](/how-it-works/dialog/codes#sg0731)
 

@@ -1,13 +1,14 @@
 # Security Audits
 
-This directory is the auditable security record for systemg's kernel-mode
-program (RFC 0001). `reports/` holds the historical free-form security
-reviews; `audits/` holds the formal per-milestone records the docs link to.
+This directory is the auditable security record for systemg's kernel mode.
+`reports/` holds the historical free-form security reviews; `audits/` holds
+the formal per-milestone records the docs link to.
 
 ## Policy
 
-- Every **release-candidate milestone of a root-facing phase** (RFC 0001
-  Phases 1a–4) ships an immutable audit report here before the release tags.
+- No formal release-candidate audit has been published yet. The intent is that
+  every **release-candidate milestone of a root-facing capability** ships an
+  immutable audit report here before the release tags.
   Patch releases inherit the most recent RC report; they do not get their own.
 - A report is immutable once its release tags. Corrections land as a new
   report, never as edits.

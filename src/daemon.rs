@@ -1,11 +1,11 @@
 //! Service management daemon.
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::{BufReader, ErrorKind, Read},
-    os::unix::process::CommandExt,
+    os::unix::process::{CommandExt, ExitStatusExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     str::FromStr,
@@ -134,6 +134,157 @@ mod systemtime_serde {
 }
 
 /// Builds env map for service (inline vars override file entries).
+/// Carries a child-side sandbox failure back to the parent.
+///
+/// Rust's exec handshake returns only an errno, so an enforcement failure would
+/// otherwise lose its SG identity and surface as a generic start failure. The
+/// child writes one byte naming the fault; the parent reads it back and rebuilds
+/// the typed diagnostic.
+///
+/// Off Linux the child enforces nothing, so this degrades to a no-op rather than
+/// opening a pipe: `pipe()` plus `fcntl()` is not atomic, and a concurrent fork
+/// between them would leak a descriptor no later `fcntl` can reach.
+#[cfg(target_os = "linux")]
+struct ChildReportChannel {
+    rx: OwnedFd,
+    tx: Option<OwnedFd>,
+}
+
+#[cfg(target_os = "linux")]
+impl ChildReportChannel {
+    /// Opens the channel. Both ends are `O_CLOEXEC`, so a successful `exec`
+    /// closes them; `O_NONBLOCK` keeps the parent's read from ever blocking.
+    fn open() -> Result<Self, ProcessManagerError> {
+        let mut fds = [0 as libc::c_int; 2];
+        let rc =
+            unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if rc != 0 {
+            return Err(ProcessManagerError::ConfigReadError(
+                std::io::Error::last_os_error(),
+            ));
+        }
+
+        // Move clear of 0..=2. `Command` remaps stdio in the child before
+        // pre_exec runs, so a write end sitting on a stdio number would be
+        // replaced and the fault byte would land in the service's output.
+        for fd in &mut fds {
+            if *fd <= libc::STDERR_FILENO {
+                let moved = unsafe {
+                    libc::fcntl(*fd, libc::F_DUPFD_CLOEXEC, libc::STDERR_FILENO + 1)
+                };
+                if moved < 0 {
+                    let err = std::io::Error::last_os_error();
+                    unsafe { libc::close(fds[0]) };
+                    unsafe { libc::close(fds[1]) };
+                    return Err(ProcessManagerError::ConfigReadError(err));
+                }
+                unsafe { libc::close(*fd) };
+                *fd = moved;
+            }
+        }
+
+        Ok(Self {
+            rx: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+            tx: unsafe { Some(OwnedFd::from_raw_fd(fds[1])) },
+        })
+    }
+
+    /// The descriptor the child writes to. Plain `int`, so the pre_exec closure
+    /// captures it by copy and owns nothing.
+    fn writer(&self) -> libc::c_int {
+        self.tx.as_ref().map_or(-1, |fd| fd.as_raw_fd())
+    }
+
+    /// Closes the parent's write end. While it stays open the pipe never
+    /// reports end-of-file, so this must happen before reading.
+    fn close_writer(&mut self) {
+        self.tx = None;
+    }
+
+    /// Reads back a fault the child reported, if any.
+    ///
+    /// One non-blocking read, never a loop to end-of-file: an unrelated
+    /// concurrent fork may still hold a copy of the write end until it execs.
+    /// `EAGAIN` means the child reported no sandbox failure.
+    fn take_fault(&self) -> Option<crate::childfault::ChildFault> {
+        let mut byte = [0u8; 1];
+        loop {
+            let n =
+                unsafe { libc::read(self.rx.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
+            if n < 0 && interrupted() {
+                continue;
+            }
+            if n != 1 {
+                return None;
+            }
+            return crate::childfault::ChildFault::from_byte(byte[0]);
+        }
+    }
+}
+
+/// No-op channel off Linux, where the child enforces nothing.
+#[cfg(not(target_os = "linux"))]
+struct ChildReportChannel;
+
+#[cfg(not(target_os = "linux"))]
+impl ChildReportChannel {
+    fn open() -> Result<Self, ProcessManagerError> {
+        Ok(Self)
+    }
+
+    fn writer(&self) -> libc::c_int {
+        -1
+    }
+
+    fn close_writer(&mut self) {}
+
+    fn take_fault(&self) -> Option<crate::childfault::ChildFault> {
+        None
+    }
+}
+
+/// Whether the last syscall was interrupted. Reads `errno` through a
+/// non-allocating `io::Error`, so it is safe on the post-fork child path.
+fn interrupted() -> bool {
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+}
+
+/// Reports `fault` to the parent from inside the child.
+///
+/// Called between `fork` and `exec`, so it must stay async-signal-safe: a
+/// one-byte stack buffer and a raw `write`, with no allocation and no locking.
+/// A failed write is not recoverable here; it degrades to an untyped errno.
+fn write_child_fault(fd: libc::c_int, fault: crate::childfault::ChildFault) {
+    if fd < 0 {
+        return;
+    }
+    let byte = [fault.as_byte()];
+    loop {
+        let n = unsafe { libc::write(fd, byte.as_ptr().cast(), 1) };
+        if n < 0 && interrupted() {
+            continue;
+        }
+        return;
+    }
+}
+
+/// Builds the typed diagnostic for a sandbox refusal, so the service reports
+/// its real SG code instead of a generic start failure.
+fn child_fault_diagnostic(
+    service: &str,
+    fault: crate::childfault::ChildFault,
+    detail: &str,
+) -> ProcessManagerError {
+    let diag = crate::diag::Diagnostic::error(
+        fault.code(),
+        format!("service '{service}' was refused: {detail}"),
+    )
+    .note(
+        "The service is refused rather than started without the protection it asked for.",
+    );
+    ProcessManagerError::Diag(Box::new(diag))
+}
+
 fn collect_service_env(
     env: &Option<EnvConfig>,
     project_root: &Path,
@@ -4728,10 +4879,15 @@ impl Daemon {
                 .as_ref()
                 .and_then(|i| i.seccomp.as_deref()),
         )
-        .map_err(|source| ProcessManagerError::PrivilegeSetupFailed {
-            service: service_name.to_string(),
-            source,
+        .map_err(|fault| {
+            child_fault_diagnostic(service_name, fault.fault, &fault.message)
         })?;
+
+        // Carries a child-side sandbox failure back to the parent. The exec
+        // handshake returns only an errno, so without this the SG identity of
+        // an enforcement failure is lost and the service reports as SG0008.
+        let mut report_channel = ChildReportChannel::open()?;
+        let fault_tx_raw = report_channel.writer();
 
         unsafe {
             cmd.pre_exec(move || {
@@ -4747,27 +4903,34 @@ impl Daemon {
                 // Orphaned services (if the supervisor dies)
                 // are recoverable — reconciled and reaped from the pid files on
                 // restart — whereas a wrongly-killed sibling is not.
+                //
+                // Nothing on these paths may allocate or take a lock: this runs
+                // after fork in a child of a multi-threaded parent, where only
+                // async-signal-safe operations are legal.
                 if libc::setsid() < 0 {
-                    let err = std::io::Error::last_os_error();
-                    eprintln!("systemg pre_exec: setsid failed: {:?}", err);
-                    return Err(err);
+                    return Err(std::io::Error::last_os_error());
                 }
 
-                privilege_clone.apply_pre_exec().map_err(|err| {
-                    eprintln!("systemg pre_exec: privilege setup failed: {}", err);
-                    err
+                privilege_clone.apply_pre_exec().map_err(|fault| {
+                    write_child_fault(fault_tx_raw, fault.fault);
+                    std::io::Error::from_raw_os_error(fault.errno)
                 })?;
 
                 // Enforcement is the last thing before exec, after the UID/GID
                 // switch and capability trimming: no_new_privs, then Landlock.
-                sandbox_plan.apply().map_err(|err| {
-                    eprintln!("systemg pre_exec: sandbox enforcement failed: {}", err);
-                    err
+                sandbox_plan.apply().map_err(|fault| {
+                    write_child_fault(fault_tx_raw, fault.fault);
+                    std::io::Error::from_raw_os_error(fault.errno)
                 })
             });
         }
 
-        match cmd.spawn() {
+        let spawned = cmd.spawn();
+        // Must close before reading: while this end stays open in the parent the
+        // pipe never reports end-of-file.
+        report_channel.close_writer();
+
+        match spawned {
             Ok(mut child) => {
                 let pid = child.id();
                 debug!("Service '{service_name}' started with PID: {pid}");
@@ -4836,6 +4999,16 @@ impl Daemon {
                 Ok((pid, pgid))
             }
             Err(e) => {
+                if let Some(fault) = report_channel.take_fault() {
+                    error!(
+                        "Sandbox enforcement failed for service '{service_name}': {e}"
+                    );
+                    return Err(child_fault_diagnostic(
+                        service_name,
+                        fault,
+                        &e.to_string(),
+                    ));
+                }
                 error!("Failed to start service '{service_name}': {e}");
                 Err(ProcessManagerError::ServiceStartError {
                     service: service_name.to_string(),

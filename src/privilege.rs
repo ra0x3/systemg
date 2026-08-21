@@ -29,6 +29,7 @@ use {
 #[cfg(target_os = "linux")]
 use crate::config::CgroupConfig;
 use crate::{
+    childfault::{ApplyFault, ChildFault},
     config::{IsolationConfig, LimitValue, LimitsConfig, ServiceConfig},
     runtime,
 };
@@ -46,6 +47,21 @@ pub struct UserContext {
 }
 
 impl UserContext {
+    /// The exact list to hand `setgroups`: the target gid first, then the
+    /// configured supplementary groups.
+    ///
+    /// Built in the parent. Returns empty when no identity switch is
+    /// configured, which the child reads as "leave groups alone".
+    fn setgroups_list(&self) -> Vec<libc::gid_t> {
+        if self.uid.is_none() && self.gid.is_none() && self.supplementary.is_empty() {
+            return Vec::new();
+        }
+        let mut list = Vec::with_capacity(self.supplementary.len() + 1);
+        list.push(self.gid.unwrap_or_else(|| getgid().as_raw()));
+        list.extend_from_slice(&self.supplementary);
+        list
+    }
+
     /// Handles new.
     fn new() -> Self {
         Self {
@@ -96,12 +112,62 @@ pub struct PrivilegeContext {
     pub capabilities: Vec<String>,
     /// Namespace isolation configuration for the process
     pub isolation: Option<IsolationConfig>,
+    /// The exact supplementary group list to install, target gid first.
+    ///
+    /// Built in the parent: the child cannot allocate, so the vector it hands
+    /// to `setgroups` must already exist. Empty means no group switch.
+    groups: Vec<libc::gid_t>,
+    /// Capabilities parsed in the parent, so the child never parses strings.
+    #[cfg(target_os = "linux")]
+    parsed_caps: HashSet<Capability>,
 }
 
 /// Names the first security key a service declares that systemg cannot yet
 /// enforce, or `None` if every declared key is enforceable. seccomp, AppArmor,
 /// SELinux, and the private-devices/tmp mounts are not yet enforced, so under
 /// fail-closed they refuse rather than run unprotected.
+/// Warns about security keys the schema accepts but this build cannot enforce.
+///
+/// Emitted in the parent: these depend only on configuration, and `warn!` after
+/// `fork` allocates and takes the logger lock, which can deadlock the child.
+fn warn_unenforced_keys(service_name: &str, service: &ServiceConfig) {
+    let Some(isolation) = service.isolation.as_ref() else {
+        return;
+    };
+    // isolation.seccomp and isolation.landlock are deliberately absent: they are
+    // enforced by crate::sandbox, so warning about them would contradict the
+    // protection actually applied.
+    for key in [
+        isolation
+            .apparmor_profile
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
+            .then_some("isolation.apparmor_profile"),
+        isolation
+            .selinux_context
+            .as_ref()
+            .is_some_and(|v| !v.is_empty())
+            .then_some("isolation.selinux_context"),
+        isolation
+            .private_devices
+            .unwrap_or(false)
+            .then_some("isolation.private_devices"),
+        isolation
+            .private_tmp
+            .unwrap_or(false)
+            .then_some("isolation.private_tmp"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        warn!(
+            "service '{service_name}' declares '{key}', which this build cannot enforce; \
+             the service runs without it (SG0721). A future release refuses the key \
+             instead of running unprotected."
+        );
+    }
+}
+
 fn unenforceable_security_key(service: &ServiceConfig) -> Option<&'static str> {
     let isolation = service.isolation.as_ref()?;
     // isolation.seccomp and isolation.landlock are now enforced (see
@@ -151,6 +217,8 @@ impl PrivilegeContext {
             ));
         }
 
+        warn_unenforced_keys(service_name, service);
+
         let mut context = PrivilegeContext {
             service_name: service_name.to_string(),
             service_hash: service.compute_hash(),
@@ -168,6 +236,11 @@ impl PrivilegeContext {
                 None
             }
         });
+
+        #[cfg(target_os = "linux")]
+        {
+            context.parsed_caps = parse_caps(&context.capabilities)?;
+        }
 
         let requested_group = service.group.clone();
         let supplementary = service.supplementary_groups.clone().unwrap_or_default();
@@ -244,7 +317,16 @@ impl PrivilegeContext {
         }
 
         context.user = user_ctx;
+        context.prepare();
         Ok(context)
+    }
+
+    /// Prepares the derived fields the child depends on.
+    ///
+    /// Must run in the parent: the child cannot allocate, so anything it hands
+    /// to a syscall has to exist before `fork`.
+    pub fn prepare(&mut self) {
+        self.groups = self.user.setgroups_list();
     }
 
     /// Executes all privilege adjustments inside the child process before
@@ -254,7 +336,7 @@ impl PrivilegeContext {
     /// Call this only between `fork` and `exec` in the child process. Invoking
     /// it in the supervisor context will mutate the supervisor's privileges and
     /// can leave the process in an inconsistent state.
-    pub unsafe fn apply_pre_exec(&self) -> io::Result<()> {
+    pub unsafe fn apply_pre_exec(&self) -> Result<(), ApplyFault> {
         self.apply_isolation()?;
         self.apply_limits()?;
         self.apply_nice()?;
@@ -268,7 +350,7 @@ impl PrivilegeContext {
     }
 
     /// Handles apply limits.
-    fn apply_limits(&self) -> io::Result<()> {
+    fn apply_limits(&self) -> Result<(), ApplyFault> {
         let Some(limits) = &self.limits else {
             return Ok(());
         };
@@ -290,21 +372,21 @@ impl PrivilegeContext {
     }
 
     /// Handles apply nice.
-    fn apply_nice(&self) -> io::Result<()> {
+    fn apply_nice(&self) -> Result<(), ApplyFault> {
         let Some(limits) = &self.limits else {
             return Ok(());
         };
         if let Some(nice) = limits.nice {
             let res = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice as c_int) };
             if res != 0 {
-                return Err(io::Error::last_os_error());
+                return Err(ApplyFault::last(ChildFault::Priority));
             }
         }
         Ok(())
     }
 
     /// Handles apply cpu affinity.
-    fn apply_cpu_affinity(&self) -> io::Result<()> {
+    fn apply_cpu_affinity(&self) -> Result<(), ApplyFault> {
         let Some(limits) = &self.limits else {
             return Ok(());
         };
@@ -316,9 +398,11 @@ impl PrivilegeContext {
         {
             let mut set = CpuSet::new();
             for cpu in cpus {
-                set.set(*cpu as usize).map_err(io::Error::other)?;
+                set.set(*cpu as usize)
+                    .map_err(|_| ApplyFault::last(ChildFault::CpuAffinity))?;
             }
-            sched::sched_setaffinity(Pid::from_raw(0), &set).map_err(io::Error::other)?;
+            sched::sched_setaffinity(Pid::from_raw(0), &set)
+                .map_err(|_| ApplyFault::last(ChildFault::CpuAffinity))?;
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -330,7 +414,7 @@ impl PrivilegeContext {
         Ok(())
     }
 
-    unsafe fn apply_user_switch(&self) -> io::Result<()> {
+    unsafe fn apply_user_switch(&self) -> Result<(), ApplyFault> {
         if self.user.uid.is_none()
             && self.user.gid.is_none()
             && self.user.supplementary.is_empty()
@@ -342,30 +426,36 @@ impl PrivilegeContext {
         // the child does not inherit the supervisor's (typically root's) groups.
         // The list is set to exactly the configured supplementary groups plus the
         // target gid; with no configuration it collapses to just the target gid.
-        if self.user.uid.is_some() || self.user.gid.is_some() {
-            let mut buf = self.user.supplementary.clone();
-            buf.insert(0, self.user.gid.unwrap_or_else(|| getgid().as_raw()));
+        // The list is built in the parent. If a switch is configured but the
+        // list is empty, this context never went through `from_service` and the
+        // service would silently keep the supervisor's groups: refuse instead.
+        if self.groups.is_empty() {
+            return Err(ApplyFault::bare(ChildFault::SupplementaryGroups));
+        }
+
+        {
             #[cfg(target_os = "linux")]
-            let group_len: size_t = buf.len();
+            let group_len: size_t = self.groups.len();
             #[cfg(not(target_os = "linux"))]
-            let group_len: c_int = buf.len().try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidInput, "too many groups")
-            })?;
-            if unsafe { libc::setgroups(group_len, buf.as_ptr()) } != 0 {
-                return Err(io::Error::last_os_error());
+            let group_len: c_int = match self.groups.len().try_into() {
+                Ok(len) => len,
+                Err(_) => return Err(ApplyFault::bare(ChildFault::SupplementaryGroups)),
+            };
+            if unsafe { libc::setgroups(group_len, self.groups.as_ptr()) } != 0 {
+                return Err(ApplyFault::last(ChildFault::SupplementaryGroups));
             }
         }
 
         if let Some(gid) = self.user.gid
             && unsafe { libc::setgid(gid as id_t) } != 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(ApplyFault::last(ChildFault::PrimaryGid));
         }
 
         if let Some(uid) = self.user.uid
             && unsafe { libc::setuid(uid as id_t) } != 0
         {
-            return Err(io::Error::last_os_error());
+            return Err(ApplyFault::last(ChildFault::UidSwitch));
         }
 
         Ok(())
@@ -373,7 +463,7 @@ impl PrivilegeContext {
 
     #[cfg(target_os = "linux")]
     /// Handles apply capabilities pre user.
-    fn apply_capabilities_pre_user(&self) -> io::Result<()> {
+    fn apply_capabilities_pre_user(&self) -> Result<(), ApplyFault> {
         if !getuid().is_root() {
             return Ok(());
         }
@@ -398,8 +488,8 @@ impl PrivilegeContext {
             return Ok(());
         }
 
-        caps::securebits::set_keepcaps(true).map_err(caps_err)?;
-        let caps = parse_caps(&self.capabilities)?;
+        caps::securebits::set_keepcaps(true)
+            .map_err(|_| ApplyFault::last(ChildFault::CapabilityRetention))?;
 
         for set in [
             CapSet::Effective,
@@ -407,16 +497,18 @@ impl PrivilegeContext {
             CapSet::Inheritable,
             CapSet::Bounding,
         ] {
-            caps::set(None, set, &caps).map_err(caps_err)?;
+            caps::set(None, set, &self.parsed_caps)
+                .map_err(|_| ApplyFault::last(ChildFault::CapabilityRetention))?;
         }
 
-        caps::clear(None, CapSet::Ambient).map_err(caps_err)?;
+        caps::clear(None, CapSet::Ambient)
+            .map_err(|_| ApplyFault::last(ChildFault::CapabilityReduction))?;
         Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
     /// Handles apply capabilities pre user.
-    fn apply_capabilities_pre_user(&self) -> io::Result<()> {
+    fn apply_capabilities_pre_user(&self) -> Result<(), ApplyFault> {
         if !self.capabilities.is_empty() {
             warn!("Capabilities requested but unsupported on this platform");
         }
@@ -425,7 +517,7 @@ impl PrivilegeContext {
 
     #[cfg(target_os = "linux")]
     /// Handles apply capabilities post user.
-    fn apply_capabilities_post_user(&self) -> io::Result<()> {
+    fn apply_capabilities_post_user(&self) -> Result<(), ApplyFault> {
         if self.user.uid.is_none() && !getuid().is_root() {
             return Ok(());
         }
@@ -435,19 +527,19 @@ impl PrivilegeContext {
             return Ok(());
         }
 
-        let caps = parse_caps(&self.capabilities)?;
-        caps::set(None, CapSet::Ambient, &caps).map_err(caps_err)?;
+        caps::set(None, CapSet::Ambient, &self.parsed_caps)
+            .map_err(|_| ApplyFault::last(ChildFault::CapabilityRetention))?;
         Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
     /// Handles apply capabilities post user.
-    fn apply_capabilities_post_user(&self) -> io::Result<()> {
+    fn apply_capabilities_post_user(&self) -> Result<(), ApplyFault> {
         Ok(())
     }
 
     /// Handles apply isolation.
-    fn apply_isolation(&self) -> io::Result<()> {
+    fn apply_isolation(&self) -> Result<(), ApplyFault> {
         let Some(isolation) = &self.isolation else {
             return Ok(());
         };
@@ -471,51 +563,17 @@ impl PrivilegeContext {
             }
 
             if !flags.is_empty() {
+                // EPERM and EINVAL are the nested-container cases: the kernel
+                // will not grant the namespace, and refusing here would break
+                // every service that runs fine without it. Anything else is a
+                // real failure. The parent logged the request, so the child
+                // does not warn -- it cannot, without taking the logger lock.
                 match sched::unshare(flags) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        let io_err = io::Error::other(err);
-                        match err {
-                            Errno::EPERM => {
-                                warn!(
-                                    "Failed to unshare namespaces ({flags:?}) due to EPERM; continuing without isolation"
-                                );
-                            }
-                            Errno::EINVAL => {
-                                warn!(
-                                    "Kernel does not support requested namespaces ({flags:?}); continuing without isolation"
-                                );
-                            }
-                            _ => return Err(io_err),
-                        }
+                    Ok(()) | Err(Errno::EPERM) | Err(Errno::EINVAL) => {}
+                    Err(_) => {
+                        return Err(ApplyFault::last(ChildFault::NamespaceUnshare));
                     }
                 }
-            }
-
-            if isolation.private_devices.unwrap_or(false) {
-                warn!(
-                    "PrivateDevices requested; additional mount setup not yet implemented. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
-                );
-            }
-            if isolation.private_tmp.unwrap_or(false) {
-                warn!(
-                    "PrivateTmp requested; additional mount setup not yet implemented. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
-                );
-            }
-            if isolation.seccomp.is_some() {
-                warn!(
-                    "Seccomp profiles not yet implemented; running WITHOUT filters. DEPRECATION: a future release refuses unenforceable security keys (SG0721/SG0722, fail-closed) instead of running unprotected"
-                );
-            }
-            if isolation.apparmor_profile.is_some() {
-                warn!(
-                    "AppArmor profiles not yet implemented; running WITHOUT confinement. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
-                );
-            }
-            if isolation.selinux_context.is_some() {
-                warn!(
-                    "SELinux contexts not yet implemented; running WITHOUT adjustments. DEPRECATION: a future release refuses unenforceable security keys (SG0721, fail-closed) instead of running unprotected"
-                );
             }
         }
 
@@ -531,10 +589,7 @@ impl PrivilegeContext {
                 || isolation.apparmor_profile.is_some()
                 || isolation.selinux_context.is_some();
             if enable {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "isolation features are only available on Linux",
-                ));
+                return Err(ApplyFault::bare(ChildFault::KeyUnenforceable));
             }
         }
 
@@ -613,7 +668,7 @@ fn clear_cap_set_best_effort(set: CapSet) {
 }
 
 /// Sets rlimit.
-fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
+fn set_rlimit(which: c_int, value: &LimitValue) -> Result<(), ApplyFault> {
     let rlim = match value {
         LimitValue::Fixed(v) => rlimit {
             rlim_cur: *v as libc::rlim_t,
@@ -630,7 +685,7 @@ fn set_rlimit(which: c_int, value: &LimitValue) -> io::Result<()> {
     #[cfg(not(target_os = "linux"))]
     let res = unsafe { libc::setrlimit(which, &rlim as *const rlimit) };
     if res != 0 {
-        return Err(io::Error::last_os_error());
+        return Err(ApplyFault::last(ChildFault::ResourceLimit));
     }
     Ok(())
 }
@@ -649,12 +704,6 @@ fn parse_caps(names: &[String]) -> io::Result<HashSet<Capability>> {
         caps_set.insert(cap);
     }
     Ok(caps_set)
-}
-
-#[cfg(target_os = "linux")]
-/// Handles caps err.
-fn caps_err(err: CapsError) -> io::Error {
-    io::Error::other(err.to_string())
 }
 
 #[cfg(target_os = "linux")]
@@ -758,7 +807,7 @@ mod tests {
             return;
         };
 
-        let ctx = PrivilegeContext {
+        let mut ctx = PrivilegeContext {
             user: UserContext {
                 uid: Some(user.uid.as_raw()),
                 gid: Some(user.gid.as_raw()),
@@ -766,6 +815,7 @@ mod tests {
             },
             ..PrivilegeContext::default()
         };
+        ctx.prepare();
 
         match unsafe { libc::fork() } {
             -1 => panic!("fork failed"),

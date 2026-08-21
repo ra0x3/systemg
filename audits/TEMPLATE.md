@@ -1,6 +1,6 @@
 # Audit Report — v0.X.Y
 
-- **Scope**: <RFC 0001 phases/tracks covered>
+- **Scope**: <capabilities covered>
 - **Tag / commit**: v0.X.Y / `<sha>`
 - **Date**: YYYY-MM-DD
 - **Maintainer reviewer**: <name>
