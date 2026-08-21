@@ -575,7 +575,7 @@ Probe configuration used to determine readiness/health during deployment workflo
 |-------|------|-------------|
 | `command` | string | Check command |
 | `url` | string | HTTP endpoint (alternative to command) |
-| `interval` | string | Time between attempts (default `2s`) |
+| `interval` | string | Time between attempts (default `2s`); must be greater than zero |
 | `attempt_timeout` | string | Maximum time for a **single** probe (default `30s`) |
 | `total_timeout` | string | Minimum total readiness window before giving up; `timeout` is accepted as a compatibility alias |
 | `retries` | number | Minimum attempts before giving up (default `3`) |
@@ -589,6 +589,25 @@ a slow-starting service's budget. A check fails only after both `retries` and
 [`SG0023`](/how-it-works/dialog/codes#sg0023) (a probe timed out), or
 [`SG0104`](/how-it-works/dialog/codes#sg0104) (ran but reported unhealthy).
 </Note>
+
+### Durations
+
+Every duration-valued field — `backoff`, `grace_period`, hook `timeout`, and the
+health-check windows — is a whole number with an optional unit:
+
+| Unit | Meaning | Example |
+|------|---------|---------|
+| `ms` | milliseconds | `interval: "100ms"` |
+| `s` | seconds | `backoff: "10s"` |
+| `m` | minutes | `total_timeout: "5m"` |
+| `h` | hours | `total_timeout: "1h"` |
+
+A bare number is seconds, so `15` and `15s` are the same value. Fractions
+(`0.5s`) are not accepted — write them in a smaller unit (`500ms`).
+
+Durations are checked when the manifest is loaded, so `sysg validate` refuses
+exactly what `sysg start` refuses, naming the offending field's path
+([`SG0210`](/how-it-works/dialog/codes#sg0210)).
 
 ### Deployment object
 

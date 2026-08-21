@@ -909,6 +909,20 @@ Target the project by id with -p instead.",
         .help_docs()
 }
 
+/// Renders a rejected manifest field as its SG0210 diagnostic.
+fn manifest_field_diag(
+    err: &systemg::error::ProcessManagerError,
+) -> Option<systemg::diag::Diagnostic> {
+    match err {
+        systemg::error::ProcessManagerError::ManifestFieldInvalid {
+            path,
+            value,
+            reason,
+        } => Some(systemg::config::manifest_field_diag(path, value, reason)),
+        _ => None,
+    }
+}
+
 /// Runs the `sysg` command-line entrypoint.
 fn main() -> process::ExitCode {
     let outcome = match run() {
@@ -916,6 +930,14 @@ fn main() -> process::ExitCode {
         Err(err) => {
             if let Some(diag) = err.downcast_ref::<DiagError>() {
                 eprintln!("{}", diag.0.render_for_terminal());
+            } else if let Some(diag) = err
+                .downcast_ref::<systemg::error::ProcessManagerError>()
+                .and_then(manifest_field_diag)
+            {
+                // A manifest the runtime cannot read is a config error, not a
+                // failed start: caught centrally so every command that loads a
+                // manifest reports SG0210 with the offending field path.
+                eprintln!("{}", diag.render_for_terminal());
             } else if let Some(diag) =
                 err.downcast_ref::<ControlError>().and_then(wait_diag)
             {

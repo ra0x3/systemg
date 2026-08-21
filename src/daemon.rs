@@ -7655,28 +7655,14 @@ impl Daemon {
         }
     }
 
-    /// Parses a user-facing duration string in the format `<number>[s|m|h]`.
+    /// Parses a manifest duration through the shared grammar.
+    ///
+    /// Manifests are duration-checked at load time, so a failure here means the
+    /// string reached the runtime without passing through a loader.
     fn parse_duration(raw: &str) -> Result<Duration, ProcessManagerError> {
-        let value = raw.trim();
-        if value.is_empty() {
-            return Err(Self::config_error("Duration value cannot be empty"));
-        }
-
-        let (amount_str, multiplier) = if let Some(stripped) = value.strip_suffix('s') {
-            (stripped.trim(), 1)
-        } else if let Some(stripped) = value.strip_suffix('m') {
-            (stripped.trim(), 60)
-        } else if let Some(stripped) = value.strip_suffix('h') {
-            (stripped.trim(), 3600)
-        } else {
-            (value, 1)
-        };
-
-        let amount: u64 = amount_str.parse().map_err(|_| {
-            Self::config_error(format!("Invalid duration value: '{raw}'"))
-        })?;
-
-        Ok(Duration::from_secs(amount.saturating_mul(multiplier)))
+        crate::config::duration::parse(raw).map_err(|reason| {
+            Self::config_error(format!("Invalid duration value '{raw}': {reason}"))
+        })
     }
 
     /// Returns a cloned service config with a single env var overridden for candidate startup.
@@ -10522,6 +10508,10 @@ sleep 30
         assert_eq!(
             Daemon::parse_duration("15").unwrap(),
             Duration::from_secs(15)
+        );
+        assert_eq!(
+            Daemon::parse_duration("100ms").unwrap(),
+            Duration::from_millis(100)
         );
     }
 

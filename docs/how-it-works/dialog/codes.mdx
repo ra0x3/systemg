@@ -284,6 +284,17 @@ A manifest's includes form a cycle, so assembly was refused.
 Includes nest deeper than 10 levels or exceed 8 MiB of cumulative fragment
 content, so assembly was refused.
 
+### [SG0210](/how-it-works/dialog/codes#sg0210)
+
+A manifest field holds a value systemg cannot interpret, so the manifest was
+refused before anything started. The diagnostic names the field's dotted path
+(e.g. `services.db.deployment.health_check.interval`) and the value it rejected.
+
+Durations are a whole number with an optional unit — `ms`, `s`, `m`, or `h`
+(`100ms`, `2s`, `5m`, `1h`). A bare number is seconds, so `15` and `15s` are the
+same value. Fractions (`0.5s`) are not accepted; write them in a smaller unit
+(`500ms`). A health check's `interval` must also be greater than zero.
+
 ## Restart
 
 ### [SG0301](/how-it-works/dialog/codes#sg0301)

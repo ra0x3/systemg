@@ -137,6 +137,9 @@ pub enum SgCode {
     IncludeCycle,
     /// SG0209 — includes exceed the nesting depth or cumulative size cap.
     IncludeLimit,
+    /// SG0210 — a manifest field holds a value systemg cannot interpret, so the
+    /// manifest was refused before anything was started.
+    ManifestFieldInvalid,
     /// SG0301 —a restart's new manifest is invalid; nothing was changed.
     ManifestRejected,
     /// SG0302 — a reconcile ran but left units short of their manifest target.
@@ -298,6 +301,7 @@ impl SgCode {
             SgCode::IncludeUnresolved => "SG0207",
             SgCode::IncludeCycle => "SG0208",
             SgCode::IncludeLimit => "SG0209",
+            SgCode::ManifestFieldInvalid => "SG0210",
             SgCode::ManifestRejected => "SG0301",
             SgCode::ReconcileIncomplete => "SG0302",
             SgCode::SupervisorRecycleFailed => "SG0303",
@@ -349,7 +353,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 84] = [
+    pub const ALL: [SgCode; 85] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -392,6 +396,7 @@ impl SgCode {
         SgCode::IncludeUnresolved,
         SgCode::IncludeCycle,
         SgCode::IncludeLimit,
+        SgCode::ManifestFieldInvalid,
         SgCode::ManifestRejected,
         SgCode::ReconcileIncomplete,
         SgCode::SupervisorRecycleFailed,
