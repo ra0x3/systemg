@@ -1,13 +1,18 @@
-//! Kernel-enforced sandboxing (Phase 3, Linux only).
+//! Kernel-enforced sandboxing (Linux only).
 //!
 //! The parent validates the requested policy and probes kernel support before
 //! any spawn (fail-closed: an unenforceable request refuses the service rather
 //! than running it unprotected). The child applies the enforcement between
 //! `fork` and `exec` using only the prepared plan, in a fixed order:
-//! `no_new_privs` → Landlock → seccomp. Filesystem paths are opened in the
+//! `no_new_privs` -> Landlock -> seccomp. Filesystem paths are opened in the
 //! parent (their `O_PATH` descriptors carried into the child) and the seccomp
-//! `BpfProgram` is compiled in the parent, so the child does no path
-//! resolution or allocation — only async-signal-safe raw syscalls.
+//! `BpfProgram` is compiled in the parent.
+//!
+//! A child-side failure cannot return a message: Rust's exec handshake carries
+//! only an errno, so the SG identity would be lost. `SandboxFault` therefore
+//! has a one-byte wire form the child writes to a dedicated pipe before it
+//! fails, and the parent turns back into a typed diagnostic. Those live in
+//! [`crate::childfault`].
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -18,7 +23,10 @@ mod imp {
         RulesetAttr, RulesetCreatedAttr, RulesetStatus,
     };
 
-    use crate::config::LandlockConfig;
+    use crate::{
+        childfault::{ApplyFault, ChildFault, PrepareFault},
+        config::LandlockConfig,
+    };
 
     /// A validated, kernel-supported sandbox plan built in the parent. The
     /// path `PathFd`s own their descriptors and are carried into the child, so
@@ -43,7 +51,7 @@ mod imp {
         pub fn prepare(
             landlock: Option<&LandlockConfig>,
             seccomp: Option<&str>,
-        ) -> io::Result<Self> {
+        ) -> Result<Self, PrepareFault> {
             let landlock = match landlock {
                 Some(cfg) if !cfg.ro_paths.is_empty() || !cfg.rw_paths.is_empty() => {
                     Some(LandlockPlan::prepare(cfg)?)
@@ -70,27 +78,27 @@ mod imp {
         /// capability trimming, immediately before `exec`.
         ///
         /// # Safety
-        /// Call only between `fork` and `exec` in the child. Only
-        /// async-signal-safe operations are performed (raw syscalls, no alloc).
-        pub unsafe fn apply(&self) -> io::Result<()> {
-            set_no_new_privs()?;
+        /// Call only between `fork` and `exec` in the child. The error path
+        /// allocates nothing, so a failure can be reported without violating
+        /// async-signal-safety.
+        pub unsafe fn apply(&self) -> Result<(), ApplyFault> {
+            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                return Err(ApplyFault::last(ChildFault::NoNewPrivs));
+            }
             if let Some(plan) = &self.landlock {
-                plan.apply()?;
+                plan.apply()
+                    .map_err(|_| ApplyFault::last(ChildFault::Landlock))?;
             }
             if let Some(program) = &self.seccomp {
-                seccompiler::apply_filter(program).map_err(|e| {
-                    io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        format!("seccomp filter could not be applied: {e} (SG0722)"),
-                    )
-                })?;
+                seccompiler::apply_filter(program)
+                    .map_err(|_| ApplyFault::last(ChildFault::SeccompFilter))?;
             }
             Ok(())
         }
     }
 
     impl LandlockPlan {
-        fn prepare(cfg: &LandlockConfig) -> io::Result<Self> {
+        fn prepare(cfg: &LandlockConfig) -> Result<Self, PrepareFault> {
             let open = |paths: &[PathBuf]| -> io::Result<Vec<PathFd>> {
                 paths
                     .iter()
@@ -123,53 +131,69 @@ mod imp {
                 )
             };
             if abi < 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "landlock is not available on this kernel (needs Linux 5.13+); schema v3 refuses the service rather than run it unconfined (SG0724)",
+                return Err(PrepareFault::new(
+                    ChildFault::Landlock,
+                    "landlock is not available on this kernel (needs Linux 5.13+); schema v3 refuses the service rather than run it unconfined",
                 ));
             }
 
+            let landlock =
+                |e: io::Error| PrepareFault::new(ChildFault::Landlock, e.to_string());
             let plan = Self {
-                ro: open(&cfg.ro_paths)?,
-                rw: open(&cfg.rw_paths)?,
+                ro: open(&cfg.ro_paths).map_err(landlock)?,
+                rw: open(&cfg.rw_paths).map_err(landlock)?,
             };
             // Also build the ruleset once so a malformed policy fails here.
-            plan.build_ruleset()?;
+            plan.build_ruleset().map_err(landlock)?;
             Ok(plan)
         }
 
-        fn build_ruleset(&self) -> io::Result<landlock::RulesetCreated> {
+        /// Builds the ruleset without formatting any error, so the child can
+        /// call it without allocating. The parent uses [`Self::build_ruleset`]
+        /// for the same work with a readable message.
+        fn build_ruleset_raw(
+            &self,
+        ) -> Result<landlock::RulesetCreated, landlock::RulesetError> {
             let abi = ABI::V1;
             let ro_access = AccessFs::from_read(abi);
             let rw_access = AccessFs::from_all(abi);
             let mut ruleset = Ruleset::default()
-                .handle_access(AccessFs::from_all(abi))
-                .map_err(to_io)?
-                .create()
-                .map_err(to_io)?;
+                .handle_access(AccessFs::from_all(abi))?
+                .create()?;
             for fd in &self.ro {
-                ruleset = ruleset
-                    .add_rule(PathBeneath::new(fd, ro_access))
-                    .map_err(to_io)?;
+                ruleset = ruleset.add_rule(PathBeneath::new(fd, ro_access))?;
             }
             for fd in &self.rw {
-                ruleset = ruleset
-                    .add_rule(PathBeneath::new(fd, rw_access))
-                    .map_err(to_io)?;
+                ruleset = ruleset.add_rule(PathBeneath::new(fd, rw_access))?;
             }
             Ok(ruleset)
         }
 
-        fn apply(&self) -> io::Result<()> {
-            let status: RestrictionStatus =
-                self.build_ruleset()?.restrict_self().map_err(to_io)?;
+        fn build_ruleset(&self) -> io::Result<landlock::RulesetCreated> {
+            self.build_ruleset_raw().map_err(to_io)
+        }
+
+        /// Applies the ruleset in the child.
+        ///
+        /// # Safety
+        /// Runs between `fork` and `exec`, so nothing here may allocate. The
+        /// error paths deliberately discard the underlying error rather than
+        /// format it, and report `errno` only where a syscall actually set it.
+        fn apply(&self) -> Result<(), ApplyFault> {
+            let ruleset = self
+                .build_ruleset_raw()
+                .map_err(|_| ApplyFault::last(ChildFault::Landlock))?;
+            let status: RestrictionStatus = ruleset
+                .restrict_self()
+                .map_err(|_| ApplyFault::last(ChildFault::Landlock))?;
             match status.ruleset {
                 RulesetStatus::FullyEnforced => Ok(()),
+                // Not a syscall failure, so `errno` would be stale: report none.
                 RulesetStatus::PartiallyEnforced | RulesetStatus::NotEnforced => {
-                    Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "landlock could not be fully enforced on this kernel (SG0724)",
-                    ))
+                    Err(ApplyFault {
+                        fault: ChildFault::Landlock,
+                        errno: 0,
+                    })
                 }
             }
         }
@@ -182,7 +206,7 @@ mod imp {
     /// The target architecture for seccomp filter compilation. seccomp filters
     /// are architecture-specific (the syscall ABI differs), so the wrong arch
     /// would silently mismatch every rule.
-    fn target_arch() -> io::Result<seccompiler::TargetArch> {
+    fn target_arch() -> Result<seccompiler::TargetArch, PrepareFault> {
         #[cfg(target_arch = "x86_64")]
         {
             Ok(seccompiler::TargetArch::x86_64)
@@ -193,9 +217,9 @@ mod imp {
         }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "seccomp is only supported on x86_64 and aarch64 (SG0726)",
+            Err(PrepareFault::new(
+                ChildFault::SeccompArch,
+                "seccomp is only supported on x86_64 and aarch64",
             ))
         }
     }
@@ -204,7 +228,9 @@ mod imp {
     /// bad profile or unsupported arch refuses the spawn before fork. Only
     /// versioned built-ins are accepted — never a mutable `default`/`strict`
     /// alias whose meaning could drift under a manifest.
-    fn build_seccomp_program(profile: &str) -> io::Result<seccompiler::BpfProgram> {
+    fn build_seccomp_program(
+        profile: &str,
+    ) -> Result<seccompiler::BpfProgram, PrepareFault> {
         use std::collections::BTreeMap;
 
         use seccompiler::{SeccompAction, SeccompFilter};
@@ -212,10 +238,10 @@ mod imp {
         let allow = match profile {
             "baseline-v1" => baseline_v1_syscalls(),
             other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
+                return Err(PrepareFault::new(
+                    ChildFault::SeccompProfile,
                     format!(
-                        "unknown seccomp profile '{other}'; the only built-in is 'baseline-v1' (SG0725)"
+                        "unknown seccomp profile '{other}'; the only built-in is 'baseline-v1'"
                     ),
                 ));
             }
@@ -234,16 +260,16 @@ mod imp {
             target_arch()?,
         )
         .map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("seccomp filter could not be built: {e} (SG0722)"),
+            PrepareFault::new(
+                ChildFault::SeccompFilter,
+                format!("seccomp filter could not be built: {e}"),
             )
         })?;
 
         seccompiler::BpfProgram::try_from(filter).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("seccomp filter could not be compiled: {e} (SG0722)"),
+            PrepareFault::new(
+                ChildFault::SeccompFilter,
+                format!("seccomp filter could not be compiled: {e}"),
             )
         })
     }
@@ -360,16 +386,6 @@ mod imp {
         v
     }
 
-    fn set_no_new_privs() -> io::Result<()> {
-        let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
-        if rc != 0 {
-            return Err(io::Error::other(
-                "prctl(PR_SET_NO_NEW_PRIVS) failed (SG0723)",
-            ));
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -385,7 +401,8 @@ mod imp {
         fn unknown_profile_is_refused() {
             let err = build_seccomp_program("strict")
                 .expect_err("only baseline-v1 is a built-in");
-            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(err.fault, ChildFault::SeccompProfile);
+            assert_eq!(err.fault.code(), crate::diag::SgCode::SeccompProfileUnknown);
             assert!(err.to_string().contains("baseline-v1"));
         }
 
@@ -411,9 +428,10 @@ pub use imp::SandboxPlan;
 
 #[cfg(not(target_os = "linux"))]
 mod stub {
-    use std::io;
-
-    use crate::config::LandlockConfig;
+    use crate::{
+        childfault::{ApplyFault, ChildFault, PrepareFault},
+        config::LandlockConfig,
+    };
 
     /// Non-Linux stub: sandboxing is unsupported. `prepare` refuses any
     /// effective request so callers fail closed under schema v3.
@@ -426,13 +444,13 @@ mod stub {
         pub fn prepare(
             landlock: Option<&LandlockConfig>,
             seccomp: Option<&str>,
-        ) -> io::Result<Self> {
+        ) -> Result<Self, PrepareFault> {
             let requested = landlock
                 .is_some_and(|c| !c.ro_paths.is_empty() || !c.rw_paths.is_empty())
                 || seccomp.is_some_and(|s| !s.is_empty());
             if requested {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
+                return Err(PrepareFault::new(
+                    ChildFault::KeyUnenforceable,
                     "kernel-enforced sandboxing is only available on Linux",
                 ));
             }
@@ -446,7 +464,7 @@ mod stub {
 
         /// # Safety
         /// No-op; safe to call, present for API parity with the Linux path.
-        pub unsafe fn apply(&self) -> io::Result<()> {
+        pub unsafe fn apply(&self) -> Result<(), ApplyFault> {
             Ok(())
         }
     }

@@ -227,6 +227,29 @@ pub enum SgCode {
     SeccompProfileUnknown,
     /// SG0726 — seccomp is not supported on this CPU architecture.
     SeccompArchUnsupported,
+    /// SG0727 — a requested namespace could not be unshared.
+    NamespaceUnshareFailed,
+    /// SG0741 — a resource limit (`nofile`, `nproc`, `memlock`) could not be
+    /// set for the service.
+    ResourceLimitFailed,
+    /// SG0742 — the requested scheduling priority could not be set.
+    PriorityFailed,
+    /// SG0743 — the requested CPU affinity could not be applied.
+    CpuAffinityFailed,
+    /// SG0744 — the supplementary group list could not be set, so the service
+    /// would have kept the supervisor's groups.
+    SupplementaryGroupsFailed,
+    /// SG0745 — the primary group could not be switched.
+    PrimaryGidFailed,
+    /// SG0746 — the user could not be switched, so the service would have run
+    /// with the supervisor's identity.
+    UidSwitchFailed,
+    /// SG0747 — the requested capabilities could not be retained across the
+    /// identity switch.
+    CapabilityRetentionFailed,
+    /// SG0748 — capabilities could not be fully dropped, so the service would
+    /// have kept more privilege than configured.
+    CapabilityReductionIncomplete,
 }
 
 impl SgCode {
@@ -308,6 +331,15 @@ impl SgCode {
             SgCode::LandlockUnavailable => "SG0724",
             SgCode::SeccompProfileUnknown => "SG0725",
             SgCode::SeccompArchUnsupported => "SG0726",
+            SgCode::NamespaceUnshareFailed => "SG0727",
+            SgCode::ResourceLimitFailed => "SG0741",
+            SgCode::PriorityFailed => "SG0742",
+            SgCode::CpuAffinityFailed => "SG0743",
+            SgCode::SupplementaryGroupsFailed => "SG0744",
+            SgCode::PrimaryGidFailed => "SG0745",
+            SgCode::UidSwitchFailed => "SG0746",
+            SgCode::CapabilityRetentionFailed => "SG0747",
+            SgCode::CapabilityReductionIncomplete => "SG0748",
         }
     }
 
@@ -317,7 +349,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 75] = [
+    pub const ALL: [SgCode; 84] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -393,6 +425,15 @@ impl SgCode {
         SgCode::LandlockUnavailable,
         SgCode::SeccompProfileUnknown,
         SgCode::SeccompArchUnsupported,
+        SgCode::NamespaceUnshareFailed,
+        SgCode::ResourceLimitFailed,
+        SgCode::PriorityFailed,
+        SgCode::CpuAffinityFailed,
+        SgCode::SupplementaryGroupsFailed,
+        SgCode::PrimaryGidFailed,
+        SgCode::UidSwitchFailed,
+        SgCode::CapabilityRetentionFailed,
+        SgCode::CapabilityReductionIncomplete,
     ];
 }
 

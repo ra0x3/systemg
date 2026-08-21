@@ -77,6 +77,9 @@ pub mod reaper;
 /// Invariant oracle: check_world() and `sysg doctor`.
 pub mod doctor;
 
+/// Failures a service's child process reports across the fork boundary.
+pub mod childfault;
+
 /// Kernel-enforced sandboxing (no_new_privs, Landlock).
 pub mod sandbox;
 

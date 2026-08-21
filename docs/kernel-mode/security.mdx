@@ -40,11 +40,13 @@ local user. The full model is
 | [`audits/unsafe-inventory.md`](https://github.com/ra0x3/systemg/blob/main/audits/unsafe-inventory.md) | Generated `unsafe` inventory |
 | [`reports/`](https://github.com/ra0x3/systemg/tree/main/reports) | Historical security reviews |
 
-Every release-candidate milestone of a root-facing phase ships an immutable
-audit report under `audits/v*/` before it tags, with an external reviewer in
-addition to maintainer self-review. Supply-chain gates run in CI: `cargo
-audit`, `cargo deny`, and `cargo vet` (whose exemption baseline is frozen —
-new dependencies must be vetted).
+No formal release-candidate audit has been published yet. `reports/` holds the
+security reviews done so far, and `audits/` holds the threat model and the
+generated `unsafe` inventory that any future audit starts from.
+
+Supply-chain gates do run in CI on every change: `cargo audit`, `cargo deny`,
+and `cargo vet`, whose exemption baseline is frozen so new dependencies must be
+vetted.
 
 The canonical trust model for all of systemg remains
 [Security](/security); this page covers what kernel mode adds.
