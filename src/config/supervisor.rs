@@ -9,6 +9,7 @@
 
 use std::{
     collections::HashSet,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock, PoisonError},
     time::Duration,
@@ -21,7 +22,7 @@ use super::{LOGS_DEFAULT_MAX_BYTES, LOGS_DEFAULT_MAX_FILES};
 use crate::{
     constants::{
         COMMAND_WAIT_BUDGET, PRE_START_TIMEOUT, SERVICE_START_STABILITY,
-        START_SETTLE_GRACE, STOP_VERIFY_TIMEOUT,
+        START_MAX_CONCURRENT, START_SETTLE_GRACE, STOP_VERIFY_TIMEOUT,
     },
     runtime, xml,
 };
@@ -46,6 +47,10 @@ fn default_command_wait_secs() -> u64 {
     COMMAND_WAIT_BUDGET.as_secs()
 }
 
+fn default_start_max_concurrent() -> i64 {
+    START_MAX_CONCURRENT
+}
+
 /// Warns that a supervisor config was unusable, at most once per path per
 /// process, so a client that reads the file on every command says it once.
 fn warn_unusable_once(path: &Path, reason: &str) {
@@ -58,6 +63,23 @@ fn warn_unusable_once(path: &Path, reason: &str) {
         tracing::warn!(
             "supervisor config {} {reason}; using defaults",
             path.display()
+        );
+    }
+}
+
+/// Warns that a start width is not a value the schema defines, at most once per
+/// value per process, so a client that reads the file on every command says it
+/// once.
+fn warn_start_width_once(value: i64) {
+    static WARNED: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
+    let mut warned = WARNED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if warned.insert(value) {
+        tracing::warn!(
+            "supervisor start max_concurrent {value} is not -1 (unlimited) or a \
+             positive count; starting every dependency-ready unit at once"
         );
     }
 }
@@ -154,6 +176,49 @@ impl SupervisorTimeouts {
     }
 }
 
+/// How wide a bulk start runs.
+///
+/// Ordering is declared by `depends_on`, never by position in the manifest, so
+/// units with no dependency between them have no reason to wait for each other.
+/// The knob exists because the resource a concurrent boot contends for belongs
+/// to the workload — one database every service connects to at once — and the
+/// supervisor cannot see that from the outside. Only an operator can.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupervisorStart {
+    /// Units started at once: `-1` for every dependency-ready unit, `1` for one
+    /// at a time, `N` for a cap. Any other value is refused and the default
+    /// applies.
+    #[serde(default = "default_start_max_concurrent")]
+    pub max_concurrent: i64,
+}
+
+impl Default for SupervisorStart {
+    /// Returns the built-in start-width policy.
+    fn default() -> Self {
+        Self {
+            max_concurrent: default_start_max_concurrent(),
+        }
+    }
+}
+
+impl SupervisorStart {
+    /// Returns the cap on units in flight, or `None` when unlimited.
+    ///
+    /// A value the schema does not define is reported rather than silently
+    /// rounded: a `0` read as "sequential" would quietly serialize a boot the
+    /// operator meant to widen.
+    pub fn concurrency(&self) -> Option<NonZeroUsize> {
+        match self.max_concurrent {
+            START_MAX_CONCURRENT => None,
+            limit if limit >= 1 => NonZeroUsize::new(limit as usize),
+            other => {
+                warn_start_width_once(other);
+                None
+            }
+        }
+    }
+}
+
 /// The supervisor's own configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename = "supervisor")]
@@ -164,6 +229,9 @@ pub struct SupervisorConfig {
     /// Lifecycle timeout defaults applied to every managed project.
     #[serde(default)]
     pub timeouts: SupervisorTimeouts,
+    /// How many units a bulk start runs at once.
+    #[serde(default)]
+    pub start: SupervisorStart,
 }
 
 impl SupervisorConfig {
@@ -293,6 +361,7 @@ mod tests {
                 start_settle_secs: 11,
                 command_wait_secs: 12,
             },
+            start: SupervisorStart { max_concurrent: 4 },
         };
         let output = xml::to_string(&cfg).unwrap();
         let back: SupervisorConfig = xml_from_str(&output).unwrap();
@@ -303,6 +372,35 @@ mod tests {
         assert_eq!(back.timeouts.stop_verify_secs, 10);
         assert_eq!(back.timeouts.start_settle_secs, 11);
         assert_eq!(back.timeouts.command_wait_secs, 12);
+        assert_eq!(back.start.max_concurrent, 4);
+    }
+
+    #[test]
+    /// Verifies a config written before the start block still parses, and keeps
+    /// the unlimited default rather than dropping to one unit at a time.
+    fn config_without_a_start_block_defaults_to_unlimited() {
+        let cfg: SupervisorConfig = xml_from_str(
+            "<supervisor><logs><max_bytes>1</max_bytes><max_files>2</max_files></logs></supervisor>",
+        )
+        .unwrap();
+        assert_eq!(cfg.start.max_concurrent, START_MAX_CONCURRENT);
+        assert_eq!(cfg.start.concurrency(), None);
+    }
+
+    #[test]
+    /// Verifies each start width maps to the documented concurrency.
+    fn start_width_maps_to_a_concurrency_limit() {
+        assert_eq!(SupervisorStart { max_concurrent: -1 }.concurrency(), None);
+        assert_eq!(
+            SupervisorStart { max_concurrent: 1 }.concurrency(),
+            NonZeroUsize::new(1)
+        );
+        assert_eq!(
+            SupervisorStart { max_concurrent: 8 }.concurrency(),
+            NonZeroUsize::new(8)
+        );
+        assert_eq!(SupervisorStart { max_concurrent: 0 }.concurrency(), None);
+        assert_eq!(SupervisorStart { max_concurrent: -9 }.concurrency(), None);
     }
 
     #[test]

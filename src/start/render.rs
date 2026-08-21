@@ -9,7 +9,7 @@
 use std::io::Write;
 
 use crate::{
-    diag::Diagnostic,
+    diag::{Diagnostic, SgCode},
     start::{BootFrame, Outcome},
 };
 
@@ -18,7 +18,7 @@ use crate::{
 pub struct BootReport {
     /// Units that came up or completed.
     pub started: usize,
-    /// Diagnostics for units that failed to come up, in arrival order.
+    /// Diagnostics for units that failed to come up, root causes first.
     pub failures: Vec<Diagnostic>,
 }
 
@@ -26,6 +26,19 @@ impl BootReport {
     /// Whether every unit that was attempted came up or completed.
     pub fn all_ok(&self) -> bool {
         self.failures.is_empty()
+    }
+
+    /// Moves units that failed in their own right ahead of the ones that only
+    /// failed because something they depend on did.
+    ///
+    /// Units come up at the same time, so frames arrive in whatever order units
+    /// finish in — and the caller reports the first failure. Without this, which
+    /// unit a boot blames would depend on scheduling, and a casualty could be
+    /// named as the reason its own dependency failed.
+    fn blame_the_cause(&mut self) {
+        self.failures.sort_by_key(|diagnostic| {
+            u8::from(diagnostic.code == SgCode::DependencyUnavailable)
+        });
     }
 }
 
@@ -87,6 +100,7 @@ pub fn render_boot<W: Write>(
             BootFrame::Done { .. } => {}
         }
     }
+    report.blame_the_cause();
     report
 }
 
@@ -143,6 +157,34 @@ mod tests {
         assert_eq!(report.started, 1);
         assert_eq!(report.failures.len(), 1);
         assert!(!report.all_ok());
+    }
+
+    #[test]
+    /// Verifies the unit that failed in its own right is blamed, even when a
+    /// unit it felled reported first.
+    fn the_root_cause_outranks_its_casualties() {
+        let casualty = BootFrame::Unit {
+            project: "p".into(),
+            service: "api".into(),
+            outcome: Outcome::Failed(outcome::dependency_unavailable(
+                "api",
+                "db",
+                "db never came up",
+            )),
+        };
+        let frames = vec![
+            casualty,
+            failed("db"),
+            BootFrame::Done {
+                started: 0,
+                failed: 2,
+            },
+        ];
+        let mut buf = Vec::new();
+        let report = render_boot(frames, false, &mut buf);
+
+        assert_eq!(report.failures[0].code, SgCode::UnitImmediateExit);
+        assert_eq!(report.failures[1].code, SgCode::DependencyUnavailable);
     }
 
     #[test]

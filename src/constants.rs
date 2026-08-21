@@ -187,6 +187,10 @@ pub const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// from being mistaken for a successful launch between process probes.
 pub const SERVICE_START_STABILITY: Duration = Duration::from_millis(250);
 
+/// Default number of units started at once during a bulk start. `-1` starts
+/// every dependency-ready unit concurrently; `1` restores one-at-a-time.
+pub const START_MAX_CONCURRENT: i64 = -1;
+
 /// How far back a crash may look for its own captured output when classifying
 /// the cause. Bounded so a failure from an earlier generation never explains a
 /// later, unrelated crash.

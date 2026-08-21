@@ -5,6 +5,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::{BufReader, ErrorKind, Read},
+    num::NonZeroUsize,
     os::unix::process::{CommandExt, ExitStatusExt},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -45,6 +46,7 @@ use crate::{
     opslot::OpSlot,
     runtime,
     spawn::SpawnedExit,
+    start::{Gate, Resolution, Schedule, Units},
     state_store::StateStore,
     upgrade::{HandoffDaemonState, HandoffProcess},
     xml,
@@ -4303,6 +4305,18 @@ impl Daemon {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = timeouts;
     }
 
+    /// Returns how many units a bulk start may run at once, or `None` when
+    /// every dependency-ready unit runs together.
+    ///
+    /// Read from disk per boot rather than pushed in like the timeouts: it is
+    /// consulted once per bulk start, so reading it fresh costs nothing and
+    /// cannot serve a value the operator has since changed.
+    pub(crate) fn start_concurrency(&self) -> Option<NonZeroUsize> {
+        crate::config::supervisor::SupervisorConfig::load_or_default()
+            .start
+            .concurrency()
+    }
+
     /// Returns the current supervisor lifecycle timeout policy.
     fn timeouts(&self) -> SupervisorTimeouts {
         self.timeouts
@@ -5284,180 +5298,28 @@ impl Daemon {
 
         let config = self.cfg();
         let order = config.service_start_order()?;
-        let mut healthy_services = HashSet::new();
-        let mut completed_services = HashSet::new();
-        let mut failed_services = HashSet::new();
-        // A skipped service is NOT a satisfied dependency — a service that
-        // depends on it must not start, or `skip` silently leaks the dependent
-        // into running against a dependency that never came up.
-        let mut skipped_services = HashSet::new();
-        let mut first_error: Option<ProcessManagerError> = None;
+        let schedule = Schedule::new(&order, |service| {
+            config
+                .services
+                .get(service)
+                .and_then(|service| service.depends_on.as_ref())
+                .into_iter()
+                .flatten()
+                .map(crate::config::DependsOn::service)
+                .collect()
+        });
+        let units = BulkStart {
+            daemon: self,
+            config: &config,
+            failures: Mutex::new(HashMap::new()),
+        };
 
-        'service_loop: for service_name in order {
-            let service = match config.services.get(&service_name) {
-                Some(service) => service,
-                None => continue,
-            };
+        schedule.run(&units, self.start_concurrency())?;
 
-            if service.cron.is_some() {
-                info!(
-                    "Skipping cron-managed service '{}' during bulk start; scheduled execution will launch it",
-                    service_name
-                );
-                healthy_services.insert(service_name.clone());
-                completed_services.insert(service_name.clone());
-                continue 'service_loop;
-            }
-
-            if let Some(skip_config) = &service.skip {
-                match skip_config {
-                    SkipConfig::Flag(true) => {
-                        info!("Skipping service '{service_name}' due to skip flag");
-                        self.mark_skipped(&service_name)?;
-                        skipped_services.insert(service_name.clone());
-                        continue 'service_loop;
-                    }
-                    SkipConfig::Flag(false) => {
-                        debug!(
-                            "Skip flag for '{service_name}' disabled; starting service"
-                        );
-                    }
-                    SkipConfig::Command(skip_command) => {
-                        match self.evaluate_skip_condition(&service_name, skip_command) {
-                            Ok(true) => {
-                                info!(
-                                    "Skipping service '{service_name}' due to skip condition"
-                                );
-                                self.mark_skipped(&service_name)?;
-                                skipped_services.insert(service_name.clone());
-                                continue 'service_loop;
-                            }
-                            Ok(false) => {
-                                debug!(
-                                    "Skip condition for '{service_name}' evaluated to false, starting service"
-                                );
-                            }
-                            Err(err) => {
-                                error!(
-                                    "Failed to evaluate skip condition for '{service_name}': {err}"
-                                );
-                                if first_error.is_none() {
-                                    first_error = Some(err);
-                                }
-                                failed_services.insert(service_name.clone());
-                                continue 'service_loop;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some(deps) = &service.depends_on {
-                for dep in deps {
-                    let dep_name = dep.service();
-                    if skipped_services.contains(dep_name) {
-                        // A dependency that was skipped can never be satisfied, so
-                        // the dependent is skipped too — never run it against a
-                        // dependency that never came up.
-                        info!(
-                            "Skipping start of '{service_name}' because its dependency '{dep_name}' is skipped"
-                        );
-                        self.mark_skipped(&service_name)?;
-                        skipped_services.insert(service_name.clone());
-                        continue 'service_loop;
-                    }
-                    if failed_services.contains(dep_name) {
-                        error!(
-                            "Skipping start of '{service_name}' because dependency '{dep_name}' failed."
-                        );
-                        if first_error.is_none() {
-                            first_error = Some(ProcessManagerError::DependencyFailed {
-                                service: service_name.clone(),
-                                dependency: dep_name.to_string(),
-                            });
-                        }
-                        failed_services.insert(service_name.clone());
-                        continue 'service_loop;
-                    }
-
-                    if !healthy_services.contains(dep_name) {
-                        error!(
-                            "Skipping start of '{service_name}' because dependency '{dep_name}' is not running."
-                        );
-                        if first_error.is_none() {
-                            first_error = Some(ProcessManagerError::DependencyError {
-                                service: service_name.clone(),
-                                dependency: dep_name.to_string(),
-                            });
-                        }
-                        failed_services.insert(service_name.clone());
-                        continue 'service_loop;
-                    }
-
-                    if dep.condition() == DependsOnCondition::Completed
-                        && !completed_services.contains(dep_name)
-                    {
-                        if let Err(err) =
-                            self.wait_for_dependency_completion(&service_name, dep_name)
-                        {
-                            error!(
-                                "Skipping start of '{service_name}' because dependency '{dep_name}' did not complete: {err}"
-                            );
-                            if first_error.is_none() {
-                                first_error = Some(err);
-                            }
-                            failed_services.insert(service_name.clone());
-                            continue 'service_loop;
-                        }
-                        completed_services.insert(dep_name.to_string());
-                    }
-                    let completed = completed_services.contains(dep_name);
-                    let running = healthy_services.contains(dep_name) && !completed;
-                    let finite = config
-                        .services
-                        .get(dep_name)
-                        .is_some_and(|dependency| !dependency.restarts_after_failure());
-                    if !Self::dependency_satisfied(dep, running, completed, finite) {
-                        error!(
-                            "Skipping start of '{service_name}' because dependency '{dep_name}' did not reach its target."
-                        );
-                        first_error.get_or_insert(
-                            ProcessManagerError::DependencyFailed {
-                                service: service_name.clone(),
-                                dependency: dep_name.to_string(),
-                            },
-                        );
-                        failed_services.insert(service_name.clone());
-                        continue 'service_loop;
-                    }
-                }
-            }
-
-            let mut service_to_start = service.clone();
-            service_to_start.skip = None;
-            match self.start_service(&service_name, &service_to_start) {
-                Ok(ServiceReadyState::Running) => {
-                    healthy_services.insert(service_name.clone());
-                }
-                Ok(ServiceReadyState::CompletedSuccess) => {
-                    info!("Service '{service_name}' completed successfully.");
-                    healthy_services.insert(service_name.clone());
-                    completed_services.insert(service_name.clone());
-                }
-                Ok(ServiceReadyState::Skipped) => {
-                    skipped_services.insert(service_name.clone());
-                }
-                Err(err) => {
-                    error!("Failed to start service '{service_name}': {err}");
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
-                    failed_services.insert(service_name.clone());
-                }
-            }
-        }
-
-        if let Some(err) = first_error {
+        // The reported failure is the earliest unit in dependency order, not
+        // whichever worker happened to finish first — which unit a start blames
+        // must not depend on scheduling.
+        if let Some(err) = units.first_failure(&order) {
             return Err(err);
         }
 
@@ -9697,6 +9559,223 @@ impl Drop for InFlightGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.name);
+    }
+}
+
+/// A project's units driven through one bulk start.
+///
+/// Only failures are collected here: the scheduler owns dependency order, and
+/// which failure a start reports is decided from that order once every unit has
+/// resolved, never from whichever worker returned first.
+struct BulkStart<'a> {
+    /// The daemon whose services are being started.
+    daemon: &'a Daemon,
+    /// The config the schedule was built from.
+    config: &'a Arc<Config>,
+    /// Failures recorded per unit, resolved into one error afterwards.
+    failures: Mutex<HashMap<String, ProcessManagerError>>,
+}
+
+impl BulkStart<'_> {
+    /// Records why a unit failed, keeping the first reason given for it.
+    fn note(&self, service: &str, err: ProcessManagerError) {
+        if let Ok(mut failures) = self.failures.lock() {
+            failures.entry(service.to_string()).or_insert(err);
+        }
+    }
+
+    /// Returns the failure belonging to the earliest unit in dependency order.
+    fn first_failure(self, order: &[String]) -> Option<ProcessManagerError> {
+        let mut failures = self.failures.into_inner().ok()?;
+        order.iter().find_map(|service| failures.remove(service))
+    }
+
+    /// Applies the dependency conditions the scheduler does not decide: a
+    /// `completed` dependency that is still running has to be waited on, and
+    /// every dependency has to reach the target its condition names.
+    fn dependencies_met(
+        &self,
+        service_name: &str,
+        service: &ServiceConfig,
+        deps: &HashMap<String, Resolution>,
+    ) -> bool {
+        let Some(declared) = &service.depends_on else {
+            return true;
+        };
+
+        for dependency in declared {
+            let dependency_name = dependency.service();
+            // A dependency outside this schedule was never ours to wait on.
+            let Some(state) = deps.get(dependency_name) else {
+                continue;
+            };
+
+            // Whether a dependency has finished is read from what it actually
+            // recorded, not only from the state this schedule saw it resolve
+            // in. A finite unit that was alive when it resolved may have
+            // exited since, and a dependent that trusted the stale view would
+            // start behind a process that is gone.
+            let mut completed = *state == Resolution::Completed
+                || matches!(
+                    self.daemon.recorded_status(dependency_name),
+                    Some(ServiceLifecycleStatus::ExitedSuccessfully)
+                );
+            if dependency.condition() == DependsOnCondition::Completed && !completed {
+                if let Err(err) = self
+                    .daemon
+                    .wait_for_dependency_completion(service_name, dependency_name)
+                {
+                    error!(
+                        "Skipping start of '{service_name}' because dependency '{dependency_name}' did not complete: {err}"
+                    );
+                    self.note(service_name, err);
+                    return false;
+                }
+                completed = true;
+            }
+
+            let running = *state == Resolution::Running && !completed;
+            let finite = self
+                .config
+                .services
+                .get(dependency_name)
+                .is_some_and(|dependency| !dependency.restarts_after_failure());
+            if !Daemon::dependency_satisfied(dependency, running, completed, finite) {
+                error!(
+                    "Skipping start of '{service_name}' because dependency '{dependency_name}' did not reach its target."
+                );
+                self.note(
+                    service_name,
+                    ProcessManagerError::DependencyFailed {
+                        service: service_name.to_string(),
+                        dependency: dependency_name.to_string(),
+                    },
+                );
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl Units for BulkStart<'_> {
+    type Error = ProcessManagerError;
+
+    fn static_resolution(
+        &self,
+        service_name: &str,
+    ) -> Result<Option<Resolution>, Self::Error> {
+        let Some(service) = self.config.services.get(service_name) else {
+            return Ok(Some(Resolution::Skipped));
+        };
+
+        if service.cron.is_some() {
+            info!(
+                "Skipping cron-managed service '{service_name}' during bulk start; scheduled execution will launch it"
+            );
+            return Ok(Some(Resolution::Completed));
+        }
+
+        if matches!(service.skip, Some(SkipConfig::Flag(true))) {
+            info!("Skipping service '{service_name}' due to skip flag");
+            self.daemon.mark_skipped(service_name)?;
+            return Ok(Some(Resolution::Skipped));
+        }
+
+        Ok(None)
+    }
+
+    fn start(
+        &self,
+        service_name: &str,
+        deps: &HashMap<String, Resolution>,
+    ) -> Result<Resolution, Self::Error> {
+        let Some(service) = self.config.services.get(service_name) else {
+            return Ok(Resolution::Skipped);
+        };
+
+        if let Some(SkipConfig::Command(skip_command)) = &service.skip {
+            match self
+                .daemon
+                .evaluate_skip_condition(service_name, skip_command)
+            {
+                Ok(true) => {
+                    info!("Skipping service '{service_name}' due to skip condition");
+                    self.daemon.mark_skipped(service_name)?;
+                    return Ok(Resolution::Skipped);
+                }
+                Ok(false) => {
+                    debug!(
+                        "Skip condition for '{service_name}' evaluated to false, starting service"
+                    );
+                }
+                Err(err) => {
+                    error!(
+                        "Failed to evaluate skip condition for '{service_name}': {err}"
+                    );
+                    self.note(service_name, err);
+                    return Ok(Resolution::Failed);
+                }
+            }
+        }
+
+        if !self.dependencies_met(service_name, service, deps) {
+            return Ok(Resolution::Failed);
+        }
+
+        let mut service_to_start = service.clone();
+        service_to_start.skip = None;
+        match self.daemon.start_service(service_name, &service_to_start) {
+            Ok(ServiceReadyState::Running) => Ok(Resolution::Running),
+            Ok(ServiceReadyState::CompletedSuccess) => {
+                info!("Service '{service_name}' completed successfully.");
+                Ok(Resolution::Completed)
+            }
+            Ok(ServiceReadyState::Skipped) => Ok(Resolution::Skipped),
+            Err(err) => {
+                error!("Failed to start service '{service_name}': {err}");
+                self.note(service_name, err);
+                Ok(Resolution::Failed)
+            }
+        }
+    }
+
+    fn gated(
+        &self,
+        service_name: &str,
+        dependency: &str,
+        gate: Gate,
+    ) -> Result<Resolution, Self::Error> {
+        match gate {
+            Gate::DependencySkipped => {
+                // A dependency that was skipped can never be satisfied, so the
+                // dependent is skipped too — never run it against a dependency
+                // that never came up.
+                info!(
+                    "Skipping start of '{service_name}' because its dependency '{dependency}' is skipped"
+                );
+                self.daemon.mark_skipped(service_name)?;
+                Ok(Resolution::Skipped)
+            }
+            Gate::DependencyFailed => {
+                error!(
+                    "Skipping start of '{service_name}' because dependency '{dependency}' failed."
+                );
+                self.note(
+                    service_name,
+                    ProcessManagerError::DependencyFailed {
+                        service: service_name.to_string(),
+                        dependency: dependency.to_string(),
+                    },
+                );
+                Ok(Resolution::Failed)
+            }
+        }
+    }
+
+    fn active(&self) -> bool {
+        !self.daemon.boot_cancelled()
     }
 }
 

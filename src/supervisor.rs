@@ -9,7 +9,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd},
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -563,6 +563,311 @@ fn log_project_groups<'a>(
         .collect()
 }
 
+/// One project's units driven through a boot.
+///
+/// Every unit that runs reports itself from its own worker; the decisions that
+/// must stay in dependency order — a unit gated by a dependency, and which
+/// diagnostic becomes the project's cause — are made by the dispatcher or
+/// resolved from the topological order once the boot is done.
+struct ProjectBoot<'a> {
+    /// The project daemon holding these units.
+    daemon: &'a Daemon,
+    /// The config the schedule was built from.
+    config: &'a Config,
+    /// The project these units belong to, for journal frames.
+    project_id: &'a str,
+    /// Registry that dynamic-spawn units publish their PID to.
+    spawn_manager: &'a DynamicSpawnManager,
+    /// Journal for the initial boot; `None` for a live project add.
+    boot_journal: Option<&'a BootJournal>,
+    /// The boot generation this schedule belongs to.
+    boot_epoch: u64,
+    /// Diagnostics recorded per unit, resolved into one cause afterwards.
+    causes: Mutex<HashMap<String, crate::diag::Diagnostic>>,
+}
+
+impl ProjectBoot<'_> {
+    /// Records why a unit failed, keeping the first reason given for it.
+    fn note(&self, service: &str, diagnostic: crate::diag::Diagnostic) {
+        if let Ok(mut causes) = self.causes.lock() {
+            causes.entry(service.to_string()).or_insert(diagnostic);
+        }
+    }
+
+    /// Returns the diagnostic belonging to the earliest unit in dependency
+    /// order.
+    fn first_cause(self, order: &[String]) -> Option<crate::diag::Diagnostic> {
+        let mut causes = self.causes.into_inner().ok()?;
+        order.iter().find_map(|service| causes.remove(service))
+    }
+
+    /// Announces that a unit is being worked, to the boot journal and to any
+    /// client watching the daemon directly.
+    fn announce(&self, service: &str) {
+        if let Some(journal) = self.boot_journal {
+            journal.push(BootFrame::UnitStarting {
+                project: self.project_id.to_string(),
+                service: service.to_string(),
+            });
+        }
+    }
+
+    /// Records a unit's terminal outcome in the boot journal.
+    fn record(&self, service: &str, outcome: start::Outcome) {
+        if let Some(journal) = self.boot_journal {
+            journal.record(self.project_id, service, outcome);
+        }
+    }
+
+    /// Reports a unit that never ran, as both a journal frame pair and the
+    /// project's candidate cause.
+    fn report_failure(&self, service: &str, diagnostic: crate::diag::Diagnostic) {
+        self.note(service, diagnostic.clone());
+        self.announce(service);
+        self.record(service, start::Outcome::Failed(diagnostic));
+    }
+
+    /// Applies the dependency conditions the scheduler does not decide.
+    fn dependencies_met(
+        &self,
+        service_name: &str,
+        service: &crate::config::ServiceConfig,
+        deps: &HashMap<String, start::Resolution>,
+    ) -> bool {
+        let Some(declared) = &service.depends_on else {
+            return true;
+        };
+
+        for dependency in declared {
+            let dependency_name = dependency.service();
+            let Some(state) = deps.get(dependency_name) else {
+                continue;
+            };
+
+            // Whether a dependency has finished is read from what it actually
+            // recorded, not only from the state this schedule saw it resolve
+            // in. A finite unit that was alive when it resolved may have
+            // exited since, and a dependent that trusted the stale view would
+            // start behind a process that is gone.
+            let mut completed = *state == start::Resolution::Completed
+                || matches!(
+                    self.daemon.recorded_status(dependency_name),
+                    Some(ServiceLifecycleStatus::ExitedSuccessfully)
+                );
+            if dependency.condition() == crate::config::DependsOnCondition::Completed
+                && !completed
+            {
+                if let Err(err) = self
+                    .daemon
+                    .wait_for_dependency_completion(service_name, dependency_name)
+                {
+                    error!(
+                        "Skipping service '{service_name}' because dependency '{dependency_name}' did not complete: {err}"
+                    );
+                    self.report_failure(
+                        service_name,
+                        start::dependency_unavailable(
+                            service_name,
+                            dependency_name,
+                            err.to_string(),
+                        ),
+                    );
+                    return false;
+                }
+                completed = true;
+            }
+
+            let running = *state == start::Resolution::Running && !completed;
+            let finite = self
+                .config
+                .services
+                .get(dependency_name)
+                .is_some_and(|dependency| !dependency.restarts_after_failure());
+            if !Daemon::dependency_satisfied(dependency, running, completed, finite) {
+                error!(
+                    "Skipping service '{service_name}' because dependency '{dependency_name}' did not reach its target"
+                );
+                self.report_failure(
+                    service_name,
+                    start::dependency_unavailable(
+                        service_name,
+                        dependency_name,
+                        format!(
+                            "dependency `{dependency_name}` did not reach its required state"
+                        ),
+                    ),
+                );
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl start::Units for ProjectBoot<'_> {
+    type Error = SupervisorError;
+
+    fn static_resolution(
+        &self,
+        service_name: &str,
+    ) -> Result<Option<start::Resolution>, Self::Error> {
+        let Some(service) = self.config.services.get(service_name) else {
+            return Ok(Some(start::Resolution::Skipped));
+        };
+
+        // A statically skipped unit is skipped whatever its kind. This is
+        // checked BEFORE the cron hand-off below: a cron unit that returned
+        // early here would be recorded healthy and completed, and its scheduler
+        // entry would go on claiming a boundary every expression tick for a
+        // command that is never allowed to run.
+        if matches!(service.skip, Some(SkipConfig::Flag(true))) {
+            info!("Skipping service '{service_name}' due to skip flag");
+            self.daemon.mark_service_skipped(service_name)?;
+            return Ok(Some(start::Resolution::Skipped));
+        }
+
+        if service.cron.is_some() {
+            return Ok(Some(start::Resolution::Completed));
+        }
+
+        Ok(None)
+    }
+
+    fn start(
+        &self,
+        service_name: &str,
+        deps: &HashMap<String, start::Resolution>,
+    ) -> Result<start::Resolution, Self::Error> {
+        let Some(service) = self.config.services.get(service_name) else {
+            return Ok(start::Resolution::Skipped);
+        };
+
+        if let Some(SkipConfig::Command(skip_command)) = &service.skip {
+            match self
+                .daemon
+                .evaluate_skip_condition(service_name, skip_command)
+            {
+                Ok(true) => {
+                    info!("Skipping service '{service_name}' due to skip condition");
+                    self.daemon.mark_service_skipped(service_name)?;
+                    return Ok(start::Resolution::Skipped);
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    error!(
+                        "Failed to evaluate skip condition for '{service_name}': {err}"
+                    );
+                    self.report_failure(
+                        service_name,
+                        start::unit_start_failed(service_name, err.to_string()),
+                    );
+                    return Ok(start::Resolution::Failed);
+                }
+            }
+        }
+
+        if !self.dependencies_met(service_name, service, deps) {
+            return Ok(start::Resolution::Failed);
+        }
+
+        self.announce(service_name);
+        // Also emitted through the daemon so a resident `start` — which has no
+        // boot journal — still streams to whoever is watching it.
+        self.daemon.note_unit_starting(service_name);
+        let mut service_to_start = service.clone();
+        service_to_start.skip = None;
+        let result = self.daemon.start_service(service_name, &service_to_start);
+
+        if !self.daemon.boot_active(self.boot_epoch) {
+            // A unit that came up after the boot was cancelled is still ours to
+            // take back down. Serialized so a wide boot does not fire N
+            // concurrent teardowns at a daemon that is already being stopped.
+            static LATE_STOP: Mutex<()> = Mutex::new(());
+            let _serialized = LATE_STOP.lock();
+            if let Err(err) = self.daemon.stop_service(service_name) {
+                error!(
+                    "Failed to stop '{service_name}' after project boot cancellation: {err}"
+                );
+            }
+            return Ok(start::Resolution::Failed);
+        }
+
+        let pid = self
+            .daemon
+            .pid_file_handle()
+            .lock()
+            .ok()
+            .and_then(|pid_file| pid_file.services().get(service_name).copied());
+        let resolution = match &result {
+            Ok(ServiceReadyState::Running) => start::Resolution::Running,
+            Ok(ServiceReadyState::CompletedSuccess) => start::Resolution::Completed,
+            Ok(ServiceReadyState::Skipped) => start::Resolution::Skipped,
+            Err(_) => start::Resolution::Failed,
+        };
+        let outcome = start::outcome_of(service_name, result, pid);
+        if let Some(diagnostic) = outcome.diagnostic() {
+            self.note(service_name, diagnostic.clone());
+            error!(
+                "Service '{service_name}' failed to start [{}]: {}.",
+                diagnostic.code_str(),
+                diagnostic.title
+            );
+        }
+        self.daemon.note_unit_done(service_name, outcome.clone());
+        self.record(service_name, outcome);
+
+        if resolution != start::Resolution::Failed
+            && let Some(spawn) = &service.spawn
+            && let Some(SpawnMode::Dynamic) = spawn.mode
+            && let Ok(pid_file) = self.daemon.pid_file_handle().lock()
+            && let Some(&pid) = pid_file.services().get(service_name)
+        {
+            self.spawn_manager
+                .register_service_pid(service_name.to_string(), pid);
+        }
+
+        Ok(resolution)
+    }
+
+    fn gated(
+        &self,
+        service_name: &str,
+        dependency: &str,
+        gate: start::Gate,
+    ) -> Result<start::Resolution, Self::Error> {
+        match gate {
+            start::Gate::DependencySkipped => {
+                info!(
+                    "Skipping service '{service_name}' because dependency '{dependency}' was skipped"
+                );
+                self.daemon.mark_service_skipped(service_name)?;
+                Ok(start::Resolution::Skipped)
+            }
+            start::Gate::DependencyFailed => {
+                error!(
+                    "Skipping service '{service_name}' because dependency '{dependency}' did not start"
+                );
+                self.report_failure(
+                    service_name,
+                    start::dependency_unavailable(
+                        service_name,
+                        dependency,
+                        format!(
+                            "dependency `{dependency}` did not reach its required state"
+                        ),
+                    ),
+                );
+                Ok(start::Resolution::Failed)
+            }
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.daemon.boot_active(self.boot_epoch)
+    }
+}
+
 impl Supervisor {
     /// Returns the configured status snapshot refresh interval.
     fn status_snapshot_interval(config: &Config) -> Duration {
@@ -630,275 +935,46 @@ impl Supervisor {
         spawn_manager: &DynamicSpawnManager,
         boot_journal: Option<&BootJournal>,
     ) -> Result<BootFailures, SupervisorError> {
-        let project_id = &config.project.id;
         let boot_epoch = daemon.begin_boot();
-        let service_order = Self::startup_service_order(config, service_filter)?;
-        let mut healthy = HashSet::new();
-        let mut completed = HashSet::new();
-        let mut failed = HashSet::new();
-        let mut skipped = HashSet::new();
-        let mut cause = None;
-        'services: for service_name in service_order {
-            if !daemon.boot_active(boot_epoch) {
-                break;
-            }
-            let Some(service_config) = config.services.get(&service_name) else {
-                continue;
-            };
+        let order = Self::startup_service_order(config, service_filter)?;
+        // A filtered start covers one unit, so it carries no edges: selecting a
+        // unit starts that unit and never silently pulls its dependencies in.
+        let schedule = start::Schedule::new(&order, |service| {
+            config
+                .services
+                .get(service)
+                .and_then(|service| service.depends_on.as_ref())
+                .into_iter()
+                .flatten()
+                .map(crate::config::DependsOn::service)
+                .collect()
+        });
 
-            // A statically skipped unit is skipped whatever its kind. This is
-            // checked BEFORE the cron hand-off below: a cron unit that returns
-            // early here would be recorded healthy and completed, and its
-            // scheduler entry would go on claiming a boundary every expression
-            // tick for a command that is never allowed to run.
-            if matches!(service_config.skip, Some(SkipConfig::Flag(true))) {
-                info!("Skipping service '{service_name}' due to skip flag");
-                daemon.mark_service_skipped(&service_name)?;
-                skipped.insert(service_name.clone());
-                continue;
-            }
+        let boot = ProjectBoot {
+            daemon,
+            config,
+            project_id: &config.project.id,
+            spawn_manager,
+            boot_journal,
+            boot_epoch,
+            causes: Mutex::new(HashMap::new()),
+        };
 
-            if service_config.cron.is_some() {
-                healthy.insert(service_name.clone());
-                completed.insert(service_name.clone());
-                continue;
-            }
+        let resolved = schedule.run(&boot, daemon.start_concurrency())?;
 
-            if let Some(skip_config) = &service_config.skip {
-                match skip_config {
-                    SkipConfig::Flag(true) => {
-                        info!("Skipping service '{service_name}' due to skip flag");
-                        daemon.mark_service_skipped(&service_name)?;
-                        skipped.insert(service_name.clone());
-                        continue;
-                    }
-                    SkipConfig::Flag(false) => {}
-                    SkipConfig::Command(skip_command) => {
-                        match daemon.evaluate_skip_condition(&service_name, skip_command)
-                        {
-                            Ok(true) => {
-                                info!(
-                                    "Skipping service '{service_name}' due to skip condition"
-                                );
-                                daemon.mark_service_skipped(&service_name)?;
-                                skipped.insert(service_name.clone());
-                                continue;
-                            }
-                            Ok(false) => {}
-                            Err(err) => {
-                                error!(
-                                    "Failed to evaluate skip condition for '{service_name}': {err}"
-                                );
-                                failed.insert(service_name.clone());
-                                let diag = start::unit_start_failed(
-                                    &service_name,
-                                    err.to_string(),
-                                );
-                                cause.get_or_insert_with(|| diag.clone());
-                                if let Some(journal) = boot_journal {
-                                    journal.push(BootFrame::UnitStarting {
-                                        project: project_id.clone(),
-                                        service: service_name.clone(),
-                                    });
-                                    journal.record(
-                                        project_id,
-                                        &service_name,
-                                        start::Outcome::Failed(diag),
-                                    );
-                                }
-                                continue 'services;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if service_filter.is_none()
-                && let Some(dependencies) = &service_config.depends_on
-            {
-                for dependency in dependencies {
-                    let dependency_name = dependency.service();
-                    if skipped.contains(dependency_name) {
-                        info!(
-                            "Skipping service '{service_name}' because dependency '{dependency_name}' was skipped"
-                        );
-                        daemon.mark_service_skipped(&service_name)?;
-                        skipped.insert(service_name.clone());
-                        continue 'services;
-                    }
-                    if failed.contains(dependency_name)
-                        || !healthy.contains(dependency_name)
-                    {
-                        error!(
-                            "Skipping service '{service_name}' because dependency '{dependency_name}' did not start"
-                        );
-                        failed.insert(service_name.clone());
-                        let diag = start::dependency_unavailable(
-                            &service_name,
-                            dependency_name,
-                            format!(
-                                "dependency `{dependency_name}` did not reach its required state"
-                            ),
-                        );
-                        cause.get_or_insert_with(|| diag.clone());
-                        if let Some(journal) = boot_journal {
-                            journal.push(BootFrame::UnitStarting {
-                                project: project_id.clone(),
-                                service: service_name.clone(),
-                            });
-                            journal.record(
-                                project_id,
-                                &service_name,
-                                start::Outcome::Failed(diag),
-                            );
-                        }
-                        continue 'services;
-                    }
-                    if dependency.condition()
-                        == crate::config::DependsOnCondition::Completed
-                        && !completed.contains(dependency_name)
-                    {
-                        if let Err(err) = daemon.wait_for_dependency_completion(
-                            &service_name,
-                            dependency_name,
-                        ) {
-                            error!(
-                                "Skipping service '{service_name}' because dependency '{dependency_name}' did not complete: {err}"
-                            );
-                            failed.insert(service_name.clone());
-                            let diag = start::dependency_unavailable(
-                                &service_name,
-                                dependency_name,
-                                err.to_string(),
-                            );
-                            cause.get_or_insert_with(|| diag.clone());
-                            if let Some(journal) = boot_journal {
-                                journal.push(BootFrame::UnitStarting {
-                                    project: project_id.clone(),
-                                    service: service_name.clone(),
-                                });
-                                journal.record(
-                                    project_id,
-                                    &service_name,
-                                    start::Outcome::Failed(diag),
-                                );
-                            }
-                            continue 'services;
-                        }
-                        completed.insert(dependency_name.to_string());
-                    }
-                    let dependency_completed = completed.contains(dependency_name);
-                    let dependency_running =
-                        healthy.contains(dependency_name) && !dependency_completed;
-                    let finite = config
-                        .services
-                        .get(dependency_name)
-                        .is_some_and(|dependency| !dependency.restarts_after_failure());
-                    if !Daemon::dependency_satisfied(
-                        dependency,
-                        dependency_running,
-                        dependency_completed,
-                        finite,
-                    ) {
-                        error!(
-                            "Skipping service '{service_name}' because dependency '{dependency_name}' did not reach its target"
-                        );
-                        failed.insert(service_name.clone());
-                        let diag = start::dependency_unavailable(
-                            &service_name,
-                            dependency_name,
-                            format!(
-                                "dependency `{dependency_name}` did not reach its required state"
-                            ),
-                        );
-                        cause.get_or_insert_with(|| diag.clone());
-                        if let Some(journal) = boot_journal {
-                            journal.push(BootFrame::UnitStarting {
-                                project: project_id.clone(),
-                                service: service_name.clone(),
-                            });
-                            journal.record(
-                                project_id,
-                                &service_name,
-                                start::Outcome::Failed(diag),
-                            );
-                        }
-                        continue 'services;
-                    }
-                }
-            }
-
-            if let Some(journal) = boot_journal {
-                journal.push(BootFrame::UnitStarting {
-                    project: project_id.clone(),
-                    service: service_name.clone(),
-                });
-            }
-            // Also emitted through the daemon so a resident `start` — which has
-            // no boot journal — still streams to whoever is watching it.
-            daemon.note_unit_starting(&service_name);
-            let mut service_to_start = service_config.clone();
-            service_to_start.skip = None;
-            let result = daemon.start_service(&service_name, &service_to_start);
-            if !daemon.boot_active(boot_epoch) {
-                if let Err(err) = daemon.stop_service(&service_name) {
-                    error!(
-                        "Failed to stop '{service_name}' after project boot cancellation: {err}"
-                    );
-                }
-                failed.insert(service_name.clone());
-                break;
-            }
-            match &result {
-                Ok(ServiceReadyState::Running) => {
-                    healthy.insert(service_name.clone());
-                }
-                Ok(ServiceReadyState::CompletedSuccess) => {
-                    healthy.insert(service_name.clone());
-                    completed.insert(service_name.clone());
-                }
-                Ok(ServiceReadyState::Skipped) => {
-                    skipped.insert(service_name.clone());
-                }
-                Err(_) => {
-                    failed.insert(service_name.clone());
-                }
-            }
-            let pid = daemon
-                .pid_file_handle()
-                .lock()
-                .ok()
-                .and_then(|pid_file| pid_file.services().get(&service_name).copied());
-            let outcome = start::outcome_of(&service_name, result, pid);
-            if let Some(diag) = outcome.diagnostic() {
-                cause.get_or_insert_with(|| diag.clone());
-                error!(
-                    "Service '{service_name}' failed to start [{}]: {}.",
-                    diag.code_str(),
-                    diag.title
-                );
-            }
-            daemon.note_unit_done(&service_name, outcome.clone());
-            if let Some(journal) = boot_journal {
-                journal.record(project_id, &service_name, outcome);
-            }
-            if failed.contains(&service_name) {
-                continue;
-            }
-
-            if let Some(ref spawn) = service_config.spawn
-                && let Some(SpawnMode::Dynamic) = spawn.mode
-                && let Ok(pid_file) = daemon.pid_file_handle().lock()
-                && let Some(&pid) = pid_file.services().get(&service_name)
-            {
-                spawn_manager.register_service_pid(service_name.clone(), pid);
-            }
-        }
+        let failed = resolved
+            .iter()
+            .filter(|(_, state)| **state == start::Resolution::Failed)
+            .map(|(service, _)| service.clone())
+            .collect();
+        // The project's root cause is the earliest failing unit in dependency
+        // order, so it does not change with which worker finished first.
+        let cause = boot.first_cause(&order);
 
         if daemon.boot_active(boot_epoch) {
             daemon.ensure_monitoring()?;
         }
-        Ok(BootFailures::new(failed.into_iter().collect(), cause))
+        Ok(BootFailures::new(failed, cause))
     }
 
     /// Combines per-project snapshots into the supervisor status view.
