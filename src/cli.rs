@@ -1,18 +1,24 @@
 //! Command-line interface for Systemg.
 use std::{fmt, str::FromStr};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use tracing::level_filters::LevelFilter;
 
 use crate::constants::DEFAULT_LOG_LINES;
 
 /// Documentation links appended to `--help` output.
-const DOCS_HELP: &str = "\
-Documentation:
-  Docs:      https://sysg.dev
-  Config:    https://sysg.dev/how-it-works/configuration
-  LLM docs:  https://sysg.dev/llms.txt (index)
-             https://sysg.dev/llms-full.txt (full reference)";
+///
+/// URLs are underlined #96CBFE. Raw ANSI is safe here: clap measures help
+/// width with escapes stripped, and anstream drops them on pipes, `NO_COLOR`,
+/// and dumb terminals. `--plain` and `SYSTEMG_AGENT` are handled in
+/// [`parse_args`], which clap cannot see.
+const DOCS_HELP: &str = concat!(
+    "Documentation:\n",
+    "  Docs:      \x1b[4;38;2;150;203;254mhttps://sysg.dev\x1b[0m\n",
+    "  Config:    \x1b[4;38;2;150;203;254mhttps://sysg.dev/how-it-works/configuration\x1b[0m\n",
+    "  LLM docs:  \x1b[4;38;2;150;203;254mhttps://sysg.dev/llms.txt\x1b[0m (index)\n",
+    "             \x1b[4;38;2;150;203;254mhttps://sysg.dev/llms-full.txt\x1b[0m (full reference)",
+);
 
 /// Wrapper around `LevelFilter` so clap can parse log levels from either
 /// string names ("info", "debug", etc.) or numeric shorthands (0-5).
@@ -645,9 +651,29 @@ impl Commands {
     }
 }
 
+/// True when `--plain` precedes `--` in argv, or `SYSTEMG_AGENT` is set.
+///
+/// `--help` is answered while clap parses, so neither the flag nor the env var
+/// this sets has been bound yet; argv is the only source that early.
+fn plain_requested() -> bool {
+    let agent = matches!(std::env::var("SYSTEMG_AGENT"), Ok(value) if !value.is_empty() && value != "0");
+    agent
+        || std::env::args()
+            .take_while(|arg| arg != "--")
+            .any(|arg| arg == "--plain")
+}
+
 /// Parses command-line arguments and returns a `Cli` struct.
+///
+/// Color is left to anstream, which already honors pipes and `NO_COLOR`; the
+/// override exists for agent mode, which clap has no way to detect.
 pub fn parse_args() -> Cli {
-    Cli::parse()
+    let mut command = Cli::command();
+    if plain_requested() {
+        command = command.color(ColorChoice::Never);
+    }
+    let matches = command.get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
 }
 
 #[cfg(test)]
