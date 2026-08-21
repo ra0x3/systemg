@@ -851,8 +851,28 @@ impl From<String> for DependsOn {
 /// Configuration for an individual service.
 #[derive(Debug, Default, Deserialize, Clone, serde::Serialize)]
 pub struct ServiceConfig {
-    /// Command used to start the service.
+    /// Command used to start the service, run through `sh -c`.
+    ///
+    /// Empty when the service declares `exec` instead; load-time normalisation
+    /// fills it from the argv so identity, status, and diagnostics keep one
+    /// command text to show.
+    #[serde(default)]
     pub command: String,
+    /// Argv form: the program and its arguments, run directly with no shell.
+    ///
+    /// A shell wrapper stays resident for the life of the service, so the
+    /// tracked pid is the shell rather than the workload. Declaring argv
+    /// removes it — signals, metrics, and exit status then land on the process
+    /// that does the work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<Vec<String>>,
+    /// Directory the service runs in, overriding the manifest's directory.
+    ///
+    /// Without it a command needing a different directory has to say
+    /// `cd elsewhere && ...`, which forces a shell and keeps a wrapper
+    /// resident for as long as the service runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     /// Optional environment variables for the service.
     pub env: Option<EnvConfig>,
     /// User that should own the running process.
@@ -1127,8 +1147,15 @@ impl ServiceConfig {
     /// diffing, state keys) would spuriously see a change. This canonical form is
     /// stable across loads.
     pub fn compute_hash(&self) -> String {
-        let value = serde_json::to_value(self)
+        let mut value = serde_json::to_value(self)
             .expect("ServiceConfig should always be serializable");
+        // `command` is rendered from `exec` for display, so hashing both would
+        // tie a service's identity to how argv happens to be printed.
+        if self.exec.is_some()
+            && let Some(map) = value.as_object_mut()
+        {
+            map.remove("command");
+        }
         let json =
             serde_json::to_string(&value).expect("JSON value is always serializable");
         let mut hasher = Sha256::new();
@@ -1159,6 +1186,24 @@ pub fn manifest_field_diag(
     .note("the manifest was refused; nothing it declares was touched")
     .help_cmd("check the whole manifest", "sysg validate -c <config>")
     .help_docs()
+}
+
+/// Renders argv as a copy-pasteable command line for display and identity.
+fn render_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|word| {
+            if word.is_empty()
+                || word
+                    .chars()
+                    .any(|c| c.is_whitespace() || "\"'\\$`*?[]{}()<>|&;#~!".contains(c))
+            {
+                format!("'{}'", word.replace('\'', "'\\''"))
+            } else {
+                word.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Rejects one duration field, naming its dotted path. Absent fields pass.
@@ -1524,6 +1569,67 @@ impl Config {
         self.services
             .get(service_name)
             .map(|cfg| cfg.compute_hash())
+    }
+
+    /// Settles each service on one command form and fills the display text.
+    ///
+    /// A service declares either `command` (shell form) or `exec` (argv form),
+    /// never both and never neither. The argv form is rendered into `command`
+    /// here so everything downstream — status, logs, hashing, diagnostics —
+    /// keeps reading a single field.
+    pub fn validate_commands(&mut self) -> Result<(), ProcessManagerError> {
+        let mut names: Vec<String> = self.services.keys().cloned().collect();
+        names.sort();
+        for name in names {
+            let scope = self.services[&name].project_scope.clone();
+            let base = match scope.as_deref() {
+                Some(project) if project != LOOSE_PROJECT_SCOPE => {
+                    format!("projects.{project}.services.{name}")
+                }
+                _ => format!("services.{name}"),
+            };
+            let service = self
+                .services
+                .get_mut(&name)
+                .expect("service present in this config");
+
+            match service.exec.as_deref() {
+                // Normalisation fills `command` from the argv, so a config
+                // validated twice -- loaded, handed to the supervisor, loaded
+                // again -- must not read its own rendering as a second form.
+                Some(argv)
+                    if !service.command.trim().is_empty()
+                        && service.command != render_argv(argv) =>
+                {
+                    return Err(ProcessManagerError::ManifestFieldInvalid {
+                        path: format!("{base}.exec"),
+                        value: render_argv(argv),
+                        reason: "the service also declares `command`; keep one form"
+                            .to_string(),
+                    });
+                }
+                Some(argv) if argv.is_empty() || argv[0].trim().is_empty() => {
+                    return Err(ProcessManagerError::ManifestFieldInvalid {
+                        path: format!("{base}.exec"),
+                        value: render_argv(argv),
+                        reason: "an argv list needs a program to run".to_string(),
+                    });
+                }
+                Some(argv) => {
+                    service.command = render_argv(argv);
+                }
+                None if service.command.trim().is_empty() => {
+                    return Err(ProcessManagerError::ManifestFieldInvalid {
+                        path: format!("{base}.command"),
+                        value: String::new(),
+                        reason: "declare `command` (shell form) or `exec` (argv form)"
+                            .to_string(),
+                    });
+                }
+                None => {}
+            }
+        }
+        Ok(())
     }
 
     /// Rejects any duration-valued field the runtime could not interpret.
@@ -1979,7 +2085,8 @@ pub fn load_config_from_file(
     // single-Config caller gets the FIRST project of a `projects:` file, and an
     // unchecked sibling would reach the forked supervisor and surface there as
     // an opaque failed boot rather than as the config error it is.
-    for config in &configs {
+    for config in &mut configs {
+        config.validate_commands()?;
         config.validate_durations()?;
     }
 
@@ -2101,6 +2208,7 @@ fn load_projects_from_content(
         for service in config.services.values_mut() {
             service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
         }
+        config.validate_commands()?;
         config.validate_durations()?;
         config.service_start_order()?;
         finalized.push(config);
@@ -2705,6 +2813,8 @@ services:
     fn minimal_service(depends_on: Option<Vec<&str>>) -> ServiceConfig {
         ServiceConfig {
             command: "echo ok".into(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,
@@ -3524,6 +3634,8 @@ services:
     fn hash_computation_is_stable() {
         let config1 = ServiceConfig {
             command: "test command".to_string(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,
@@ -3549,6 +3661,8 @@ services:
 
         let config2 = ServiceConfig {
             command: "test command".to_string(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,
@@ -3586,6 +3700,8 @@ services:
     fn hash_changes_with_config_changes() {
         let base_config = ServiceConfig {
             command: "test command".to_string(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,
@@ -3650,6 +3766,8 @@ services:
     fn service_rename_preserves_hash() {
         let config = ServiceConfig {
             command: "echo hello".to_string(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,

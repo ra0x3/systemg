@@ -1522,6 +1522,8 @@ mod tests {
     fn compute_test_hash(cron_config: &CronConfig) -> String {
         let service_config = ServiceConfig {
             command: "test_command".to_string(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,
@@ -2149,6 +2151,8 @@ mod tests {
     fn service_with_cron(expr: &str) -> ServiceConfig {
         ServiceConfig {
             command: "/bin/true".into(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,

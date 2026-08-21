@@ -4806,8 +4806,38 @@ impl Daemon {
         let command = &service_config.command;
         debug!("Launching service: '{service_name}' with command: `{command}`");
 
-        let mut cmd = Command::new(DEFAULT_SHELL);
-        cmd.arg(SHELL_COMMAND_FLAG).arg(command);
+        // Argv form execs the program itself, so the pid sysg tracks is the
+        // workload. The shell form cannot: `sh` stays resident as the parent
+        // for the life of the service, and every signal, metric, and exit code
+        // sysg reads then belongs to the shell.
+        let mut cmd = match service_config.exec.as_deref() {
+            Some([program, args @ ..]) => {
+                let mut cmd = Command::new(program);
+                cmd.args(args);
+                cmd
+            }
+            // An empty argv is refused at load; reaching here means a caller
+            // built the config in code. Falling back to the shell would run a
+            // command the service never declared, so refuse instead.
+            Some([]) => {
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: service_name.to_string(),
+                    source: std::io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "`exec` is empty: an argv list needs a program to run",
+                    ),
+                });
+            }
+            None => {
+                let mut cmd = Command::new(DEFAULT_SHELL);
+                cmd.arg(SHELL_COMMAND_FLAG).arg(command);
+                cmd
+            }
+        };
+        let working_dir = match service_config.working_dir.as_deref() {
+            Some(dir) => working_dir.join(dir),
+            None => working_dir,
+        };
         cmd.current_dir(&working_dir);
 
         debug!("Executing command: {cmd:?}");
@@ -9885,6 +9915,8 @@ mod tests {
     fn make_service(command: &str, deps: &[&str]) -> ServiceConfig {
         ServiceConfig {
             command: command.to_string(),
+            exec: None,
+            working_dir: None,
             env: None,
             user: None,
             group: None,

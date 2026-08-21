@@ -866,6 +866,14 @@ fn canonical_combined_log_path(project: &str, service: &str) -> PathBuf {
 }
 
 const LIVE_LOG_BUFFER_LIMIT: usize = 256 * 1024;
+/// Ceiling on every live-log buffer combined. Per-entry caps shrink as more
+/// services register so total resident cost stays flat in the service count.
+///
+/// These buffers only seed the backlog a project-wide `logs -f` replays when it
+/// attaches; the files hold the history. A megabyte still carries thousands of
+/// lines across a project, and it is a megabyte whether one service is running
+/// or four hundred.
+const LIVE_LOG_TOTAL_LIMIT: usize = 1024 * 1024;
 /// Maximum queued project log chunks before a slow subscriber is disconnected.
 const PROJECT_LOG_CHANNEL_CAPACITY: usize = 4096;
 /// Interval used to detect disconnected clients while no log data is arriving.
@@ -882,17 +890,91 @@ impl LiveLogEntry {
         Self { buffer: Vec::new() }
     }
 
-    /// Appends bytes and trims the in-memory buffer to the configured cap.
-    fn append(&mut self, chunk: &[u8]) {
+    /// Appends bytes and trims the in-memory buffer to `cap`.
+    fn append(&mut self, chunk: &[u8], cap: usize) {
         self.buffer.extend_from_slice(chunk);
-        if self.buffer.len() > LIVE_LOG_BUFFER_LIMIT {
-            let overflow = self.buffer.len() - LIVE_LOG_BUFFER_LIMIT;
+        self.trim(cap);
+    }
+
+    /// Drops whole lines from the front until the buffer fits `cap`, releasing
+    /// the freed capacity: `drain` alone keeps the old allocation resident, so
+    /// a shrinking cap would not return any memory.
+    fn trim(&mut self, cap: usize) {
+        if self.buffer.len() > cap {
+            let overflow = self.buffer.len() - cap;
             let cutoff = self.buffer[overflow..]
                 .iter()
                 .position(|byte| *byte == b'\n')
                 .map(|offset| overflow + offset + 1)
                 .unwrap_or(self.buffer.len());
             self.buffer.drain(..cutoff);
+        }
+        if self.buffer.capacity() > cap.saturating_mul(2) {
+            self.buffer.shrink_to(cap);
+        }
+    }
+}
+
+/// Live-log buffers for every service stream under one shared byte ceiling.
+struct LiveLogRegistry {
+    entries: std::collections::HashMap<LiveLogKey, LiveLogEntry>,
+    cap_per_entry: usize,
+}
+
+impl LiveLogRegistry {
+    /// Creates an empty registry.
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            cap_per_entry: LIVE_LOG_BUFFER_LIMIT,
+        }
+    }
+
+    /// Returns the per-entry cap that keeps `count` entries under the ceiling.
+    /// There is no floor: the total ceiling is hard, so a large enough service
+    /// count shrinks every tail rather than breaching it.
+    fn cap_for(count: usize) -> usize {
+        (LIVE_LOG_TOTAL_LIMIT / count.max(1)).min(LIVE_LOG_BUFFER_LIMIT)
+    }
+
+    /// Appends a chunk under the current shared cap.
+    ///
+    /// A new stream lowers the cap immediately, but every existing buffer is
+    /// only re-trimmed when the stream count crosses a power of two. Trimming
+    /// all of them on every registration would be quadratic across a large
+    /// boot; between those points a buffer that has stopped receiving output
+    /// can still hold its previous cap, so the total sits under twice the
+    /// ceiling at worst and returns to it on the next crossing.
+    fn append(&mut self, key: LiveLogKey, chunk: &[u8]) {
+        if !self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), LiveLogEntry::new());
+            if self.entries.len().is_power_of_two() {
+                self.recap();
+            } else {
+                self.cap_per_entry = Self::cap_for(self.entries.len());
+            }
+        }
+        let cap = self.cap_per_entry;
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.append(chunk, cap);
+        }
+    }
+
+    /// Recomputes the shared cap and trims every entry to it.
+    fn recap(&mut self) {
+        let cap = Self::cap_for(self.entries.len());
+        self.cap_per_entry = cap;
+        for entry in self.entries.values_mut() {
+            entry.trim(cap);
+        }
+    }
+
+    /// Drops every entry matching `predicate`, then reclaims the freed budget.
+    fn remove_matching(&mut self, predicate: impl Fn(&LiveLogKey) -> bool) {
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !predicate(key));
+        if self.entries.len() != before {
+            self.cap_per_entry = Self::cap_for(self.entries.len());
         }
     }
 }
@@ -940,12 +1022,9 @@ impl Drop for ProjectLogSub {
 }
 
 /// Returns the global live log registry shared by supervisor-side log readers.
-fn live_log_registry()
--> &'static Mutex<std::collections::HashMap<LiveLogKey, LiveLogEntry>> {
-    static REGISTRY: OnceLock<
-        Mutex<std::collections::HashMap<LiveLogKey, LiveLogEntry>>,
-    > = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn live_log_registry() -> &'static Mutex<LiveLogRegistry> {
+    static REGISTRY: OnceLock<Mutex<LiveLogRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(LiveLogRegistry::new()))
 }
 
 /// Returns the registry of project-wide log subscribers.
@@ -964,8 +1043,7 @@ fn append_live_log_chunk(project: &str, service: &str, stream: LogStream, chunk:
     let mut registry = live_log_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let entry = registry.entry(key).or_insert_with(LiveLogEntry::new);
-    entry.append(chunk);
+    registry.append(key, chunk);
     if stream == LogStream::Combined {
         let mut subscribers = project_log_subscribers()
             .lock()
@@ -1007,7 +1085,7 @@ fn subscribe_project_logs(projects: &[String]) -> (Vec<ProjectLogChunk>, Project
     let mut subscribers = project_log_subscribers()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for ((project, service, stream), entry) in registry.iter() {
+    for ((project, service, stream), entry) in registry.entries.iter() {
         if stream == LogStream::Combined.as_str()
             && projects.iter().any(|candidate| candidate == project)
             && !entry.buffer.is_empty()
@@ -1044,7 +1122,29 @@ fn subscribe_project_logs(projects: &[String]) -> (Vec<ProjectLogChunk>, Project
 /// would leave a serving supervisor able to replay purged content.
 pub fn clear_live_log(project: &str, service: &str) {
     if let Ok(mut registry) = live_log_registry().lock() {
-        registry.retain(|(proj, name, _), _| proj != project || name != service);
+        registry.remove_matching(|(proj, name, _)| proj == project && name == service);
+    }
+}
+
+/// Drops the in-memory live-log buffers for every service of a project.
+///
+/// A removed project keeps no services, so its buffers would otherwise hold
+/// their share of the ceiling for the life of the supervisor.
+pub fn clear_project_live_logs(project: &str) {
+    if let Ok(mut registry) = live_log_registry().lock() {
+        registry.remove_matching(|(proj, _, _)| proj == project);
+    }
+}
+
+/// Drops the live-log buffers of a project's services that `keep` omits.
+///
+/// A reloaded manifest can drop services; their buffers would otherwise hold
+/// their share of the ceiling with nothing left to write to them.
+pub fn retain_project_live_logs(project: &str, keep: &HashSet<String>) {
+    if let Ok(mut registry) = live_log_registry().lock() {
+        registry.remove_matching(|(proj, service, _)| {
+            proj == project && !keep.contains(service)
+        });
     }
 }
 
