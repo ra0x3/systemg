@@ -142,6 +142,20 @@ $ sysg start --parent-pid 4242 --name worker-1 --ttl 900 -- python worker.py
 In either mode, the supervisor owns the services. Foreground versus daemon mode
 controls the terminal attachment, not whether supervision exists.
 
+## Startup order
+
+`depends_on` is the only thing that orders a start. Every service whose declared
+dependencies have resolved starts at the same time, so a boot takes as long as
+its longest dependency chain rather than the sum of every service's readiness
+wait. A service never waits on one it did not declare.
+
+Set `start.max_concurrent` in
+[`supervisor.xml`](/how-it-works/configuration#supervisor-configuration) to `1`
+to start services one at a time, or to a positive number to cap how many run at
+once. The cap is worth reaching for when a wide boot contends for something the
+supervisor cannot see — every service opening connections to the same database
+at the same moment.
+
 ## See also
 
 - [`stop`](/how-it-works/commands/stop) - Stop running services

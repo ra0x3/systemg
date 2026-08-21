@@ -20,7 +20,7 @@ its Unix socket.
 
 ## Process lifecycle
 
-1. **Start**: Services launch in dependency order
+1. **Start**: Services launch as soon as their `depends_on` entries resolve
 2. **Monitor**: Supervisor tracks PIDs and health
 3. **Restart**: Unsuccessful services restart per policy; clean exits stay done
 4. **Stop**: Services terminate in reverse order

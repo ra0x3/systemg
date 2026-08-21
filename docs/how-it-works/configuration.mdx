@@ -102,6 +102,9 @@ in `~/.local/share/systemg/supervisor.xml`, or
     <start_settle_secs>360</start_settle_secs>
     <command_wait_secs>900</command_wait_secs>
   </timeouts>
+  <start>
+    <max_concurrent>-1</max_concurrent>
+  </start>
 </supervisor>
 ```
 
@@ -113,6 +116,10 @@ in `~/.local/share/systemg/supervisor.xml`, or
   before reporting [SG0111](/how-it-works/dialog/codes#sg0111). `0` waits
   indefinitely. Raise it when a project is large enough that a restart runs
   longer than the default; the command is never cancelled by the wait ending.
+- `max_concurrent`: how many services a bulk start runs at once. `-1` (the
+  default) starts every service whose dependencies have resolved, `1` starts
+  one service at a time, and any other positive number is a cap. Applies to
+  `sysg start` and to project boot; `restart` remains one service at a time.
 
 The file is created on first supervisor start. Existing compact XML remains
 compatible and is rewritten in the indented form after it parses successfully.
@@ -392,6 +399,19 @@ services:
       - postgres
       - redis
 ```
+
+`depends_on` is the only thing that orders a start. Services with no dependency
+between them start at the same time, and a service waits for the dependencies it
+declared and for nothing else — an unrelated slow service never holds it back.
+Position in the manifest has never ordered anything and does not now.
+
+<Warning>
+  If a service needs another one up first, declare it. A service that relied on
+  a manifest's ordering without saying so will now start alongside what it used
+  to follow. Set `max_concurrent` to `1` in
+  [`supervisor.xml`](#supervisor-configuration) to restore one-at-a-time startup
+  while you add the missing `depends_on` entries.
+</Warning>
 
 ### `env`
 
