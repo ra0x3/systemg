@@ -379,12 +379,50 @@ tags unresolved.
 
 ### `command`
 
-**Required**. The command to execute.
+The command to execute, run through `sh -c`. Required unless the service
+declares [`exec`](#exec) instead.
 
 ```yaml
 services:
   web:
     command: "python app.py"
+```
+
+The shell stays alive for as long as the service does, and it is the process
+systemg tracks: signals, CPU and memory readings, and the recorded exit status
+all describe the shell rather than the program inside it. On most Linux systems
+`/bin/sh` is `dash`, which does not replace itself with the command, so a shell
+form service costs one extra process and one extra entry in `status`.
+
+Use it when the service genuinely needs a shell - a pipeline, `&&`, a glob, a
+variable expansion. Reach for `exec` when it does not.
+
+### `exec`
+
+The program and its arguments as a list. systemg runs it directly, with no
+shell in between, so the tracked process is the workload itself.
+
+```yaml
+services:
+  web:
+    exec: ["python", "app.py"]
+```
+
+A service declares `command` or `exec`, never both. Nothing is quoted, split,
+or expanded: each list entry is passed through as one argument, so a value
+containing spaces stays one argument.
+
+### `working_dir`
+
+The directory the service runs in, relative to the manifest's directory or
+absolute. Without it, a service that needs another directory has to say
+`cd elsewhere && ...`, which forces the shell form.
+
+```yaml
+services:
+  web:
+    working_dir: "services/api"
+    exec: ["python", "app.py"]
 ```
 
 ### `depends_on`
@@ -537,7 +575,9 @@ Primary keys available on each service definition.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `command` | string | Command to execute (required) |
+| `command` | string | Command to execute through `sh -c` (required unless `exec` is set) |
+| `exec` | array | Program and arguments run directly, with no shell |
+| `working_dir` | string | Directory the service runs in |
 | `depends_on` | array | Services that must start first |
 | `env` | object | Environment configuration |
 | `restart_policy` | string | `always`, `on-failure`, or `never` |

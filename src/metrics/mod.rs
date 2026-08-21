@@ -29,6 +29,21 @@ const DEFAULT_RETENTION_MINUTES: u64 = 720;
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 1;
 const DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 
+/// Raw samples kept at full resolution before aggregation begins.
+const RAW_CAPACITY: usize = 120;
+/// Bucket width of the middle tier.
+const MINUTE_SPAN_SECS: i64 = 60;
+/// Minute buckets kept before they fold into the coarse tier.
+const MINUTE_CAPACITY: usize = 60;
+/// Bucket width of the coarse tier.
+const COARSE_SPAN_SECS: i64 = 900;
+/// Hard ceiling on coarse buckets per unit; retention is honoured by widening
+/// the bucket, never by keeping more of them.
+const COARSE_CAPACITY_MAX: usize = 96;
+/// Buckets a retention window is divided into when it exceeds what the default
+/// span covers.
+const COARSE_CAPACITY_MIN_SPAN_DIVISOR: i64 = 48;
+
 /// Sample collected for a managed unit at a specific timestamp.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricSample {
@@ -46,6 +61,64 @@ pub struct MetricSample {
     pub net_rx_bytes: u64,
     /// Total bytes transmitted to network.
     pub net_tx_bytes: u64,
+    /// Raw observations this entry represents. Older entries are aggregated,
+    /// so a single entry can stand for a whole minute or quarter hour.
+    #[serde(default = "one_sample")]
+    pub sample_count: u32,
+    /// Seconds of wall clock the entry covers. Zero for an instantaneous read.
+    #[serde(default)]
+    pub span_secs: u32,
+    /// Lowest CPU reading inside the entry; absent on an instantaneous read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_min: Option<f32>,
+    /// Highest CPU reading inside the entry. Aggregating on the mean alone
+    /// would erase every spike older than the raw window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_max: Option<f32>,
+    /// Lowest resident size inside the entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_min: Option<u64>,
+    /// Highest resident size inside the entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_max: Option<u64>,
+    /// Mean resident size across the entry. `rss_bytes` stays the newest
+    /// reading, which is what a status line wants; an average over a window
+    /// needs this instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_mean: Option<u64>,
+}
+
+impl MetricSample {
+    /// Lowest CPU the entry saw, falling back to its own reading.
+    pub fn cpu_low(&self) -> f32 {
+        self.cpu_min.unwrap_or(self.cpu_percent)
+    }
+
+    /// Highest CPU the entry saw, falling back to its own reading.
+    pub fn cpu_high(&self) -> f32 {
+        self.cpu_max.unwrap_or(self.cpu_percent)
+    }
+
+    /// Lowest resident size the entry saw, falling back to its own reading.
+    pub fn rss_low(&self) -> u64 {
+        self.rss_min.unwrap_or(self.rss_bytes)
+    }
+
+    /// Highest resident size the entry saw, falling back to its own reading.
+    pub fn rss_high(&self) -> u64 {
+        self.rss_max.unwrap_or(self.rss_bytes)
+    }
+
+    /// Mean resident size across the entry, falling back to its own reading.
+    pub fn rss_average(&self) -> u64 {
+        self.rss_mean.unwrap_or(self.rss_bytes)
+    }
+}
+
+/// Serde default for [`MetricSample::sample_count`] on records written before
+/// aggregation existed.
+fn one_sample() -> u32 {
+    1
 }
 
 /// Summary statistics derived from recent samples.
@@ -113,11 +186,173 @@ pub enum MetricsError {
     SpilloverSerialize(serde_json::Error),
 }
 
+/// One time bucket. A freshly recorded sample is a bucket of one observation
+/// spanning nothing; folding older buckets together is what keeps a unit's
+/// history bounded no matter how long it runs.
+#[derive(Debug, Clone)]
+struct Bucket {
+    timestamp: DateTime<Utc>,
+    /// When the newest reading inside this bucket was actually taken. The
+    /// bucket's own timestamp is the window it was aligned to, which says
+    /// nothing about which reading is the latest once entries merge.
+    last_observed: DateTime<Utc>,
+    cpu_mean: f32,
+    cpu_min: f32,
+    cpu_max: f32,
+    rss_bytes: u64,
+    rss_mean: f64,
+    rss_min: u64,
+    rss_max: u64,
+    io_read_bytes: u64,
+    io_write_bytes: u64,
+    net_rx_bytes: u64,
+    net_tx_bytes: u64,
+    count: u32,
+    span_secs: u32,
+}
+
+impl Bucket {
+    /// Wraps a freshly collected sample.
+    fn raw(sample: &MetricSample) -> Self {
+        Self {
+            timestamp: sample.timestamp,
+            last_observed: sample.timestamp,
+            cpu_mean: sample.cpu_percent,
+            cpu_min: sample.cpu_low(),
+            cpu_max: sample.cpu_high(),
+            rss_bytes: sample.rss_bytes,
+            rss_mean: sample.rss_mean.unwrap_or(sample.rss_bytes) as f64,
+            rss_min: sample.rss_low(),
+            rss_max: sample.rss_high(),
+            io_read_bytes: sample.io_read_bytes,
+            io_write_bytes: sample.io_write_bytes,
+            net_rx_bytes: sample.net_rx_bytes,
+            net_tx_bytes: sample.net_tx_bytes,
+            count: sample.sample_count.max(1),
+            span_secs: sample.span_secs,
+        }
+    }
+
+    /// Renders the bucket back into the wire sample shape. Aggregates carry
+    /// their extrema so a consumer can still see the peak inside the window.
+    fn to_sample(&self) -> MetricSample {
+        let aggregated = self.count > 1;
+        MetricSample {
+            timestamp: self.timestamp,
+            cpu_percent: self.cpu_mean,
+            rss_bytes: self.rss_bytes,
+            io_read_bytes: self.io_read_bytes,
+            io_write_bytes: self.io_write_bytes,
+            net_rx_bytes: self.net_rx_bytes,
+            net_tx_bytes: self.net_tx_bytes,
+            sample_count: self.count,
+            span_secs: self.span_secs,
+            cpu_min: aggregated.then_some(self.cpu_min),
+            cpu_max: aggregated.then_some(self.cpu_max),
+            rss_min: aggregated.then_some(self.rss_min),
+            rss_max: aggregated.then_some(self.rss_max),
+            rss_mean: aggregated.then_some(self.rss_mean.round() as u64),
+        }
+    }
+
+    /// Returns the wall clock the bucket's window ends at.
+    fn end(&self) -> DateTime<Utc> {
+        self.timestamp + ChronoDuration::seconds(self.span_secs as i64)
+    }
+
+    /// Absorbs a later bucket: means combine by observation count, extrema
+    /// survive, and the monotonic counters take the newer reading.
+    fn merge(&mut self, other: &Bucket) {
+        let total = self.count.saturating_add(other.count).max(1) as f64;
+        self.cpu_mean = ((self.cpu_mean as f64 * self.count as f64
+            + other.cpu_mean as f64 * other.count as f64)
+            / total) as f32;
+        self.rss_mean = (self.rss_mean * self.count as f64
+            + other.rss_mean * other.count as f64)
+            / total;
+        self.cpu_min = self.cpu_min.min(other.cpu_min);
+        self.cpu_max = self.cpu_max.max(other.cpu_max);
+        self.rss_min = self.rss_min.min(other.rss_min);
+        self.rss_max = self.rss_max.max(other.rss_max);
+        // "Latest" follows observation time, not arrival order: a reading that
+        // turns up late, or after a clock step, must not overwrite a newer one.
+        if other.last_observed >= self.last_observed {
+            self.last_observed = other.last_observed;
+            self.rss_bytes = other.rss_bytes;
+            self.io_read_bytes = other.io_read_bytes;
+            self.io_write_bytes = other.io_write_bytes;
+            self.net_rx_bytes = other.net_rx_bytes;
+            self.net_tx_bytes = other.net_tx_bytes;
+        }
+        self.count = self.count.saturating_add(other.count);
+    }
+}
+
+/// Returns the start of the `span`-aligned bucket containing `timestamp`.
+fn align_to_span(timestamp: DateTime<Utc>, span: i64) -> DateTime<Utc> {
+    let secs = timestamp.timestamp();
+    DateTime::from_timestamp(secs - secs.rem_euclid(span), 0).unwrap_or(timestamp)
+}
+
+/// Folds `bucket` into `tier` at its aligned window, keeping the tier ordered.
+///
+/// The common case appends or merges at the tail. A clock that steps backwards
+/// would otherwise push an older entry after a newer one, which corrupts both
+/// the ordering charts rely on and whatever "latest" means, so an out-of-order
+/// arrival is placed where it belongs instead.
+fn fold_into(tier: &mut VecDeque<Bucket>, mut bucket: Bucket, span: i64) {
+    let start = align_to_span(bucket.timestamp, span);
+    // Aligning moves the bucket's label, never its observation time.
+    bucket.timestamp = start;
+    bucket.span_secs = span as u32;
+
+    match tier.back_mut() {
+        Some(last) if last.timestamp == start => {
+            last.merge(&bucket);
+        }
+        Some(last) if last.timestamp < start => tier.push_back(bucket),
+        Some(_) => match tier.iter().rposition(|entry| entry.timestamp <= start) {
+            Some(index) if tier[index].timestamp == start => {
+                let existing = &mut tier[index];
+                existing.merge(&bucket);
+            }
+            Some(index) => tier.insert(index + 1, bucket),
+            None => tier.push_front(bucket),
+        },
+        None => tier.push_back(bucket),
+    }
+}
+
+/// A unit's history at three resolutions: recent seconds, the last hour by the
+/// minute, and older history in quarter hours.
 #[derive(Debug, Clone, Default)]
-/// Represents unit metrics.
 struct UnitMetrics {
-    samples: VecDeque<MetricSample>,
-    estimated_bytes: usize,
+    raw: VecDeque<Bucket>,
+    minute: VecDeque<Bucket>,
+    coarse: VecDeque<Bucket>,
+}
+
+impl UnitMetrics {
+    /// Returns every retained bucket oldest first.
+    fn buckets(&self) -> impl Iterator<Item = &Bucket> {
+        self.coarse
+            .iter()
+            .chain(self.minute.iter())
+            .chain(self.raw.iter())
+    }
+
+    /// Returns the number of retained buckets across all tiers.
+    fn len(&self) -> usize {
+        self.coarse.len() + self.minute.len() + self.raw.len()
+    }
+
+    /// Drops the oldest retained bucket, coarsest tier first.
+    fn pop_oldest(&mut self) -> Option<Bucket> {
+        self.coarse
+            .pop_front()
+            .or_else(|| self.minute.pop_front())
+            .or_else(|| self.raw.pop_front())
+    }
 }
 
 /// Thread-safe handle for interacting with metrics storage.
@@ -158,57 +393,108 @@ impl MetricsStore {
         if let Some(buffer) = self.units.remove(unit_hash) {
             self.total_estimated_bytes = self
                 .total_estimated_bytes
-                .saturating_sub(buffer.estimated_bytes);
+                .saturating_sub(buffer.len() * mem::size_of::<Bucket>());
         }
     }
 
-    /// Records a new sample for the provided unit, pruning data outside the retention
-    /// window and enforcing the configured memory budget.
+    /// Records a new sample for the provided unit.
+    ///
+    /// History is bounded by resolution, not by count: recent samples stay raw,
+    /// anything older folds into minute buckets and then quarter-hour buckets.
+    /// A unit therefore costs the same whether it has run for a minute or a
+    /// week, and retention no longer shrinks as more units are supervised.
     pub fn record_sample(
         &mut self,
         unit_hash: &str,
         sample: MetricSample,
     ) -> Result<(), MetricsError> {
-        let retention_duration = ChronoDuration::from_std(self.settings.retention)
-            .unwrap_or_else(|_| {
+        let raw_capacity = self.raw_capacity();
+        let coarse_span = self.coarse_span();
+        let retention_cutoff = sample.timestamp
+            - ChronoDuration::from_std(self.settings.retention).unwrap_or_else(|_| {
                 ChronoDuration::minutes(DEFAULT_RETENTION_MINUTES as i64)
             });
-        let retention_cutoff = sample
-            .timestamp
-            .checked_sub_signed(retention_duration)
-            .unwrap_or(DateTime::<Utc>::MIN_UTC);
-
         let buffer = self.units.entry(unit_hash.to_string()).or_default();
+        let before = buffer.len();
 
-        let sample_estimated_bytes = mem::size_of::<MetricSample>();
-        buffer.samples.push_back(sample.clone());
-        buffer.estimated_bytes = buffer
-            .estimated_bytes
-            .saturating_add(sample_estimated_bytes);
+        let arriving = Bucket::raw(&sample);
+        match buffer.raw.back() {
+            Some(last) if last.timestamp > arriving.timestamp => {
+                // A backwards clock step: place the reading in time order
+                // rather than letting it masquerade as the newest one.
+                let index = buffer
+                    .raw
+                    .iter()
+                    .rposition(|entry| entry.timestamp <= arriving.timestamp);
+                match index {
+                    Some(index) => buffer.raw.insert(index + 1, arriving),
+                    None => buffer.raw.push_front(arriving),
+                }
+            }
+            _ => buffer.raw.push_back(arriving),
+        }
+
+        let mut evicted = Vec::new();
+        while buffer.raw.len() > raw_capacity {
+            if let Some(bucket) = buffer.raw.pop_front() {
+                fold_into(&mut buffer.minute, bucket, MINUTE_SPAN_SECS);
+            }
+        }
+        while buffer.minute.len() > MINUTE_CAPACITY {
+            if let Some(bucket) = buffer.minute.pop_front() {
+                fold_into(&mut buffer.coarse, bucket, coarse_span);
+            }
+        }
+        // Retention is a wall-clock window, not a bucket count, and it applies
+        // to every tier: a retention shorter than the raw window would
+        // otherwise keep readings the operator asked to forget.
+        for tier in [&mut buffer.coarse, &mut buffer.minute, &mut buffer.raw] {
+            while tier
+                .front()
+                .is_some_and(|bucket| bucket.end() <= retention_cutoff)
+            {
+                if let Some(bucket) = tier.pop_front() {
+                    evicted.push(bucket);
+                }
+            }
+        }
+        while buffer.coarse.len() > COARSE_CAPACITY_MAX {
+            if let Some(bucket) = buffer.coarse.pop_front() {
+                evicted.push(bucket);
+            }
+        }
+
+        let after = buffer.len();
         self.total_estimated_bytes = self
             .total_estimated_bytes
-            .saturating_add(sample_estimated_bytes);
+            .saturating_add(after.saturating_sub(before) * mem::size_of::<Bucket>())
+            .saturating_sub(before.saturating_sub(after) * mem::size_of::<Bucket>());
 
-        while let Some(front) = buffer.samples.front() {
-            if front.timestamp >= retention_cutoff {
-                break;
-            }
-
-            if let Some(evicted) = buffer.samples.pop_front() {
-                buffer.estimated_bytes = buffer
-                    .estimated_bytes
-                    .saturating_sub(sample_estimated_bytes);
-                self.total_estimated_bytes = self
-                    .total_estimated_bytes
-                    .saturating_sub(sample_estimated_bytes);
-                if let Some(spillover) = self.spillover.as_mut() {
-                    spillover.persist(unit_hash, &evicted)?;
-                }
+        if let Some(spillover) = self.spillover.as_mut() {
+            for bucket in &evicted {
+                spillover.persist(unit_hash, &bucket.to_sample())?;
             }
         }
 
         self.enforce_memory_budget()?;
         Ok(())
+    }
+
+    /// Returns how many raw samples to keep before aggregation starts. Slower
+    /// sampling keeps the same wall-clock window at full resolution.
+    fn raw_capacity(&self) -> usize {
+        let interval = self.settings.sample_interval.as_secs().max(1);
+        (RAW_CAPACITY / interval as usize).max(30)
+    }
+
+    /// Returns the coarse bucket width that covers the configured retention
+    /// within a fixed number of buckets. A long retention widens the bucket
+    /// rather than allocating more of them, so memory stays flat while the
+    /// window the operator asked for is honoured.
+    fn coarse_span(&self) -> i64 {
+        let retention = self.settings.retention.as_secs() as i64;
+        let needed = retention.div_euclid(COARSE_CAPACITY_MIN_SPAN_DIVISOR);
+        needed.max(COARSE_SPAN_SECS)
     }
 
     /// Handles retention.
@@ -221,7 +507,8 @@ impl MetricsStore {
         self.settings.sample_interval
     }
 
-    /// Handles enforce memory budget.
+    /// Backstop for the tiered budget: with bounded tiers this should never
+    /// bind, but a very large unit count can still exceed the ceiling.
     fn enforce_memory_budget(&mut self) -> Result<(), MetricsError> {
         if self.total_estimated_bytes <= self.settings.max_memory_bytes {
             return Ok(());
@@ -233,17 +520,13 @@ impl MetricsStore {
             let mut removed_any = false;
             for key in unit_keys.iter() {
                 if let Some(buffer) = self.units.get_mut(key)
-                    && let Some(sample) = buffer.samples.pop_front()
+                    && let Some(bucket) = buffer.pop_oldest()
                 {
-                    let sample_estimated_bytes = mem::size_of::<MetricSample>();
-                    buffer.estimated_bytes = buffer
-                        .estimated_bytes
-                        .saturating_sub(sample_estimated_bytes);
                     self.total_estimated_bytes = self
                         .total_estimated_bytes
-                        .saturating_sub(sample_estimated_bytes);
+                        .saturating_sub(mem::size_of::<Bucket>());
                     if let Some(spillover) = self.spillover.as_mut() {
-                        spillover.persist(key, &sample)?;
+                        spillover.persist(key, &bucket.to_sample())?;
                     }
                     removed_any = true;
                 }
@@ -260,53 +543,55 @@ impl MetricsStore {
         Ok(())
     }
 
-    /// Returns the recent samples for a unit without cloning the entire store.
+    /// Returns the retained history for a unit, oldest first. Entries older
+    /// than the raw window carry `sample_count` and `span_secs` describing the
+    /// window they summarise.
     pub fn snapshot_unit(&self, unit_hash: &str) -> Option<Vec<MetricSample>> {
         self.units
             .get(unit_hash)
-            .map(|buffer| buffer.samples.iter().cloned().collect())
+            .map(|buffer| buffer.buckets().map(Bucket::to_sample).collect())
     }
 
-    /// Returns a copy of the most recent samples limited to `limit` entries.
+    /// Returns a copy of the most recent entries limited to `limit`.
     pub fn latest_samples(&self, unit_hash: &str, limit: usize) -> Vec<MetricSample> {
         self.units
             .get(unit_hash)
             .map(|buffer| {
+                let total = buffer.len();
                 buffer
-                    .samples
-                    .iter()
-                    .rev()
-                    .take(limit)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
+                    .buckets()
+                    .skip(total.saturating_sub(limit))
+                    .map(Bucket::to_sample)
                     .collect()
             })
             .unwrap_or_default()
     }
 
-    /// Produces summary statistics for the requested unit.
+    /// Produces summary statistics for the requested unit. The average weighs
+    /// each entry by the observations it stands for, so aggregation does not
+    /// let one quarter-hour bucket outvote a hundred raw samples.
     pub fn summarize_unit(&self, unit_hash: &str) -> Option<MetricsSummary> {
         let buffer = self.units.get(unit_hash)?;
-        if buffer.samples.is_empty() {
+        let latest = buffer.buckets().max_by_key(|bucket| bucket.last_observed)?;
+
+        let mut observations = 0_u64;
+        let mut weighted_cpu = 0.0_f64;
+        let mut max_cpu = 0.0_f32;
+        for bucket in buffer.buckets() {
+            observations += bucket.count as u64;
+            weighted_cpu += bucket.cpu_mean as f64 * bucket.count as f64;
+            max_cpu = max_cpu.max(bucket.cpu_max);
+        }
+        if observations == 0 {
             return None;
         }
 
-        let samples = buffer.samples.len();
-        let latest = buffer.samples.back()?;
-        let sum_cpu: f32 = buffer.samples.iter().map(|sample| sample.cpu_percent).sum();
-        let max_cpu = buffer
-            .samples
-            .iter()
-            .fold(0.0_f32, |acc, sample| acc.max(sample.cpu_percent));
-
         Some(MetricsSummary {
-            latest_cpu_percent: latest.cpu_percent,
-            average_cpu_percent: sum_cpu / samples as f32,
+            latest_cpu_percent: latest.cpu_mean,
+            average_cpu_percent: (weighted_cpu / observations as f64) as f32,
             max_cpu_percent: max_cpu,
             latest_rss_bytes: latest.rss_bytes,
-            samples,
+            samples: observations as usize,
         })
     }
 }
@@ -670,6 +955,13 @@ fn sample_process(system: &mut System, pid: u32) -> MetricSample {
             io_write_bytes: 0,
             net_rx_bytes: 0,
             net_tx_bytes: 0,
+            sample_count: 1,
+            span_secs: 0,
+            cpu_min: None,
+            cpu_max: None,
+            rss_min: None,
+            rss_max: None,
+            rss_mean: None,
         }
     } else {
         missing_process_sample()
@@ -686,5 +978,12 @@ fn missing_process_sample() -> MetricSample {
         io_write_bytes: 0,
         net_rx_bytes: 0,
         net_tx_bytes: 0,
+        sample_count: 1,
+        span_secs: 0,
+        cpu_min: None,
+        cpu_max: None,
+        rss_min: None,
+        rss_max: None,
+        rss_mean: None,
     }
 }

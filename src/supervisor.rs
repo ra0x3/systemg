@@ -1843,6 +1843,9 @@ impl Supervisor {
             return Err(err);
         }
 
+        let surviving: std::collections::HashSet<String> =
+            replacement.config().services.keys().cloned().collect();
+        crate::logs::retain_project_live_logs(&project_id, &surviving);
         self.extra_projects.insert(
             project_id.clone(),
             ProjectRuntime {
@@ -6146,6 +6149,7 @@ running project does not declare; restart the project to apply structural change
             return Err(err.into());
         }
         self.extra_projects.remove(project_id);
+        crate::logs::clear_project_live_logs(project_id);
         if let Ok(mut projects) = self.boot_projects.write() {
             projects.remove(project_id);
         }

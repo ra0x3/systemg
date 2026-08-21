@@ -42,15 +42,12 @@ pub fn render_metrics_chart_lines(
         ]);
     }
 
-    let cpu_values: Vec<f64> = samples.iter().map(|s| s.cpu_percent as f64).collect();
-    let mem_gb_values: Vec<f64> = samples
-        .iter()
-        .map(|s| s.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-        .collect();
-
     let chart_width = 48usize;
-    let cpu_resampled = resample_to_width(&cpu_values, chart_width);
-    let mem_resampled = resample_to_width(&mem_gb_values, chart_width);
+    let cpu_resampled =
+        resample_over_time(samples, chart_width, |sample| sample.cpu_percent as f64);
+    let mem_resampled = resample_over_time(samples, chart_width, |sample| {
+        sample.rss_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    });
 
     let cpu_resampled: Vec<f64> = cpu_resampled
         .iter()
@@ -148,24 +145,51 @@ pub fn render_metrics_chart_lines(
     output.push(String::new());
     output.push("Summary Statistics:".to_string());
 
-    let cpu_avg = if !cpu_values.is_empty() {
-        cpu_values.iter().sum::<f64>() / cpu_values.len() as f64
-    } else {
-        0.0
-    };
-    let cpu_max = cpu_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let cpu_min = cpu_values.iter().cloned().fold(f64::INFINITY, f64::min);
-
-    let mem_avg = if !mem_gb_values.is_empty() {
-        mem_gb_values.iter().sum::<f64>() / mem_gb_values.len() as f64
-    } else {
-        0.0
-    };
-    let mem_max = mem_gb_values
+    let cpu_values: Vec<f64> = samples.iter().map(|s| s.cpu_percent as f64).collect();
+    let mem_gb_values: Vec<f64> = samples
         .iter()
-        .cloned()
+        .map(|s| s.rss_average() as f64 / (1024.0 * 1024.0 * 1024.0))
+        .collect();
+    let observations: f64 = samples
+        .iter()
+        .map(|sample| sample.sample_count.max(1) as f64)
+        .sum();
+
+    let weighted_avg = |values: &[f64]| -> f64 {
+        if observations <= 0.0 {
+            return 0.0;
+        }
+        values
+            .iter()
+            .zip(samples.iter())
+            .map(|(value, sample)| value * sample.sample_count.max(1) as f64)
+            .sum::<f64>()
+            / observations
+    };
+
+    // Extrema come from each entry's own recorded peak and trough, not from
+    // its mean: an aggregated entry stands for a whole window, and reading only
+    // its mean would quietly erase every spike older than the raw window.
+    let cpu_avg = weighted_avg(&cpu_values);
+    let cpu_max = samples
+        .iter()
+        .map(|sample| sample.cpu_high() as f64)
         .fold(f64::NEG_INFINITY, f64::max);
-    let mem_min = mem_gb_values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let cpu_min = samples
+        .iter()
+        .map(|sample| sample.cpu_low() as f64)
+        .fold(f64::INFINITY, f64::min);
+
+    let to_gb = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    let mem_avg = weighted_avg(&mem_gb_values);
+    let mem_max = samples
+        .iter()
+        .map(|sample| to_gb(sample.rss_high()))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mem_min = samples
+        .iter()
+        .map(|sample| to_gb(sample.rss_low()))
+        .fold(f64::INFINITY, f64::min);
 
     output.push(format!(
         "  CPU:     min={:.1}% avg={:.1}% max={:.1}%",
@@ -179,7 +203,7 @@ pub fn render_metrics_chart_lines(
         mem_avg,
         if mem_max.is_finite() { mem_max } else { 0.0 }
     ));
-    output.push(format!("  Samples: {}", samples.len()));
+    output.push(format!("  Samples: {}", observations as u64));
 
     Ok(output)
 }
@@ -398,6 +422,77 @@ fn visible_width(s: &str) -> usize {
 }
 
 /// Resample data to a specific width by interpolation or repetition
+/// Resamples along the time axis rather than the array index.
+///
+/// History arrives at mixed cadence -- recent entries are one second apart,
+/// older ones summarise a minute or a quarter hour -- so spacing points evenly
+/// by index would stretch old data across the chart and squeeze the recent
+/// past. Each column here covers an equal slice of wall clock, averaging the
+/// entries that land in it weighted by the observations each stands for, and
+/// carrying the last known value across columns with no data.
+fn resample_over_time(
+    samples: &[MetricSample],
+    target_width: usize,
+    value: impl Fn(&MetricSample) -> f64,
+) -> Vec<f64> {
+    if samples.is_empty() || target_width == 0 {
+        return vec![0.0; target_width];
+    }
+
+    let first = samples[0].timestamp.timestamp_millis();
+    let last = samples[samples.len() - 1].timestamp.timestamp_millis();
+    let span = (last - first).max(1) as f64;
+
+    let mut sums = vec![0.0_f64; target_width];
+    let mut weights = vec![0.0_f64; target_width];
+    for sample in samples {
+        let offset = (sample.timestamp.timestamp_millis() - first) as f64;
+        let column = ((offset / span) * (target_width - 1) as f64).round() as usize;
+        let column = column.min(target_width - 1);
+        let weight = sample.sample_count.max(1) as f64;
+        sums[column] += value(sample) * weight;
+        weights[column] += weight;
+    }
+
+    // Columns with no entry are held at the last known value only while the
+    // gap is narrower than the entries themselves are spaced -- that is
+    // upsampling, and interpolating is right. A real gap in the history, when
+    // nothing was running or nothing was collected, reads as zero instead of
+    // as a flat line that never happened.
+    // How far a value may be carried is set by the entries around the gap, not
+    // by the coarsest entry anywhere in the window: one quarter-hour bucket at
+    // the far end of a long window must not license painting over a recent
+    // outage.
+    let mut widest = vec![0.0_f64; target_width];
+    for sample in samples {
+        let offset = (sample.timestamp.timestamp_millis() - first) as f64;
+        let column = ((offset / span) * (target_width - 1) as f64).round() as usize;
+        let column = column.min(target_width - 1);
+        widest[column] = widest[column].max(sample.span_secs as f64 * 1000.0);
+    }
+
+    let column_span = span / target_width.max(1) as f64;
+    let mut result = Vec::with_capacity(target_width);
+    let mut carried = value(&samples[0]);
+    let mut carry_budget = 0.0_f64;
+    for column in 0..target_width {
+        if weights[column] > 0.0 {
+            carried = sums[column] / weights[column];
+            carry_budget = widest[column].max(column_span);
+            result.push(carried);
+            continue;
+        }
+        carry_budget -= column_span;
+        if carry_budget >= 0.0 {
+            result.push(carried);
+        } else {
+            result.push(0.0);
+        }
+    }
+    result
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn resample_to_width(data: &[f64], target_width: usize) -> Vec<f64> {
     if data.is_empty() {
         return vec![0.0; target_width];
