@@ -45,7 +45,10 @@ const releases = JSON.parse(readFileSync(RELEASES, "utf8")).map((r) => ({
   title: r.title,
   description: r.summary,
   headings: "",
-  text: r.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").slice(0, 1200),
+  text: r.html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .slice(0, 1200),
 }));
 
 const docsIndex = [...docs, ...releases];

@@ -157,7 +157,6 @@ export function Search() {
   const expanded = open && (hits.length > 0 || query.trim().length > 0);
   const anchor = useAnchor(barRef, expanded);
 
-
   return (
     <>
       {open ? (

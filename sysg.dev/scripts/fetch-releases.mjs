@@ -1,5 +1,6 @@
 import { writeFileSync, existsSync, readFileSync } from "node:fs";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import rehypeSlug from "rehype-slug";
 import rehypeStringify from "rehype-stringify";
 import remarkGfm from "remark-gfm";
@@ -19,16 +20,27 @@ const md = unified()
   .use(remarkRehype, { allowDangerousHtml: true })
   .use(rehypeRaw)
   .use(rehypeSlug)
+  .use(rehypeSanitize)
   .use(rehypeShiki, shikiOptions)
-  .use(rehypeStringify, { allowDangerousHtml: true });
+  .use(rehypeStringify);
 
 function summarise(body) {
   const line = body
     .split("\n")
     .map((l) => l.trim())
-    .find((l) => l && !l.startsWith("#") && !l.startsWith("<!--") && !/^\**Full Changelog/i.test(l) && !/^\[Full changelog/i.test(l));
+    .find(
+      (l) =>
+        l &&
+        !l.startsWith("#") &&
+        !l.startsWith("<!--") &&
+        !/^\**Full Changelog/i.test(l) &&
+        !/^\[Full changelog/i.test(l),
+    );
   if (!line) return "";
-  const text = line.replace(/^[-*]\s*/, "").replace(/[*_`]/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  const text = line
+    .replace(/^[-*]\s*/, "")
+    .replace(/[*_`]/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
   return text.length > 200 ? `${text.slice(0, 197)}…` : text;
 }
 
@@ -56,16 +68,16 @@ try {
       .map(async (r) => {
         const md_body = changelog(r.tag_name, r.body || "");
         return {
-        tag: r.tag_name,
-        slug: r.tag_name.replace(/^v/, "").replace(/[^\w.-]/g, "-"),
-        title: r.name?.trim() || r.tag_name,
-        date: r.published_at || r.created_at,
-        prerelease: Boolean(r.prerelease),
-        author: r.author?.login ?? null,
-        url: r.html_url,
-        summary: summarise(md_body),
-        html: md_body ? String(await md.process(md_body)) : "",
-        commits: commitsFor(r.tag_name).length,
+          tag: r.tag_name,
+          slug: r.tag_name.replace(/^v/, "").replace(/[^\w.-]/g, "-"),
+          title: r.name?.trim() || r.tag_name,
+          date: r.published_at || r.created_at,
+          prerelease: Boolean(r.prerelease),
+          author: r.author?.login ?? null,
+          url: r.html_url,
+          summary: summarise(md_body),
+          html: md_body ? String(await md.process(md_body)) : "",
+          commits: commitsFor(r.tag_name).length,
         };
       }),
   );

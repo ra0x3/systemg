@@ -31,8 +31,20 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <link rel="icon" href="/logo-mark.svg" type="image/svg+xml" />
         <link rel="icon" href="/icon-32.png" sizes="32x32" type="image/png" />
         <link rel="apple-touch-icon" href="/icon-180.png" sizes="180x180" />
-        <link rel="preload" as="font" type="font/woff2" crossOrigin="anonymous" href="/fonts/SpaceGrotesk-normal-latin.woff2" />
-        <link rel="preload" as="font" type="font/woff2" crossOrigin="anonymous" href="/fonts/JetBrainsMono-normal-latin.woff2" />
+        <link
+          rel="preload"
+          as="font"
+          type="font/woff2"
+          crossOrigin="anonymous"
+          href="/fonts/SpaceGrotesk-normal-latin.woff2"
+        />
+        <link
+          rel="preload"
+          as="font"
+          type="font/woff2"
+          crossOrigin="anonymous"
+          href="/fonts/JetBrainsMono-normal-latin.woff2"
+        />
         <Meta />
         <Links />
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />

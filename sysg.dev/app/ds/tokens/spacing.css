@@ -1,24 +1,35 @@
-:root{
-  --sp-0:0px; --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px;
-  --sp-6:24px; --sp-8:32px; --sp-10:40px; --sp-12:48px; --sp-16:64px; --sp-20:80px; --sp-24:96px;
+:root {
+  --sp-0: 0px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+  --sp-20: 80px;
+  --sp-24: 96px;
 
   /* docs layout — fixed chrome */
-  --layout-nav-h:60px; /* @kind spacing */
-  --layout-sidebar-w:270px; /* @kind spacing */
-  --layout-toc-w:220px; /* @kind spacing */
-  --layout-content-max:768px; /* @kind spacing */
-  --layout-page-max:1440px; /* @kind spacing */
-  --layout-gutter:32px; /* @kind spacing */
+  --layout-nav-h: 60px; /* @kind spacing */
+  --layout-sidebar-w: 270px; /* @kind spacing */
+  --layout-toc-w: 220px; /* @kind spacing */
+  --layout-content-max: 768px; /* @kind spacing */
+  --layout-page-max: 1440px; /* @kind spacing */
+  --layout-gutter: 32px; /* @kind spacing */
 
   /* rhythm */
-  --stack-block:22px;      /* paragraph → paragraph */
-  --stack-section:52px;    /* h2 section spacing */
-  --stack-tight:8px;
-  --pad-card:22px;
-  --pad-panel-header:14px 18px; /* @kind spacing */
-  --pad-callout:16px 18px; /* @kind spacing */
-  --pad-code:16px 18px; /* @kind spacing */
-  --pad-cta:7px 14px; /* @kind spacing */
-  --pad-ghost:6px 11px; /* @kind spacing */
-  --pad-nav-item:7px 12px; /* @kind spacing */
+  --stack-block: 22px; /* paragraph → paragraph */
+  --stack-section: 52px; /* h2 section spacing */
+  --stack-tight: 8px;
+  --pad-card: 22px;
+  --pad-panel-header: 14px 18px; /* @kind spacing */
+  --pad-callout: 16px 18px; /* @kind spacing */
+  --pad-code: 16px 18px; /* @kind spacing */
+  --pad-cta: 7px 14px; /* @kind spacing */
+  --pad-ghost: 6px 11px; /* @kind spacing */
+  --pad-nav-item: 7px 12px; /* @kind spacing */
 }

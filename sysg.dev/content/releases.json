@@ -8,7 +8,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.65.0",
     "summary": "feat(start): run every dependency-ready service concurrently (1c6dc42)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>feat(start): run every dependency-ready service concurrently (<code>1c6dc42</code>)</li>\n<li>fix(config): parse durations at load time and type them SG0210 (<code>5ed8da2</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.5 (<code>672952a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.5...v0.65.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(start): run every dependency-ready service concurrently (<code>1c6dc42</code>)</li>\n<li>fix(config): parse durations at load time and type them SG0210 (<code>5ed8da2</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.5 (<code>672952a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.5...v0.65.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -20,7 +20,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.5",
     "summary": "fix(kernel): type child-side refusals as SG0721-SG0748 and drop RFC 0001 (6af8d4c)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(kernel): type child-side refusals as SG0721-SG0748 and drop RFC 0001 (<code>6af8d4c</code>)</li>\n<li>docs(kernel): replace stale roadmap copy with shipped behavior (<code>228ce57</code>)</li>\n<li>chore(docs): add GTM container GTM-TZ59MZS2 for LinkedIn Insight Tag (<code>9cc44b6</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.4 (<code>e1b95f0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.4...v0.64.5\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(kernel): type child-side refusals as SG0721-SG0748 and drop RFC 0001 (<code>6af8d4c</code>)</li>\n<li>docs(kernel): replace stale roadmap copy with shipped behavior (<code>228ce57</code>)</li>\n<li>chore(docs): add GTM container GTM-TZ59MZS2 for LinkedIn Insight Tag (<code>9cc44b6</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.4 (<code>e1b95f0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.4...v0.64.5\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -32,7 +32,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.4",
     "summary": "fix(daemon): stop reconciliation clobbering a completed cron run (7c84dd7)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(daemon): stop reconciliation clobbering a completed cron run (<code>7c84dd7</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.3 (<code>7de4890</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.3...v0.64.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(daemon): stop reconciliation clobbering a completed cron run (<code>7c84dd7</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.3 (<code>7de4890</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.3...v0.64.4\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -44,7 +44,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.3",
     "summary": "fix(ci): patch RUSTSEC-2026-0258 and let the audit job write checks (21770d8)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(ci): patch RUSTSEC-2026-0258 and let the audit job write checks (<code>21770d8</code>)</li>\n<li>fix(daemon): delete the per-launch lifetime thread and surface the resident supervisor version (<code>65ddfc4</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.1 (<code>e8549af</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.1...v0.64.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): patch RUSTSEC-2026-0258 and let the audit job write checks (<code>21770d8</code>)</li>\n<li>fix(daemon): delete the per-launch lifetime thread and surface the resident supervisor version (<code>65ddfc4</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.1 (<code>e8549af</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.1...v0.64.3\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -56,7 +56,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.1",
     "summary": "fix(state): keep a skipped record when the monitor reaps the process (03dfa03)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(state): keep a skipped record when the monitor reaps the process (<code>03dfa03</code>)</li>\n<li>feat(config): move the command wait budget into supervisor.xml (<code>6e4f077</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.3 (<code>1e5ccfd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.3...v0.64.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(state): keep a skipped record when the monitor reaps the process (<code>03dfa03</code>)</li>\n<li>feat(config): move the command wait budget into supervisor.xml (<code>6e4f077</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.3 (<code>1e5ccfd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.3...v0.64.1\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -68,7 +68,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.3",
     "summary": "fix(ipc): wait on supervisor liveness, not a 120s clock (0a99e1a)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(ipc): wait on supervisor liveness, not a 120s clock (<code>0a99e1a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.2 (<code>70c97ee</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.2...v0.63.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ipc): wait on supervisor liveness, not a 120s clock (<code>0a99e1a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.2 (<code>70c97ee</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.2...v0.63.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -80,7 +80,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.2",
     "summary": "fix(daemon): trip a restart breaker when a unit never stays up (1a3794d)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(daemon): trip a restart breaker when a unit never stays up (<code>1a3794d</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.1 (<code>7117f12</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.1...v0.63.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(daemon): trip a restart breaker when a unit never stays up (<code>1a3794d</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.1 (<code>7117f12</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.1...v0.63.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -92,7 +92,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.1",
     "summary": "fix(ci): drop conflicting musl-tools from musl cross Dockerfiles (base image already ships musl toolchain) (1d3df97)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(ci): drop conflicting musl-tools from musl cross Dockerfiles (base image already ships musl toolchain) (<code>1d3df97</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.0...v0.63.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): drop conflicting musl-tools from musl cross Dockerfiles (base image already ships musl toolchain) (<code>1d3df97</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.0...v0.63.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -104,7 +104,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.0",
     "summary": "ci(release): publish claude plugin only after crate is published to crates.io (cb2bcff)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>ci(release): publish claude plugin only after crate is published to crates.io (<code>cb2bcff</code>)</li>\n<li>fix(supply-chain): treat systemg root crate as first-party in cargo-vet (audit-as-crates-io = false) (<code>8897dcf</code>)</li>\n<li>ci(commit-check): run cancel-previous before the commit-message check (<code>6548c69</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.0 (<code>890feea</code>)</li>\n<li>fix(ci, test): deflake auto-restart test; replace broken virtme kernel-matrix with native-kernel Landlock lane (<code>05a8974</code>)</li>\n<li>ci(commit-check): enforce type(scope) commit format, gate audit/deny/vet on it (<code>4b1a322</code>)</li>\n<li>fix(ci): v2 test manifests, re-disable legacy uat suites, update purge/sys-root tests for SG0405/SG0704; sandbox lane seccomp+landlock flags (<code>fa87ba2</code>)</li>\n<li>test(model): model-based sequence harness — random lifecycle ops, oracle+model checked every step; CI matrix (<code>68b581b</code>)</li>\n<li>feat(doctor): pid-reuse + empty-teardown invariants; wire teardown oracle into parity (<code>f39076c</code>)</li>\n<li>feat(doctor): invariant oracle check_world() + sysg doctor; wire into parity UAT (<code>82e8c4d</code>)</li>\n<li>fix(ci): clippy clean on linux both arches — io::Error::other, arch-conditional mut/return; SG links out of SVG text (<code>47b2976</code>)</li>\n<li>docs(kernel-mode): add per-platform kernel-interaction diagram (userspace↔kernel boundary) (<code>c145655</code>)</li>\n<li>docs(kernel-mode): resolve Phase 4 — pidfd ships, eBPF evaluated and declined; all four phases complete (<code>472aec5</code>)</li>\n<li>feat(sandbox): seccomp baseline-v1 enforcement (SG0722), parent-compiled BpfProgram + child raw-syscall apply (<code>574b3e9</code>)</li>\n<li>feat(sandbox): schema v3 fail-closed + Landlock/no_new_privs enforcement (SG0724), sandbox UAT + CI (<code>6d4f4cc</code>)</li>\n<li>feat(sandbox): manifest schema v3 fail-closed — refuse unenforceable security keys in parent before spawn (<code>0b63c5b</code>)</li>\n<li>feat(macos): system mode on /Library paths + launchd installer; native smoke-test lane; docs (<code>93fa3ab</code>)</li>\n<li>feat(init): container-init teardown — fix init-mode wait() hang, broker orphan reaping, reverse-order shutdown, pid1 UAT suite (<code>d9a061f</code>)</li>\n<li>feat(init): reverse-dependency-order teardown + SG0713 survivor verdict on init exit (<code>be56831</code>)</li>\n<li>feat(init): PID1 wait broker with routed mailbox, ECHILD-safe waits, TERM/INT shutdown bridge (<code>d2e37f1</code>)</li>\n<li>feat(init): sysg init subcommand with PID1/prereq preflights, SG0711-0714, upgrade refusal in init mode (<code>7de5a6e</code>)</li>\n<li>feat(validate): mode-aware enforceability pass — SG0705, startable field, rootless --sys validate, docs callout (<code>6777b09</code>)</li>\n<li>feat(monitor): pidfd-based instant exit detection with polling fallback; sandbox keys warn of fail-closed deprecation (<code>3fa6869</code>)</li>\n<li>docs(kernel-mode): record reduced-v1 scope decision in RFC and docs callouts (<code>f1fba1c</code>)</li>\n<li>fix(purge): stale pidfile no longer bypasses live-socket supervisor shutdown; SG0405 covers scoped purge (<code>90e9d9d</code>)</li>\n<li>feat(kernel-mode): docs/kernel-mode section, purge ghost-supervisor fix (SG0405), weekly fuzz CI, release gates on deny+vet (<code>828f4d8</code>)</li>\n<li>feat(kernel-mode): alpine/musl parity lane + setrlimit musl fix, non-root user lane, exec-drop regression case, cargo-vet (<code>3753517</code>)</li>\n<li>feat(kernel-mode): phase 0+1a — audits program, cargo-deny, ipc fuzzing, SG0701-0704, --sys exec-drop fix, parity UAT lanes, musl+UAT CI (<code>9b70fcb</code>)</li>\n<li>rfc: embed red-team objections as callouts in kernel-mode design (<code>50fa7df</code>)</li>\n<li>rfc: kernel mode design (system/init/sandbox/ebpf) with SG07xx and test matrix (<code>3945948</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.3 (<code>9a34f26</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.3...v0.63.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci(release): publish claude plugin only after crate is published to crates.io (<code>cb2bcff</code>)</li>\n<li>fix(supply-chain): treat systemg root crate as first-party in cargo-vet (audit-as-crates-io = false) (<code>8897dcf</code>)</li>\n<li>ci(commit-check): run cancel-previous before the commit-message check (<code>6548c69</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.0 (<code>890feea</code>)</li>\n<li>fix(ci, test): deflake auto-restart test; replace broken virtme kernel-matrix with native-kernel Landlock lane (<code>05a8974</code>)</li>\n<li>ci(commit-check): enforce type(scope) commit format, gate audit/deny/vet on it (<code>4b1a322</code>)</li>\n<li>fix(ci): v2 test manifests, re-disable legacy uat suites, update purge/sys-root tests for SG0405/SG0704; sandbox lane seccomp+landlock flags (<code>fa87ba2</code>)</li>\n<li>test(model): model-based sequence harness — random lifecycle ops, oracle+model checked every step; CI matrix (<code>68b581b</code>)</li>\n<li>feat(doctor): pid-reuse + empty-teardown invariants; wire teardown oracle into parity (<code>f39076c</code>)</li>\n<li>feat(doctor): invariant oracle check_world() + sysg doctor; wire into parity UAT (<code>82e8c4d</code>)</li>\n<li>fix(ci): clippy clean on linux both arches — io::Error::other, arch-conditional mut/return; SG links out of SVG text (<code>47b2976</code>)</li>\n<li>docs(kernel-mode): add per-platform kernel-interaction diagram (userspace↔kernel boundary) (<code>c145655</code>)</li>\n<li>docs(kernel-mode): resolve Phase 4 — pidfd ships, eBPF evaluated and declined; all four phases complete (<code>472aec5</code>)</li>\n<li>feat(sandbox): seccomp baseline-v1 enforcement (SG0722), parent-compiled BpfProgram + child raw-syscall apply (<code>574b3e9</code>)</li>\n<li>feat(sandbox): schema v3 fail-closed + Landlock/no_new_privs enforcement (SG0724), sandbox UAT + CI (<code>6d4f4cc</code>)</li>\n<li>feat(sandbox): manifest schema v3 fail-closed — refuse unenforceable security keys in parent before spawn (<code>0b63c5b</code>)</li>\n<li>feat(macos): system mode on /Library paths + launchd installer; native smoke-test lane; docs (<code>93fa3ab</code>)</li>\n<li>feat(init): container-init teardown — fix init-mode wait() hang, broker orphan reaping, reverse-order shutdown, pid1 UAT suite (<code>d9a061f</code>)</li>\n<li>feat(init): reverse-dependency-order teardown + SG0713 survivor verdict on init exit (<code>be56831</code>)</li>\n<li>feat(init): PID1 wait broker with routed mailbox, ECHILD-safe waits, TERM/INT shutdown bridge (<code>d2e37f1</code>)</li>\n<li>feat(init): sysg init subcommand with PID1/prereq preflights, SG0711-0714, upgrade refusal in init mode (<code>7de5a6e</code>)</li>\n<li>feat(validate): mode-aware enforceability pass — SG0705, startable field, rootless --sys validate, docs callout (<code>6777b09</code>)</li>\n<li>feat(monitor): pidfd-based instant exit detection with polling fallback; sandbox keys warn of fail-closed deprecation (<code>3fa6869</code>)</li>\n<li>docs(kernel-mode): record reduced-v1 scope decision in RFC and docs callouts (<code>f1fba1c</code>)</li>\n<li>fix(purge): stale pidfile no longer bypasses live-socket supervisor shutdown; SG0405 covers scoped purge (<code>90e9d9d</code>)</li>\n<li>feat(kernel-mode): docs/kernel-mode section, purge ghost-supervisor fix (SG0405), weekly fuzz CI, release gates on deny+vet (<code>828f4d8</code>)</li>\n<li>feat(kernel-mode): alpine/musl parity lane + setrlimit musl fix, non-root user lane, exec-drop regression case, cargo-vet (<code>3753517</code>)</li>\n<li>feat(kernel-mode): phase 0+1a — audits program, cargo-deny, ipc fuzzing, SG0701-0704, --sys exec-drop fix, parity UAT lanes, musl+UAT CI (<code>9b70fcb</code>)</li>\n<li>rfc: embed red-team objections as callouts in kernel-mode design (<code>50fa7df</code>)</li>\n<li>rfc: kernel mode design (system/init/sandbox/ebpf) with SG07xx and test matrix (<code>3945948</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.3 (<code>9a34f26</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.3...v0.63.0\">Full changelog on GitHub</a></p>",
     "commits": 31
   },
   {
@@ -116,7 +116,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.62.3",
     "summary": "fix(diag): include SG0404 and SG0601-0605 in SgCode::ALL (d9d5b0d)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(diag): include SG0404 and SG0601-0605 in SgCode::ALL (<code>d9d5b0d</code>)</li>\n<li>docs(lib): match crate-root tagline to README (<code>f2f6789</code>)</li>\n<li>test(usecase): dump state files and supervisor log on a RED run (<code>c3753f8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.2 (<code>03474a9</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.2...v0.62.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(diag): include SG0404 and SG0601-0605 in SgCode::ALL (<code>d9d5b0d</code>)</li>\n<li>docs(lib): match crate-root tagline to README (<code>f2f6789</code>)</li>\n<li>test(usecase): dump state files and supervisor log on a RED run (<code>c3753f8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.2 (<code>03474a9</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.2...v0.62.3\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -128,7 +128,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.62.2",
     "summary": "fix(restart): scope restart -s to its target and seal queued op journals (fc2fed1)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(restart): scope restart -s to its target and seal queued op journals (<code>fc2fed1</code>)</li>\n<li>docs(restart): clarify --daemonize is a no-op against a running supervisor (<code>01670d8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.1 (<code>2d7c78d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.1...v0.62.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): scope restart -s to its target and seal queued op journals (<code>fc2fed1</code>)</li>\n<li>docs(restart): clarify --daemonize is a no-op against a running supervisor (<code>01670d8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.1 (<code>2d7c78d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.1...v0.62.2\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -140,7 +140,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.62.1",
     "summary": "test(daemon): ignore the flaky automatic-restart test pending a wider deadline (c06d369)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>test(daemon): ignore the flaky automatic-restart test pending a wider deadline (<code>c06d369</code>)</li>\n<li>fix(restart): keep the fixed-port rolling→immediate transition after the reconcile deletion (<code>5ec2c40</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.0 (<code>6859b3b</code>)</li>\n<li>feat(status): probe declared health on a timer and stop reporting live pids as healthy (<code>33fbe67</code>)</li>\n<li>feat(daemon): reap orphaned generations by provenance and drop port-based ghost detection (<code>508eba3</code>)</li>\n<li>fix(daemon): terminate and verify service teardown by session, not just group (<code>8722bcb</code>)</li>\n<li>feat(daemon): retain retired process generations so orphans stay attributable (<code>c1a38f5</code>)</li>\n<li>docs: swap the installation gif for the rebuilt sysg lifecycle recording (<code>15fa304</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.4 (<code>ef38c6d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.4...v0.62.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(daemon): ignore the flaky automatic-restart test pending a wider deadline (<code>c06d369</code>)</li>\n<li>fix(restart): keep the fixed-port rolling→immediate transition after the reconcile deletion (<code>5ec2c40</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.0 (<code>6859b3b</code>)</li>\n<li>feat(status): probe declared health on a timer and stop reporting live pids as healthy (<code>33fbe67</code>)</li>\n<li>feat(daemon): reap orphaned generations by provenance and drop port-based ghost detection (<code>508eba3</code>)</li>\n<li>fix(daemon): terminate and verify service teardown by session, not just group (<code>8722bcb</code>)</li>\n<li>feat(daemon): retain retired process generations so orphans stay attributable (<code>c1a38f5</code>)</li>\n<li>docs: swap the installation gif for the rebuilt sysg lifecycle recording (<code>15fa304</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.4 (<code>ef38c6d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.4...v0.62.1\">Full changelog on GitHub</a></p>",
     "commits": 9
   },
   {
@@ -152,7 +152,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.61.4",
     "summary": "fix(status): report a unit's recorded exit instead of inferring it should still be running (c562fd1)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(status): report a unit's recorded exit instead of inferring it should still be running (<code>c562fd1</code>)</li>\n<li>fix(start): settle a boot verdict for the primary project and stop blaming transiently Lost units (<code>316ee8c</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.3 (<code>6f64789</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.3...v0.61.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(status): report a unit's recorded exit instead of inferring it should still be running (<code>c562fd1</code>)</li>\n<li>fix(start): settle a boot verdict for the primary project and stop blaming transiently Lost units (<code>316ee8c</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.3 (<code>6f64789</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.3...v0.61.4\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -164,7 +164,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.61.3",
     "summary": "fix(restart): emit unit frames on the single-service cascade and stop paths (67e0135)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(restart): emit unit frames on the single-service cascade and stop paths (<code>67e0135</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.2 (<code>305ce15</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.2...v0.61.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): emit unit frames on the single-service cascade and stop paths (<code>67e0135</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.2 (<code>305ce15</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.2...v0.61.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -176,7 +176,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.61.2",
     "summary": "feat(start): render the progress tree for queued project boots too (9136fe5)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>feat(start): render the progress tree for queued project boots too (<code>9136fe5</code>)</li>\n<li>fix(start): key progress-tree journals on a client nonce, not the command target (<code>ad90a81</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.60.0...v0.61.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(start): render the progress tree for queued project boots too (<code>9136fe5</code>)</li>\n<li>fix(start): key progress-tree journals on a client nonce, not the command target (<code>ad90a81</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.60.0...v0.61.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -188,7 +188,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.60.0",
     "summary": "fix(tests): assert the absent-supervisor condition by code, not by prose (8e8c809)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(tests): assert the absent-supervisor condition by code, not by prose (<code>8e8c809</code>)</li>\n<li>fix(ci): key release detection on the published tag, not the previous commit (<code>999323e</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.60.0 (<code>4cd6f41</code>)</li>\n<li>fix(status): type the no-supervisor failure as SG0206 instead of the catch-all (<code>9655b50</code>)</li>\n<li>fix(skip): make skip mean skipped for cron units and dependents (<code>ce6c1eb</code>)</li>\n<li>fix(status): publish boot snapshot before announcing start complete (<code>06d0614</code>)</li>\n<li>feat(config): (bang)include manifest fragments with chain-attributed errors and lifecycle-safe handling (<code>ca8c7ca</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.3 (<code>b363b82</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.3...v0.60.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(tests): assert the absent-supervisor condition by code, not by prose (<code>8e8c809</code>)</li>\n<li>fix(ci): key release detection on the published tag, not the previous commit (<code>999323e</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.60.0 (<code>4cd6f41</code>)</li>\n<li>fix(status): type the no-supervisor failure as SG0206 instead of the catch-all (<code>9655b50</code>)</li>\n<li>fix(skip): make skip mean skipped for cron units and dependents (<code>ce6c1eb</code>)</li>\n<li>fix(status): publish boot snapshot before announcing start complete (<code>06d0614</code>)</li>\n<li>feat(config): (bang)include manifest fragments with chain-attributed errors and lifecycle-safe handling (<code>ca8c7ca</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.3 (<code>b363b82</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.3...v0.60.0\">Full changelog on GitHub</a></p>",
     "commits": 8
   },
   {
@@ -200,7 +200,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.59.3",
     "summary": "fix(upgrade): resume pre-0.59 loose handoffs under their derived identity (1321553)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(upgrade): resume pre-0.59 loose handoffs under their derived identity (<code>1321553</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.2 (<code>3a40c21</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.2...v0.59.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(upgrade): resume pre-0.59 loose handoffs under their derived identity (<code>1321553</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.2 (<code>3a40c21</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.2...v0.59.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -212,7 +212,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.59.2",
     "summary": "fix(tests): read loose logs from the derived project, not loose (1affbdd)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(tests): read loose logs from the derived project, not <strong>loose</strong> (<code>1affbdd</code>)</li>\n<li>chore: update version-bump (<code>f762e4e</code>)</li>\n<li>fix(loose): give every project-less config its own project (<code>c8a5ff5</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.3 (<code>65cfa63</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.3...v0.59.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(tests): read loose logs from the derived project, not <strong>loose</strong> (<code>1affbdd</code>)</li>\n<li>chore: update version-bump (<code>f762e4e</code>)</li>\n<li>fix(loose): give every project-less config its own project (<code>c8a5ff5</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.3 (<code>65cfa63</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.3...v0.59.2\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -224,7 +224,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.58.3",
     "summary": "fix(opslot): match progress details by project id, not label substring (33b4449)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(opslot): match progress details by project id, not label substring (<code>33b4449</code>)</li>\n<li>feat(cli): nest restart progress into indented rows (<code>72111af</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.2 (<code>d19685f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.2...v0.58.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(opslot): match progress details by project id, not label substring (<code>33b4449</code>)</li>\n<li>feat(cli): nest restart progress into indented rows (<code>72111af</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.2 (<code>d19685f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.2...v0.58.3\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -236,7 +236,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.58.2",
     "summary": "fix: stop inferring listening ports from command text (9494b5a)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: stop inferring listening ports from command text (<code>9494b5a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.1 (<code>5e993cf</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.1...v0.58.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: stop inferring listening ports from command text (<code>9494b5a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.1 (<code>5e993cf</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.1...v0.58.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -248,7 +248,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.58.1",
     "summary": "fix: avoid false port conflicts during restart (144983c)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: avoid false port conflicts during restart (<code>144983c</code>)</li>\n<li>docs: recommend zero-backlog log streaming (<code>b8fc7fd</code>)</li>\n<li>fix(logs): hide single-service headers (<code>d6de34c</code>)</li>\n<li>feat(hooks): simplify service hook events (<code>087ecb7</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.4 (<code>a8162c6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.4...v0.58.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: avoid false port conflicts during restart (<code>144983c</code>)</li>\n<li>docs: recommend zero-backlog log streaming (<code>b8fc7fd</code>)</li>\n<li>fix(logs): hide single-service headers (<code>d6de34c</code>)</li>\n<li>feat(hooks): simplify service hook events (<code>087ecb7</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.4 (<code>a8162c6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.4...v0.58.1\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -260,7 +260,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.4",
     "summary": "fix(logs): restore fresh bounded and aligned output (3b202f4)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(logs): restore fresh bounded and aligned output (<code>3b202f4</code>)</li>\n<li>fix(start): verify inferred port ownership before readiness (<code>28ef00c</code>)</li>\n<li>fix(reconcile): restore inactive projects and completed dependencies (<code>a490a6e</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.3 (<code>a33529b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.3...v0.57.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(logs): restore fresh bounded and aligned output (<code>3b202f4</code>)</li>\n<li>fix(start): verify inferred port ownership before readiness (<code>28ef00c</code>)</li>\n<li>fix(reconcile): restore inactive projects and completed dependencies (<code>a490a6e</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.3 (<code>a33529b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.3...v0.57.4\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -272,7 +272,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.3",
     "summary": "fix(supervisor): eliminate shutdown verification flake (339a184)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(supervisor): eliminate shutdown verification flake (<code>339a184</code>)</li>\n<li>fix(units): correct staged unit startup and settling (<code>e2c6098</code>)</li>\n<li>feat(inspect): separate unit config path from command details (<code>23963b4</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.1 (<code>b814afe</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.1...v0.57.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(supervisor): eliminate shutdown verification flake (<code>339a184</code>)</li>\n<li>fix(units): correct staged unit startup and settling (<code>e2c6098</code>)</li>\n<li>feat(inspect): separate unit config path from command details (<code>23963b4</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.1 (<code>b814afe</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.1...v0.57.3\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -284,7 +284,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.1",
     "summary": "fix(usecase): remove contention races from upgrade and port diagnostics (331b2be)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(usecase): remove contention races from upgrade and port diagnostics (<code>331b2be</code>)</li>\n<li>fix(upgrade): negotiate compatibility by handoff contract (<code>f7db9f3</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.0 (<code>2ca06c9</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.0...v0.57.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(usecase): remove contention races from upgrade and port diagnostics (<code>331b2be</code>)</li>\n<li>fix(upgrade): negotiate compatibility by handoff contract (<code>f7db9f3</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.0 (<code>2ca06c9</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.0...v0.57.1\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -296,7 +296,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.0",
     "summary": "docs: explain the staged unit lifecycle (0ddb8c9)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>docs: explain the staged unit lifecycle (<code>0ddb8c9</code>)</li>\n<li>fix(start): recover when supervisor exits during queued boot (<code>69caa7e</code>)</li>\n<li>test(usecase): align manifest and race cases with current lifecycle (<code>ed5adc5</code>)</li>\n<li>docs: link every diagnostic code reference (<code>a2df394</code>)</li>\n<li>feat(restart): automatically adopt registered manifest changes (<code>b4daccb</code>)</li>\n<li>fix(deploy): make replacement transitions generation-safe (<code>05093d8</code>)</li>\n<li>test: remove log finalization race from supervisor config use case (<code>26ec95b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.56.3 (<code>5d6a252</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.56.3...v0.57.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>docs: explain the staged unit lifecycle (<code>0ddb8c9</code>)</li>\n<li>fix(start): recover when supervisor exits during queued boot (<code>69caa7e</code>)</li>\n<li>test(usecase): align manifest and race cases with current lifecycle (<code>ed5adc5</code>)</li>\n<li>docs: link every diagnostic code reference (<code>a2df394</code>)</li>\n<li>feat(restart): automatically adopt registered manifest changes (<code>b4daccb</code>)</li>\n<li>fix(deploy): make replacement transitions generation-safe (<code>05093d8</code>)</li>\n<li>test: remove log finalization race from supervisor config use case (<code>26ec95b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.56.3 (<code>5d6a252</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.56.3...v0.57.0\">Full changelog on GitHub</a></p>",
     "commits": 8
   },
   {
@@ -308,7 +308,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.56.3",
     "summary": "feat/v0.55.0 (#46) (e401f77)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>feat/v0.55.0 (#46) (<code>e401f77</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.2 (<code>cdb3672</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.2...v0.56.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat/v0.55.0 (#46) (<code>e401f77</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.2 (<code>cdb3672</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.2...v0.56.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -320,7 +320,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.54.2",
     "summary": "fix(cli): recycle the supervisor on version drift during full restart (720c2d0)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(cli): recycle the supervisor on version drift during full restart (<code>720c2d0</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.1 (<code>a7e5792</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.1...v0.54.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(cli): recycle the supervisor on version drift during full restart (<code>720c2d0</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.1 (<code>a7e5792</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.1...v0.54.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -332,7 +332,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.54.1",
     "summary": "fix(supervisor): survive per-unit failures on resident project load/restart (3e048b0)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(supervisor): survive per-unit failures on resident project load/restart (<code>3e048b0</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.0 (<code>fbb92ab</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.0...v0.54.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(supervisor): survive per-unit failures on resident project load/restart (<code>3e048b0</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.0 (<code>fbb92ab</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.0...v0.54.1\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -344,7 +344,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.54.0",
     "summary": "feat(diag): SG0102 early-exit, SG0103 prestart failure, SG0001 catchall + docs (bde51bb)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>feat(diag): SG0102 early-exit, SG0103 pre_start failure, SG0001 catchall + docs (<code>bde51bb</code>)</li>\n<li>feat(diag): rustc-style diagnostics with evidence, next steps, and docs links (<code>689e625</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.53.4...v0.54.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(diag): SG0102 early-exit, SG0103 pre_start failure, SG0001 catchall + docs (<code>bde51bb</code>)</li>\n<li>feat(diag): rustc-style diagnostics with evidence, next steps, and docs links (<code>689e625</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.53.4...v0.54.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -356,7 +356,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.53.4",
     "summary": "fix(ci): set Cache-Control on release assets and harden CDN verification + v0.53.3 (2e4618a)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(ci): set Cache-Control on release assets and harden CDN verification + v0.53.3 (<code>2e4618a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.53.2...v0.53.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): set Cache-Control on release assets and harden CDN verification + v0.53.3 (<code>2e4618a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.53.2...v0.53.4\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -368,7 +368,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.53.2",
     "summary": "test: update test + v0.53.2 (a726cb7)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>test: update test + v0.53.2 (<code>a726cb7</code>)</li>\n<li>fix(daemon): survive per-service boot failures and auto-restart reaped units (<code>ca79691</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.53.0...v0.53.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test: update test + v0.53.2 (<code>a726cb7</code>)</li>\n<li>fix(daemon): survive per-service boot failures and auto-restart reaped units (<code>ca79691</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.53.0...v0.53.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -380,7 +380,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.53.0",
     "summary": "feat(daemon): dependson condition gating with completed semantics (530f0dc)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>feat(daemon): depends_on condition gating with completed semantics (<code>530f0dc</code>)</li>\n<li>docs: add dedicated Projects page for -p/--project (<code>3658a9d</code>)</li>\n<li>fix(install): cache-control on VERSION + installer, warn on skipped invalidation (<code>c4cabf3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.52.2...v0.53.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(daemon): depends_on condition gating with completed semantics (<code>530f0dc</code>)</li>\n<li>docs: add dedicated Projects page for -p/--project (<code>3658a9d</code>)</li>\n<li>fix(install): cache-control on VERSION + installer, warn on skipped invalidation (<code>c4cabf3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.52.2...v0.53.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -392,7 +392,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.52.2",
     "summary": "fix+release: update test + 0.52.2 (bdac364)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix+release: update test + 0.52.2 (<code>bdac364</code>)</li>\n<li>fix: rustfmt (<code>61618f1</code>)</li>\n<li>feat(daemon): gate depends_on on the dependency's health check (<code>0785f27</code>)</li>\n<li>feat(cli): add  with rich, colored config diagnostics (<code>73a3c8d</code>)</li>\n<li>feat(claude): ship claude code plugin + skill, self-hosted marketplace, CI version sync (<code>cb6da83</code>)</li>\n<li>docs: fix inaccuracies across docs, examples, and llms guides + rewrite README (<code>443f889</code>)</li>\n<li>docs: update taglines to indicate agent-friendly (<code>c899b06</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.51.0...v0.52.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix+release: update test + 0.52.2 (<code>bdac364</code>)</li>\n<li>fix: rustfmt (<code>61618f1</code>)</li>\n<li>feat(daemon): gate depends_on on the dependency's health check (<code>0785f27</code>)</li>\n<li>feat(cli): add  with rich, colored config diagnostics (<code>73a3c8d</code>)</li>\n<li>feat(claude): ship claude code plugin + skill, self-hosted marketplace, CI version sync (<code>cb6da83</code>)</li>\n<li>docs: fix inaccuracies across docs, examples, and llms guides + rewrite README (<code>443f889</code>)</li>\n<li>docs: update taglines to indicate agent-friendly (<code>c899b06</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.51.0...v0.52.2\">Full changelog on GitHub</a></p>",
     "commits": 7
   },
   {
@@ -404,7 +404,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.51.0",
     "summary": "fix(logs): honor filters and populate service in project-wide log queries (1401b9c)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix(logs): honor filters and populate service in project-wide log queries (<code>1401b9c</code>)</li>\n<li>docs: make reports/2026-07-13.md more concise (<code>c4966f4</code>)</li>\n<li>infra: update release/ci for cloudfront distribution (<code>7d3133d</code>)</li>\n<li>test: update docker harness for correctness/parity/hardening (<code>af703c5</code>)</li>\n<li>docs: update philosophy/security docs (<code>dd40b66</code>)</li>\n<li>2026-07-13 security audit (<code>1b75d91</code>)</li>\n<li>docs: update llms txt (<code>85d763b</code>)</li>\n<li>cve: bump crossbeam-epoch to 0.9.20 (<code>d863e73</code>)</li>\n<li>feat(cli): add global --plain agent mode and  discovery (<code>d42d433</code>)</li>\n<li>feat(logs): add --format json, --raw, and ANSI stripping (<code>3fbceb3</code>)</li>\n<li>feat(logs): add --since/--until/--grep/--all filtering and rotated history (<code>af40f50</code>)</li>\n<li>feat(logs): default to one-shot when non-interactive, add --follow/--no-follow (<code>fe91f4b</code>)</li>\n<li>ci: bump libclang (<code>d058cdd</code>)</li>\n<li>cve: patch cve issues (<code>f09ea5a</code>)</li>\n<li>fix: recover cron history across config drift, surface pre_start failures, show cron tz in inspect (<code>920a7d4</code>)</li>\n<li>fix: reconcile stale service config on restart/start with -c (<code>c119bb3</code>)</li>\n<li>fix: patch transitive dependency CVEs (<code>c7ce520</code>)</li>\n<li>ci: add cargo-audit cve check (<code>c5c86e3</code>)</li>\n<li>feat: allow different output formats xml|json (<code>f22b777</code>)</li>\n<li>fix: reject direct control of cron units (<code>bc1af26</code>)</li>\n<li>fix: strip caller session env vars from daemonized services (<code>1dee49d</code>)</li>\n<li>docs: unify tagline, fill crate metadata, fix cron schema in examples (<code>b47130f</code>)</li>\n<li>fix: reload stored manifest on project-scoped restart and re-add (<code>72cdacf</code>)</li>\n<li>fix: report process RSS in bytes, not 1024x inflated (<code>872239d</code>)</li>\n<li>fix: only treat process-group survivors as healthy when the zombie is the group leader (<code>630c306</code>)</li>\n<li>fix: run service restarts detached so backoff doesn't serialize the monitor loop (<code>4b321e1</code>)</li>\n<li>fix: supervise process group, not wrapper shell, to stop restart leaks and zombie status (<code>631c383</code>)</li>\n<li>fix: don't show completed cron/one-shot units as Lost after their PID exits (<code>876402c</code>)</li>\n<li>fix: don't flag completed cron/one-shot units as unhealthy (<code>43ce3db</code>)</li>\n<li>enhancement: remove INTENT column from sysg status table (<code>1409714</code>)</li>\n<li>fix: allow successful one-shot services during restart (<code>09b8be4</code>)</li>\n<li>test: update sysg status health output test (<code>7fb92fb</code>)</li>\n<li>fix: bound supervisor.log growth with rotation, truncation, and prune (<code>a30ec12</code>)</li>\n<li>enhancement: make srvc units show healthy status with exit 0 (<code>c262d27</code>)</li>\n<li>enhancement: explain unit health and color inspect cron status (<code>ad1bdb7</code>)</li>\n<li>enhancement: show progress spinners for start and restart (<code>87a8b0e</code>)</li>\n<li>test: isolate build_snapshot summary test runtime state (<code>af2d34a</code>)</li>\n<li>2026-06-11 security audit (<code>c4c58d3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.42.2...v0.51.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(logs): honor filters and populate service in project-wide log queries (<code>1401b9c</code>)</li>\n<li>docs: make reports/2026-07-13.md more concise (<code>c4966f4</code>)</li>\n<li>infra: update release/ci for cloudfront distribution (<code>7d3133d</code>)</li>\n<li>test: update docker harness for correctness/parity/hardening (<code>af703c5</code>)</li>\n<li>docs: update philosophy/security docs (<code>dd40b66</code>)</li>\n<li>2026-07-13 security audit (<code>1b75d91</code>)</li>\n<li>docs: update llms txt (<code>85d763b</code>)</li>\n<li>cve: bump crossbeam-epoch to 0.9.20 (<code>d863e73</code>)</li>\n<li>feat(cli): add global --plain agent mode and  discovery (<code>d42d433</code>)</li>\n<li>feat(logs): add --format json, --raw, and ANSI stripping (<code>3fbceb3</code>)</li>\n<li>feat(logs): add --since/--until/--grep/--all filtering and rotated history (<code>af40f50</code>)</li>\n<li>feat(logs): default to one-shot when non-interactive, add --follow/--no-follow (<code>fe91f4b</code>)</li>\n<li>ci: bump libclang (<code>d058cdd</code>)</li>\n<li>cve: patch cve issues (<code>f09ea5a</code>)</li>\n<li>fix: recover cron history across config drift, surface pre_start failures, show cron tz in inspect (<code>920a7d4</code>)</li>\n<li>fix: reconcile stale service config on restart/start with -c (<code>c119bb3</code>)</li>\n<li>fix: patch transitive dependency CVEs (<code>c7ce520</code>)</li>\n<li>ci: add cargo-audit cve check (<code>c5c86e3</code>)</li>\n<li>feat: allow different output formats xml|json (<code>f22b777</code>)</li>\n<li>fix: reject direct control of cron units (<code>bc1af26</code>)</li>\n<li>fix: strip caller session env vars from daemonized services (<code>1dee49d</code>)</li>\n<li>docs: unify tagline, fill crate metadata, fix cron schema in examples (<code>b47130f</code>)</li>\n<li>fix: reload stored manifest on project-scoped restart and re-add (<code>72cdacf</code>)</li>\n<li>fix: report process RSS in bytes, not 1024x inflated (<code>872239d</code>)</li>\n<li>fix: only treat process-group survivors as healthy when the zombie is the group leader (<code>630c306</code>)</li>\n<li>fix: run service restarts detached so backoff doesn't serialize the monitor loop (<code>4b321e1</code>)</li>\n<li>fix: supervise process group, not wrapper shell, to stop restart leaks and zombie status (<code>631c383</code>)</li>\n<li>fix: don't show completed cron/one-shot units as Lost after their PID exits (<code>876402c</code>)</li>\n<li>fix: don't flag completed cron/one-shot units as unhealthy (<code>43ce3db</code>)</li>\n<li>enhancement: remove INTENT column from sysg status table (<code>1409714</code>)</li>\n<li>fix: allow successful one-shot services during restart (<code>09b8be4</code>)</li>\n<li>test: update sysg status health output test (<code>7fb92fb</code>)</li>\n<li>fix: bound supervisor.log growth with rotation, truncation, and prune (<code>a30ec12</code>)</li>\n<li>enhancement: make srvc units show healthy status with exit 0 (<code>c262d27</code>)</li>\n<li>enhancement: explain unit health and color inspect cron status (<code>ad1bdb7</code>)</li>\n<li>enhancement: show progress spinners for start and restart (<code>87a8b0e</code>)</li>\n<li>test: isolate build_snapshot summary test runtime state (<code>af2d34a</code>)</li>\n<li>2026-06-11 security audit (<code>c4c58d3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.42.2...v0.51.0\">Full changelog on GitHub</a></p>",
     "commits": 38
   },
   {
@@ -416,7 +416,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.50.0",
     "summary": "cve: bump crossbeam-epoch to 0.9.20 (2559223)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>cve: bump crossbeam-epoch to 0.9.20 (<code>2559223</code>)</li>\n<li>feat(cli): add global --plain agent mode and  discovery (<code>4636cee</code>)</li>\n<li>feat(logs): add --format json, --raw, and ANSI stripping (<code>07a96a3</code>)</li>\n<li>feat(logs): add --since/--until/--grep/--all filtering and rotated history (<code>80476c3</code>)</li>\n<li>feat(logs): default to one-shot when non-interactive, add --follow/--no-follow (<code>675f671</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.49.1...v0.50.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>cve: bump crossbeam-epoch to 0.9.20 (<code>2559223</code>)</li>\n<li>feat(cli): add global --plain agent mode and  discovery (<code>4636cee</code>)</li>\n<li>feat(logs): add --format json, --raw, and ANSI stripping (<code>07a96a3</code>)</li>\n<li>feat(logs): add --since/--until/--grep/--all filtering and rotated history (<code>80476c3</code>)</li>\n<li>feat(logs): default to one-shot when non-interactive, add --follow/--no-follow (<code>675f671</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.49.1...v0.50.0\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -428,7 +428,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.49.1",
     "summary": "ci: bump libclang (b1a640d)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>ci: bump libclang (<code>b1a640d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.49.0...v0.49.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci: bump libclang (<code>b1a640d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.49.0...v0.49.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -440,7 +440,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.49.0",
     "summary": "cve: patch cve issues (d1a752a)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>cve: patch cve issues (<code>d1a752a</code>)</li>\n<li>fix: recover cron history across config drift, surface pre_start failures, show cron tz in inspect (<code>421c438</code>)</li>\n<li>fix: reconcile stale service config on restart/start with -c (<code>13d82b6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.48.0...v0.49.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>cve: patch cve issues (<code>d1a752a</code>)</li>\n<li>fix: recover cron history across config drift, surface pre_start failures, show cron tz in inspect (<code>421c438</code>)</li>\n<li>fix: reconcile stale service config on restart/start with -c (<code>13d82b6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.48.0...v0.49.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -452,7 +452,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.48.0",
     "summary": "fix: patch transitive dependency CVEs (dbe5192)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: patch transitive dependency CVEs (<code>dbe5192</code>)</li>\n<li>ci: add cargo-audit cve check (<code>9810752</code>)</li>\n<li>feat: allow different output formats xml|json (<code>b57f468</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.47.1...v0.48.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: patch transitive dependency CVEs (<code>dbe5192</code>)</li>\n<li>ci: add cargo-audit cve check (<code>9810752</code>)</li>\n<li>feat: allow different output formats xml|json (<code>b57f468</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.47.1...v0.48.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -464,7 +464,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.47.1",
     "summary": "fix: reject direct control of cron units (71486ad)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: reject direct control of cron units (<code>71486ad</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.47.0...v0.47.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: reject direct control of cron units (<code>71486ad</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.47.0...v0.47.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -476,7 +476,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.47.0",
     "summary": "fix: strip caller session env vars from daemonized services (305b93b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: strip caller session env vars from daemonized services (<code>305b93b</code>)</li>\n<li>docs: unify tagline, fill crate metadata, fix cron schema in examples (<code>4f095d6</code>)</li>\n<li>fix: reload stored manifest on project-scoped restart and re-add (<code>a37ffa4</code>)</li>\n<li>fix: report process RSS in bytes, not 1024x inflated (<code>e4c303a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.46.0...v0.47.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: strip caller session env vars from daemonized services (<code>305b93b</code>)</li>\n<li>docs: unify tagline, fill crate metadata, fix cron schema in examples (<code>4f095d6</code>)</li>\n<li>fix: reload stored manifest on project-scoped restart and re-add (<code>a37ffa4</code>)</li>\n<li>fix: report process RSS in bytes, not 1024x inflated (<code>e4c303a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.46.0...v0.47.0\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -488,7 +488,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.46.0",
     "summary": "fix: only treat process-group survivors as healthy when the zombie is the group leader (8a2a75b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: only treat process-group survivors as healthy when the zombie is the group leader (<code>8a2a75b</code>)</li>\n<li>fix: run service restarts detached so backoff doesn't serialize the monitor loop (<code>dc640b4</code>)</li>\n<li>fix: supervise process group, not wrapper shell, to stop restart leaks and zombie status (<code>80c927e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.45.1...v0.46.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: only treat process-group survivors as healthy when the zombie is the group leader (<code>8a2a75b</code>)</li>\n<li>fix: run service restarts detached so backoff doesn't serialize the monitor loop (<code>dc640b4</code>)</li>\n<li>fix: supervise process group, not wrapper shell, to stop restart leaks and zombie status (<code>80c927e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.45.1...v0.46.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -500,7 +500,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.45.1",
     "summary": "fix: don't show completed cron/one-shot units as Lost after their PID exits (687226b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: don't show completed cron/one-shot units as Lost after their PID exits (<code>687226b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.45.0...v0.45.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: don't show completed cron/one-shot units as Lost after their PID exits (<code>687226b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.45.0...v0.45.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -512,7 +512,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.45.0",
     "summary": "fix: don't flag completed cron/one-shot units as unhealthy (eabf1c1)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: don't flag completed cron/one-shot units as unhealthy (<code>eabf1c1</code>)</li>\n<li>enhancement: remove INTENT column from sysg status table (<code>baa8ebd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.44.1...v0.45.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: don't flag completed cron/one-shot units as unhealthy (<code>eabf1c1</code>)</li>\n<li>enhancement: remove INTENT column from sysg status table (<code>baa8ebd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.44.1...v0.45.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -524,7 +524,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.44.1",
     "summary": "fix: allow successful one-shot services during restart (98ae639)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: allow successful one-shot services during restart (<code>98ae639</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.44.0...v0.44.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: allow successful one-shot services during restart (<code>98ae639</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.44.0...v0.44.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -536,7 +536,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.44.0",
     "summary": "test: update sysg status health output test (072b32b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>test: update sysg status health output test (<code>072b32b</code>)</li>\n<li>fix: bound supervisor.log growth with rotation, truncation, and prune (<code>7c498bf</code>)</li>\n<li>enhancement: make srvc units show healthy status with exit 0 (<code>836a5a6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.43.0...v0.44.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test: update sysg status health output test (<code>072b32b</code>)</li>\n<li>fix: bound supervisor.log growth with rotation, truncation, and prune (<code>7c498bf</code>)</li>\n<li>enhancement: make srvc units show healthy status with exit 0 (<code>836a5a6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.43.0...v0.44.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -548,7 +548,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.43.0",
     "summary": "enhancement: explain unit health and color inspect cron status (5d91680)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: explain unit health and color inspect cron status (<code>5d91680</code>)</li>\n<li>enhancement: show progress spinners for start and restart (<code>6f19125</code>)</li>\n<li>test: isolate build_snapshot summary test runtime state (<code>86e72b9</code>)</li>\n<li>2026-06-11 audit (<code>28f389e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.42.2...v0.43.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: explain unit health and color inspect cron status (<code>5d91680</code>)</li>\n<li>enhancement: show progress spinners for start and restart (<code>6f19125</code>)</li>\n<li>test: isolate build_snapshot summary test runtime state (<code>86e72b9</code>)</li>\n<li>2026-06-11 audit (<code>28f389e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.42.2...v0.43.0\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -572,7 +572,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.42.1",
     "summary": "fix: reload project config on scoped restart (c08920f)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: reload project config on scoped restart (<code>c08920f</code>)</li>\n<li>docs: update status and stop semantics (<code>94a045c</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.42.0...v0.42.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: reload project config on scoped restart (<code>c08920f</code>)</li>\n<li>docs: update status and stop semantics (<code>94a045c</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.42.0...v0.42.1\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -584,7 +584,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.42.0",
     "summary": "enhancement: add darkmode logos (8f6d741)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add darkmode logos (<code>8f6d741</code>)</li>\n<li>fix: make status supervisor-scoped (<code>271d806</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.41.0...v0.42.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add darkmode logos (<code>8f6d741</code>)</li>\n<li>fix: make status supervisor-scoped (<code>271d806</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.41.0...v0.42.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -596,7 +596,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.41.0",
     "summary": "fix: tighten project-scoped service targeting (da59155)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: tighten project-scoped service targeting (<code>da59155</code>)</li>\n<li>fix: ensure supervisor distinguishes start for service vs project (<code>65364f4</code>)</li>\n<li>fix: ensure sysg restart 'l' key respects abspath of relevant project/service config (<code>57b835d</code>)</li>\n<li>enhancement: clarify unit status health model (<code>41ecc8b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.40.0...v0.41.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: tighten project-scoped service targeting (<code>da59155</code>)</li>\n<li>fix: ensure supervisor distinguishes start for service vs project (<code>65364f4</code>)</li>\n<li>fix: ensure sysg restart 'l' key respects abspath of relevant project/service config (<code>57b835d</code>)</li>\n<li>enhancement: clarify unit status health model (<code>41ecc8b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.40.0...v0.41.0\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -608,7 +608,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.40.0",
     "summary": "fix: harden restart IPC upgrades and cron timeout cleanup (ef4304e)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: harden restart IPC upgrades and cron timeout cleanup (<code>ef4304e</code>)</li>\n<li>docs: bring sysg status docs up-to-date + add kind to sysg inspect (<code>3338f7b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.5...v0.40.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: harden restart IPC upgrades and cron timeout cleanup (<code>ef4304e</code>)</li>\n<li>docs: bring sysg status docs up-to-date + add kind to sysg inspect (<code>3338f7b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.5...v0.40.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -620,7 +620,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.39.5",
     "summary": "fix: read current cron history for status and inspect + v0.39.5 (492af0f)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: read current cron history for status and inspect + v0.39.5 (<code>492af0f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.4...v0.39.5\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: read current cron history for status and inspect + v0.39.5 (<code>492af0f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.4...v0.39.5\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -632,7 +632,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.39.4",
     "summary": "fix: preserve cron history across project reloads + v0.39.4 (d7eccfe)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: preserve cron history across project reloads + v0.39.4 (<code>d7eccfe</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.3...v0.39.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: preserve cron history across project reloads + v0.39.4 (<code>d7eccfe</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.3...v0.39.4\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -644,7 +644,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.39.3",
     "summary": "fix: preserve running cron state after daemon restart + v0.39.2 (a8fa759)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: preserve running cron state after daemon restart + v0.39.2 (<code>a8fa759</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.2...v0.39.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: preserve running cron state after daemon restart + v0.39.2 (<code>a8fa759</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.2...v0.39.3\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -656,7 +656,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.39.2",
     "summary": "fix: preserve cron history across multi-project inspect + v0.39.2 (13814fa)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: preserve cron history across multi-project inspect + v0.39.2 (<code>13814fa</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.1...v0.39.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: preserve cron history across multi-project inspect + v0.39.2 (<code>13814fa</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.1...v0.39.2\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -668,7 +668,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.39.1",
     "summary": "fix: remove stopped projects from supervisor status + v0.39.1 (3cdea2b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: remove stopped projects from supervisor status + v0.39.1 (<code>3cdea2b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.0...v0.39.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: remove stopped projects from supervisor status + v0.39.1 (<code>3cdea2b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.39.0...v0.39.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -680,7 +680,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.39.0",
     "summary": "fix: register extra project cron jobs with supervisor (9a41a89)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: register extra project cron jobs with supervisor (<code>9a41a89</code>)</li>\n<li>enhancement: add keyboard flags to restart services via sysg status (<code>c215810</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.38.0...v0.39.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: register extra project cron jobs with supervisor (<code>9a41a89</code>)</li>\n<li>enhancement: add keyboard flags to restart services via sysg status (<code>c215810</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.38.0...v0.39.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -692,7 +692,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.38.0",
     "summary": "fix: scope foreground lifetime and service restarts by project (67553b3)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: scope foreground lifetime and service restarts by project (<code>67553b3</code>)</li>\n<li>enhancement: track foreground project mode in supervisor status (<code>fc71b74</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.37.1...v0.38.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: scope foreground lifetime and service restarts by project (<code>67553b3</code>)</li>\n<li>enhancement: track foreground project mode in supervisor status (<code>fc71b74</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.37.1...v0.38.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -704,7 +704,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.37.1",
     "summary": "fix: admit additional project configs into running supervisor (26e1f4a)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: admit additional project configs into running supervisor (<code>26e1f4a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.37.0...v0.37.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: admit additional project configs into running supervisor (<code>26e1f4a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.37.0...v0.37.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -716,7 +716,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.37.0",
     "summary": "enhancement: add project-scoped status and command targeting (94018ab)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add project-scoped status and command targeting (<code>94018ab</code>)</li>\n<li>enhancement: add project metadata to status grouping (<code>8ab49ec</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.4...v0.37.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add project-scoped status and command targeting (<code>94018ab</code>)</li>\n<li>enhancement: add project metadata to status grouping (<code>8ab49ec</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.4...v0.37.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -728,7 +728,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.36.4",
     "summary": "fix: honor supervisor dependency order + v0.36.4 (071dc79)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: honor supervisor dependency order + v0.36.4 (<code>071dc79</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.3...v0.36.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: honor supervisor dependency order + v0.36.4 (<code>071dc79</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.3...v0.36.4\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -740,7 +740,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.36.3",
     "summary": "fix: keep linux restart parent alive + v0.36.3 (7174dd5)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: keep linux restart parent alive + v0.36.3 (<code>7174dd5</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.2...v0.36.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: keep linux restart parent alive + v0.36.3 (<code>7174dd5</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.2...v0.36.3\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -752,7 +752,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.36.2",
     "summary": "fix: prevent daemonized restart from spawning duplicate supervisor (4b0b929)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: prevent daemonized restart from spawning duplicate supervisor (<code>4b0b929</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.1...v0.36.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: prevent daemonized restart from spawning duplicate supervisor (<code>4b0b929</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.1...v0.36.2\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -764,7 +764,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.36.1",
     "summary": "fix: clean up logs stream rendering (d5d09e6)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: clean up logs stream rendering (<code>d5d09e6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.0...v0.36.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: clean up logs stream rendering (<code>d5d09e6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.36.0...v0.36.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -776,7 +776,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.36.0",
     "summary": "enhancement: add esc functionality to sysg logs + fix dupe stale supervisor (6bd1166)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add esc functionality to sysg logs + fix dupe stale supervisor (<code>6bd1166</code>)</li>\n<li>fix: stop stale config-owned service instances (<code>ab33b8c</code>)</li>\n<li>enhancement: add L key to sysg status usgae (<code>ae63760</code>)</li>\n<li>enhancement: update rustc to 1.96.0 (<code>c13a85a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.35.0...v0.36.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add esc functionality to sysg logs + fix dupe stale supervisor (<code>6bd1166</code>)</li>\n<li>fix: stop stale config-owned service instances (<code>ab33b8c</code>)</li>\n<li>enhancement: add L key to sysg status usgae (<code>ae63760</code>)</li>\n<li>enhancement: update rustc to 1.96.0 (<code>c13a85a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.35.0...v0.36.0\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -788,7 +788,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.35.0",
     "summary": "enhancement: stack stderr+stdout in logs by default (f338be5)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: stack stderr+stdout in logs by default (<code>f338be5</code>)</li>\n<li>enhancement: allow manifest migrations up + down (<code>ac80410</code>)</li>\n<li>fix: update loading indicator copy (<code>c9ef86e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.34.0...v0.35.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: stack stderr+stdout in logs by default (<code>f338be5</code>)</li>\n<li>enhancement: allow manifest migrations up + down (<code>ac80410</code>)</li>\n<li>fix: update loading indicator copy (<code>c9ef86e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.34.0...v0.35.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -800,7 +800,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.34.0",
     "summary": "enhancement: add live status and inspect refresh flag (061bb4b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add live status and inspect refresh flag (<code>061bb4b</code>)</li>\n<li>enhancement: cache status and inspect snapshots (<code>6955f34</code>)</li>\n<li>enhancement: add configurable service log capture (<code>c9061ba</code>)</li>\n<li>enhancement: don't rebuild logs index per-service (<code>1a25625</code>)</li>\n<li>ci: remove docker tests from ci for now (<code>a74c039</code>)</li>\n<li>fix: tail latest log lines efficiently (<code>7084479</code>)</li>\n<li>test: update docker tests (<code>372a49d</code>)</li>\n<li>fix: ensure tint with sysg status output (<code>a913850</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.33.1...v0.34.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add live status and inspect refresh flag (<code>061bb4b</code>)</li>\n<li>enhancement: cache status and inspect snapshots (<code>6955f34</code>)</li>\n<li>enhancement: add configurable service log capture (<code>c9061ba</code>)</li>\n<li>enhancement: don't rebuild logs index per-service (<code>1a25625</code>)</li>\n<li>ci: remove docker tests from ci for now (<code>a74c039</code>)</li>\n<li>fix: tail latest log lines efficiently (<code>7084479</code>)</li>\n<li>test: update docker tests (<code>372a49d</code>)</li>\n<li>fix: ensure tint with sysg status output (<code>a913850</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.33.1...v0.34.0\">Full changelog on GitHub</a></p>",
     "commits": 8
   },
   {
@@ -812,7 +812,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.33.1",
     "summary": "fix: ensure cron history table is in sysg inspect output (5bed136)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: ensure cron history table is in sysg inspect output (<code>5bed136</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.33.0...v0.33.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: ensure cron history table is in sysg inspect output (<code>5bed136</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.33.0...v0.33.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -824,7 +824,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.33.0",
     "summary": "ci: gate ci runs according to project (93687dc)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>ci: gate ci runs according to project (<code>93687dc</code>)</li>\n<li>enhancement: add indicator for computing sysg inspect/status state (<code>dd38768</code>)</li>\n<li>docs: update sysg logs --clear to --purge (<code>f848b91</code>)</li>\n<li>docs: add short opts to commands docs (<code>81fa360</code>)</li>\n<li>enhancement: make blue_green deployments more generic (<code>088d48d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.32.0...v0.33.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci: gate ci runs according to project (<code>93687dc</code>)</li>\n<li>enhancement: add indicator for computing sysg inspect/status state (<code>dd38768</code>)</li>\n<li>docs: update sysg logs --clear to --purge (<code>f848b91</code>)</li>\n<li>docs: add short opts to commands docs (<code>81fa360</code>)</li>\n<li>enhancement: make blue_green deployments more generic (<code>088d48d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.32.0...v0.33.0\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -836,7 +836,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.32.0",
     "summary": "enhancement: update sysg logs formatting (47691e0)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: update sysg logs formatting (<code>47691e0</code>)</li>\n<li>fix: restart with --daemonize not being detached (<code>ab3dcea</code>)</li>\n<li>fix: clear sysg --stream with esc (<code>b3fa402</code>)</li>\n<li>docs: fix favicon path (<code>2ac2ccb</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.31.0...v0.32.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: update sysg logs formatting (<code>47691e0</code>)</li>\n<li>fix: restart with --daemonize not being detached (<code>ab3dcea</code>)</li>\n<li>fix: clear sysg --stream with esc (<code>b3fa402</code>)</li>\n<li>docs: fix favicon path (<code>2ac2ccb</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.31.0...v0.32.0\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -848,7 +848,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.31.0",
     "summary": "v0.31.0 (10fa2cf)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>v0.31.0 (<code>10fa2cf</code>)</li>\n<li>docs: add official systemg logo (<code>5e151d9</code>)</li>\n<li>fix: let repeated sysg logs follow sessions reconnect cleanly (<code>639ce06</code>)</li>\n<li>fix: parse direct env blocks so supervised services emit logs (<code>81fbf99</code>)</li>\n<li>chore: code cleanup (<code>d84b07b</code>)</li>\n<li>fix: remove sysg status chart after ESC (<code>5fafe0b</code>)</li>\n<li>fix: align sysg logs with live supervisor state (<code>2fa27d7</code>)</li>\n<li>docs: simplify readme (<code>938d0ac</code>)</li>\n<li>chore: add commit-check.sh (<code>c2eebdf</code>)</li>\n<li>fix: remove duplicate docs links (<code>db518b0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.30.0...v0.31.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>v0.31.0 (<code>10fa2cf</code>)</li>\n<li>docs: add official systemg logo (<code>5e151d9</code>)</li>\n<li>fix: let repeated sysg logs follow sessions reconnect cleanly (<code>639ce06</code>)</li>\n<li>fix: parse direct env blocks so supervised services emit logs (<code>81fbf99</code>)</li>\n<li>chore: code cleanup (<code>d84b07b</code>)</li>\n<li>fix: remove sysg status chart after ESC (<code>5fafe0b</code>)</li>\n<li>fix: align sysg logs with live supervisor state (<code>2fa27d7</code>)</li>\n<li>docs: simplify readme (<code>938d0ac</code>)</li>\n<li>chore: add commit-check.sh (<code>c2eebdf</code>)</li>\n<li>fix: remove duplicate docs links (<code>db518b0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.30.0...v0.31.0\">Full changelog on GitHub</a></p>",
     "commits": 10
   },
   {
@@ -860,7 +860,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.30.0",
     "summary": "v0.30.0 (8376a14)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>v0.30.0 (<code>8376a14</code>)</li>\n<li>fix: pin mintlify version + fix broken links (<code>d3a3900</code>)</li>\n<li>refactor: migrate docs to mintlify (<code>26ef48c</code>)</li>\n<li>fix: allow sysg logs to fwd logs from monitored procs (<code>040f98f</code>)</li>\n<li>enhancement: add --clear to sysg logs (<code>17b8455</code>)</li>\n<li>chore: cleanup comments (<code>952eca8</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.29.0...v0.30.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>v0.30.0 (<code>8376a14</code>)</li>\n<li>fix: pin mintlify version + fix broken links (<code>d3a3900</code>)</li>\n<li>refactor: migrate docs to mintlify (<code>26ef48c</code>)</li>\n<li>fix: allow sysg logs to fwd logs from monitored procs (<code>040f98f</code>)</li>\n<li>enhancement: add --clear to sysg logs (<code>17b8455</code>)</li>\n<li>chore: cleanup comments (<code>952eca8</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.29.0...v0.30.0\">Full changelog on GitHub</a></p>",
     "commits": 6
   },
   {
@@ -872,7 +872,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.29.0",
     "summary": "enhancement: add --stderr to sysg start + update docs (8b764b6)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add --stderr to sysg start + update docs (<code>8b764b6</code>)</li>\n<li>enhancement: tighten sysg status header (<code>85eebf6</code>)</li>\n<li>enhancement: shade sysg status by process level + merge sysg inspect tables (<code>02b0b4f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.28.0...v0.29.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add --stderr to sysg start + update docs (<code>8b764b6</code>)</li>\n<li>enhancement: tighten sysg status header (<code>85eebf6</code>)</li>\n<li>enhancement: shade sysg status by process level + merge sysg inspect tables (<code>02b0b4f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.28.0...v0.29.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -884,7 +884,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.28.0",
     "summary": "enhancement: allow sysg status to be interactive (9149e14)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: allow sysg status to be interactive (<code>9149e14</code>)</li>\n<li>docs: minor docs ux updates (<code>01b120c</code>)</li>\n<li>docs: update unit examples (<code>126ce9e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.27.0...v0.28.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: allow sysg status to be interactive (<code>9149e14</code>)</li>\n<li>docs: minor docs ux updates (<code>01b120c</code>)</li>\n<li>docs: update unit examples (<code>126ce9e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.27.0...v0.28.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -896,7 +896,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.27.0",
     "summary": "docs: add unit examples (2f26701)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>docs: add unit examples (<code>2f26701</code>)</li>\n<li>fix: update unit health status calculation (<code>7145ad0</code>)</li>\n<li>refactor: merge swap to start and deprecate swap (<code>a77d93a</code>)</li>\n<li>enhancement: impl ad-hoc supervision of arbitrary commands (<code>3be41af</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.3...v0.27.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>docs: add unit examples (<code>2f26701</code>)</li>\n<li>fix: update unit health status calculation (<code>7145ad0</code>)</li>\n<li>refactor: merge swap to start and deprecate swap (<code>a77d93a</code>)</li>\n<li>enhancement: impl ad-hoc supervision of arbitrary commands (<code>3be41af</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.3...v0.27.0\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -908,7 +908,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.26.3",
     "summary": "fix+release: fix sysg inspect table width + v0.26.3 (8739a98)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix+release: fix sysg inspect table width + v0.26.3 (<code>8739a98</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.2...v0.26.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix+release: fix sysg inspect table width + v0.26.3 (<code>8739a98</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.2...v0.26.3\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -920,7 +920,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.26.2",
     "summary": "fix: address sysg chart sizing (6eb39b8)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: address sysg chart sizing (<code>6eb39b8</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.1...v0.26.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: address sysg chart sizing (<code>6eb39b8</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.1...v0.26.2\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -932,7 +932,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.26.1",
     "summary": "fix: adjust sysg inspect formatting (ee9156b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: adjust sysg inspect formatting (<code>ee9156b</code>)</li>\n<li>fix: ensure status/inspect dont read from stale cache (<code>b3948e2</code>)</li>\n<li>fix: recolor sysg inspect for clarity + improve formatting (<code>ef94a7e</code>)</li>\n<li>fix: adjust unit type color (<code>80c0c45</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.0...v0.26.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: adjust sysg inspect formatting (<code>ee9156b</code>)</li>\n<li>fix: ensure status/inspect dont read from stale cache (<code>b3948e2</code>)</li>\n<li>fix: recolor sysg inspect for clarity + improve formatting (<code>ef94a7e</code>)</li>\n<li>fix: adjust unit type color (<code>80c0c45</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.26.0...v0.26.1\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -944,7 +944,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.26.0",
     "summary": "fix: simplify crud example + prettify sysg inspect (dc52f64)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: simplify crud example + prettify sysg inspect (<code>dc52f64</code>)</li>\n<li>fix: add htop bars to sysg inspect (<code>2ac11aa</code>)</li>\n<li>fix+enhancement: enable sysg status table size dynamically + add -s --service opt to sysg inspect (<code>9ada092</code>)</li>\n<li>fix: update tests per new xml artifacts (<code>6d12a95</code>)</li>\n<li>refactor: use xml for state artifacts instead of json (<code>28bb977</code>)</li>\n<li>test: rewrite restart orphan regression with unix baseline and linux edge case (<code>a178ca0</code>)</li>\n<li>fix: use blue_green for rolling deployments (<code>800210f</code>)</li>\n<li>fix: ensure that sysg restart does not create process leaks (<code>026724a</code>)</li>\n<li>fix: address sysg status formatting (<code>4e3b365</code>)</li>\n<li>enhancement: make sysg inspect output for htop-like (<code>3ff4830</code>)</li>\n<li>fix: address inconcsistencies with --sys and --drop-privileges + update docs (<code>b451fcf</code>)</li>\n<li>fix: prettify sysg inspect output (<code>9b22d0c</code>)</li>\n<li>fix: capitalize health labels from sysg status (<code>995156f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.24.1...v0.26.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: simplify crud example + prettify sysg inspect (<code>dc52f64</code>)</li>\n<li>fix: add htop bars to sysg inspect (<code>2ac11aa</code>)</li>\n<li>fix+enhancement: enable sysg status table size dynamically + add -s --service opt to sysg inspect (<code>9ada092</code>)</li>\n<li>fix: update tests per new xml artifacts (<code>6d12a95</code>)</li>\n<li>refactor: use xml for state artifacts instead of json (<code>28bb977</code>)</li>\n<li>test: rewrite restart orphan regression with unix baseline and linux edge case (<code>a178ca0</code>)</li>\n<li>fix: use blue_green for rolling deployments (<code>800210f</code>)</li>\n<li>fix: ensure that sysg restart does not create process leaks (<code>026724a</code>)</li>\n<li>fix: address sysg status formatting (<code>4e3b365</code>)</li>\n<li>enhancement: make sysg inspect output for htop-like (<code>3ff4830</code>)</li>\n<li>fix: address inconcsistencies with --sys and --drop-privileges + update docs (<code>b451fcf</code>)</li>\n<li>fix: prettify sysg inspect output (<code>9b22d0c</code>)</li>\n<li>fix: capitalize health labels from sysg status (<code>995156f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.24.1...v0.26.0\">Full changelog on GitHub</a></p>",
     "commits": 13
   },
   {
@@ -956,7 +956,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.24.1",
     "summary": "fix: upload binaries on auto-release (8f58ffd)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: upload binaries on auto-release (<code>8f58ffd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.24.0...v0.24.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: upload binaries on auto-release (<code>8f58ffd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.24.0...v0.24.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -968,7 +968,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.25.0",
     "summary": "fix+release: upload binaries on auto-release (7a16fcd)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix+release: upload binaries on auto-release (<code>7a16fcd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.24.0...v0.25.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix+release: upload binaries on auto-release (<code>7a16fcd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.24.0...v0.25.0\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -980,7 +980,7 @@
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.24.0",
     "summary": "enhancement: refactor 'status' 'logs' 'inspect' to use --stream opt (efc9af3)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: refactor 'status' 'logs' 'inspect' to use --stream opt (<code>efc9af3</code>)</li>\n<li>fix: update orchestrator instructions (<code>2944c69</code>)</li>\n<li>fix: default sysg logs to stderr + update orchestrator instructions (<code>2526b36</code>)</li>\n<li>fix: flush out orchestrator instructions (<code>399d5d4</code>)</li>\n<li>fix: small ux updates to sysg status (<code>22b00c7</code>)</li>\n<li>chore: update sysg config for orchestrator (<code>e1647e5</code>)</li>\n<li>ci: fix bad release logic (<code>d641480</code>)</li>\n<li>docs: update readme (<code>fc43d60</code>)</li>\n<li>ci: impl auto release creation (<code>cd7c712</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.23.0...v0.24.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: refactor 'status' 'logs' 'inspect' to use --stream opt (<code>efc9af3</code>)</li>\n<li>fix: update orchestrator instructions (<code>2944c69</code>)</li>\n<li>fix: default sysg logs to stderr + update orchestrator instructions (<code>2526b36</code>)</li>\n<li>fix: flush out orchestrator instructions (<code>399d5d4</code>)</li>\n<li>fix: small ux updates to sysg status (<code>22b00c7</code>)</li>\n<li>chore: update sysg config for orchestrator (<code>e1647e5</code>)</li>\n<li>ci: fix bad release logic (<code>d641480</code>)</li>\n<li>docs: update readme (<code>fc43d60</code>)</li>\n<li>ci: impl auto release creation (<code>cd7c712</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.23.0...v0.24.0\">Full changelog on GitHub</a></p>",
     "commits": 9
   },
   {
@@ -992,7 +992,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.23.0",
     "summary": "enhancement: colorize and label peripherally spawned procs (01972ac)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: colorize and label peripherally spawned procs (<code>01972ac</code>)</li>\n<li>fix: update orchestrator example instructions (<code>44cab76</code>)</li>\n<li>enhancement: allow sysg status to track non-supervisor launched procs (<code>fc7a7ee</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.22.0...v0.23.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: colorize and label peripherally spawned procs (<code>01972ac</code>)</li>\n<li>fix: update orchestrator example instructions (<code>44cab76</code>)</li>\n<li>enhancement: allow sysg status to track non-supervisor launched procs (<code>fc7a7ee</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.22.0...v0.23.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1004,7 +1004,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.22.0",
     "summary": "enhancement: migrate orchestrator agents to porki package (96beaa8)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: migrate orchestrator agents to porki package (<code>96beaa8</code>)</li>\n<li>fix: flushout orchestrator example more (<code>0db8760</code>)</li>\n<li>docs: add install gif (<code>8ff56fd</code>)</li>\n<li>fix: add USER to sysg status for spwn services (<code>9477ca2</code>)</li>\n<li>fix: update orchestrator example (<code>e3d794f</code>)</li>\n<li>docs: update readme (<code>14afa88</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.21.0...v0.22.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: migrate orchestrator agents to porki package (<code>96beaa8</code>)</li>\n<li>fix: flushout orchestrator example more (<code>0db8760</code>)</li>\n<li>docs: add install gif (<code>8ff56fd</code>)</li>\n<li>fix: add USER to sysg status for spwn services (<code>9477ca2</code>)</li>\n<li>fix: update orchestrator example (<code>e3d794f</code>)</li>\n<li>docs: update readme (<code>14afa88</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.21.0...v0.22.0\">Full changelog on GitHub</a></p>",
     "commits": 6
   },
   {
@@ -1016,7 +1016,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.21.0",
     "summary": "fix: simplify logging + update orchestrator instructions (53fc8af)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: simplify logging + update orchestrator instructions (<code>53fc8af</code>)</li>\n<li>fix: update orchestrator example (<code>a63850b</code>)</li>\n<li>fix: add -s --service to sysg logs (<code>94692bb</code>)</li>\n<li>docs: ensure commands are up-to-date (<code>566b64b</code>)</li>\n<li>fix: make default log stream stderr (<code>b7b3de5</code>)</li>\n<li>docs: refactor/update all docs (<code>c2c64e0</code>)</li>\n<li>enhancement: add user to sysg status (<code>91b3126</code>)</li>\n<li>docs: simplify docs (<code>70929ca</code>)</li>\n<li>chore: refactor gen-ui example to orchestrator example (<code>7e4e030</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.4...v0.21.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: simplify logging + update orchestrator instructions (<code>53fc8af</code>)</li>\n<li>fix: update orchestrator example (<code>a63850b</code>)</li>\n<li>fix: add -s --service to sysg logs (<code>94692bb</code>)</li>\n<li>docs: ensure commands are up-to-date (<code>566b64b</code>)</li>\n<li>fix: make default log stream stderr (<code>b7b3de5</code>)</li>\n<li>docs: refactor/update all docs (<code>c2c64e0</code>)</li>\n<li>enhancement: add user to sysg status (<code>91b3126</code>)</li>\n<li>docs: simplify docs (<code>70929ca</code>)</li>\n<li>chore: refactor gen-ui example to orchestrator example (<code>7e4e030</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.4...v0.21.0\">Full changelog on GitHub</a></p>",
     "commits": 9
   },
   {
@@ -1028,7 +1028,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.20.4",
     "summary": "fix: default install to local/bin (233b4d6)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: default install to local/bin (<code>233b4d6</code>)</li>\n<li>fix: update flaky system_mode_uses_var_directories (<code>7be2a0e</code>)</li>\n<li>fix: add --log-level to sysg spawn (<code>f5d0b0c</code>)</li>\n<li>fix: allow sysg to track full process tree (<code>262e295</code>)</li>\n<li>spike: sysg ui (#43) (<code>ab74986</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.3...v0.20.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: default install to local/bin (<code>233b4d6</code>)</li>\n<li>fix: update flaky system_mode_uses_var_directories (<code>7be2a0e</code>)</li>\n<li>fix: add --log-level to sysg spawn (<code>f5d0b0c</code>)</li>\n<li>fix: allow sysg to track full process tree (<code>262e295</code>)</li>\n<li>spike: sysg ui (#43) (<code>ab74986</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.3...v0.20.4\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -1040,7 +1040,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.20.3",
     "summary": "fix+release: ensure sysg status nesting (9b59c14)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix+release: ensure sysg status nesting (<code>9b59c14</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.2...v0.20.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix+release: ensure sysg status nesting (<code>9b59c14</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.2...v0.20.3\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1052,7 +1052,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.20.2",
     "summary": "fix+release: redirect subproc stderr + address cascade termination + updates tests (1768038)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix+release: redirect subproc stderr + address cascade termination + updates tests (<code>1768038</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.1...v0.20.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix+release: redirect subproc stderr + address cascade termination + updates tests (<code>1768038</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.1...v0.20.2\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1064,7 +1064,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.20.1",
     "summary": "fix+release: ensure sysg status reports on sub-processes + v0.20.1 (8c218cd)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix+release: ensure sysg status reports on sub-processes + v0.20.1 (<code>8c218cd</code>)</li>\n<li>fix: update install logo + reenable console logging on sysg start + fix example (<code>db476ba</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.0...v0.20.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix+release: ensure sysg status reports on sub-processes + v0.20.1 (<code>8c218cd</code>)</li>\n<li>fix: update install logo + reenable console logging on sysg start + fix example (<code>db476ba</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.20.0...v0.20.1\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -1076,7 +1076,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.20.0",
     "summary": "enhancement: impl sysg spawn + update docs (#42) (e8da51b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: impl sysg spawn + update docs (#42) (<code>e8da51b</code>)</li>\n<li>docs: update missed docs for rebrand (<code>b22517d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.19.0...v0.20.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: impl sysg spawn + update docs (#42) (<code>e8da51b</code>)</li>\n<li>docs: update missed docs for rebrand (<code>b22517d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.19.0...v0.20.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -1088,7 +1088,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.19.0",
     "summary": "enhancement: swap charting to rasciigraph + remove comments (944fab9)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: swap charting to rasciigraph + remove comments (<code>944fab9</code>)</li>\n<li>admin: rebrand to program composer + update docs (<code>16e1869</code>)</li>\n<li>fix+release: swap gnuchart with rasciichart + v0.18.1 (<code>4ecc55b</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: swap charting to rasciigraph + remove comments (<code>944fab9</code>)</li>\n<li>admin: rebrand to program composer + update docs (<code>16e1869</code>)</li>\n<li>fix+release: swap gnuchart with rasciichart + v0.18.1 (<code>4ecc55b</code>)</li>\n</ul>",
     "commits": 3
   },
   {
@@ -1100,7 +1100,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.18.0",
     "summary": "fix: address cron pid race condition (21ee4eb)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: address cron pid race condition (<code>21ee4eb</code>)</li>\n<li>test: add docker tests (<code>a289eba</code>)</li>\n<li>enhancement: update rustfmt usage (<code>c583bd3</code>)</li>\n<li>enhancement: use gnuplot for sysg inspect (<code>cf407d4</code>)</li>\n<li>fix+release: address linux zombie thread bug + cleanup + v0.17.0-rc9 (<code>502b2eb</code>)</li>\n<li>release+fix: resolve sysg inspect deadlock by using try_read for metrics + v0.17.0-rc8 (<code>c91011c</code>)</li>\n<li>fix+release: sysg inspect inline charts (<code>f3fbd5f</code>)</li>\n<li>enhancement+release: add sliding window to sysg inspect + v0.17.0-rc5 (<code>c2b7b1a</code>)</li>\n<li>release+fix: sysg status/inspect improvements + v0.17.0-rc4 (<code>cf3ae4d</code>)</li>\n<li>enhancement+release: update sysg status/inspect + v0.17.0-rc3 (<code>b57b7fd</code>)</li>\n<li>fix+release: use chart view for sysg inspect + v0.17.0-rc2 (<code>622c210</code>)</li>\n<li>enhancement: implement sysg inspect devx improvements (#39) (<code>1eef279</code>)</li>\n<li>enhancement: implement kernel space (#38) (<code>2592828</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.17.0..v0.18.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: address cron pid race condition (<code>21ee4eb</code>)</li>\n<li>test: add docker tests (<code>a289eba</code>)</li>\n<li>enhancement: update rustfmt usage (<code>c583bd3</code>)</li>\n<li>enhancement: use gnuplot for sysg inspect (<code>cf407d4</code>)</li>\n<li>fix+release: address linux zombie thread bug + cleanup + v0.17.0-rc9 (<code>502b2eb</code>)</li>\n<li>release+fix: resolve sysg inspect deadlock by using try_read for metrics + v0.17.0-rc8 (<code>c91011c</code>)</li>\n<li>fix+release: sysg inspect inline charts (<code>f3fbd5f</code>)</li>\n<li>enhancement+release: add sliding window to sysg inspect + v0.17.0-rc5 (<code>c2b7b1a</code>)</li>\n<li>release+fix: sysg status/inspect improvements + v0.17.0-rc4 (<code>cf3ae4d</code>)</li>\n<li>enhancement+release: update sysg status/inspect + v0.17.0-rc3 (<code>b57b7fd</code>)</li>\n<li>fix+release: use chart view for sysg inspect + v0.17.0-rc2 (<code>622c210</code>)</li>\n<li>enhancement: implement sysg inspect devx improvements (#39) (<code>1eef279</code>)</li>\n<li>enhancement: implement kernel space (#38) (<code>2592828</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.17.0..v0.18.0\">Full changelog on GitHub</a></p>",
     "commits": 13
   },
   {
@@ -1112,7 +1112,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.17.0",
     "summary": "main<-develop (#40) (f02bf9b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>main&#x3C;-develop (#40) (<code>f02bf9b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.6...v0.17.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>main&#x3C;-develop (#40) (<code>f02bf9b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.6...v0.17.0\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1124,7 +1124,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.15.6",
     "summary": "fix: address purge + fix ipc state updates (36bb3f8)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: address purge + fix ipc state updates (<code>36bb3f8</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.5...v0.15.6\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: address purge + fix ipc state updates (<code>36bb3f8</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.5...v0.15.6\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1136,7 +1136,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.15.5",
     "summary": "fix: address individual service start/stop + refactor tests (91e10df)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: address individual service start/stop + refactor tests (<code>91e10df</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.4...v0.15.5\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: address individual service start/stop + refactor tests (<code>91e10df</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.4...v0.15.5\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1148,7 +1148,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.15.4",
     "summary": "fix: terminate full process tree and clean hashed service state (9b0b653)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: terminate full process tree and clean hashed service state (<code>9b0b653</code>)</li>\n<li>docs: add philosophy (<code>a3ac662</code>)</li>\n<li>fix: cleanup supervisor tracking (<code>0b2e4aa</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.3...v0.15.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: terminate full process tree and clean hashed service state (<code>9b0b653</code>)</li>\n<li>docs: add philosophy (<code>a3ac662</code>)</li>\n<li>fix: cleanup supervisor tracking (<code>0b2e4aa</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.15.3...v0.15.4\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1196,7 +1196,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.15.0",
     "summary": "enhancement: support renaming services (f7f6e9c)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: support renaming services (<code>f7f6e9c</code>)</li>\n<li>fix: limit sysg logs output size per log type (<code>26f7287</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.5...v0.15.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: support renaming services (<code>f7f6e9c</code>)</li>\n<li>fix: limit sysg logs output size per log type (<code>26f7287</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.5...v0.15.0\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -1208,7 +1208,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.14.5",
     "summary": "fix: re-attempt cron registration on restart (e0ebe7c)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: re-attempt cron registration on restart (<code>e0ebe7c</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.4...v0.14.5\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: re-attempt cron registration on restart (<code>e0ebe7c</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.4...v0.14.5\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1220,7 +1220,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.14.4",
     "summary": "fix: ensure sysg restart registers new cron + update rustdoc (1fee54e)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: ensure sysg restart registers new cron + update rustdoc (<code>1fee54e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.3...v0.14.4\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: ensure sysg restart registers new cron + update rustdoc (<code>1fee54e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.3...v0.14.4\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1232,7 +1232,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.14.3",
     "summary": "fix: persist unexpected pre-start failures with ExitedWithError and record start attempts (b101c3e)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: persist unexpected pre-start failures with ExitedWithError and record start attempts (<code>b101c3e</code>)</li>\n<li>fix: update daemon to record failed start attempts (<code>43bb0da</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.2...v0.14.3\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: persist unexpected pre-start failures with ExitedWithError and record start attempts (<code>b101c3e</code>)</li>\n<li>fix: update daemon to record failed start attempts (<code>43bb0da</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.2...v0.14.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -1244,7 +1244,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.14.2",
     "summary": "fix: enable prestart for all deployment types (6bf322f)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: enable pre_start for all deployment types (<code>6bf322f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.1...v0.14.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: enable pre_start for all deployment types (<code>6bf322f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.1...v0.14.2\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1256,7 +1256,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.14.1",
     "summary": "fix: address cron lockfile race (d7fbf23)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: address cron lockfile race (<code>d7fbf23</code>)</li>\n<li>fix: cleanup pid file when changing state (<code>886fe6b</code>)</li>\n<li>docs: update multi-service example (<code>cdebe37</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.0...v0.14.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: address cron lockfile race (<code>d7fbf23</code>)</li>\n<li>fix: cleanup pid file when changing state (<code>886fe6b</code>)</li>\n<li>docs: update multi-service example (<code>cdebe37</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.14.0...v0.14.1\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1280,7 +1280,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.13.2",
     "summary": "fix: dont start cron on restart + address zombie threads (f88c1e3)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: dont start cron on restart + address zombie threads (<code>f88c1e3</code>)</li>\n<li>enhancement: add max_restarts config (<code>b032776</code>)</li>\n<li>fix: colorize sysg status a bit more (<code>ab21d26</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.13.1...v0.13.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: dont start cron on restart + address zombie threads (<code>f88c1e3</code>)</li>\n<li>enhancement: add max_restarts config (<code>b032776</code>)</li>\n<li>fix: colorize sysg status a bit more (<code>ab21d26</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.13.1...v0.13.2\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1292,7 +1292,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.13.1",
     "summary": "fix: ensure monitor reaps services (095ba63)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: ensure monitor reaps services (<code>095ba63</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.13.0...v0.13.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: ensure monitor reaps services (<code>095ba63</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.13.0...v0.13.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1304,7 +1304,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.13.0",
     "summary": "fix: ensure statuses are communicated differently (694923b)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: ensure statuses are communicated differently (<code>694923b</code>)</li>\n<li>enhancement: add supervisor logs (#34) (<code>304f69b</code>)</li>\n<li>enhancement: add -s --service opt to start command (<code>3dac369</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.12.0...v0.13.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: ensure statuses are communicated differently (<code>694923b</code>)</li>\n<li>enhancement: add supervisor logs (#34) (<code>304f69b</code>)</li>\n<li>enhancement: add -s --service opt to start command (<code>3dac369</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.12.0...v0.13.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1316,7 +1316,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.12.0",
     "summary": "fix: ensure supervisor recognizes skip flag (d032f11)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: ensure supervisor recognizes skip flag (<code>d032f11</code>)</li>\n<li>enhancement: add -s --service flag to status command (<code>5ac2ed5</code>)</li>\n<li>fix: re-address supervisor abandoning procs after session exit (<code>bb0d2d2</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.11.2...v0.12.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: ensure supervisor recognizes skip flag (<code>d032f11</code>)</li>\n<li>enhancement: add -s --service flag to status command (<code>5ac2ed5</code>)</li>\n<li>fix: re-address supervisor abandoning procs after session exit (<code>bb0d2d2</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.11.2...v0.12.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1328,7 +1328,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.11.2",
     "summary": "fix: address unrisilient logs + rolling deployment silently failing (13638e3)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: address unrisilient logs + rolling deployment silently failing (<code>13638e3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.11.1...v0.11.2\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: address unrisilient logs + rolling deployment silently failing (<code>13638e3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.11.1...v0.11.2\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1340,7 +1340,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.11.1",
     "summary": "fix: repair restart pid tracking and stop (b47880e)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: repair restart pid tracking and stop (<code>b47880e</code>)</li>\n<li>docs: update examples (<code>193407e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.11.0...v0.11.1\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: repair restart pid tracking and stop (<code>b47880e</code>)</li>\n<li>docs: update examples (<code>193407e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.11.0...v0.11.1\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -1352,7 +1352,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.11.0",
     "summary": "enhancement: add linux alpine support (c215fe2)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add linux alpine support (<code>c215fe2</code>)</li>\n<li>enhancement: add root-level env config (<code>66c6c7e</code>)</li>\n<li>enhancement: add 'skip' functionality (<code>ff52e66</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add linux alpine support (<code>c215fe2</code>)</li>\n<li>enhancement: add root-level env config (<code>66c6c7e</code>)</li>\n<li>enhancement: add 'skip' functionality (<code>ff52e66</code>)</li>\n</ul>",
     "commits": 3
   },
   {
@@ -1364,7 +1364,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.10.0",
     "summary": "enhancement: add webhooks (#33) (83d0067)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add webhooks (#33) (<code>83d0067</code>)</li>\n<li>docs: thoroughly update command docs (<code>8cb7459</code>)</li>\n<li>fix: add debian build back to cross (<code>d7de0c1</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.9.0...v0.10.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add webhooks (#33) (<code>83d0067</code>)</li>\n<li>docs: thoroughly update command docs (<code>8cb7459</code>)</li>\n<li>fix: add debian build back to cross (<code>d7de0c1</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.9.0...v0.10.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1376,7 +1376,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.9.0",
     "summary": "enhancement: add logs support on macos and fix prestart config (9a77b5a)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add logs support on macos and fix pre_start config (<code>9a77b5a</code>)</li>\n<li>enhancement: impl cron support (#32) (<code>2b29d5e</code>)</li>\n<li>enhancement: zero downtime deployments (#30) (<code>3a67c2f</code>)</li>\n<li>chore: add RUSTFLAGS to docker build + update readme (<code>19668ff</code>)</li>\n<li>enhancement: add debian support (<code>afacfd6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.8.0...v0.9.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add logs support on macos and fix pre_start config (<code>9a77b5a</code>)</li>\n<li>enhancement: impl cron support (#32) (<code>2b29d5e</code>)</li>\n<li>enhancement: zero downtime deployments (#30) (<code>3a67c2f</code>)</li>\n<li>chore: add RUSTFLAGS to docker build + update readme (<code>19668ff</code>)</li>\n<li>enhancement: add debian support (<code>afacfd6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.8.0...v0.9.0\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -1388,7 +1388,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.8.0",
     "summary": "enhancement: add --log-level (#29) (d4a5c01)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: add --log-level (#29) (<code>d4a5c01</code>)</li>\n<li>enhancement: fix daemon dep handling (#28) (<code>a25b0e6</code>)</li>\n<li>enhancement: dont replace binaries with matching versions (<code>96159d3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.7.1...v0.8.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: add --log-level (#29) (<code>d4a5c01</code>)</li>\n<li>enhancement: fix daemon dep handling (#28) (<code>a25b0e6</code>)</li>\n<li>enhancement: dont replace binaries with matching versions (<code>96159d3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.7.1...v0.8.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -1400,7 +1400,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.7.1",
     "summary": "fix: ctrl+c terminates all non --daemonize'd 'sysg start' children by @ra0x3 in https://github.com/ra0x3/systemg/pull/23",
-    "html": "<h2 id=\"whats-changed\">What's Changed</h2>\n<ul>\n<li>fix: ctrl+c terminates all non --daemonize'd 'sysg start' children by @ra0x3 in <a href=\"https://github.com/ra0x3/systemg/pull/23\">https://github.com/ra0x3/systemg/pull/23</a></li>\n<li>refactor: update for new supervisor by @ra0x3 in <a href=\"https://github.com/ra0x3/systemg/pull/27\">https://github.com/ra0x3/systemg/pull/27</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/ra0x3/systemg/compare/v0.6.8...v0.7.1\">https://github.com/ra0x3/systemg/compare/v0.6.8...v0.7.1</a></p>",
+    "html": "<h2 id=\"user-content-whats-changed\">What's Changed</h2>\n<ul>\n<li>fix: ctrl+c terminates all non --daemonize'd 'sysg start' children by @ra0x3 in <a href=\"https://github.com/ra0x3/systemg/pull/23\">https://github.com/ra0x3/systemg/pull/23</a></li>\n<li>refactor: update for new supervisor by @ra0x3 in <a href=\"https://github.com/ra0x3/systemg/pull/27\">https://github.com/ra0x3/systemg/pull/27</a></li>\n</ul>\n<p><strong>Full Changelog</strong>: <a href=\"https://github.com/ra0x3/systemg/compare/v0.6.8...v0.7.1\">https://github.com/ra0x3/systemg/compare/v0.6.8...v0.7.1</a></p>",
     "commits": 0
   },
   {
@@ -1412,7 +1412,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.6.8",
     "summary": "enhancement: update install script + update ci (d8e4004)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: update install script + update ci (<code>d8e4004</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.6.2...v0.6.8\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: update install script + update ci (<code>d8e4004</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.6.2...v0.6.8\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1424,7 +1424,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.6.2",
     "summary": "test: release test 0.6.2 (8a368bf)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>test: release test 0.6.2 (<code>8a368bf</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test: release test 0.6.2 (<code>8a368bf</code>)</li>\n</ul>",
     "commits": 1
   },
   {
@@ -1436,7 +1436,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.6.1",
     "summary": "test: release test 0.6.1 (53f9d6e)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>test: release test 0.6.1 (<code>53f9d6e</code>)</li>\n<li>ci: allow for dry run on cargo publish (<code>cfc7564</code>)</li>\n<li>ci: remove macos builds (<code>32c2989</code>)</li>\n<li>fix: add ci scripts for cross build (<code>4a5748b</code>)</li>\n<li>misc: temp turn off release actions (<code>ffcf619</code>)</li>\n<li>chore: update ci actions (#11) (<code>c011a5a</code>)</li>\n<li>feat: upload + install binaries (#10) (<code>87974aa</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test: release test 0.6.1 (<code>53f9d6e</code>)</li>\n<li>ci: allow for dry run on cargo publish (<code>cfc7564</code>)</li>\n<li>ci: remove macos builds (<code>32c2989</code>)</li>\n<li>fix: add ci scripts for cross build (<code>4a5748b</code>)</li>\n<li>misc: temp turn off release actions (<code>ffcf619</code>)</li>\n<li>chore: update ci actions (#11) (<code>c011a5a</code>)</li>\n<li>feat: upload + install binaries (#10) (<code>87974aa</code>)</li>\n</ul>",
     "commits": 7
   },
   {
@@ -1448,7 +1448,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.6.0",
     "summary": "fix: start srvcs in session + send signals to proc group (#9) (eb2f164)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>fix: start srvcs in session + send signals to proc group (#9) (<code>eb2f164</code>)</li>\n<li>docs: update usage (<code>5ef565a</code>)</li>\n<li>feat/support rel abs paths (#4) (<code>043ef35</code>)</li>\n<li>docs: flush out docs + add more docs (<code>d10f177</code>)</li>\n<li>chore: docs updates (<code>31bd5f3</code>)</li>\n<li>chore: update docs meta + logos (<code>f644fba</code>)</li>\n<li>fix: get docs building (<code>1040e51</code>)</li>\n<li>chore: update docs (<code>fe8deda</code>)</li>\n<li>enhancement: add examples (<code>e8fd533</code>)</li>\n<li>fix: add daemon hooks on linux (<code>96b3baf</code>)</li>\n<li>enhancement: add support for simple webhooks (<code>192ba7b</code>)</li>\n<li>enhancement: add integration test skeleton (<code>d851882</code>)</li>\n<li>chore: update rustdoc (<code>6d4623c</code>)</li>\n<li>fix: add feature flag to docs.rs build (<code>292a976</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: start srvcs in session + send signals to proc group (#9) (<code>eb2f164</code>)</li>\n<li>docs: update usage (<code>5ef565a</code>)</li>\n<li>feat/support rel abs paths (#4) (<code>043ef35</code>)</li>\n<li>docs: flush out docs + add more docs (<code>d10f177</code>)</li>\n<li>chore: docs updates (<code>31bd5f3</code>)</li>\n<li>chore: update docs meta + logos (<code>f644fba</code>)</li>\n<li>fix: get docs building (<code>1040e51</code>)</li>\n<li>chore: update docs (<code>fe8deda</code>)</li>\n<li>enhancement: add examples (<code>e8fd533</code>)</li>\n<li>fix: add daemon hooks on linux (<code>96b3baf</code>)</li>\n<li>enhancement: add support for simple webhooks (<code>192ba7b</code>)</li>\n<li>enhancement: add integration test skeleton (<code>d851882</code>)</li>\n<li>chore: update rustdoc (<code>6d4623c</code>)</li>\n<li>fix: add feature flag to docs.rs build (<code>292a976</code>)</li>\n</ul>",
     "commits": 14
   },
   {
@@ -1460,7 +1460,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.5.0",
     "summary": "enhancement: get start + log commands working on linux (#1) (f78032a)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: get start + log commands working on linux (#1) (<code>f78032a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.4.0...v0.5.0\">Full changelog on GitHub</a></p>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: get start + log commands working on linux (#1) (<code>f78032a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.4.0...v0.5.0\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -1472,7 +1472,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.4.0",
     "summary": "enhancement: fix status uptime issue + add warning for logs on mac (f1397d4)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: fix status uptime issue + add warning for logs on mac (<code>f1397d4</code>)</li>\n<li>fix: add optional linux imports (<code>646dbdb</code>)</li>\n<li>enhancement: prettify status output format (<code>6fe8175</code>)</li>\n<li>enhancement: add sysd status command (<code>ce5f037</code>)</li>\n<li>chore: update docs + rename binary to sysg (<code>294899c</code>)</li>\n<li>chore: cleanup .expect (<code>d2f9df0</code>)</li>\n<li>fix: remove quotes from injected env vars (<code>c63f8cd</code>)</li>\n<li>fix: version is string (<code>85c511c</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: fix status uptime issue + add warning for logs on mac (<code>f1397d4</code>)</li>\n<li>fix: add optional linux imports (<code>646dbdb</code>)</li>\n<li>enhancement: prettify status output format (<code>6fe8175</code>)</li>\n<li>enhancement: add sysd status command (<code>ce5f037</code>)</li>\n<li>chore: update docs + rename binary to sysg (<code>294899c</code>)</li>\n<li>chore: cleanup .expect (<code>d2f9df0</code>)</li>\n<li>fix: remove quotes from injected env vars (<code>c63f8cd</code>)</li>\n<li>fix: version is string (<code>85c511c</code>)</li>\n</ul>",
     "commits": 8
   },
   {
@@ -1484,7 +1484,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.3.0",
     "summary": "enhancement: update logs command (134fe91)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: update logs command (<code>134fe91</code>)</li>\n<li>enhancement: reload pid file during monitoring (<code>9bc5c40</code>)</li>\n<li>enhancement: add pid manager + daemonize systemg itself (<code>779582a</code>)</li>\n<li>enhancement: attach child procs to same group as systemg proc (<code>09029a5</code>)</li>\n<li>chore: update README (<code>e3d89a2</code>)</li>\n<li>fix: remove lib (<code>8d22e01</code>)</li>\n<li>enhancement: daemonize services (<code>e75ae1e</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: update logs command (<code>134fe91</code>)</li>\n<li>enhancement: reload pid file during monitoring (<code>9bc5c40</code>)</li>\n<li>enhancement: add pid manager + daemonize systemg itself (<code>779582a</code>)</li>\n<li>enhancement: attach child procs to same group as systemg proc (<code>09029a5</code>)</li>\n<li>chore: update README (<code>e3d89a2</code>)</li>\n<li>fix: remove lib (<code>8d22e01</code>)</li>\n<li>enhancement: daemonize services (<code>e75ae1e</code>)</li>\n</ul>",
     "commits": 7
   },
   {
@@ -1496,7 +1496,7 @@
     "author": "ra0x3",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.2.0",
     "summary": "enhancement: first mvp (0de95e3)",
-    "html": "<h2 id=\"changes\">Changes</h2>\n<ul>\n<li>enhancement: first mvp (<code>0de95e3</code>)</li>\n<li>enhancement: flush out daemon + tests (<code>59e709f</code>)</li>\n<li>enhancement: add docs (<code>a5840ca</code>)</li>\n<li>enhancement: flush out systemg project (<code>c2a6e3d</code>)</li>\n<li>enhancement: init systemg project (<code>c80f2df</code>)</li>\n</ul>",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>enhancement: first mvp (<code>0de95e3</code>)</li>\n<li>enhancement: flush out daemon + tests (<code>59e709f</code>)</li>\n<li>enhancement: add docs (<code>a5840ca</code>)</li>\n<li>enhancement: flush out systemg project (<code>c2a6e3d</code>)</li>\n<li>enhancement: init systemg project (<code>c80f2df</code>)</li>\n</ul>",
     "commits": 5
   }
 ]

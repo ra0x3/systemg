@@ -102,6 +102,7 @@ jobs:
     outputs:
       docs: ${{ steps.filter.outputs.docs }}
       rust: ${{ steps.filter.outputs.rust }}
+      web: ${{ steps.filter.outputs.web }}
 
     steps:
       - name: Checkout code
@@ -117,6 +118,9 @@ jobs:
           filters: |
             docs:
               - 'docs/**'
+              - '.github/workflows/ci.yaml'
+            web:
+              - 'sysg.dev/**'
               - '.github/workflows/ci.yaml'
             rust:
               - 'Cargo.toml'
@@ -247,6 +251,46 @@ jobs:
       - name: Validate Docs
         working-directory: docs
         run: mintlify broken-links
+
+  web:
+    name: sysg.dev
+    runs-on: ubuntu-latest
+    needs: [cancel-previous, changes]
+    if: ${{ needs.changes.outputs.web == 'true' }}
+    defaults:
+      run:
+        working-directory: sysg.dev
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: sysg.dev/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Check Formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build Site
+        run: npm run build
+
+      # `prebuild` regenerates content/search.json from the MDX sources, so a
+      # dirty tree here means the committed search index is stale.
+      - name: Check Search Index Freshness
+        run: git diff --exit-code -- content/search.json
 
   rustdoc:
     name: Rust Doc

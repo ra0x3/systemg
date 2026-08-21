@@ -55,7 +55,15 @@ export default function BlogPost() {
           </Prose>
         </Box>
 
-        <Flex mt="section" pt="24px" borderTop="1px solid" borderColor="border.rule" gap="12px" justify="space-between" wrap="wrap">
+        <Flex
+          mt="section"
+          pt="24px"
+          borderTop="1px solid"
+          borderColor="border.rule"
+          gap="12px"
+          justify="space-between"
+          wrap="wrap"
+        >
           {older ? (
             <Pill variant="secondary" href={`/blog/${older.slug}`}>
               ← {older.title}

@@ -137,7 +137,14 @@ export function DocsShell({ page }: { page: Page }) {
         </Box>
 
         {prev || next ? (
-          <Flex mt="section" pt="24px" borderTop="1px solid" borderColor="border.rule" gap="12px" justify="space-between">
+          <Flex
+            mt="section"
+            pt="24px"
+            borderTop="1px solid"
+            borderColor="border.rule"
+            gap="12px"
+            justify="space-between"
+          >
             {prev ? (
               <Pill variant="secondary" href={prev.route}>
                 ← {prev.title}
