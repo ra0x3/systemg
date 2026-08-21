@@ -33,7 +33,14 @@ export function Logo({ variant = "lockup", size = 26, title = "systemg" }: LogoP
   }
 
   return (
-    <Box as="span" display="inline-flex" alignItems="center" gap={`${size * GAP_RATIO}px`} role="img" aria-label={title}>
+    <Box
+      as="span"
+      display="inline-flex"
+      alignItems="center"
+      gap={`${size * GAP_RATIO}px`}
+      role="img"
+      aria-label={title}
+    >
       {mark}
       <chakra.span
         fontFamily="mono"

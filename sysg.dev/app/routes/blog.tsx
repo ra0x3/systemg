@@ -31,7 +31,14 @@ export default function Blog() {
         <Text mt="20px" fontSize="lead" lineHeight="1.5" color="text.secondary">
           Every systemg release, with its changelog.
         </Text>
-        <Text mt="10px" fontFamily="mono" fontSize="micro" letterSpacing="0.06em" textTransform="uppercase" color="text.faint">
+        <Text
+          mt="10px"
+          fontFamily="mono"
+          fontSize="micro"
+          letterSpacing="0.06em"
+          textTransform="uppercase"
+          color="text.faint"
+        >
           {RELEASES.length} posts
         </Text>
       </Box>

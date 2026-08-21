@@ -1,12 +1,12 @@
-:root{
+:root {
   /* soft warm cards; every control is a pill */
-  --radius-0:0px;
-  --radius-xs:4px;    /* inline code */
-  --radius-sm:5px;    /* bar / meter track */
-  --radius-md:16px;   /* compact card, code block, terminal */
-  --radius-lg:20px;   /* card, panel, widget */
-  --radius-pill:999px;
-  --border-width:1px; /* @kind radius */
-  --border-width-thick:2px; /* @kind radius */
-  --rule-width:3px; /* @kind radius */
+  --radius-0: 0px;
+  --radius-xs: 4px; /* inline code */
+  --radius-sm: 5px; /* bar / meter track */
+  --radius-md: 16px; /* compact card, code block, terminal */
+  --radius-lg: 20px; /* card, panel, widget */
+  --radius-pill: 999px;
+  --border-width: 1px; /* @kind radius */
+  --border-width-thick: 2px; /* @kind radius */
+  --rule-width: 3px; /* @kind radius */
 }

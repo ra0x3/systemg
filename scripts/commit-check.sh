@@ -90,6 +90,11 @@ run_labeled \
   "cd \"${REPO_ROOT}/docs\" && mintlify broken-links"
 
 run_labeled \
+  "sysg.dev" \
+  "${BLUE}" \
+  "cd \"${REPO_ROOT}/sysg.dev\" && npm run format:check && npm run lint && npm run typecheck && npm run build && git diff --exit-code -- content/search.json"
+
+run_labeled \
   "docs:sg-links" \
   "${BLUE}" \
   "cd \"${REPO_ROOT}\" && bash scripts/check-sg-links.sh"

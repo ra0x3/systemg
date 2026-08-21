@@ -27,7 +27,8 @@ export function remarkCallouts() {
       const label = i >= 0 ? textOf(children[i]) : undefined;
       if (i >= 0) children.splice(i, 1);
 
-      const data = (node.data as Record<string, unknown>) || (node.data = {});
+      if (!node.data) node.data = {};
+      const data = node.data as Record<string, unknown>;
       data.hName = "callout";
       data.hProperties = label ? { type: kind, label } : { type: kind };
     });

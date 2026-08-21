@@ -49,10 +49,25 @@ const fs = { sm: "11.5px", md: "13px", lg: "13px" };
 export function Pill({ variant = "primary", size = "md", href, onClick, children, ariaLabel }: PillProps) {
   const tone =
     variant === "primary"
-      ? { bg: "action.primary", color: "text.inverse", borderColor: "action.primary", _hover: { bg: "action.primaryHover", borderColor: "action.primaryHover" } }
+      ? {
+          bg: "action.primary",
+          color: "text.inverse",
+          borderColor: "action.primary",
+          _hover: { bg: "action.primaryHover", borderColor: "action.primaryHover" },
+        }
       : variant === "secondary"
-        ? { bg: "surface.subtle", color: "text.heading", borderColor: "border.control", _hover: { borderColor: "accent.500" } }
-        : { bg: "transparent", color: "text.muted", borderColor: "transparent", _hover: { bg: "action.ghostHover", color: "text.heading" } };
+        ? {
+            bg: "surface.subtle",
+            color: "text.heading",
+            borderColor: "border.control",
+            _hover: { borderColor: "accent.500" },
+          }
+        : {
+            bg: "transparent",
+            color: "text.muted",
+            borderColor: "transparent",
+            _hover: { bg: "action.ghostHover", color: "text.heading" },
+          };
 
   return (
     <chakra.a
@@ -80,7 +95,15 @@ export function Pill({ variant = "primary", size = "md", href, onClick, children
   );
 }
 
-export function Panel({ children, radius = "lg", ...rest }: { children: ReactNode; radius?: string; [k: string]: unknown }) {
+export function Panel({
+  children,
+  radius = "lg",
+  ...rest
+}: {
+  children: ReactNode;
+  radius?: string;
+  [k: string]: unknown;
+}) {
   return (
     <Box
       border="1px solid"
@@ -115,7 +138,15 @@ export function PanelHeader({ children }: { children: ReactNode }) {
   );
 }
 
-export function Callout({ type = "info", label, children }: { type?: "info" | "note" | "warning"; label?: string; children: ReactNode }) {
+export function Callout({
+  type = "info",
+  label,
+  children,
+}: {
+  type?: "info" | "note" | "warning";
+  label?: string;
+  children: ReactNode;
+}) {
   const map = {
     info: { bg: "callout.infoBg", rule: "callout.infoRule", fallback: "Info" },
     note: { bg: "callout.noteBg", rule: "callout.noteRule", fallback: "Note" },
@@ -134,14 +165,34 @@ export function Callout({ type = "info", label, children }: { type?: "info" | "n
   );
 }
 
-export function BarRow({ label, value, width, subject }: { label: string; value: string; width: number; subject?: boolean }) {
+export function BarRow({
+  label,
+  value,
+  width,
+  subject,
+}: {
+  label: string;
+  value: string;
+  width: number;
+  subject?: boolean;
+}) {
   return (
-    <Box display="grid" gridTemplateColumns={{ base: "110px 1fr 74px", md: "168px 1fr 96px" }} alignItems="center" gap="12px">
+    <Box
+      display="grid"
+      gridTemplateColumns={{ base: "110px 1fr 74px", md: "168px 1fr 96px" }}
+      alignItems="center"
+      gap="12px"
+    >
       <Text fontFamily="mono" fontSize="11.5px" color={subject ? "text.heading" : "text.muted"}>
         {label}
       </Text>
       <Box height="21px" bg="surface.track" borderRadius="sm" overflow="hidden">
-        <Box height="100%" width={`${width}%`} borderRadius="sm" background={subject ? "var(--accent-bar)" : "channel.neutral"} />
+        <Box
+          height="100%"
+          width={`${width}%`}
+          borderRadius="sm"
+          background={subject ? "var(--accent-bar)" : "channel.neutral"}
+        />
       </Box>
       <Text textAlign="right" fontFamily="mono" fontSize="11.5px" color={subject ? "accent.500" : "text.secondary"}>
         {value}

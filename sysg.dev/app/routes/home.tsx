@@ -1,6 +1,5 @@
 import { Box, Flex, Grid, Heading, Stack, Text, chakra } from "@chakra-ui/react";
 import { useState } from "react";
-import { Link } from "react-router";
 import { BarRow, Eyebrow, InlineCode, K, N, Panel, PanelHeader, Pill, S, Yaml } from "~/ds/components";
 
 export function meta() {
@@ -94,7 +93,15 @@ function InstallCard() {
 
   return (
     <Panel radius="md" maxW="720px">
-      <Flex align="center" gap="2px" px="10px" py="8px" borderBottom="1px solid" borderColor="border.default" bg="surface.subtle">
+      <Flex
+        align="center"
+        gap="2px"
+        px="10px"
+        py="8px"
+        borderBottom="1px solid"
+        borderColor="border.default"
+        bg="surface.subtle"
+      >
         {INSTALL.map((item) => {
           const on = item.id === tab;
           return (
@@ -156,8 +163,22 @@ export default function Home() {
   return (
     <Box as="main">
       <Box as="section" position="relative" overflow="hidden" borderBottom="1px solid" borderColor="border.rule">
-        <Box position="absolute" insetInline="-200px" top="-80px" height="520px" background="var(--hero-wash)" pointerEvents="none" />
-        <Box position="relative" maxW="1020px" mx="auto" px={{ base: "20px", md: "gutter" }} pt={{ base: "56px", md: "96px" }} pb="72px">
+        <Box
+          position="absolute"
+          insetInline="-200px"
+          top="-80px"
+          height="520px"
+          background="var(--hero-wash)"
+          pointerEvents="none"
+        />
+        <Box
+          position="relative"
+          maxW="1020px"
+          mx="auto"
+          px={{ base: "20px", md: "gutter" }}
+          pt={{ base: "56px", md: "96px" }}
+          pb="72px"
+        >
           <Flex align="center" gap="12px" wrap="wrap">
             <Eyebrow>v0.65.0 is out</Eyebrow>
             <Box width="24px" height="1px" bg="border.control" />
@@ -231,8 +252,9 @@ export default function Home() {
             One file describes the graph
           </Heading>
           <Text mb="20px" color="text.body">
-            Declare commands, dependencies, restart policy and schedules in one manifest. <InlineCode>sysg validate</InlineCode>{" "}
-            exits <InlineCode>0</InlineCode> when the file is sound, so CI can gate on it.
+            Declare commands, dependencies, restart policy and schedules in one manifest.{" "}
+            <InlineCode>sysg validate</InlineCode> exits <InlineCode>0</InlineCode> when the file is sound, so CI can
+            gate on it.
           </Text>
           <Stack gap="10px">
             {BARS.map((b) => (

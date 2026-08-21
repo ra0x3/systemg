@@ -1,4 +1,4 @@
-import { Box, Flex, Text, chakra } from "@chakra-ui/react";
+import { Box, Flex, chakra } from "@chakra-ui/react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router";
@@ -64,42 +64,42 @@ export function Navbar() {
       backdropFilter="var(--blur-nav)"
     >
       <Flex align="center" gap="24px" maxW="page" mx="auto" px={{ base: "20px", md: "gutter" }} py="14px">
-      <NavLink to="/" aria-label="systemg home">
-        <Logo size={15} />
-      </NavLink>
+        <NavLink to="/" aria-label="systemg home">
+          <Logo size={15} />
+        </NavLink>
 
-      <Flex as="nav" align="center" gap="2px" display={{ base: "none", md: "flex" }}>
-        {LINKS.map((link) => (
-          <NavLink key={link.to} to={link.to}>
-            {({ isActive }) => (
-              <Box
-                px="12px"
-                py="7px"
-                borderRadius="pill"
-                fontSize="15px"
-                color={isActive ? "text.heading" : "text.muted"}
-                bg={isActive ? "action.ghostHover" : "transparent"}
-                transition="var(--transition-hover)"
-                _hover={{ bg: "action.ghostHover", color: "text.heading" }}
-              >
-                {link.label}
-              </Box>
-            )}
-          </NavLink>
-        ))}
-      </Flex>
+        <Flex as="nav" align="center" gap="2px" display={{ base: "none", md: "flex" }}>
+          {LINKS.map((link) => (
+            <NavLink key={link.to} to={link.to}>
+              {({ isActive }) => (
+                <Box
+                  px="12px"
+                  py="7px"
+                  borderRadius="pill"
+                  fontSize="15px"
+                  color={isActive ? "text.heading" : "text.muted"}
+                  bg={isActive ? "action.ghostHover" : "transparent"}
+                  transition="var(--transition-hover)"
+                  _hover={{ bg: "action.ghostHover", color: "text.heading" }}
+                >
+                  {link.label}
+                </Box>
+              )}
+            </NavLink>
+          ))}
+        </Flex>
 
-      <Flex align="center" gap="2px" ml="6px" display={{ base: "none", sm: "flex" }}>
-        {SOCIALS.map(({ href, label, Icon }) => (
-          <IconLink key={label} href={href} label={label}>
-            <Icon />
-          </IconLink>
-        ))}
-      </Flex>
+        <Flex align="center" gap="2px" ml="6px" display={{ base: "none", sm: "flex" }}>
+          {SOCIALS.map(({ href, label, Icon }) => (
+            <IconLink key={label} href={href} label={label}>
+              <Icon />
+            </IconLink>
+          ))}
+        </Flex>
 
-      <Box flex="1" />
+        <Box flex="1" />
 
-      <Search />
+        <Search />
 
         <Pill href="/docs/installation">Install</Pill>
         <ModeToggle />
