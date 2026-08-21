@@ -1,0 +1,38 @@
+:root{
+  --font-display:"Space Grotesk",Helvetica,sans-serif;
+  --font-heading:"Space Grotesk",Helvetica,sans-serif;
+  --font-body:"Space Grotesk",Helvetica,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+
+  --fw-regular:400; /* @kind font */
+  --fw-medium:500; /* @kind font */
+  --fw-semibold:600; /* @kind font */
+  --fw-bold:700; /* @kind font */
+  --fw-black:700; /* @kind font */
+
+  /* type scale */
+  --fs-hero:78px;      --lh-hero:0.96; /* @kind font */    --ls-hero:-0.045em; /* @kind font */
+  --fs-h1:62px;        --lh-h1:0.98; /* @kind font */      --ls-h1:-0.045em; /* @kind font */
+  --fs-card-title:42px; --lh-card-title:1.04; /* @kind font */ --ls-card-title:-0.04em; /* @kind font */
+  --fs-h2:34px;        --lh-h2:1.1; /* @kind font */       --ls-h2:-0.03em; /* @kind font */
+  --fs-h3:22px;        --lh-h3:1.3; /* @kind font */       --ls-h3:-0.02em; /* @kind font */
+  --fs-lead:22px;      --lh-lead:1.5; /* @kind font */
+  --fs-body-lg:19px;   --lh-body-lg:1.6; /* @kind font */
+  --fs-body:17px;      --lh-body:1.65; /* @kind font */
+  --fs-body-sm:15px;   --lh-body-sm:1.55; /* @kind font */
+  --fs-meta:13px;      --lh-meta:1.5; /* @kind font */
+  --fs-caption:12.5px; --lh-caption:1.5; /* @kind font */
+  --fs-micro:11.5px;   --lh-micro:1.4; /* @kind font */    --ls-micro:0.06em; /* @kind font */
+  --fs-code:13px;      --lh-code:1.85; /* @kind font */
+  --fs-code-sm:11.5px;
+  --lh-log:2; /* @kind font */ /* terminal / log line height */
+
+  /* big mono metrics */
+  --fs-metric-sm:24px; --fs-metric:32px; --fs-metric-lg:44px; --ls-metric:-0.03em; /* @kind font */
+
+  /* semantic aliases */
+  --text-h1-font:var(--font-heading);
+  --text-body-font:var(--font-body);
+  --text-code-font:var(--font-mono);
+  --measure-prose:none; /* @kind other */
+}

@@ -1,0 +1,49 @@
+{
+  "name": "sysg.dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "react-router dev",
+    "releases": "node --experimental-strip-types scripts/fetch-releases.mjs",
+    "search": "node --experimental-strip-types scripts/build-search.mjs",
+    "prebuild": "npm run search",
+    "build": "react-router build",
+    "start": "react-router-serve ./build/server/index.js",
+    "typecheck": "react-router typegen && tsc"
+  },
+  "dependencies": {
+    "@chakra-ui/react": "^3.36.1",
+    "@emotion/react": "^11.14.0",
+    "@mdx-js/react": "^3.1.1",
+    "@mdx-js/rollup": "^3.1.1",
+    "@react-router/node": "^8.3.0",
+    "@react-router/serve": "^8.3.0",
+    "@shikijs/rehype": "^4.4.3",
+    "gray-matter": "^4.0.3",
+    "isbot": "^5",
+    "lucide-react": "^1.33.0",
+    "minisearch": "^7.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router": "^8.3.0",
+    "rehype-slug": "^6.0.0",
+    "remark-directive": "^4.0.0",
+    "remark-frontmatter": "^5.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-mdx-frontmatter": "^5.2.0",
+    "unist-util-visit": "^5.1.0"
+  },
+  "devDependencies": {
+    "@react-router/dev": "^8.3.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-stringify": "^10.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
+    "typescript": "^5.7.0",
+    "unified": "^11.0.5",
+    "vite": "^8.2.2"
+  }
+}

@@ -1,0 +1,11 @@
+:root{
+  /* one shadow only */
+  --shadow-none:none;
+  --shadow-card:0 12px 34px -26px rgba(74,50,24,0.45);
+  --shadow-card-hover:var(--shadow-card);
+  --shadow-popover:var(--shadow-card);
+  --shadow-nav:0 1px 0 var(--line-2);
+  --shadow-inset-code:none;
+  --blur-nav:saturate(140%) blur(12px); /* @kind other */
+  --scrim-top:linear-gradient(to bottom,rgba(251,244,233,.96),rgba(251,244,233,0)); /* @kind color */
+}

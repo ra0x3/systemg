@@ -1,0 +1,127 @@
+:root{
+  /* ---- surfaces: warm cream paper ---- */
+  --paper-1:#fbf4e9;   /* page / paper */
+  --paper-2:#fffdf8;   /* card, panel, terminal body */
+  --paper-3:#f7efe2;   /* panel header, subtle fill, button rest */
+  --paper-4:#f4ebdc;   /* inline code fill */
+  --paper-5:#efe3d0;   /* bar / meter track */
+  --paper-hover:#f2e7d7; /* nav + ghost hover fill */
+  --hatch-a:#e4d6bf;   /* blocked/waiting stripe */
+  --hatch-b:#dfd0b8;
+
+  /* ---- lines: always warm, always 1px ---- */
+  --line-1:#ecdfcb;    /* card border */
+  --line-2:#eaddc9;    /* section rule */
+  --line-3:#e0d1b9;    /* control border */
+  --line-4:#c9b79e;    /* control border hover */
+  --glyph-dim:#bfae98; /* | and · separators */
+
+  /* ---- ink ---- */
+  --ink-1:#181310;     /* headings, primary */
+  --ink-2:#332e29;     /* body copy */
+  --ink-3:#574d43;     /* secondary body */
+  --ink-4:#6d6154;     /* muted label */
+  --ink-5:#87796a;     /* faint / caption */
+  --ink-6:#8e8071;     /* footer */
+
+  /* ---- accent: raspberry = brand + healthy + primary ---- */
+  --accent-300:#e0698a;
+  --accent-500:#ce3c5a;
+  --accent-600:#b3304b; /* pressed / CTA hover */
+  --accent-700:#a72c46; /* link hover */
+  --accent-tint:rgba(206,60,90,0.10);
+  --accent-select:rgba(206,60,90,0.18);
+  --accent-bar:linear-gradient(90deg,#e0698a,#ce3c5a); /* @kind color */
+  --hero-wash:radial-gradient(60% 100% at 30% 0%,rgba(206,60,90,0.10),transparent 70%); /* @kind color */
+
+  /* ---- signal: amber = failure, retry, scheduled ---- */
+  --warn-300:#f0bd72;
+  --warn-500:#b8590d;
+  --warn-tint:rgba(184,89,13,0.10);
+  --warn-bar:linear-gradient(90deg,#f0bd72,#b8590d); /* @kind color */
+
+  /* ---- log channels (never decoration; max two hues per chart) ---- */
+  --channel-blue:#2f5fb3;
+  --channel-violet:#6b46b8;
+  --channel-accent:var(--accent-500);
+  --bar-neutral:#dcccb4; /* comparison bar */
+
+  /* ---- semantic: text ---- */
+  --text-heading:var(--ink-1);
+  --text-body:var(--ink-2);
+  --text-secondary:var(--ink-3);
+  --text-muted:var(--ink-4);
+  --text-faint:var(--ink-5);
+  --text-footer:var(--ink-6);
+  --text-link:var(--accent-500);
+  --text-link-hover:var(--accent-700);
+  --text-inverse:var(--paper-2);
+  --text-accent:var(--accent-500);
+  --text-code:var(--ink-2);
+
+  /* ---- semantic: surfaces ---- */
+  --surface-page:var(--paper-1);
+  --surface-card:var(--paper-2);
+  --surface-card-hover:var(--paper-2);
+  --surface-subtle:var(--paper-3);
+  --surface-sunken:var(--paper-3);
+  --surface-inline-code:var(--paper-4);
+  --surface-track:var(--paper-5);
+  --surface-code:var(--paper-2);
+  --surface-code-header:var(--paper-3);
+  --surface-terminal:var(--paper-2);
+  --surface-nav:rgba(251,244,233,0.86);
+  --surface-hatch:repeating-linear-gradient(115deg,#e4d6bf 0 5px,#dfd0b8 5px 10px); /* @kind color */
+
+  /* ---- semantic: borders ---- */
+  --border-default:var(--line-1);
+  --border-rule:var(--line-2);
+  --border-strong:var(--line-3);
+  --border-control:var(--line-3);
+  --border-control-hover:var(--line-4);
+  --border-code:var(--line-1);
+  --border-focus:var(--accent-500);
+
+  /* ---- semantic: interactive ---- */
+  --action-primary:var(--accent-500);
+  --action-primary-hover:var(--accent-600);
+  --action-accent:var(--accent-500);
+  --action-accent-hover:var(--accent-600);
+  --action-ghost-hover:var(--paper-hover);
+  --focus-ring:rgba(206,60,90,.32);
+
+  /* ---- semantic: status (raspberry healthy, amber failing) ---- */
+  --status-ok-fg:var(--accent-700);
+  --status-ok-bg:var(--accent-tint);
+  --status-warn-fg:var(--warn-500);
+  --status-warn-bg:var(--warn-tint);
+  --status-error-fg:var(--warn-500);
+  --status-error-bg:var(--warn-tint);
+  --status-info-fg:var(--channel-blue);
+  --status-info-bg:rgba(47,95,179,0.10);
+  --status-neutral-fg:var(--ink-4);
+  --status-neutral-bg:var(--paper-3);
+
+  /* ---- semantic: code syntax on light paper ---- */
+  --code-text:var(--ink-2);
+  --code-comment:var(--ink-5);
+  --code-key:var(--channel-blue);   /* yaml keys, bash builtins */
+  --code-string:var(--accent-500);
+  --code-number:var(--warn-500);    /* numbers + durations */
+  --code-flag:var(--channel-violet);
+  --code-punct:var(--glyph-dim);
+  --code-caret:var(--accent-500);
+  --code-add-bg:rgba(206,60,90,0.09);
+  --code-add-fg:var(--accent-700);
+  --code-remove-bg:rgba(184,89,13,0.10);
+  --code-remove-fg:var(--warn-500);
+
+  /* ---- semantic: callouts ---- */
+  --callout-info-bg:rgba(47,95,179,0.07);
+  --callout-info-rule:var(--channel-blue);
+  --callout-note-bg:var(--paper-3);
+  --callout-note-rule:var(--ink-4);
+  --callout-warning-bg:var(--warn-tint);
+  --callout-warning-rule:var(--warn-500);
+}
+::selection{background:var(--accent-select)}
