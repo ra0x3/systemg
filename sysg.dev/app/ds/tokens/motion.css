@@ -1,0 +1,13 @@
+:root{
+  --dur-instant:80ms; /* @kind other */
+  --dur-fast:120ms; /* @kind other */
+  --dur-base:180ms; /* @kind other */
+  --dur-cross:220ms; /* @kind other */ /* text state cross-fade */
+  --dur-slow:260ms; /* @kind other */
+  --ease-out:cubic-bezier(.22,.61,.36,1); /* @kind other */
+  --ease-in-out:cubic-bezier(.4,0,.2,1); /* @kind other */
+  --ease-linear:linear; /* @kind other */ /* bar widths track stated durations */
+  --rise-distance:4px; /* @kind spacing */ /* text states rise as they fade in */
+  --transition-hover:color var(--dur-fast) var(--ease-out),background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out); /* @kind other */
+  --press-scale:1; /* @kind other */
+}

@@ -1,0 +1,96 @@
+@import url("./tokens/fonts.css");
+@import url("./tokens/colors.css");
+@import url("./tokens/typography.css");
+@import url("./tokens/spacing.css");
+@import url("./tokens/radius.css");
+@import url("./tokens/elevation.css");
+@import url("./tokens/motion.css");
+@import url("./tokens/dark.css");
+
+@keyframes sysg-collapse {
+  0%, 8% {
+    transform: translate(0, 0) rotate(0deg);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.9, 0.35);
+  }
+  26% {
+    transform: translate(calc(var(--dx) * 0.5), calc(var(--dy) * 0.3)) rotate(var(--rot));
+  }
+  40%, 62% {
+    transform: translate(var(--dx), var(--dy)) rotate(0deg);
+    animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  80% {
+    transform: translate(calc(var(--dx) * 0.45), calc(var(--dy) * 0.35)) rotate(calc(var(--rot) * -0.5));
+  }
+  92%, 100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-crumble] span { animation: none !important; }
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.shiki code {
+  display: block;
+}
+
+.shiki,
+.shiki span {
+  color: var(--sysg-code-light);
+}
+
+.shiki {
+  background: var(--paper-hover) !important;
+}
+
+.shiki[data-lang="bash"] span,
+.shiki[data-lang="sh"] span,
+.shiki[data-lang="shell"] span,
+.shiki[data-lang="console"] span,
+.shiki[data-lang="text"] span {
+  color: inherit !important;
+}
+
+[data-theme="dark"] .shiki,
+[data-theme="dark"] .shiki span {
+  color: var(--sysg-code-dark);
+}
+
+[data-theme="dark"] .shiki {
+  background: var(--sysg-code-dark-bg) !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] .shiki,
+  [data-theme="system"] .shiki span {
+    color: var(--sysg-code-dark);
+  }
+
+  [data-theme="system"] .shiki {
+    background: var(--sysg-code-dark-bg) !important;
+  }
+}
+
+:root {
+  --text-link: var(--accent-700);
+  --text-link-hover: var(--accent-600);
+}
+
+[data-theme="dark"] {
+  --text-link: var(--accent-500);
+  --text-link-hover: var(--accent-300);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] {
+    --text-link: var(--accent-500);
+    --text-link-hover: var(--accent-300);
+  }
+}

@@ -1,0 +1,86 @@
+/* Dark mode. Same system, inverted field: warm charcoal paper, warm-neutral lines,
+   a lighter raspberry so the accent keeps its contrast on a dark ground.
+   Applied by setting data-theme="dark" on <html> (or any wrapper);
+   data-theme="system" follows the OS. */
+[data-theme="dark"]{
+  --paper-1:#14110e;
+  --paper-2:#1c1815;
+  --paper-3:#241f1a;
+  --paper-4:#221d19;
+  --paper-5:#2a241e;
+  --paper-hover:#2b251f;
+  --hatch-a:#3a322a;
+  --hatch-b:#332b24;
+
+  --line-1:#2c2620;
+  --line-2:#29231d;
+  --line-3:#3a3229;
+  --line-4:#4d4238;
+  --glyph-dim:#6f6355;
+
+  --ink-1:#f7efe4;
+  --ink-2:#e6ddd1;
+  --ink-3:#c4b8a9;
+  --ink-4:#a49788;
+  --ink-5:#8b7f70;
+  --ink-6:#7d7264;
+
+  --accent-300:#ff8ea8;
+  --accent-500:#ee5c7a;
+  --accent-600:#f4788f;
+  --accent-700:#f79aab;
+  --accent-tint:rgba(238,92,122,0.16);
+  --accent-select:rgba(238,92,122,0.28);
+  --accent-bar:linear-gradient(90deg,#ff8ea8,#ee5c7a); /* @kind color */
+  --hero-wash:radial-gradient(60% 100% at 30% 0%,rgba(238,92,122,0.14),transparent 70%); /* @kind color */
+
+  --warn-300:#f5c07a;
+  --warn-500:#e08a2f;
+  --warn-tint:rgba(224,138,47,0.16);
+  --warn-bar:linear-gradient(90deg,#f5c07a,#e08a2f); /* @kind color */
+
+  --channel-blue:#7aa5f0;
+  --channel-violet:#b394f0;
+  --bar-neutral:#4a4038;
+
+  --text-inverse:#17130f;
+  --surface-nav:rgba(20,17,14,0.86);
+  --surface-hatch:repeating-linear-gradient(115deg,#3a322a 0 5px,#332b24 5px 10px); /* @kind color */
+
+  --status-info-bg:rgba(122,165,240,0.16);
+  --focus-ring:rgba(238,92,122,.42);
+
+  --code-add-bg:rgba(238,92,122,0.14);
+  --code-remove-bg:rgba(224,138,47,0.16);
+
+  --callout-info-bg:rgba(122,165,240,0.10);
+
+  --shadow-card:0 14px 36px -24px rgba(0,0,0,0.8);
+  --shadow-card-hover:var(--shadow-card);
+  --shadow-popover:var(--shadow-card);
+  --scrim-top:linear-gradient(to bottom,rgba(20,17,14,.96),rgba(20,17,14,0)); /* @kind color */
+  color-scheme:dark;
+}
+@media (prefers-color-scheme:dark){
+  [data-theme="system"]{
+    --paper-1:#14110e;--paper-2:#1c1815;--paper-3:#241f1a;--paper-4:#221d19;--paper-5:#2a241e;--paper-hover:#2b251f;
+    --hatch-a:#3a322a;--hatch-b:#332b24;
+    --line-1:#2c2620;--line-2:#29231d;--line-3:#3a3229;--line-4:#4d4238;--glyph-dim:#6f6355;
+    --ink-1:#f7efe4;--ink-2:#e6ddd1;--ink-3:#c4b8a9;--ink-4:#a49788;--ink-5:#8b7f70;--ink-6:#7d7264;
+    --accent-300:#ff8ea8;--accent-500:#ee5c7a;--accent-600:#f4788f;--accent-700:#f79aab;
+    --accent-tint:rgba(238,92,122,0.16);--accent-select:rgba(238,92,122,0.28);
+    --accent-bar:linear-gradient(90deg,#ff8ea8,#ee5c7a); /* @kind color */
+    --hero-wash:radial-gradient(60% 100% at 30% 0%,rgba(238,92,122,0.14),transparent 70%); /* @kind color */
+    --warn-300:#f5c07a;--warn-500:#e08a2f;--warn-tint:rgba(224,138,47,0.16);
+    --warn-bar:linear-gradient(90deg,#f5c07a,#e08a2f); /* @kind color */
+    --channel-blue:#7aa5f0;--channel-violet:#b394f0;--bar-neutral:#4a4038;
+    --text-inverse:#17130f;--surface-nav:rgba(20,17,14,0.86);
+    --surface-hatch:repeating-linear-gradient(115deg,#3a322a 0 5px,#332b24 5px 10px);
+    --status-info-bg:rgba(122,165,240,0.16);--focus-ring:rgba(238,92,122,.42);
+    --code-add-bg:rgba(238,92,122,0.14);--code-remove-bg:rgba(224,138,47,0.16);
+    --callout-info-bg:rgba(122,165,240,0.10);
+    --shadow-card:0 14px 36px -24px rgba(0,0,0,0.8);--shadow-card-hover:var(--shadow-card);--shadow-popover:var(--shadow-card);
+    --scrim-top:linear-gradient(to bottom,rgba(20,17,14,.96),rgba(20,17,14,0)); /* @kind color */
+    color-scheme:dark;
+  }
+}

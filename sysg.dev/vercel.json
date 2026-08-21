@@ -1,0 +1,358 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "build/client",
+  "trailingSlash": false,
+  "redirects": [
+    {
+      "source": "/docs/index",
+      "destination": "/docs",
+      "permanent": true
+    },
+    {
+      "source": "/index",
+      "destination": "/docs",
+      "permanent": true
+    },
+    {
+      "source": "/intro",
+      "destination": "/docs/intro",
+      "permanent": true
+    },
+    {
+      "source": "/installation",
+      "destination": "/docs/installation",
+      "permanent": true
+    },
+    {
+      "source": "/installation/upgrading",
+      "destination": "/docs/installation/upgrading",
+      "permanent": true
+    },
+    {
+      "source": "/quickstart",
+      "destination": "/docs/quickstart",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works",
+      "destination": "/docs/how-it-works",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/projects",
+      "destination": "/docs/how-it-works/projects",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/cron",
+      "destination": "/docs/how-it-works/cron",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/hooks",
+      "destination": "/docs/how-it-works/hooks",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/state",
+      "destination": "/docs/how-it-works/state",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/logs",
+      "destination": "/docs/how-it-works/logs",
+      "permanent": true
+    },
+    {
+      "source": "/kernel-mode",
+      "destination": "/docs/kernel-mode",
+      "permanent": true
+    },
+    {
+      "source": "/kernel-mode/how-sysg-meets-the-kernel",
+      "destination": "/docs/kernel-mode/how-sysg-meets-the-kernel",
+      "permanent": true
+    },
+    {
+      "source": "/kernel-mode/system-mode",
+      "destination": "/docs/kernel-mode/system-mode",
+      "permanent": true
+    },
+    {
+      "source": "/kernel-mode/container-init",
+      "destination": "/docs/kernel-mode/container-init",
+      "permanent": true
+    },
+    {
+      "source": "/kernel-mode/sandboxing",
+      "destination": "/docs/kernel-mode/sandboxing",
+      "permanent": true
+    },
+    {
+      "source": "/kernel-mode/kernel-assisted",
+      "destination": "/docs/kernel-mode/kernel-assisted",
+      "permanent": true
+    },
+    {
+      "source": "/kernel-mode/security",
+      "destination": "/docs/kernel-mode/security",
+      "permanent": true
+    },
+    {
+      "source": "/security",
+      "destination": "/docs/security",
+      "permanent": true
+    },
+    {
+      "source": "/philosophy",
+      "destination": "/docs/philosophy",
+      "permanent": true
+    },
+    {
+      "source": "/examples",
+      "destination": "/docs/examples",
+      "permanent": true
+    },
+    {
+      "source": "/examples/hello-world",
+      "destination": "/docs/examples/hello-world",
+      "permanent": true
+    },
+    {
+      "source": "/examples/crud",
+      "destination": "/docs/examples/crud",
+      "permanent": true
+    },
+    {
+      "source": "/examples/units",
+      "destination": "/docs/examples/units",
+      "permanent": true
+    },
+    {
+      "source": "/examples/orchestrator",
+      "destination": "/docs/examples/orchestrator",
+      "permanent": true
+    },
+    {
+      "source": "/integrations/claude-code",
+      "destination": "/docs/integrations/claude-code",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/configuration",
+      "destination": "/reference/configuration",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/configuration",
+      "destination": "/reference/configuration",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands",
+      "destination": "/reference/commands",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands",
+      "destination": "/reference/commands",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/start",
+      "destination": "/reference/commands/start",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/start",
+      "destination": "/reference/commands/start",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/stop",
+      "destination": "/reference/commands/stop",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/stop",
+      "destination": "/reference/commands/stop",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/restart",
+      "destination": "/reference/commands/restart",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/restart",
+      "destination": "/reference/commands/restart",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/logs",
+      "destination": "/reference/commands/logs",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/logs",
+      "destination": "/reference/commands/logs",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/status",
+      "destination": "/reference/commands/status",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/status",
+      "destination": "/reference/commands/status",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/inspect",
+      "destination": "/reference/commands/inspect",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/inspect",
+      "destination": "/reference/commands/inspect",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/validate",
+      "destination": "/reference/commands/validate",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/validate",
+      "destination": "/reference/commands/validate",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/migrate",
+      "destination": "/reference/commands/migrate",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/migrate",
+      "destination": "/reference/commands/migrate",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/migrate-state",
+      "destination": "/reference/commands/migrate-state",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/migrate-state",
+      "destination": "/reference/commands/migrate-state",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/purge",
+      "destination": "/reference/commands/purge",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/purge",
+      "destination": "/reference/commands/purge",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/version",
+      "destination": "/reference/commands/version",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/version",
+      "destination": "/reference/commands/version",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/spawn",
+      "destination": "/reference/commands/spawn",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/spawn",
+      "destination": "/reference/commands/spawn",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/commands/start-vs-spawn",
+      "destination": "/reference/commands/start-vs-spawn",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/commands/start-vs-spawn",
+      "destination": "/reference/commands/start-vs-spawn",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/dialog",
+      "destination": "/reference/dialog",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/dialog",
+      "destination": "/reference/dialog",
+      "permanent": true
+    },
+    {
+      "source": "/docs/how-it-works/dialog/codes",
+      "destination": "/reference/dialog/codes",
+      "permanent": true
+    },
+    {
+      "source": "/how-it-works/dialog/codes",
+      "destination": "/reference/dialog/codes",
+      "permanent": true
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/404/index.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/fonts/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=63072000; includeSubDomains; preload"
+        }
+      ]
+    }
+  ]
+}
