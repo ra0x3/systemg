@@ -4,6 +4,9 @@
 /// manifests; holds supervisor-wide defaults such as log-rotation caps.
 pub mod supervisor;
 
+/// The manifest duration grammar shared by validation and the runtime.
+pub mod duration;
+
 mod include;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -313,10 +316,19 @@ impl ConfigV1 {
             return Ok(configs);
         }
 
+        // A single-project file has no fan-out scope. Clearing it rather than
+        // trusting what parsed keeps `project_scope` an internal stamp: it keys
+        // state hashes and names projects in diagnostics, neither of which a
+        // manifest gets to forge.
+        let mut services = self.services;
+        for service in services.values_mut() {
+            service.project_scope = None;
+        }
+
         configs.push(Config {
             version,
             project: self.project.map(Into::into).unwrap_or_default(),
-            services: self.services,
+            services,
             project_dir: self.project_dir,
             env: self.env,
             metrics: self.metrics,
@@ -1129,6 +1141,69 @@ impl ServiceConfig {
     }
 }
 
+/// Builds the SG0210 diagnostic for a manifest field the runtime cannot read.
+///
+/// The field path is the whole point: the old failure said only "Invalid
+/// duration value" from inside a start attempt, leaving the operator to find
+/// which of a manifest's durations it meant.
+pub fn manifest_field_diag(
+    path: &str,
+    value: &str,
+    reason: &str,
+) -> crate::diag::Diagnostic {
+    crate::diag::Diagnostic::error(
+        crate::diag::SgCode::ManifestFieldInvalid,
+        format!("`{path}` holds a value systemg cannot read"),
+    )
+    .note(format!("`{value}` — {reason}"))
+    .note("the manifest was refused; nothing it declares was touched")
+    .help_cmd("check the whole manifest", "sysg validate -c <config>")
+    .help_docs()
+}
+
+/// Rejects one duration field, naming its dotted path. Absent fields pass.
+fn check_duration(path: &str, raw: Option<&str>) -> Result<(), ProcessManagerError> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    duration::parse(raw).map(|_| ()).map_err(|reason| {
+        ProcessManagerError::ManifestFieldInvalid {
+            path: path.to_string(),
+            value: raw.to_string(),
+            reason: reason.to_string(),
+        }
+    })
+}
+
+/// Rejects every duration on a health check. `interval` additionally refuses
+/// zero: the probe loop sleeps for it between attempts, so zero busy-spins
+/// rather than meaning "no wait".
+fn check_health_check(
+    path: &str,
+    health_check: Option<&HealthCheckConfig>,
+) -> Result<(), ProcessManagerError> {
+    let Some(health_check) = health_check else {
+        return Ok(());
+    };
+    if let Some(raw) = health_check.interval.as_deref() {
+        duration::parse_positive(raw).map_err(|reason| {
+            ProcessManagerError::ManifestFieldInvalid {
+                path: format!("{path}.interval"),
+                value: raw.to_string(),
+                reason: reason.to_string(),
+            }
+        })?;
+    }
+    check_duration(
+        &format!("{path}.attempt_timeout"),
+        health_check.attempt_timeout.as_deref(),
+    )?;
+    check_duration(
+        &format!("{path}.total_timeout"),
+        health_check.total_timeout.as_deref(),
+    )
+}
+
 /// Deployment strategy configuration for a service.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
 pub struct DeploymentConfig {
@@ -1449,6 +1524,73 @@ impl Config {
         self.services
             .get(service_name)
             .map(|cfg| cfg.compute_hash())
+    }
+
+    /// Rejects any duration-valued field the runtime could not interpret.
+    ///
+    /// Runs at load time so `validate`, `start`, `restart`, and the supervisor
+    /// all refuse the same manifests. Before this, durations were parsed lazily
+    /// at the point of use, which let `validate` bless a manifest that `start`
+    /// then failed on.
+    pub fn validate_durations(&self) -> Result<(), ProcessManagerError> {
+        let mut names: Vec<&String> = self.services.keys().collect();
+        names.sort();
+        for name in names {
+            let service = &self.services[name];
+            // A `projects:` manifest fans out into one Config per project, so a
+            // bare `services.db.backoff` would not say which project's `db` it
+            // meant. The scope stamped during fan-out is what distinguishes
+            // them; a legacy single-project file has none, and top-level
+            // services alongside `projects:` are loose, so both stay unqualified
+            // — their path is literally `services.<name>` in the file.
+            let base = match service.project_scope.as_deref() {
+                Some(project) if project != LOOSE_PROJECT_SCOPE => {
+                    format!("projects.{project}.services.{name}")
+                }
+                _ => format!("services.{name}"),
+            };
+            check_duration(&format!("{base}.backoff"), service.backoff.as_deref())?;
+
+            if let Some(hooks) = &service.hooks {
+                for (hook, action) in [
+                    ("onstart", hooks.onstart.as_ref()),
+                    ("onerr", hooks.onerr.as_ref()),
+                ] {
+                    if let Some(action) = action {
+                        check_duration(
+                            &format!("{base}.hooks.{hook}.timeout"),
+                            action.timeout.as_deref(),
+                        )?;
+                    }
+                }
+            }
+
+            let Some(deployment) = &service.deployment else {
+                continue;
+            };
+            let base = format!("{base}.deployment");
+            check_duration(
+                &format!("{base}.grace_period"),
+                deployment.grace_period.as_deref(),
+            )?;
+            check_health_check(
+                &format!("{base}.health_check"),
+                deployment.health_check.as_ref(),
+            )?;
+
+            if let Some(blue_green) = &deployment.blue_green {
+                let base = format!("{base}.blue_green");
+                check_health_check(
+                    &format!("{base}.candidate_health_check"),
+                    blue_green.candidate_health_check.as_ref(),
+                )?;
+                check_health_check(
+                    &format!("{base}.switch_verify"),
+                    blue_green.switch_verify.as_ref(),
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns services ordered so dependencies start before dependents.
@@ -1809,49 +1951,19 @@ pub fn load_config_from_file(
     let content = resolve_includes(&raw, config_path)?;
     let assembled = content != raw;
 
-    let mut config =
-        parse_config_manifest(&content).map_err(ProcessManagerError::ConfigParseError)?;
-
     let base_path = config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    config.project_dir = Some(base_path.to_string_lossy().to_string());
-    config.project = resolve_project_config(config.project, config_path)?;
-    if let Some(env_config) = &config.env
-        && let Some(resolved_path) = env_config.path(&base_path)
+
+    // Env side effects come from EVERY project, matching the fan-out loader.
+    // `${VAR}` expansion below runs over the whole file, so a later project's
+    // reference resolves against the env its own block declares rather than
+    // against whatever the caller happened to export.
+    for config in
+        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?
     {
-        load_env_file(&resolved_path.to_string_lossy())?;
-    }
-    if let Some(env_config) = &config.env
-        && let Some(vars) = &env_config.vars
-    {
-        for (key, value) in vars {
-            unsafe {
-                env::set_var(key, value);
-            }
-        }
-    }
-    for service in config.services.values_mut() {
-        let merged_env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
-
-        if let Some(env_config) = &merged_env
-            && let Some(resolved_path) = env_config.path(&base_path)
-        {
-            load_env_file(&resolved_path.to_string_lossy())?;
-        }
-
-        if let Some(env_config) = &merged_env
-            && let Some(vars) = &env_config.vars
-        {
-            for (key, value) in vars {
-                unsafe {
-                    env::set_var(key, value);
-                }
-            }
-        }
-
-        service.env = merged_env;
+        apply_env_side_effects(&config, &base_path)?;
     }
 
     let expanded_content = if assembled {
@@ -1860,8 +1972,22 @@ pub fn load_config_from_file(
         expand_env_vars(&content)?
     };
 
-    let mut config = parse_config_manifest(&expanded_content)
+    let mut configs = parse_config_projects(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
+
+    // Every project's fields, not only the one this loader hands back: a
+    // single-Config caller gets the FIRST project of a `projects:` file, and an
+    // unchecked sibling would reach the forked supervisor and surface there as
+    // an opaque failed boot rather than as the config error it is.
+    for config in &configs {
+        config.validate_durations()?;
+    }
+
+    let mut config = if configs.is_empty() {
+        Config::default()
+    } else {
+        configs.remove(0)
+    };
 
     config.project_dir = Some(base_path.to_string_lossy().to_string());
     config.project = resolve_project_config(config.project, config_path)?;
@@ -1877,8 +2003,18 @@ pub fn load_config_from_file(
 /// env resolution and validation as [`load_config_from_file`] to each. This is
 /// how one file fans out into the multiple project runtimes the supervisor holds.
 pub fn load_projects_from_file(
+    file: fs::File,
+    config_path: &Path,
+) -> Result<Vec<Config>, ProcessManagerError> {
+    load_projects_from_file_inner(file, config_path, true)
+}
+
+/// Shared body of the project loaders, parameterized on whether a deprecated
+/// manifest shape warns.
+fn load_projects_from_file_inner(
     mut file: fs::File,
     config_path: &Path,
+    warn_legacy: bool,
 ) -> Result<Vec<Config>, ProcessManagerError> {
     use std::io::Read;
 
@@ -1892,7 +2028,17 @@ pub fn load_projects_from_file(
     let raw = content;
     let content = resolve_includes(&raw, config_path)?;
     let assembled = content != raw;
-    load_projects_from_content(content, config_path, assembled)
+    load_projects_from_content(content, config_path, assembled, warn_legacy)
+}
+
+/// Loads projects without the deprecated-shape warning, for readers that only
+/// inspect a manifest. `validate` renders a report; a raw tracing line above it
+/// on every single-project manifest is noise, not a finding.
+pub(crate) fn load_projects_quiet(
+    file: fs::File,
+    config_path: &Path,
+) -> Result<Vec<Config>, ProcessManagerError> {
+    load_projects_from_file_inner(file, config_path, false)
 }
 
 /// Loads projects from an already-assembled manifest snapshot, e.g. the
@@ -1902,7 +2048,7 @@ pub fn load_projects_from_snapshot(
     content: &str,
     config_path: &Path,
 ) -> Result<Vec<Config>, ProcessManagerError> {
-    load_projects_from_content(content.to_string(), config_path, true)
+    load_projects_from_content(content.to_string(), config_path, true, true)
 }
 
 /// Shared tail of project loading over include-resolved manifest text: env
@@ -1911,6 +2057,7 @@ fn load_projects_from_content(
     content: String,
     config_path: &Path,
     assembled: bool,
+    warn_legacy: bool,
 ) -> Result<Vec<Config>, ProcessManagerError> {
     let base_path = config_path
         .parent()
@@ -1933,7 +2080,7 @@ fn load_projects_from_content(
     let (configs, legacy) = parse_config_projects_with_legacy(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
 
-    if legacy {
+    if legacy && warn_legacy {
         let project = configs
             .first()
             .map(|config| config.project.id.as_str())
@@ -1954,6 +2101,7 @@ fn load_projects_from_content(
         for service in config.services.values_mut() {
             service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
         }
+        config.validate_durations()?;
         config.service_start_order()?;
         finalized.push(config);
     }

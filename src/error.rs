@@ -16,6 +16,18 @@ pub enum ProcessManagerError {
     #[error("Invalid YAML format: {0}")]
     ConfigParseError(#[from] serde_yaml::Error),
 
+    /// A manifest field holds a value systemg cannot interpret.
+    #[error("{path}: invalid value '{value}' ({reason})")]
+    ManifestFieldInvalid {
+        /// Dotted path to the offending field (e.g.
+        /// `services.db.deployment.health_check.interval`).
+        path: String,
+        /// The value as loaded, after any `${VAR}` expansion.
+        value: String,
+        /// Why it could not be interpreted.
+        reason: String,
+    },
+
     /// A referenced environment variable was not set during config expansion.
     #[error("Missing environment variable '{0}' referenced in config")]
     MissingEnvVar(String),

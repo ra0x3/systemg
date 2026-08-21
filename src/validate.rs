@@ -9,7 +9,7 @@ use std::{fs, path::Path};
 use serde::Serialize;
 
 use crate::{
-    config::{load_config, parse_config_manifest},
+    config::{load_projects_quiet, parse_config_manifest},
     error::ProcessManagerError,
 };
 
@@ -265,9 +265,49 @@ pub fn validate(path: &str, system_mode: bool) -> (ValidationReport, Option<Stri
         return (ValidationReport::failed(path, diagnostic), Some(content));
     }
 
-    match load_config(Some(path)) {
-        Ok(config) => {
-            let findings = mode_findings(&config, system_mode, &HostFacts::probe());
+    let file = match fs::File::open(Path::new(path)) {
+        Ok(file) => file,
+        Err(err) => {
+            let diagnostic = Diagnostic {
+                severity: "error".into(),
+                line: None,
+                column: None,
+                kind: "unreadable-config".into(),
+                message: err.to_string(),
+                why: format!(
+                    "systemg could not open '{path}', so there is nothing to validate."
+                ),
+                suggestion:
+                    "Check the path and permissions, or pass -c <file> to point at your manifest."
+                        .into(),
+                doc: format!("{DOCS}/how-it-works/commands/validate"),
+            };
+            return (ValidationReport::failed(path, diagnostic), Some(content));
+        }
+    };
+
+    // Every project, not just the first: a `projects:` manifest fans out into
+    // one Config each, and validating only one of them blessed manifests whose
+    // later projects `start` went on to refuse.
+    match load_projects_quiet(file, Path::new(path)) {
+        Ok(configs) => {
+            let host = HostFacts::probe();
+            let qualify = configs.len() > 1;
+            let findings: Vec<Diagnostic> = configs
+                .iter()
+                .flat_map(|config| {
+                    let project = config.project.id.clone();
+                    mode_findings(config, system_mode, &host).into_iter().map(
+                        move |mut finding| {
+                            if qualify {
+                                finding.message =
+                                    format!("project '{project}': {}", finding.message);
+                            }
+                            finding
+                        },
+                    )
+                })
+                .collect();
             let startable = findings.iter().all(|f| f.severity != "error");
             (
                 ValidationReport {
@@ -308,6 +348,12 @@ fn classify_semantic(err: &ProcessManagerError) -> Diagnostic {
             "The config interpolates a `${VAR}` that is not set in the environment or env file.",
             "Export the variable, add it to your env file, or set it under `env.vars`.",
             "/how-it-works/configuration",
+        ),
+        ProcessManagerError::ManifestFieldInvalid { .. } => (
+            "invalid-field-value",
+            "A manifest field holds a value systemg cannot interpret, so the manifest would be refused at start (SG0210).",
+            "Fix the value named above. Durations are a whole number with an optional unit: ms, s, m, or h (e.g. \"100ms\", \"2s\", \"5m\").",
+            "/how-it-works/dialog/codes#sg0210",
         ),
         ProcessManagerError::ConfigParseError(inner) => return classify_yaml(inner),
         _ => (
@@ -454,6 +500,44 @@ mod tests {
         let (report, _) = validate(&path, false);
         assert!(!report.valid);
         assert_eq!(report.diagnostics[0].kind, "invalid-health-check");
+    }
+
+    #[test]
+    fn subsecond_health_interval_validates() {
+        let (_dir, path) = write_config(
+            "version: \"2\"\nservices:\n  db:\n    command: \"sleep 1\"\n    deployment:\n      health_check:\n        command: \"true\"\n        interval: \"100ms\"\n",
+        );
+        let (report, _) = validate(&path, false);
+        assert!(report.valid && report.startable);
+    }
+
+    #[test]
+    fn invalid_duration_names_its_field_path() {
+        let (_dir, path) = write_config(
+            "version: \"2\"\nservices:\n  db:\n    command: \"sleep 1\"\n    deployment:\n      health_check:\n        command: \"true\"\n        interval: \"0.5s\"\n",
+        );
+        let (report, _) = validate(&path, false);
+        assert!(!report.valid);
+        assert_eq!(report.diagnostics[0].kind, "invalid-field-value");
+        assert!(
+            report.diagnostics[0]
+                .message
+                .contains("services.db.deployment.health_check.interval")
+        );
+    }
+
+    #[test]
+    fn every_project_is_validated_not_just_the_first() {
+        let (_dir, path) = write_config(
+            "version: \"2\"\nprojects:\n  alpha:\n    services:\n      a:\n        command: \"sleep 1\"\n  beta:\n    services:\n      b:\n        command: \"sleep 1\"\n        backoff: \"nope\"\n",
+        );
+        let (report, _) = validate(&path, false);
+        assert!(!report.valid);
+        assert!(
+            report.diagnostics[0]
+                .message
+                .contains("projects.beta.services.b.backoff")
+        );
     }
 
     #[test]
