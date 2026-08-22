@@ -1,6 +1,6 @@
 import { Box, Flex, Stack, Text } from "@chakra-ui/react";
-import { MorphLogo } from "~/ds/MorphLogo";
 import { Eyebrow, Pill } from "~/ds/components";
+import { MorphLogo } from "~/ds/MorphLogo";
 
 export function NotFound({ path }: { path?: string }) {
   return (

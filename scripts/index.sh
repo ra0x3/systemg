@@ -375,7 +375,7 @@ p "${C_BORDER_MAIN}╰───────────────────�
 p ""
 p "${C_BORDER_SUB}╭──────────────────────────────────────────────────────────────────────────────╮${RESET}"
 p "${C_BORDER_SUB}│${C_TEXT}${BOLD}$(center_text "systemg 1.0 is coming!")${RESET}${C_BORDER_SUB}│${RESET}"
-p "${C_BORDER_SUB}│${C_MUTED2}${DIM}$(center_text "An agent-friendly general process composer")${RESET}${C_BORDER_SUB}│${RESET}"
+p "${C_BORDER_SUB}│${C_MUTED2}${DIM}$(center_text "An agent-friendly general-purpose program orchestrator for busy people.")${RESET}${C_BORDER_SUB}│${RESET}"
 p "${C_BORDER_SUB}╰──────────────────────────────────────────────────────────────────────────────╯${RESET}"
 
 if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$VERSION" ]; then

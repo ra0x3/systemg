@@ -20,7 +20,7 @@ export const ENTRIES: Entry[] = [
     group: null,
     route: "/docs",
     title: "systemg",
-    description: "An agent-friendly general process composer.",
+    description: "An agent-friendly general-purpose program orchestrator for busy people.",
     canonical: null,
     legacy: ["/docs/index", "/index"],
   },

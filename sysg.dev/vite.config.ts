@@ -9,10 +9,10 @@ import remarkMdxFrontmatter from "remark-mdx-frontmatter";
 import { defineConfig } from "vite";
 import { remarkCallouts } from "./app/mdx/directives";
 import { normalizeDirectives } from "./app/mdx/normalize";
-import { remarkStyleProps } from "./app/mdx/style-props";
-import { remarkStripTitle } from "./app/mdx/strip-title";
-import { remarkToc } from "./app/mdx/toc";
 import { shikiOptions } from "./app/mdx/shiki";
+import { remarkStripTitle } from "./app/mdx/strip-title";
+import { remarkStyleProps } from "./app/mdx/style-props";
+import { remarkToc } from "./app/mdx/toc";
 
 export default defineConfig({
   plugins: [

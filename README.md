@@ -1,6 +1,6 @@
 # systemg
 
-An agent-friendly general process composer.
+An agent-friendly general-purpose program orchestrator for busy people.
 
 <br/><br/>
 

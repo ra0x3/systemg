@@ -8,6 +8,11 @@ FAILED=0
 
 while IFS= read -r file; do
   issues="$(perl -ne '
+    # Fenced blocks hold captured terminal output and config samples, where a
+    # bare SG code is the literal thing the tool printed -- not a doc reference
+    # that should be a link.
+    if (/^\s*```/) { $fence = !$fence; next; }
+    next if $fence;
     $line = $_;
     $line =~ s{\[`?(SG\d{4})`?\]\(([^)]*)\)}{
       $whole = $&;
