@@ -6,9 +6,9 @@ An agent-friendly general-purpose program orchestrator for busy people.
 
 <div align="center" >
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://i.imgur.com/lkKPMoX.png" />
-    <source media="(prefers-color-scheme: light)" srcset="https://i.imgur.com/13cCBze.png" />
-    <img src="https://i.imgur.com/13cCBze.png" alt="systemg" width="320" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ra0x3/systemg/main/sysg.dev/public/img/full-logo-colored-cropped-darkmode.png" />
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/ra0x3/systemg/main/sysg.dev/public/img/full-logo-colored-cropped.png" />
+    <img src="https://raw.githubusercontent.com/ra0x3/systemg/main/sysg.dev/public/img/full-logo-colored-cropped.png" alt="systemg" width="320" />
   </picture>
 </div>
 
