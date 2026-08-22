@@ -7,10 +7,11 @@ projects:
         command: "sh -c 'echo PROBE_DONE'"
       migration:
         command: "sh -c 'echo MIGRATION_DONE'"
-        pre_start: "sleep 4"
         depends_on:
           - service: probe
             condition: completed
+        deployment:
+          pre_start: "sleep 4"
       api:
         command: "python3 -m http.server 18080 --bind 127.0.0.1"
         restart_policy: always

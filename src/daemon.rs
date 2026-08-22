@@ -8749,20 +8749,34 @@ impl Daemon {
                     let signal = None;
                     // A cron unit's run is owned by its completion thread: the
                     // monitor only reaped the child first. Route the status to
-                    // that owner and leave the outcome — hooks, restarts — to
-                    // it, or the same run gets judged twice by two threads that
-                    // disagree.
+                    // that owner and leave everything downstream — the recorded
+                    // outcome, the hook, the next run — to it. Judging the run
+                    // here as well would race the owner: the boundary that
+                    // follows can already be live by the time this branch
+                    // finishes, and a stale exit would overwrite its state and
+                    // clear its PID.
                     let is_cron = ctx
                         .config
                         .services
                         .get(&name)
                         .is_some_and(|service| service.cron.is_some());
                     if is_cron {
-                        crate::reaper::publish(exited_pid as i32, &name, exit_status);
+                        crate::reaper::publish(
+                            exited_pid as i32,
+                            &ctx.config.state_key(&name),
+                            exit_status,
+                        );
+                        if let Ok(mut processes) = ctx.lock_processes()
+                            && processes
+                                .get(&name)
+                                .is_some_and(|child| child.id() == exited_pid)
+                        {
+                            processes.remove(&name);
+                        }
+                        continue;
                     }
                     if !manually_stopped
                         && !exit_success
-                        && !is_cron
                         && let Some(service) = ctx.config.services.get(&name)
                     {
                         let env = service.env.clone();
@@ -8826,11 +8840,11 @@ impl Daemon {
                         if let Ok(mut gate) = ctx.lock_restart_gate() {
                             gate.entry(name.clone()).or_default().settle(Instant::now());
                         }
-                        let should_restart =
-                            !is_cron
-                                && ctx.config.services.get(&name).is_some_and(
-                                    |service| service.restarts_after_failure(),
-                                );
+                        let should_restart = ctx
+                            .config
+                            .services
+                            .get(&name)
+                            .is_some_and(|service| service.restarts_after_failure());
 
                         if should_restart {
                             let already = ctx
@@ -8844,10 +8858,6 @@ impl Daemon {
                                 }
                                 restarted_services.push((name.clone(), recorded_pgid));
                             }
-                        } else if is_cron {
-                            debug!(
-                                "Cron unit '{name}' failed; its next run comes from the schedule, not a restart."
-                            );
                         } else {
                             warn!(
                                 "Service '{name}' crashed but restart_policy does not allow restart."
