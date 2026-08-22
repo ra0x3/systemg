@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Enforces the repo commit-message convention:
-#   - a title of the form `type(scope): subject` — scope REQUIRED
+#   - a title of the form `type: subject` or `type(scope): subject`
 #   - compound scopes are comma-separated in one paren:
 #       `type(scope1, scope2, ...): subject`
 #   - the title ONLY: no body, no trailing paragraphs
@@ -13,16 +13,16 @@ set -u
 
 # The set of prefix operations this repo has actually used (derived from
 # `git log`), not a generic conventional-commit list. Add a new type here when
-# the project genuinely adopts one. Every type requires a (scope) EXCEPT
-# `release`, which is scopeless (`release: v1.2.3`).
+# the project genuinely adopts one.
 TYPES='feat|fix|docs|test|refactor|perf|build|ci|chore|revert|style|rfc|audit|enhancement|cve|spike|misc|infra|admin'
 
-# `type(scope): subject`, or `type(scope1, scope2, ...): subject` for compound
-# scopes. The scope list is mandatory; an optional '!' marks a breaking change.
+# `type: subject`, or `type(scope): subject` — the scope is optional, and a
+# compound scope is comma-separated in one paren. An optional '!' marks a
+# breaking change.
 SCOPE='[a-z0-9._/-]+'
-SUBJECT_RE="^(${TYPES})\(${SCOPE}( *, *${SCOPE})*\)!?: .+"
+SUBJECT_RE="^(${TYPES})(\(${SCOPE}( *, *${SCOPE})*\))?!?: .+"
 
-# `release` is the one scopeless type: `release: <subject>` (typically a version).
+# `release` sits outside TYPES: `release: <subject>` (typically a version).
 RELEASE_RE="^release!?: .+"
 
 fail() { echo "commit-message: $1" >&2; return 1; }
@@ -33,7 +33,7 @@ check_one() {
 
   if ! printf '%s' "$subject" | grep -qE "$SUBJECT_RE" \
     && ! printf '%s' "$subject" | grep -qE "$RELEASE_RE"; then
-    fail "subject must be 'type(scope): subject' (scope required, except 'release: ...'): '$subject'"
+    fail "subject must be 'type: subject' or 'type(scope): subject': '$subject'"
     rc=1
   fi
 
