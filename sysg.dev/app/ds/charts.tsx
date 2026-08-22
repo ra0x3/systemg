@@ -88,7 +88,7 @@ export function Replay({ ms, label, children }: { ms: number; label?: string; ch
   return (
     <Box ref={ref}>
       {children(t)}
-      <Flex mt="14px" align="center" gap="10px">
+      <Flex mt="14px" align="center" gap="10px" css={{ zoom: "calc(1 / var(--fit-scale, 1))" }}>
         <Box
           as="button"
           onClick={run}
@@ -159,7 +159,7 @@ export function Gantt({
                 <Text
                   fontFamily="mono"
                   fontSize="14px"
-                  width={{ base: "64px", md: "78px" }}
+                  width="78px"
                   flexShrink={0}
                   color={done ? "text.secondary" : "text.faint"}
                   transition="color 200ms"
@@ -203,11 +203,11 @@ export function Gantt({
           width="1px"
           bg="accent.500"
           opacity={t > 0 && t < 1 ? 0.55 : 0}
-          ml={{ base: "74px", md: "88px" }}
+          ml="88px"
           pointerEvents="none"
         />
       </Box>
-      <Flex mt="8px" ml={{ base: "74px", md: "88px" }} justify="space-between">
+      <Flex mt="8px" ml="88px" justify="space-between">
         {ticks.map((s) => (
           <Text key={s} fontFamily="mono" fontSize="13px" color="text.faint">
             {s}s
@@ -235,7 +235,7 @@ export function Blocks({
   const MAX_PX = 300;
   const MIN_PX = 30;
   return (
-    <Flex gap={{ base: "20px", md: "44px" }} align="flex-end" wrap="wrap" justify="space-between">
+    <Flex gap="44px" align="flex-end" wrap="wrap" justify="space-between">
       {items.map((it, i) => {
         const scale = Math.sqrt(it.value / max);
         const size = MIN_PX + scale * (MAX_PX - MIN_PX);
@@ -437,7 +437,7 @@ export function LineChart({
         </Box>
 
         {/* legend replaces end-of-line labels, so nothing can collide */}
-        <Stack gap="10px" pl="16px" width={{ base: "108px", md: "132px" }} flexShrink={0} justify="center">
+        <Stack gap="10px" pl="16px" width="132px" flexShrink={0} justify="center">
           {geom.map((g) => (
             <Box key={`${g.name}-leg`}>
               <Flex align="center" gap="7px">
@@ -471,7 +471,7 @@ export function LineChart({
       </Flex>
 
       {/* x axis */}
-      <Flex ml="34px" mr={{ base: "108px", md: "132px" }} position="relative" height="18px">
+      <Flex ml="34px" mr="132px" position="relative" height="18px">
         {xTicks.map((x) => (
           <Text
             key={x}
@@ -540,7 +540,7 @@ export function ProcessDots({
         return (
           <Box key={g.label}>
             <Flex align="center" gap="12px" wrap="wrap">
-              <Text fontFamily="mono" fontSize="15px" color="text.muted" width={{ base: "auto", md: "160px" }}>
+              <Text fontFamily="mono" fontSize="15px" color="text.muted" width="160px">
                 {g.label}
               </Text>
               <Flex gap="7px">
@@ -588,7 +588,7 @@ export function ProcessDots({
                 {settled ? (g.survivors === 0 ? "none left" : `${g.survivors} left`) : `${Math.round(standing)} left`}
               </Text>
             </Flex>
-            <Text mt="6px" ml={{ base: "0", md: "172px" }} fontFamily="mono" fontSize="14px" color="text.faint">
+            <Text mt="6px" ml="172px" fontFamily="mono" fontSize="14px" color="text.faint">
               {g.note}
             </Text>
           </Box>
@@ -622,7 +622,7 @@ export function GapBar({
         return (
           <Box key={r.label}>
             <Flex align="center" gap="10px">
-              <Text fontFamily="mono" fontSize="14.5px" color="text.muted" width={{ base: "96px", md: "148px" }}>
+              <Text fontFamily="mono" fontSize="14.5px" color="text.muted" width="148px">
                 {r.label}
               </Text>
               <Box position="relative" height="16px" flex="1" bg="surface.track" borderRadius="2px">
@@ -667,7 +667,7 @@ export function GapBar({
               </Text>
             </Flex>
             {r.note ? (
-              <Text mt="4px" ml={{ base: "106px", md: "158px" }} fontFamily="mono" fontSize="14px" color="text.faint">
+              <Text mt="4px" ml="158px" fontFamily="mono" fontSize="14px" color="text.faint">
                 {r.note}
               </Text>
             ) : null}
@@ -820,7 +820,7 @@ export function Race({
               <Text
                 fontFamily="mono"
                 fontSize="15px"
-                width={{ base: "92px", md: "132px" }}
+                width="132px"
                 flexShrink={0}
                 color={l.subject ? "text.heading" : "text.muted"}
               >
@@ -877,7 +877,7 @@ export function Race({
               </Text>
             </Flex>
             {l.note ? (
-              <Text mt="3px" ml={{ base: "104px", md: "144px" }} fontFamily="mono" fontSize="14px" color="text.faint">
+              <Text mt="3px" ml="144px" fontFamily="mono" fontSize="14px" color="text.faint">
                 {l.note}
               </Text>
             ) : null}
@@ -905,7 +905,7 @@ export function Matrix({
   const revealed = Math.floor(t * total * 1.08);
   return (
     <Box>
-      <Flex gap="10px" mb="12px" pl={{ base: "108px", md: "180px" }}>
+      <Flex gap="10px" mb="12px" pl="180px">
         {cols.map((c, ci) => (
           <Text
             key={c}
@@ -922,13 +922,7 @@ export function Matrix({
       <Stack gap="7px">
         {rows.map((r, ri) => (
           <Flex key={r.label} align="center" gap="10px">
-            <Text
-              fontFamily="mono"
-              fontSize="14.5px"
-              width={{ base: "98px", md: "170px" }}
-              flexShrink={0}
-              color="text.muted"
-            >
+            <Text fontFamily="mono" fontSize="14.5px" width="170px" flexShrink={0} color="text.muted">
               {r.label}
             </Text>
             {r.cells.map((v, ci) => {
@@ -985,7 +979,7 @@ export function Meters({
   t: number;
 }) {
   return (
-    <Flex gap={{ base: "26px", md: "44px" }} wrap="wrap">
+    <Flex gap="44px" wrap="wrap">
       {groups.map((g, gi) => {
         const max = Math.max(...g.rows.map((r) => r.value));
         return (
@@ -1153,64 +1147,62 @@ export function SummaryGrid({
 }) {
   const per = 1 / (rows.length + 2);
   return (
-    <Box overflowX="auto">
-      <Box minW="620px">
-        <Flex pb="12px" borderBottom="1px solid" borderColor="border.rule">
-          <Box flex="2.1" minW="0" />
-          {cols.map((c, ci) => (
-            <Text
-              key={c}
-              flex="1"
-              textAlign="center"
-              fontFamily="mono"
-              fontSize="14px"
-              fontWeight={ci === 0 ? "bold" : "normal"}
-              color={ci === 0 ? "accent.500" : "text.muted"}
-            >
-              {c}
+    <Box>
+      <Flex pb="12px" borderBottom="1px solid" borderColor="border.rule">
+        <Box flex="2.1" minW="0" />
+        {cols.map((c, ci) => (
+          <Text
+            key={c}
+            flex="1"
+            textAlign="center"
+            fontFamily="mono"
+            fontSize="14px"
+            fontWeight={ci === 0 ? "bold" : "normal"}
+            color={ci === 0 ? "accent.500" : "text.muted"}
+          >
+            {c}
+          </Text>
+        ))}
+      </Flex>
+      {rows.map((r, ri) => {
+        const on = t > per * (ri + 1);
+        return (
+          <Flex
+            key={r.label}
+            align="center"
+            py="13px"
+            borderBottom="1px solid"
+            borderColor="border.rule"
+            opacity={on ? 1 : 0}
+            transform={on ? "translateY(0)" : "translateY(5px)"}
+            transition="opacity 320ms ease, transform 320ms ease"
+          >
+            <Text flex="2.1" minW="0" fontFamily="mono" fontSize="14px" color="text.secondary" pr="12px">
+              {r.label}
             </Text>
-          ))}
-        </Flex>
-        {rows.map((r, ri) => {
-          const on = t > per * (ri + 1);
-          return (
-            <Flex
-              key={r.label}
-              align="center"
-              py="13px"
-              borderBottom="1px solid"
-              borderColor="border.rule"
-              opacity={on ? 1 : 0}
-              transform={on ? "translateY(0)" : "translateY(5px)"}
-              transition="opacity 320ms ease, transform 320ms ease"
-            >
-              <Text flex="2.1" minW="0" fontFamily="mono" fontSize="14px" color="text.secondary" pr="12px">
-                {r.label}
-              </Text>
-              {r.cells.map((v, ci) => (
-                <Flex key={`${r.label}-${cols[ci]}`} flex="1" justify="center" align="center">
-                  {v === null ? (
-                    <Text fontFamily="mono" fontSize="14px" color="text.faint">
-                      —
-                    </Text>
-                  ) : typeof v === "boolean" ? (
-                    <Tick kind={v ? "yes" : "no"} />
-                  ) : (
-                    <Text
-                      fontFamily="mono"
-                      fontSize="14.5px"
-                      fontWeight={ci === 0 ? "bold" : "normal"}
-                      color={ci === 0 ? "accent.500" : "text.body"}
-                    >
-                      {v}
-                    </Text>
-                  )}
-                </Flex>
-              ))}
-            </Flex>
-          );
-        })}
-      </Box>
+            {r.cells.map((v, ci) => (
+              <Flex key={`${r.label}-${cols[ci]}`} flex="1" justify="center" align="center">
+                {v === null ? (
+                  <Text fontFamily="mono" fontSize="14px" color="text.faint">
+                    —
+                  </Text>
+                ) : typeof v === "boolean" ? (
+                  <Tick kind={v ? "yes" : "no"} />
+                ) : (
+                  <Text
+                    fontFamily="mono"
+                    fontSize="14.5px"
+                    fontWeight={ci === 0 ? "bold" : "normal"}
+                    color={ci === 0 ? "accent.500" : "text.body"}
+                  >
+                    {v}
+                  </Text>
+                )}
+              </Flex>
+            ))}
+          </Flex>
+        );
+      })}
     </Box>
   );
 }

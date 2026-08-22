@@ -1,4 +1,5 @@
 import { Box, chakra, Flex, Stack, Text } from "@chakra-ui/react";
+import { Search as SearchIcon, X } from "lucide-react";
 import type MiniSearch from "minisearch";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -21,6 +22,13 @@ type Hit = Doc & { snippet: string };
 const LABEL: Record<string, string> = { docs: "Docs", reference: "Reference", blog: "Blog" };
 
 let indexPromise: Promise<{ engine: MiniSearch<Doc>; byId: Map<string, Doc> }> | null = null;
+
+let opener: (() => void) | null = null;
+
+/** Opens the one mounted Search, so the mobile menu does not need a second copy of it. */
+export function requestSearch() {
+  opener?.();
+}
 
 function loadIndex() {
   indexPromise ??= (async () => {
@@ -91,13 +99,23 @@ export function Search() {
   const [hits, setHits] = useState<Hit[]>([]);
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const sheetInputRef = useRef<HTMLInputElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  const returnTo = useRef<HTMLElement | null>(null);
   const navigate = useNavigate();
 
   const close = useCallback(() => {
     setOpen(false);
     setQuery("");
     setHits([]);
+  }, []);
+
+  useEffect(() => {
+    opener = () => setOpen(true);
+    return () => {
+      opener = null;
+    };
   }, []);
 
   useEffect(() => {
@@ -116,9 +134,26 @@ export function Search() {
 
   useEffect(() => {
     if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, close]);
+
+  useEffect(() => {
+    if (!open) {
+      returnTo.current?.focus();
+      returnTo.current = null;
+      return;
+    }
+    returnTo.current = document.activeElement as HTMLElement | null;
     loadIndex();
     setActive(0);
-    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    const id = requestAnimationFrame(() => {
+      const visible = sheetInputRef.current?.offsetParent ? sheetInputRef.current : inputRef.current;
+      visible?.focus();
+    });
     return () => cancelAnimationFrame(id);
   }, [open]);
 
@@ -154,14 +189,89 @@ export function Search() {
     [close, navigate],
   );
 
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") close();
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive((i) => Math.min(i + 1, hits.length - 1));
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((i) => Math.max(i - 1, 0));
+    }
+    if (e.key === "Enter" && hits[active]) {
+      e.preventDefault();
+      go(hits[active].route);
+    }
+  };
+
   const expanded = open && (hits.length > 0 || query.trim().length > 0);
   const anchor = useAnchor(barRef, expanded);
+
+  const results = (
+    <>
+      {hits.length === 0 && query.trim() ? (
+        <Box px="16px" py="18px">
+          <Text fontSize="bodySm" color="text.muted">
+            No matches for{" "}
+            <chakra.span fontFamily="mono" color="text.heading">
+              {query}
+            </chakra.span>
+            .
+          </Text>
+        </Box>
+      ) : null}
+
+      <Stack gap="0">
+        {hits.map((hit, i) => (
+          <Box
+            key={hit.id}
+            as="button"
+            textAlign="start"
+            width="100%"
+            onClick={() => go(hit.route)}
+            onMouseEnter={() => setActive(i)}
+            px="16px"
+            py="11px"
+            borderTop={i === 0 ? "none" : "1px solid"}
+            borderColor="border.rule"
+            bg={i === active ? "action.ghostHover" : "transparent"}
+            cursor="pointer"
+          >
+            <Flex align="center" gap="10px" mb="3px">
+              <Eyebrow color={i === active ? "accent.500" : "text.muted"}>{LABEL[hit.section] ?? hit.section}</Eyebrow>
+              {hit.group ? (
+                <Text fontFamily="mono" fontSize="micro" color="text.faint">
+                  {hit.group}
+                </Text>
+              ) : null}
+            </Flex>
+            <Text fontSize="body" fontWeight="semibold" color="text.heading" lineHeight="1.3">
+              {hit.title}
+            </Text>
+            {hit.snippet ? (
+              <Text mt="2px" fontSize="bodySm" color="text.secondary" lineHeight="1.5" lineClamp={2}>
+                {hit.snippet}
+              </Text>
+            ) : null}
+          </Box>
+        ))}
+      </Stack>
+    </>
+  );
 
   return (
     <>
       {open ? (
         <Portal>
-          <Box position="fixed" inset="0" zIndex="15" bg="rgb(0 0 0 / 0.34)" onClick={close} />
+          <Box
+            position="fixed"
+            inset="0"
+            zIndex="15"
+            display={{ base: "none", lg: "block" }}
+            bg="rgb(0 0 0 / 0.34)"
+            onClick={close}
+          />
         </Portal>
       ) : null}
 
@@ -193,21 +303,7 @@ export function Search() {
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") close();
-                if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  setActive((i) => Math.min(i + 1, hits.length - 1));
-                }
-                if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  setActive((i) => Math.max(i - 1, 0));
-                }
-                if (e.key === "Enter" && hits[active]) {
-                  e.preventDefault();
-                  go(hits[active].route);
-                }
-              }}
+              onKeyDown={onKey}
               placeholder="Search docs, reference and releases"
               aria-label="Search"
               flex="1"
@@ -239,6 +335,28 @@ export function Search() {
         </Flex>
       </Box>
 
+      <chakra.button
+        type="button"
+        aria-label="Search"
+        onClick={() => setOpen(true)}
+        display={{ base: "none", md: "flex", lg: "none" }}
+        flex="none"
+        width="34px"
+        height="34px"
+        alignItems="center"
+        justifyContent="center"
+        border="1px solid"
+        borderColor="border.control"
+        bg="surface.subtle"
+        color="text.secondary"
+        borderRadius="pill"
+        cursor="pointer"
+        transition="var(--transition-hover)"
+        _hover={{ borderColor: "border.controlHover", color: "text.heading" }}
+      >
+        <SearchIcon size={16} strokeWidth={1.6} />
+      </chakra.button>
+
       {expanded && anchor ? (
         <Portal>
           <Box
@@ -248,6 +366,7 @@ export function Search() {
             width="440px"
             maxWidth="calc(100vw - 40px)"
             zIndex="25"
+            display={{ base: "none", lg: "block" }}
             bg="surface.card"
             border="1px solid"
             borderColor="border.default"
@@ -256,55 +375,7 @@ export function Search() {
             overflow="hidden"
           >
             <Box maxHeight="min(62vh, 440px)" overflowY="auto">
-              {hits.length === 0 ? (
-                <Box px="16px" py="18px">
-                  <Text fontSize="bodySm" color="text.muted">
-                    No matches for{" "}
-                    <chakra.span fontFamily="mono" color="text.heading">
-                      {query}
-                    </chakra.span>
-                    .
-                  </Text>
-                </Box>
-              ) : null}
-
-              <Stack gap="0">
-                {hits.map((hit, i) => (
-                  <Box
-                    key={hit.id}
-                    as="button"
-                    textAlign="start"
-                    width="100%"
-                    onClick={() => go(hit.route)}
-                    onMouseEnter={() => setActive(i)}
-                    px="16px"
-                    py="11px"
-                    borderTop={i === 0 ? "none" : "1px solid"}
-                    borderColor="border.rule"
-                    bg={i === active ? "action.ghostHover" : "transparent"}
-                    cursor="pointer"
-                  >
-                    <Flex align="center" gap="10px" mb="3px">
-                      <Eyebrow color={i === active ? "accent.500" : "text.muted"}>
-                        {LABEL[hit.section] ?? hit.section}
-                      </Eyebrow>
-                      {hit.group ? (
-                        <Text fontFamily="mono" fontSize="micro" color="text.faint">
-                          {hit.group}
-                        </Text>
-                      ) : null}
-                    </Flex>
-                    <Text fontSize="body" fontWeight="semibold" color="text.heading" lineHeight="1.3">
-                      {hit.title}
-                    </Text>
-                    {hit.snippet ? (
-                      <Text mt="2px" fontSize="bodySm" color="text.secondary" lineHeight="1.5" lineClamp={2}>
-                        {hit.snippet}
-                      </Text>
-                    ) : null}
-                  </Box>
-                ))}
-              </Stack>
+              {results}
             </Box>
 
             <Flex
@@ -323,6 +394,67 @@ export function Search() {
               <Text>esc close</Text>
             </Flex>
           </Box>
+        </Portal>
+      ) : null}
+
+      {open ? (
+        <Portal>
+          <Flex
+            ref={sheetRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Search"
+            onKeyDown={(e) => {
+              if (e.key !== "Tab") return;
+              const focusable = sheetRef.current?.querySelectorAll<HTMLElement>("input, button");
+              if (!focusable?.length) return;
+              const edge = e.shiftKey ? focusable[0] : focusable[focusable.length - 1];
+              if (document.activeElement !== edge) return;
+              e.preventDefault();
+              (e.shiftKey ? focusable[focusable.length - 1] : focusable[0]).focus();
+            }}
+            position="fixed"
+            inset="0"
+            zIndex="30"
+            display={{ base: "flex", lg: "none" }}
+            direction="column"
+            bg="surface.page"
+          >
+            <Flex align="center" gap="10px" px="16px" py="12px" borderBottom="1px solid" borderColor="border.rule">
+              <SearchIcon size={17} strokeWidth={1.6} color="var(--text-faint)" />
+              <chakra.input
+                ref={sheetInputRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={onKey}
+                placeholder="Search docs and releases"
+                aria-label="Search"
+                flex="1"
+                minW="0"
+                background="transparent"
+                border="none"
+                outline="none"
+                fontSize="17px"
+                color="text.heading"
+                _placeholder={{ color: "text.faint" }}
+              />
+              <chakra.button
+                type="button"
+                aria-label="Close search"
+                onClick={close}
+                flex="none"
+                display="flex"
+                alignItems="center"
+                color="text.muted"
+                cursor="pointer"
+              >
+                <X size={19} strokeWidth={1.6} />
+              </chakra.button>
+            </Flex>
+            <Box flex="1" overflowY="auto">
+              {results}
+            </Box>
+          </Flex>
         </Portal>
       ) : null}
     </>
