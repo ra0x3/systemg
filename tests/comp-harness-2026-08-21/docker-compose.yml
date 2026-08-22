@@ -1,0 +1,145 @@
+services:
+  db:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/db; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/db"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+  queue:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/queue; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/queue"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+  cache:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/cache; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/cache"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      db:
+        condition: service_healthy
+  worker1:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/worker1; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/worker1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      cache:
+        condition: service_healthy
+  worker2:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/worker2; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/worker2"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      cache:
+        condition: service_healthy
+  worker3:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/worker3; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/worker3"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      cache:
+        condition: service_healthy
+  ingest1:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/ingest1; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/ingest1"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      queue:
+        condition: service_healthy
+  ingest2:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/ingest2; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/ingest2"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      queue:
+        condition: service_healthy
+  aggregator:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/aggregator; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/aggregator"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      worker1:
+        condition: service_healthy
+      worker2:
+        condition: service_healthy
+      worker3:
+        condition: service_healthy
+      ingest1:
+        condition: service_healthy
+      ingest2:
+        condition: service_healthy
+  reporter:
+    image: debian:bookworm-slim
+    volumes:
+      - ready:/ready
+    command: ["sh","-c","sleep 0.3; date +%s.%N > /ready/reporter; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/reporter"]
+      interval: 1s
+      timeout: 2s
+      retries: 60
+      start_period: 0s
+    depends_on:
+      aggregator:
+        condition: service_healthy
+volumes:
+  ready:

@@ -20,7 +20,7 @@ export function NotFound({ path }: { path?: string }) {
           fontWeight="bold"
           color="text.heading"
         >
-          The supervisor lost track of this path.
+          The supervisor lost this unit.
         </Box>
 
         <Text fontSize="lead" lineHeight="1.5" color="text.secondary">

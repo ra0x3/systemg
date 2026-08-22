@@ -197,7 +197,7 @@ export default function Home() {
             mt="22px"
             mb="20px"
           >
-            Run your whole stack from one file.
+            The process manager for busy people.
           </Heading>
 
           <Text fontSize="lead" lineHeight="1.5" color="text.secondary" maxW="640px" mb="32px">

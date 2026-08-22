@@ -32,6 +32,8 @@
   --accent-tint: rgba(238, 92, 122, 0.16);
   --accent-select: rgba(238, 92, 122, 0.28);
   --accent-bar: linear-gradient(90deg, #ff8ea8, #ee5c7a); /* @kind color */
+  --verdict-good: #5fbe86; /* @kind color */
+  --verdict-bad: #ef7a8c;  /* @kind color */
   --hero-wash: radial-gradient(60% 100% at 30% 0%, rgba(238, 92, 122, 0.14), transparent 70%); /* @kind color */
 
   --warn-300: #f5c07a;
@@ -42,6 +44,7 @@
   --channel-blue: #7aa5f0;
   --channel-violet: #b394f0;
   --bar-neutral: #4a4038;
+  --bar-doomed: #6f6154; /* comparison bar, pre-teardown */
 
   --text-inverse: #17130f;
   --surface-nav: rgba(20, 17, 14, 0.86);
@@ -89,6 +92,8 @@
     --accent-tint: rgba(238, 92, 122, 0.16);
     --accent-select: rgba(238, 92, 122, 0.28);
     --accent-bar: linear-gradient(90deg, #ff8ea8, #ee5c7a); /* @kind color */
+  --verdict-good: #5fbe86; /* @kind color */
+  --verdict-bad: #ef7a8c;  /* @kind color */
     --hero-wash: radial-gradient(60% 100% at 30% 0%, rgba(238, 92, 122, 0.14), transparent 70%); /* @kind color */
     --warn-300: #f5c07a;
     --warn-500: #e08a2f;
@@ -97,6 +102,7 @@
     --channel-blue: #7aa5f0;
     --channel-violet: #b394f0;
     --bar-neutral: #4a4038;
+  --bar-doomed: #6f6154; /* comparison bar, pre-teardown */
     --text-inverse: #17130f;
     --surface-nav: rgba(20, 17, 14, 0.86);
     --surface-hatch: repeating-linear-gradient(115deg, #3a322a 0 5px, #332b24 5px 10px);

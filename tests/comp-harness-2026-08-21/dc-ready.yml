@@ -1,0 +1,13 @@
+services:
+  w:
+    image: debian:bookworm-slim
+    volumes: [ready:/ready]
+    command: ["/bin/sh","-c","sleep 5; date +%s.%N > /ready/w; exec sleep 3600"]
+    healthcheck:
+      test: ["CMD","test","-f","/ready/w"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 0s
+volumes:
+  ready:
