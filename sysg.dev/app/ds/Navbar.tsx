@@ -1,11 +1,11 @@
-import { Box, chakra, Flex } from "@chakra-ui/react";
-import { Monitor, Moon, Sun } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Box, chakra, Flex, Stack } from "@chakra-ui/react";
+import { Menu, Monitor, Moon, Search as SearchIcon, Sun, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router";
 import { Pill } from "~/ds/components";
 import { IconLink, SOCIALS } from "~/ds/icons";
 import { Logo } from "~/ds/Logo";
-import { Search } from "~/ds/Search";
+import { requestSearch, Search } from "~/ds/Search";
 import { applyMode, MODES, type Mode, readMode } from "~/ds/theme";
 
 const LINKS = [
@@ -15,6 +15,23 @@ const LINKS = [
 ];
 
 const ICONS: Record<Mode, typeof Sun> = { light: Sun, dark: Moon, system: Monitor };
+
+const CONTROL = {
+  flex: "none",
+  width: "34px",
+  height: "34px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  border: "1px solid",
+  borderColor: "border.control",
+  bg: "surface.subtle",
+  color: "text.secondary",
+  borderRadius: "pill",
+  cursor: "pointer",
+  transition: "var(--transition-hover)",
+  _hover: { borderColor: "border.controlHover", color: "text.heading" },
+} as const;
 
 function ModeToggle() {
   const [mode, setMode] = useState<Mode>("system");
@@ -31,20 +48,7 @@ function ModeToggle() {
         setMode(next);
         applyMode(next);
       }}
-      flex="none"
-      width="34px"
-      height="34px"
-      display="flex"
-      alignItems="center"
-      justifyContent="center"
-      border="1px solid"
-      borderColor="border.control"
-      bg="surface.subtle"
-      color="text.secondary"
-      borderRadius="pill"
-      cursor="pointer"
-      transition="var(--transition-hover)"
-      _hover={{ borderColor: "border.controlHover", color: "text.heading" }}
+      {...CONTROL}
     >
       <Icon size={16} strokeWidth={1.6} />
     </chakra.button>
@@ -52,6 +56,21 @@ function ModeToggle() {
 }
 
 export function Navbar() {
+  const [menu, setMenu] = useState(false);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const close = () => setMenu(false);
+
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setMenu(false);
+      toggleRef.current?.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu]);
+
   return (
     <Box
       as="header"
@@ -63,8 +82,15 @@ export function Navbar() {
       bg="surface.nav"
       backdropFilter="var(--blur-nav)"
     >
-      <Flex align="center" gap="24px" maxW="page" mx="auto" px={{ base: "20px", md: "gutter" }} py="14px">
-        <NavLink to="/" aria-label="systemg home">
+      <Flex
+        align="center"
+        gap={{ base: "10px", md: "24px" }}
+        maxW="page"
+        mx="auto"
+        px={{ base: "20px", md: "gutter" }}
+        py="14px"
+      >
+        <NavLink to="/" aria-label="systemg home" onClick={close}>
           <Logo size={15} />
         </NavLink>
 
@@ -101,9 +127,84 @@ export function Navbar() {
 
         <Search />
 
-        <Pill href="/docs/installation">Install</Pill>
+        <Pill href="/docs/installation" onClick={close}>
+          Install
+        </Pill>
         <ModeToggle />
+
+        <chakra.button
+          ref={toggleRef}
+          type="button"
+          aria-label={menu ? "Close menu" : "Open menu"}
+          aria-expanded={menu}
+          aria-controls="nav-menu"
+          onClick={() => setMenu((v) => !v)}
+          {...CONTROL}
+          display={{ base: "flex", md: "none" }}
+        >
+          {menu ? <X size={16} strokeWidth={1.6} /> : <Menu size={16} strokeWidth={1.6} />}
+        </chakra.button>
       </Flex>
+
+      {menu ? (
+        <Box
+          id="nav-menu"
+          display={{ base: "block", md: "none" }}
+          borderTop="1px solid"
+          borderColor="border.rule"
+          bg="surface.page"
+          px="20px"
+          py="12px"
+        >
+          <Stack gap="2px">
+            {LINKS.map((link) => (
+              <NavLink key={link.to} to={link.to} onClick={close}>
+                {({ isActive }) => (
+                  <Box
+                    px="12px"
+                    py="11px"
+                    borderRadius="sm"
+                    fontSize="17px"
+                    color={isActive ? "text.heading" : "text.muted"}
+                    bg={isActive ? "action.ghostHover" : "transparent"}
+                  >
+                    {link.label}
+                  </Box>
+                )}
+              </NavLink>
+            ))}
+
+            <chakra.button
+              type="button"
+              onClick={() => {
+                close();
+                requestSearch();
+              }}
+              display="flex"
+              alignItems="center"
+              gap="10px"
+              px="12px"
+              py="11px"
+              borderRadius="sm"
+              fontSize="17px"
+              color="text.muted"
+              cursor="pointer"
+              textAlign="start"
+            >
+              <SearchIcon size={17} strokeWidth={1.6} />
+              Search
+            </chakra.button>
+          </Stack>
+
+          <Flex align="center" gap="2px" mt="8px" pt="10px" borderTop="1px solid" borderColor="border.rule">
+            {SOCIALS.map(({ href, label, Icon }) => (
+              <IconLink key={label} href={href} label={label}>
+                <Icon />
+              </IconLink>
+            ))}
+          </Flex>
+        </Box>
+      ) : null}
     </Box>
   );
 }

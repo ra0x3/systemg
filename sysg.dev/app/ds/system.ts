@@ -16,6 +16,7 @@ const config = defineConfig({
       lineHeight: v("lh-body"),
     },
     body: { minHeight: "100vh", textWrap: "pretty", display: "flex", flexDirection: "column" },
+    "body > *": { minWidth: 0, width: "100%" },
     "h1, h2, h3, h4": { textWrap: "balance", fontFamily: v("font-heading"), color: v("text-heading") },
     "code, kbd, pre, samp": { fontFamily: v("font-mono"), fontVariantLigatures: "none" },
     a: { color: v("text-link"), textDecoration: "none" },

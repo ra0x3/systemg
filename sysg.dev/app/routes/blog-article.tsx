@@ -1,5 +1,5 @@
 import { Box, chakra, Flex, Stack, Text } from "@chakra-ui/react";
-import type { ReactNode } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router";
 import { ARTICLES } from "~/content/articles";
 import {
@@ -96,6 +96,51 @@ function Note({ children }: { children: ReactNode }) {
   );
 }
 
+/** The width every figure is composed at; below it a figure scales rather than reflows. */
+const FIT = 860;
+
+/**
+ * Charts are laid out once, at FIT, and shrunk to whatever room the card has.
+ * A narrow screen gets the same composition as a wide one, just smaller -- no
+ * label wraps to two lines, no bar row breaking onto a second line.
+ */
+function Fit({ children }: { children: ReactNode }) {
+  const outer = useRef<HTMLDivElement>(null);
+  const inner = useRef<HTMLDivElement>(null);
+  const [scale, setScale] = useState(1);
+  const [height, setHeight] = useState<number>();
+
+  useEffect(() => {
+    const o = outer.current;
+    const i = inner.current;
+    if (!o || !i) return;
+    const measure = () => {
+      const next = Math.min(1, o.clientWidth / FIT);
+      setScale(next);
+      setHeight(i.offsetHeight * next);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(o);
+    ro.observe(i);
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <Box ref={outer} height={height ? `${height}px` : undefined}>
+      <Box
+        ref={inner}
+        width={scale < 1 ? `${FIT}px` : "100%"}
+        transformOrigin="top left"
+        transform={scale < 1 ? `scale(${scale})` : undefined}
+        style={{ "--fit-scale": scale } as CSSProperties}
+      >
+        {children}
+      </Box>
+    </Box>
+  );
+}
+
 function Figure({ children, caption }: { children: ReactNode; caption?: string }) {
   return (
     <Box mt="30px">
@@ -104,9 +149,9 @@ function Figure({ children, caption }: { children: ReactNode; caption?: string }
         borderColor="border.rule"
         borderRadius="lg"
         bg="surface.card"
-        p={{ base: "18px", md: "26px" }}
+        p={{ base: "14px", md: "26px" }}
       >
-        {children}
+        <Fit>{children}</Fit>
       </Box>
       {caption ? (
         <Text mt="10px" fontFamily="mono" fontSize="14.5px" lineHeight="1.55" color="text.faint">
