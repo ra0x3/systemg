@@ -76,7 +76,7 @@ impl fmt::Display for VersionReport {
         if self.drifted() {
             write!(
                 f,
-                "\n  drift: the supervisor is still serving {}; rerun the installer to activate {}",
+                "\n  drift: the supervisor is still serving {}; it adopts {} when it is upgraded in place or stopped",
                 self.supervisor.as_deref().unwrap_or(""),
                 self.cli
             )?;

@@ -14,6 +14,17 @@ title: Installation
 $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
+### Homebrew
+
+```bash
+$ brew install ra0x3/tap/sysg
+```
+
+Homebrew owns the binary it installs, so `brew upgrade sysg` swaps it without
+the live re-execution the installer performs. A supervisor that is already
+resident keeps serving the build it booted from until it is stopped; `sysg
+version` reports both.
+
 ## Verify
 
 ```bash

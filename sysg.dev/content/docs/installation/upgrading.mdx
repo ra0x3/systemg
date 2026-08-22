@@ -10,6 +10,12 @@ Run the normal installer again to upgrade to the latest release:
 $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
+A Homebrew install upgrades through Homebrew instead:
+
+```bash
+$ brew upgrade sysg
+```
+
 ## Live re-execution
 
 Starting with `0.56.0`, compatible releases use **live re-execution**: the
@@ -55,6 +61,25 @@ The installer reports [`SG0502`](/how-it-works/dialog/codes#sg0502) and leaves
 the existing PATH target unchanged when the resident and target cannot hand
 off safely. The target remains installed, so stopping the supervisor and
 rerunning the same installer activates it.
+
+## Homebrew installs
+
+`brew upgrade sysg` replaces the binary on disk and stops there: it does not
+run the installer, so none of the live re-execution steps above happen. A
+supervisor that is already resident keeps serving the build it booted from.
+
+```bash
+$ sysg version
+```
+
+That reports the binary and the resident supervisor separately, so drift is
+visible. To adopt the new build, stop the supervisor and start each project
+again.
+
+<Warning>
+  `sysg stop --supervisor` stops every registered project. After stopping,
+  restart each required project from its manifest.
+</Warning>
 
 ## Safe handoff requirements
 
