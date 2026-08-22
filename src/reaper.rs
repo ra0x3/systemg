@@ -31,11 +31,6 @@ use crate::runtime;
 /// an adopted orphan's exit. Covers the spawn-before-registration race.
 const RETENTION: Duration = Duration::from_secs(30);
 
-/// How long a status addressed to a named waiter is held. Longer than the
-/// orphan window because the waiter can be held off by work that runs before
-/// it looks — an `onstart` hook alone may occupy the full pre-start timeout.
-const CLAIM_RETENTION: Duration = Duration::from_secs(900);
-
 /// A reaped exit status waiting to be claimed.
 struct Filed {
     /// Exit status of the reaped process.
@@ -44,17 +39,6 @@ struct Filed {
     filed: Instant,
     /// Unit this status is addressed to, when the reaper knew the owner.
     claimant: Option<String>,
-}
-
-impl Filed {
-    /// Returns how long this entry may sit unclaimed.
-    fn retention(&self) -> Duration {
-        if self.claimant.is_some() {
-            CLAIM_RETENTION
-        } else {
-            RETENTION
-        }
-    }
 }
 
 fn mailbox() -> &'static Mutex<HashMap<i32, Filed>> {
@@ -127,15 +111,23 @@ pub fn publish(pid: i32, claimant: &str, status: ExitStatus) {
 
 /// Claims the status filed for `pid` on behalf of `claimant`. Active in every
 /// runtime mode.
+///
+/// An unaddressed status for that pid is claimable too: in init mode the
+/// broker reaps whatever is waitable, including this claimant's own child, and
+/// refusing it would strand the outcome the claimant is the only one waiting
+/// for. Only a status addressed to somebody else is off limits.
 pub fn take_for(pid: i32, claimant: &str) -> Option<ExitStatus> {
     reap_pending();
     let mut box_ = mailbox()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let addressed = box_
-        .get(&pid)
-        .is_some_and(|filed| filed.claimant.as_deref() == Some(claimant));
-    if !addressed {
+    let claimable = box_.get(&pid).is_some_and(|filed| {
+        filed
+            .claimant
+            .as_deref()
+            .is_none_or(|addressee| addressee == claimant)
+    });
+    if !claimable {
         return None;
     }
     box_.remove(&pid).map(|filed| filed.status)
@@ -146,6 +138,10 @@ pub fn take_for(pid: i32, claimant: &str) -> Option<ExitStatus> {
 /// A run claims only its own outcome: clearing the address before a new run
 /// starts means anything still filed under that name belongs to a run nobody
 /// is waiting on any more, and can never be read as this run's result.
+///
+/// Claimants are state keys (`v2:project:service`), never bare service names —
+/// two projects may each run a `nightly`, and a shared address would let one
+/// project's boundary erase the other's outcome.
 pub fn drop_claims(claimant: &str) {
     mailbox()
         .lock()
@@ -161,20 +157,14 @@ pub fn sweep_orphans() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     box_.retain(|pid, filed| {
-        if filed.filed.elapsed() < filed.retention() {
+        // An addressed status belongs to a claimant that clears its own address
+        // before its next run, so it holds at most one entry and no clock can
+        // decide it went stale: the work that delays a claim — an `onstart`
+        // hook, a pre-start script — is unbounded by configuration.
+        if filed.claimant.is_some() || filed.filed.elapsed() < RETENTION {
             return true;
         }
-        match filed.claimant.as_deref() {
-            Some(claimant) => {
-                info!(
-                    "dropping unclaimed exit status of pid {pid} addressed to '{claimant}' ({:?})",
-                    filed.status
-                );
-            }
-            None => {
-                info!("init reaped adopted orphan pid {pid} ({:?})", filed.status);
-            }
-        }
+        info!("init reaped adopted orphan pid {pid} ({:?})", filed.status);
         false
     });
 }

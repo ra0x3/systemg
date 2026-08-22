@@ -3555,7 +3555,7 @@ impl Supervisor {
                                 // to a run nobody is waiting on; clearing it
                                 // before the spawn keeps it from being read as
                                 // this run's outcome.
-                                crate::reaper::drop_claims(&job_name_clone);
+                                crate::reaper::drop_claims(&service_hash);
                                 match daemon
                                     .start_service(&job_name_clone, &service_config)
                                 {
@@ -3619,6 +3619,7 @@ impl Supervisor {
                                                         Self::wait_for_cron_completion(
                                                             pid,
                                                             &job_name_clone,
+                                                            &service_hash,
                                                         );
 
                                                     match result {
@@ -3834,12 +3835,23 @@ impl Supervisor {
                                 })
                             {
                                 error!("Failed to start cron worker: {err}");
+                                let status = CronExecutionStatus::Failed(format!(
+                                    "Failed to start cron worker: {err}"
+                                ));
+                                if let Some(service_config) =
+                                    project.config.services.get(&due_job.service_name)
+                                {
+                                    notify_cron_failure(
+                                        &project.daemon,
+                                        &due_job.service_name,
+                                        service_config,
+                                        &status,
+                                    );
+                                }
                                 failed_manager.complete_job_run(
                                     &failed_hash,
                                     run_started_at,
-                                    CronExecutionStatus::Failed(format!(
-                                        "Failed to start cron worker: {err}"
-                                    )),
+                                    status,
                                     None,
                                     vec![],
                                 );
@@ -6392,18 +6404,24 @@ running project does not declare; restart the project to apply structural change
     fn wait_for_cron_completion(
         pid: u32,
         job_name: &str,
+        claim_key: &str,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
         Self::wait_for_cron_completion_with_timeout(
             pid,
             job_name,
+            claim_key,
             Duration::from_secs(3600),
             Duration::from_millis(100),
         )
     }
 
+    /// Waits for one cron run to finish. `claim_key` is the unit's state key:
+    /// the address a routed exit status carries, unique across projects where a
+    /// service name is not.
     fn wait_for_cron_completion_with_timeout(
         pid: u32,
         job_name: &str,
+        claim_key: &str,
         max_wait_time: Duration,
         poll_interval: Duration,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
@@ -6419,7 +6437,7 @@ running project does not declare; restart the project to apply structural change
             // The monitor reaps managed children too, and on Linux a pidfd
             // wakes it the instant one exits. When it gets there first it
             // routes the status here rather than leaving this thread to guess.
-            if let Some(status) = crate::reaper::take_for(pid as i32, job_name) {
+            if let Some(status) = crate::reaper::take_for(pid as i32, claim_key) {
                 return Ok(Self::cron_outcome_from_status(job_name, status));
             }
             match waitpid(wait_pid, Some(WaitPidFlag::WNOHANG)) {
@@ -6477,7 +6495,7 @@ running project does not declare; restart the project to apply structural change
                     thread::sleep(poll_interval);
                 }
                 Err(nix::errno::Errno::ECHILD) => {
-                    if let Some(status) = crate::reaper::take_for(pid as i32, job_name) {
+                    if let Some(status) = crate::reaper::take_for(pid as i32, claim_key) {
                         return Ok(Self::cron_outcome_from_status(job_name, status));
                     }
                     warn!(
@@ -6679,6 +6697,7 @@ mod tests {
         let outcome = Supervisor::wait_for_cron_completion_with_timeout(
             pid,
             "slow-cron",
+            "v2:demo:slow-cron",
             Duration::from_millis(1),
             Duration::from_millis(1),
         )
@@ -6707,16 +6726,17 @@ mod tests {
         // so the outcome has to come from the routed status — exactly the
         // position the cron thread is in when the monitor wins the race.
         let pid = 4_000_001u32;
-        crate::reaper::drop_claims("routed-cron");
+        crate::reaper::drop_claims("v2:demo:routed-cron");
         crate::reaper::publish(
             pid as i32,
-            "routed-cron",
+            "v2:demo:routed-cron",
             std::process::ExitStatus::from_raw(1024),
         );
 
         let outcome = Supervisor::wait_for_cron_completion_with_timeout(
             pid,
             "routed-cron",
+            "v2:demo:routed-cron",
             Duration::from_millis(50),
             Duration::from_millis(1),
         )
@@ -6732,11 +6752,12 @@ mod tests {
     #[test]
     fn cron_completion_never_invents_success_for_a_lost_status() {
         let pid = 4_000_002u32;
-        crate::reaper::drop_claims("lost-cron");
+        crate::reaper::drop_claims("v2:demo:lost-cron");
 
         let outcome = Supervisor::wait_for_cron_completion_with_timeout(
             pid,
             "lost-cron",
+            "v2:demo:lost-cron",
             Duration::from_millis(50),
             Duration::from_millis(1),
         )
