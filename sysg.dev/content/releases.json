@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.66.5",
+    "slug": "0.66.5",
+    "title": "v0.66.5",
+    "date": "2026-08-22T23:59:01Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.5",
+    "summary": "fix(web): correct the teardown tie, the Blocks legend, and an SVG title hydration mismatch (0ab6a55)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(web): correct the teardown tie, the Blocks legend, and an SVG title hydration mismatch (<code>0ab6a55</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.4 (<code>487ea77</code>)</li>\n<li>docs(blog): publish release post for v0.66.4 (<code>922c6ca</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.4...v0.66.5\">Full changelog on GitHub</a></p>",
+    "commits": 3
+  },
+  {
     "tag": "v0.66.4",
     "slug": "0.66.4",
     "title": "v0.66.4",
