@@ -184,8 +184,9 @@ export default function BlogArticle() {
         </Text>
         <Text mt="18px" fontSize="lead" lineHeight="1.5" color="text.heading" fontWeight="bold" maxW="content">
           TL;DR: systemg installs faster than Supervisor, boots a dependency graph faster than Docker Compose, and uses
-          less memory than either. It is also the only one of the three that leaves nothing running after you stop a
-          service, and the only one that neither duplicates nor loses your workload when the supervisor itself dies.
+          less memory than either. It leaves nothing running after you stop a service — so does Compose, where
+          Supervisor strands up to five — and it is the only one of the three that neither duplicates nor loses your
+          workload when the supervisor itself dies.
         </Text>
 
         <Flex mt="26px" gap="10px" wrap="wrap">

@@ -165,42 +165,6 @@ export function Callout({
   );
 }
 
-export function BarRow({
-  label,
-  value,
-  width,
-  subject,
-}: {
-  label: string;
-  value: string;
-  width: number;
-  subject?: boolean;
-}) {
-  return (
-    <Box
-      display="grid"
-      gridTemplateColumns={{ base: "110px 1fr 74px", md: "168px 1fr 96px" }}
-      alignItems="center"
-      gap="12px"
-    >
-      <Text fontFamily="mono" fontSize="11.5px" color={subject ? "text.heading" : "text.muted"}>
-        {label}
-      </Text>
-      <Box height="21px" bg="surface.track" borderRadius="sm" overflow="hidden">
-        <Box
-          height="100%"
-          width={`${width}%`}
-          borderRadius="sm"
-          background={subject ? "var(--accent-bar)" : "channel.neutral"}
-        />
-      </Box>
-      <Text textAlign="right" fontFamily="mono" fontSize="11.5px" color={subject ? "accent.500" : "text.secondary"}>
-        {value}
-      </Text>
-    </Box>
-  );
-}
-
 export function Yaml({ lines }: { lines: ReactNode[] }) {
   return (
     <chakra.pre
