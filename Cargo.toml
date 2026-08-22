@@ -1,6 +1,6 @@
 [package]
 name = "systemg"
-version = "0.66.4"
+version = "0.66.5"
 edition = "2024"
 license = "MIT"
 description = "An agent-friendly general-purpose program orchestrator for busy people."
