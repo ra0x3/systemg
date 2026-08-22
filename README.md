@@ -62,6 +62,12 @@ An agent-friendly general-purpose program orchestrator for busy people.
 $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
 ```
 
+Or with Homebrew, on macOS and Linux:
+
+```sh
+$ brew install ra0x3/tap/sysg
+```
+
 For system-wide deployments, `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/systemg`, and `/var/lib/systemg` — see the [security guide](docs/security.mdx).
 
 ### Usage

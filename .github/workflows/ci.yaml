@@ -744,6 +744,28 @@ jobs:
           git pull --rebase origin main
           git push origin main
 
+  publish-homebrew:
+    name: Publish Homebrew Tap
+    runs-on: ubuntu-latest
+    # The tap is pushed on the same gate as the Claude plugin: only once the
+    # crate is on crates.io, and therefore only once every release asset the
+    # formula hashes -- GitHub release and sh.sysg.dev mirror alike -- is
+    # already published. A dispatched test-release never reaches this job.
+    needs:
+      - extract-version
+      - detect-version-bump
+      - cargo-publish
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-version-bump.outputs.bumped == 'true' && needs.cargo-publish.result == 'success'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Publish formula to ra0x3/homebrew-tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: ci/brew/publish-tap.sh "${{ needs.extract-version.outputs.tag }}"
+
   create-github-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest

@@ -1,6 +1,8 @@
 import { Box, chakra, Flex, Grid, Heading, Stack, Text } from "@chakra-ui/react";
-import { useState } from "react";
-import { BarRow, Eyebrow, InlineCode, K, N, Panel, PanelHeader, Pill, S, Yaml } from "~/ds/components";
+import { type ReactNode, useState } from "react";
+import { Blocks, Race, Replay, TreeSwap } from "~/ds/charts";
+import { Eyebrow, InlineCode, Panel, Pill } from "~/ds/components";
+import { Figure, Stat } from "~/ds/figure";
 
 export function meta() {
   return [
@@ -33,58 +35,181 @@ const FEATURES = [
   },
 ];
 
-const BARS = [
-  { label: "sysg", value: "0.41 s", width: 14, subject: true },
-  { label: "docker compose", value: "2.30 s", width: 78 },
-  { label: "supervisord", value: "2.95 s", width: 100 },
+const METRICS = [
+  {
+    id: "boot",
+    to: 6.91,
+    decimals: 2,
+    unit: "s",
+    label: "ten-service graph\ncold boot",
+    heading: "Ten services, five levels deep",
+    compare: "1.2× faster than Docker Compose · Supervisor cannot express the graph",
+    blurb:
+      "Two independent roots and a five-wide fan-in, where every unit whose dependencies are already satisfied is dispatched at once — so the graph boots in five waves rather than ten steps.",
+    caption: (
+      <>
+        Supervisor has no dependency edges — <InlineCode>priority</InlineCode> orders starts but never gates on
+        readiness. Compose ran each unit as a container against the host daemon while sysg ran processes in a container,
+        so that lane is indicative rather than controlled.
+      </>
+    ),
+    ms: 2600,
+    chart: (t: number) => (
+      <Race
+        t={t}
+        span={14}
+        lanes={[
+          { label: "sysg 0.65.0", time: 6.91, subject: true },
+          { label: "Docker Compose", time: 8.31, note: "1.20× slower" },
+          { label: "sysg 0.64.4", time: 13.83, note: "2.00× slower" },
+          { label: "Supervisor", time: null },
+        ]}
+      />
+    ),
+  },
+  {
+    id: "overhead",
+    to: 12.4,
+    decimals: 1,
+    unit: "MB",
+    label: "supervisor overhead\nat ten services",
+    heading: "What the supervisor itself costs",
+    compare: "28× less supervisor overhead than Docker Compose · 1.5× less than Supervisor",
+    blurb:
+      "Memory for the supervisor itself, minus the same ten near-idle services run bare — orders of magnitude apart, so each block is sized against the largest rather than on a shared axis.",
+    caption: (
+      <>
+        Compose is dockerd + containerd + one containerd-shim per container, measured inside the VM; on macOS Docker
+        Desktop adds a further 476 MB host-side. Per added service Supervisor is cheaper than sysg — 0.020 MB against
+        0.035 MB.
+      </>
+    ),
+    ms: 1500,
+    chart: (t: number) => (
+      <Blocks
+        t={t}
+        unit="MB"
+        items={[
+          { label: "sysg", value: 12.4, display: "12.4 MB", subject: true },
+          { label: "Supervisor", value: 18.1, display: "18.1 MB" },
+          { label: "Docker Compose", value: 354, display: "354 MB" },
+        ]}
+      />
+    ),
+  },
+  {
+    id: "recovery",
+    to: 5,
+    decimals: 0,
+    unit: "/5",
+    label: "recovery checks passed\nSupervisor 4 · Compose 1",
+    heading: "When the supervisor itself is killed",
+    blurb:
+      "kill -9 the supervisor — dockerd for Compose, not the CLI — then start it again and look at what happened to the workload underneath it.",
+    compare: "Supervisor starts a duplicate · Compose terminates the workload",
+    caption: (
+      <>
+        Five checks: services survive, visible while down, no duplicate started, workload kept, recovers unattended.
+        sysg passes five, Supervisor four, Docker Compose one. Docker tested at its default{" "}
+        <InlineCode>live-restore: false</InlineCode> and restarted by hand; Supervisor&apos;s services keep running, but
+        supervisord has no record of them and starts a second copy beside the orphan.
+      </>
+    ),
+    ms: 2700,
+    chart: (t: number) => (
+      <Flex gap="14px" wrap={{ base: "wrap", md: "nowrap" }}>
+        <TreeSwap
+          t={t}
+          tool="sysg"
+          before={["sysg", " \u2514\u2500 web  pid 77"]}
+          after={["sysg  (new pid)", " \u2514\u2500 web  pid 77"]}
+          verdict="re-adopted, same pid"
+        />
+        <TreeSwap
+          t={t}
+          tool="Supervisor"
+          before={["supervisord", " \u2514\u2500 web  pid 77"]}
+          after={["supervisord (new)", " \u251c\u2500 web  pid 77  orphan", " \u2514\u2500 web  pid 91  duplicate"]}
+          verdict="duplicate started"
+          bad
+        />
+        <TreeSwap
+          t={t}
+          tool="Docker Compose"
+          before={["dockerd", " \u2514\u2500 web  running"]}
+          after={["dockerd (manual)", " \u2514\u2500 web  exited"]}
+          verdict="workload terminated"
+          bad
+        />
+      </Flex>
+    ),
+  },
 ];
 
-const YAML_LINES = [
-  <>
-    <K>version</K>: <S>"2"</S>
-  </>,
-  <>
-    <K>services</K>:
-  </>,
-  <>
-    {"  "}
-    <K>postgres</K>:
-  </>,
-  <>
-    {"    "}
-    <K>command</K>: <S>"postgres -D /var/lib/postgresql/data"</S>
-  </>,
-  <>
-    {"  "}
-    <K>api</K>:
-  </>,
-  <>
-    {"    "}
-    <K>command</K>: <S>"python app.py"</S>
-  </>,
-  <>
-    {"    "}
-    <K>depends_on</K>: [<S>"postgres"</S>]
-  </>,
-  <>
-    {"    "}
-    <K>restart</K>: {"{ "}
-    <K>backoff</K>: <N>1s</N>, <K>max</K>: <N>5</N>
-    {" }"}
-  </>,
-  <>
-    {"  "}
-    <K>backup</K>:
-  </>,
-  <>
-    {"    "}
-    <K>command</K>: <S>"pg_dump mydb &gt; /backups/db.sql"</S>
-  </>,
-  <>
-    {"    "}
-    <K>cron</K>: <S>"0 2 * * *"</S>
-  </>,
-];
+const B = ({ children }: { children: ReactNode }) => (
+  <chakra.strong fontWeight="bold" color="text.heading">
+    {children}
+  </chakra.strong>
+);
+
+function Proof() {
+  return (
+    <Box as="section" maxW="1020px" mx="auto" px={{ base: "20px", md: "gutter" }} pt="96px">
+      <Flex align="center" gap="12px" wrap="wrap" mb="14px">
+        <Eyebrow>measured</Eyebrow>
+        <Box width="24px" height="1px" bg="border.control" />
+        <Text fontFamily="mono" fontSize="12px" color="text.muted">
+          three of eight benchmarks
+        </Text>
+      </Flex>
+
+      <Heading as="h2" fontSize="h2" lineHeight="1.1" letterSpacing="-0.03em" fontWeight="bold" mb="12px">
+        Faster, lighter, and recovers better
+      </Heading>
+      <Text color="text.body" maxW="content">
+        We ran systemg against Supervisor and Docker Compose across eight benchmarks, and against systemd on installed
+        size — the one metric it compares on without being PID 1. sysg booted a ten-service dependency graph{" "}
+        <B>1.2× faster than Docker Compose</B> — a graph Supervisor cannot express at all — held it on{" "}
+        <B>28× less supervisor overhead than Compose</B> and <B>1.5× less than Supervisor</B>, and was the{" "}
+        <B>only one of the three to recover from its own kill -9 without losing or duplicating the workload</B>.
+      </Text>
+      <Box mt="20px">
+        <Pill href="/blog/2026-08-21/how-systemg-compares">View the full report →</Pill>
+      </Box>
+
+      <Stack gap="72px" mt="56px">
+        {METRICS.map((m) => (
+          <Box key={m.id}>
+            <Flex gap={{ base: "20px", md: "40px" }} align="baseline" wrap="wrap" mb="18px">
+              <Stat to={m.to} decimals={m.decimals} unit={m.unit} label={m.label} />
+              <Box flex="1" minW="280px">
+                <Text fontSize="h3" lineHeight="1.3" letterSpacing="-0.02em" fontWeight="bold" color="text.heading">
+                  {m.heading}
+                </Text>
+                <Text mt="8px" fontSize="bodySm" lineHeight="1.55" color="text.secondary">
+                  {m.blurb}
+                </Text>
+                <Text mt="10px" fontFamily="mono" fontSize="13px" lineHeight="1.5" color="accent.500">
+                  {m.compare}
+                </Text>
+              </Box>
+            </Flex>
+            <Figure caption={m.caption}>
+              <Replay ms={m.ms}>{(t) => m.chart(t)}</Replay>
+            </Figure>
+          </Box>
+        ))}
+      </Stack>
+
+      <Flex mt="44px" gap="10px" wrap="wrap">
+        <Pill href="/blog/2026-08-21/how-systemg-compares">See the other five benchmarks →</Pill>
+        <Pill variant="secondary" href="https://github.com/ra0x3/systemg/tree/main/tests/comp-harness-2026-08-21">
+          Scripts and raw output
+        </Pill>
+      </Flex>
+    </Box>
+  );
+}
 
 function InstallCard() {
   const [tab, setTab] = useState("curl");
@@ -236,42 +361,7 @@ export default function Home() {
         </Grid>
       </Box>
 
-      <Box
-        as="section"
-        maxW="1020px"
-        mx="auto"
-        px={{ base: "20px", md: "gutter" }}
-        pt="72px"
-        display="grid"
-        gridTemplateColumns={{ base: "1fr", lg: "1fr 1fr" }}
-        gap="28px"
-        alignItems="start"
-      >
-        <Box>
-          <Heading as="h2" fontSize="h2" lineHeight="1.1" letterSpacing="-0.03em" fontWeight="bold" mb="14px">
-            One file describes the graph
-          </Heading>
-          <Text mb="20px" color="text.body">
-            Declare commands, dependencies, restart policy and schedules in one manifest.{" "}
-            <InlineCode>sysg validate</InlineCode> exits <InlineCode>0</InlineCode> when the file is sound, so CI can
-            gate on it.
-          </Text>
-          <Stack gap="10px">
-            {BARS.map((b) => (
-              <BarRow key={b.label} {...b} />
-            ))}
-          </Stack>
-          <Text mt="14px" fontSize="12.5px" lineHeight="1.5" color="text.faint">
-            Illustrative — not a measured benchmark. Cold start of an eleven-service graph, Linux x64, median of 5 runs.
-            Replace with real figures before publishing.
-          </Text>
-        </Box>
-
-        <Panel radius="md">
-          <PanelHeader>sysg.yaml</PanelHeader>
-          <Yaml lines={YAML_LINES} />
-        </Panel>
-      </Box>
+      <Proof />
 
       <Box as="section" maxW="1020px" mx="auto" px={{ base: "20px", md: "gutter" }} pt="72px" pb="96px">
         <Panel px={{ base: "24px", md: "36px" }} py="34px">
