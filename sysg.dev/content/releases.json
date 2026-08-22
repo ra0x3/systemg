@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.66.4",
+    "slug": "0.66.4",
+    "title": "v0.66.4",
+    "date": "2026-08-22T23:04:40Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.4",
+    "summary": "test(cron): sample the cron failure case while no run is in flight (b20fe5f)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(cron): sample the cron failure case while no run is in flight (<code>b20fe5f</code>)</li>\n<li>docs(github): add issue and pull request templates (<code>b871795</code>)</li>\n<li>ci: make the commit-message scope optiona (<code>aba9cd3</code>)</li>\n<li>ci: drop the mintlify docs check and canonicalize SG code links (<code>e49fc09</code>)</li>\n<li>fix(docs): prefix internal doc links with /docs and pin the mintlify link check (<code>681e509</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.3 (<code>0b2da7b</code>)</li>\n<li>docs(blog): publish release post for v0.66.3 (<code>a95efcd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.3...v0.66.4\">Full changelog on GitHub</a></p>",
+    "commits": 7
+  },
+  {
     "tag": "v0.66.3",
     "slug": "0.66.3",
     "title": "v0.66.3",
