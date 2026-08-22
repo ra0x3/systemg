@@ -57,7 +57,7 @@ $ curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh
   restart each required project from its manifest.
 </Warning>
 
-The installer reports [`SG0502`](/how-it-works/dialog/codes#sg0502) and leaves
+The installer reports [`SG0502`](/docs/how-it-works/dialog/codes#sg0502) and leaves
 the existing PATH target unchanged when the resident and target cannot hand
 off safely. The target remains installed, so stopping the supervisor and
 rerunning the same installer activates it.
@@ -96,11 +96,11 @@ the installer.
 
 The previous versioned binary remains installed until the replacement has
 restored supervision. Failures before `exec` produce
-[`SG0504`](/how-it-works/dialog/codes#sg0504) and the resident supervisor resumes
+[`SG0504`](/docs/how-it-works/dialog/codes#sg0504) and the resident supervisor resumes
 normally. If the replacement cannot restore the handoff, systemg attempts to
 re-execute the previous binary and reports
-[`SG0505`](/how-it-works/dialog/codes#sg0505).
+[`SG0505`](/docs/how-it-works/dialog/codes#sg0505).
 
 Upgrade diagnostics are documented from
-[`SG0501`](/how-it-works/dialog/codes#sg0501) through
-[`SG0505`](/how-it-works/dialog/codes#sg0505).
+[`SG0501`](/docs/how-it-works/dialog/codes#sg0501) through
+[`SG0505`](/docs/how-it-works/dialog/codes#sg0505).

@@ -62,7 +62,7 @@ A clean file reports success and exits `0`:
 **Validation is mode-aware.** `sysg validate` judges the manifest against
 **user mode**: root-only keys (`user`, `group`, `capabilities`,
 `limits.cgroup`, `isolation`, non-empty `supplementary_groups`) produce an
-error finding ([SG0705](/how-it-works/dialog/codes#sg0705)) — the file is
+error finding ([SG0705](/docs/how-it-works/dialog/codes#sg0705)) — the file is
 well-formed (`valid: true`) but not startable in that mode
 (`startable: false`, exit 1). `sysg validate --sys` judges against
 **system (kernel) mode**, where those keys pass; accounts missing on the
@@ -116,6 +116,6 @@ $ sysg start -c production.yaml --daemonize
 
 ## See also
 
-- [Configuration](/how-it-works/configuration) - Full manifest reference
-- [`start`](/how-it-works/commands/start) - Launch a validated manifest
-- [`status`](/how-it-works/commands/status) - Check services once they're running
+- [Configuration](/docs/how-it-works/configuration) - Full manifest reference
+- [`start`](/docs/how-it-works/commands/start) - Launch a validated manifest
+- [`status`](/docs/how-it-works/commands/status) - Check services once they're running

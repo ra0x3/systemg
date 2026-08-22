@@ -113,7 +113,7 @@ in `~/.local/share/systemg/supervisor.xml`, or
 - `stop_verify_secs`: time allowed to confirm that a terminated process is gone.
 - `start_settle_secs`: maximum wait for an unresolved queued project start.
 - `command_wait_secs`: how long a CLI command waits for the supervisor's reply
-  before reporting [SG0111](/how-it-works/dialog/codes#sg0111). `0` waits
+  before reporting [SG0111](/docs/how-it-works/dialog/codes#sg0111). `0` waits
   indefinitely. Raise it when a project is large enough that a restart runs
   longer than the default; the command is never cancelled by the wait ending.
 - `max_concurrent`: how many services a bulk start runs at once. `-1` (the
@@ -143,13 +143,13 @@ manifest's resolved path for each project it registers. Later commands can omit
   first stages the command as a generated version 2 manifest. If a supervisor
   is already running, that file is not registered or started until you run the
   explicit `sysg start --config ...` command systemg prints. See
-  [Units](/examples/units).
+  [Units](/docs/examples/units).
 </Info>
 
 `sysg restart` treats the files at those paths as the source of truth. It reads
 and validates every registered manifest before touching a process, then
 re-registers added, changed, and removed projects and services. An invalid
-manifest returns [`SG0301`](/how-it-works/dialog/codes#sg0301) and leaves the
+manifest returns [`SG0301`](/docs/how-it-works/dialog/codes#sg0301) and leaves the
 running workloads unchanged.
 
 ```sh
@@ -170,10 +170,10 @@ $ sysg restart
 **Required**. Specifies the configuration schema version. The current schema is
 `2`. Older `version: "1"` manifests are no longer accepted. For a legacy
 singular-`project:` manifest, run
-[`sysg migrate`](/how-it-works/commands/migrate), which converts the shape and
+[`sysg migrate`](/docs/how-it-works/commands/migrate), which converts the shape and
 emits `version: "2"`. For a loose or existing `projects:` manifest, update the
 version field directly. When upgrading from 0.54.x or older, also follow the
-[state-layout migration](/how-it-works/state#persistence).
+[state-layout migration](/docs/how-it-works/state#persistence).
 
 ```yaml
 version: "2"
@@ -201,7 +201,7 @@ projects:
 
 Each key is the `project.id`. When a `name` is omitted, the id doubles as the
 display name. Every project gets its own state directory — see
-[State](/how-it-works/state) — and you target each one by id with `-p/--project`
+[State](/docs/how-it-works/state) — and you target each one by id with `-p/--project`
 at runtime.
 
 <Warning>
@@ -238,9 +238,9 @@ project:
 
 The shorthand `project: arbitration` (which sets both `id` and `name`) is also
 still accepted. Convert old-shape manifests with
-[`sysg migrate`](/how-it-works/commands/migrate).
+[`sysg migrate`](/docs/how-it-works/commands/migrate).
 
-See [Projects](/how-it-works/projects) for how one supervisor hosts many
+See [Projects](/docs/how-it-works/projects) for how one supervisor hosts many
 projects at once and how `-p/--project` targets them at runtime.
 
 ### `env`
@@ -368,10 +368,10 @@ Fragments are held to the same trust bar as the root manifest, `${VAR}`
 expansion applies to included content, and every command (`validate`,
 `status`, `restart`, `upgrade`) sees the assembled result. A missing or broken
 fragment is always a hard error carrying the include chain
-([SG0207](/how-it-works/dialog/codes#sg0207)) — never a partially loaded
-manifest — and cyclic includes ([SG0208](/how-it-works/dialog/codes#sg0208))
+([SG0207](/docs/how-it-works/dialog/codes#sg0207)) — never a partially loaded
+manifest — and cyclic includes ([SG0208](/docs/how-it-works/dialog/codes#sg0208))
 or includes past the depth/size caps
-([SG0209](/how-it-works/dialog/codes#sg0209)) are refused. Include paths
+([SG0209](/docs/how-it-works/dialog/codes#sg0209)) are refused. Include paths
 themselves cannot use `${VAR}` expansion. `sysg migrate` preserves `!include`
 tags unresolved.
 
@@ -597,7 +597,7 @@ Primary keys available on each service definition.
 
 `user`, `group`, `supplementary_groups`, `capabilities`, `limits`, and
 `isolation` only take effect in privileged mode - see
-[System mode](/kernel-mode/system-mode) for details and examples.
+[System mode](/docs/kernel-mode/system-mode) for details and examples.
 
 Health checks are configured under `deployment.health_check`, not as a
 top-level service key.
@@ -645,9 +645,9 @@ Probe configuration used to determine readiness/health during deployment workflo
 readiness window, so connection refusals that return immediately do not exhaust
 a slow-starting service's budget. A check fails only after both `retries` and
 `total_timeout` are exhausted. The failure carries a code by cause:
-[`SG0022`](/how-it-works/dialog/codes#sg0022) (could not reach),
-[`SG0023`](/how-it-works/dialog/codes#sg0023) (a probe timed out), or
-[`SG0104`](/how-it-works/dialog/codes#sg0104) (ran but reported unhealthy).
+[`SG0022`](/docs/how-it-works/dialog/codes#sg0022) (could not reach),
+[`SG0023`](/docs/how-it-works/dialog/codes#sg0023) (a probe timed out), or
+[`SG0104`](/docs/how-it-works/dialog/codes#sg0104) (ran but reported unhealthy).
 </Note>
 
 ### Durations
@@ -667,7 +667,7 @@ A bare number is seconds, so `15` and `15s` are the same value. Fractions
 
 Durations are checked when the manifest is loaded, so `sysg validate` refuses
 exactly what `sysg start` refuses, naming the offending field's path
-([`SG0210`](/how-it-works/dialog/codes#sg0210)).
+([`SG0210`](/docs/how-it-works/dialog/codes#sg0210)).
 
 ### Deployment object
 
@@ -676,7 +676,7 @@ Controls how restarts are performed and what validation happens before cutover.
 | Field | Type | Description |
 |-------|------|-------------|
 | `strategy` | string | `rolling` or `immediate` |
-| `pre_start` | string | Command that must exit successfully before starting; its process tree is terminated after the configured supervisor command budget ([`SG0108`](/how-it-works/dialog/codes#sg0108)) |
+| `pre_start` | string | Command that must exit successfully before starting; its process tree is terminated after the configured supervisor command budget ([`SG0108`](/docs/how-it-works/dialog/codes#sg0108)) |
 | `health_check` | object | Health check configuration |
 | `grace_period` | string | Time before stopping old instance |
 | `blue_green` | object | Single-host blue/green rollout settings |
@@ -684,8 +684,8 @@ Controls how restarts are performed and what validation happens before cutover.
 <Note>
   `pre_start` runs from the manifest directory with the service environment.
   Its output is captured in the service log. A non-zero exit is
-  [`SG0103`](/how-it-works/dialog/codes#sg0103); exceeding the `supervisor.xml`
-  `pre_start_secs` budget is [`SG0108`](/how-it-works/dialog/codes#sg0108), and
+  [`SG0103`](/docs/how-it-works/dialog/codes#sg0103); exceeding the `supervisor.xml`
+  `pre_start_secs` budget is [`SG0108`](/docs/how-it-works/dialog/codes#sg0108), and
   the service is not launched.
 </Note>
 
@@ -716,7 +716,7 @@ previous manifest or convert it before starting an older release.
 
 Schema validation is separate from manifest *shape* conversion. To rewrite an
 old singular-`project:` manifest into the canonical
-`projects:` map, run [`sysg migrate`](/how-it-works/commands/migrate) — it prints
+`projects:` map, run [`sysg migrate`](/docs/how-it-works/commands/migrate) — it prints
 the converted YAML to stdout unless `--in-place` is requested.
 
 ::::

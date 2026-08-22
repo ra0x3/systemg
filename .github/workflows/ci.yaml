@@ -249,7 +249,7 @@ jobs:
         run: npm install --global mintlify@4.0.373
 
       - name: Validate Docs
-        working-directory: sysg.dev/content/docs
+        working-directory: sysg.dev/content
         run: mintlify broken-links < /dev/null
 
   web:
