@@ -1,6 +1,6 @@
 import { Navigate, useLocation } from "react-router";
 import { metaForRoute } from "~/content/meta";
-import { pagesFor, PAGES } from "~/content/pages";
+import { PAGES, pagesFor } from "~/content/pages";
 import { DocsShell } from "~/ds/DocsShell";
 import { NotFound } from "~/ds/NotFound";
 

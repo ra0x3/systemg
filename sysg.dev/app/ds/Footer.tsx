@@ -1,8 +1,8 @@
-import { Box, Flex, Stack, Text, chakra } from "@chakra-ui/react";
+import { Box, chakra, Flex, Stack, Text } from "@chakra-ui/react";
 import { Link } from "react-router";
-import { Logo } from "~/ds/Logo";
 import { Eyebrow } from "~/ds/components";
 import { IconLink, SOCIALS } from "~/ds/icons";
+import { Logo } from "~/ds/Logo";
 
 const COLUMNS = [
   {
@@ -64,7 +64,7 @@ export function Footer() {
           <Stack gap="12px" minW="200px" maxW="280px">
             <Logo size={15} />
             <Text fontSize="meta" lineHeight="1.6" color="text.footer">
-              An agent-friendly general process composer.
+              An agent-friendly general-purpose program orchestrator for busy people.
             </Text>
             <Flex gap="2px" ml="-8px">
               {SOCIALS.map(({ href, label, Icon }) => (

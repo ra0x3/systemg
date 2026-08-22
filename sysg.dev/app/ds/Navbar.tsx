@@ -1,12 +1,12 @@
-import { Box, Flex, chakra } from "@chakra-ui/react";
+import { Box, chakra, Flex } from "@chakra-ui/react";
 import { Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink } from "react-router";
-import { Logo } from "~/ds/Logo";
 import { Pill } from "~/ds/components";
 import { IconLink, SOCIALS } from "~/ds/icons";
+import { Logo } from "~/ds/Logo";
 import { Search } from "~/ds/Search";
-import { applyMode, MODES, readMode, type Mode } from "~/ds/theme";
+import { applyMode, MODES, type Mode, readMode } from "~/ds/theme";
 
 const LINKS = [
   { to: "/docs", label: "Docs" },

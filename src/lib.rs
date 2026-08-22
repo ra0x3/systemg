@@ -1,4 +1,4 @@
-//! An agent-friendly general process composer.
+//! An agent-friendly general-purpose program orchestrator for busy people.
 
 #![warn(unused_crate_dependencies)]
 #[cfg(test)]

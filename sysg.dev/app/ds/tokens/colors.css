@@ -93,7 +93,7 @@
 
   /* ---- semantic: status (raspberry healthy, amber failing) ---- */
   --verdict-good: #2f8a54; /* @kind color */
-  --verdict-bad: #c9445a;  /* @kind color */
+  --verdict-bad: #c9445a; /* @kind color */
   --status-ok-fg: var(--accent-700);
   --status-ok-bg: var(--accent-tint);
   --status-warn-fg: var(--warn-500);

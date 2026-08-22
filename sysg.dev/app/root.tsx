@@ -9,15 +9,15 @@ import "~/ds/tokens.css";
 export function meta() {
   return [
     { title: "systemg" },
-    { name: "description", content: "An agent-friendly general process composer." },
+    { name: "description", content: "An agent-friendly general-purpose program orchestrator for busy people." },
     { property: "og:title", content: "systemg" },
-    { property: "og:description", content: "An agent-friendly general process composer." },
+    { property: "og:description", content: "An agent-friendly general-purpose program orchestrator for busy people." },
     { property: "og:type", content: "website" },
     { property: "og:url", content: "https://sysg.dev" },
     { property: "og:image", content: "https://sysg.dev/og.png" },
     { name: "twitter:card", content: "summary_large_image" },
     { name: "twitter:title", content: "systemg" },
-    { name: "twitter:description", content: "An agent-friendly general process composer." },
+    { name: "twitter:description", content: "An agent-friendly general-purpose program orchestrator for busy people." },
     { name: "twitter:image", content: "https://sysg.dev/og.png" },
   ];
 }

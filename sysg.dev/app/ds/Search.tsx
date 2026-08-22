@@ -1,4 +1,4 @@
-import { Box, Flex, Stack, Text, chakra } from "@chakra-ui/react";
+import { Box, chakra, Flex, Stack, Text } from "@chakra-ui/react";
 import type MiniSearch from "minisearch";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";

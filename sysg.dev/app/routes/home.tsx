@@ -1,11 +1,11 @@
-import { Box, Flex, Grid, Heading, Stack, Text, chakra } from "@chakra-ui/react";
+import { Box, chakra, Flex, Grid, Heading, Stack, Text } from "@chakra-ui/react";
 import { useState } from "react";
 import { BarRow, Eyebrow, InlineCode, K, N, Panel, PanelHeader, Pill, S, Yaml } from "~/ds/components";
 
 export function meta() {
   return [
-    { title: "systemg — An agent-friendly general process composer" },
-    { name: "description", content: "An agent-friendly general process composer." },
+    { title: "systemg — An agent-friendly general-purpose program orchestrator for busy people" },
+    { name: "description", content: "An agent-friendly general-purpose program orchestrator for busy people." },
   ];
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "systemg",
-  "description": "Official plugin marketplace for systemg (sysg), an agent-friendly general process composer.",
+  "description": "Official plugin marketplace for systemg (sysg), an agent-friendly general-purpose program orchestrator for busy people.",
   "owner": {
     "name": "ra0x3",
     "url": "https://github.com/ra0x3"

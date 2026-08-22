@@ -1,6 +1,7 @@
 # systemg
 
-> systemg is an agent-friendly general process composer: a single `sysg` binary that
+> systemg is an agent-friendly general-purpose program orchestrator for busy people: a
+single `sysg` binary that
 > starts, supervises, restarts, inspects, and logs local service graphs defined
 > in YAML. It is useful for development environments, local stacks, CI jobs,
 > cron-style units, and agent-managed workflows.

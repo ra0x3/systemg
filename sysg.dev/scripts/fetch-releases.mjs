@@ -1,4 +1,5 @@
-import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import rehypeShiki from "@shikijs/rehype";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import rehypeSlug from "rehype-slug";
@@ -6,10 +7,9 @@ import rehypeStringify from "rehype-stringify";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
-import rehypeShiki from "@shikijs/rehype";
 import { unified } from "unified";
-import { changelog, commitsFor } from "./git-log.mjs";
 import { shikiOptions } from "../app/mdx/shiki.ts";
+import { changelog, commitsFor } from "./git-log.mjs";
 
 const OUT = new URL("../content/releases.json", import.meta.url);
 const REPO = "ra0x3/systemg";
