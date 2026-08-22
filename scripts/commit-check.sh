@@ -87,7 +87,7 @@ run_labeled \
 run_labeled \
   "docs:mintlify" \
   "${BLUE}" \
-  "cd \"${REPO_ROOT}/docs\" && mintlify broken-links"
+  "cd \"${REPO_ROOT}/sysg.dev/content/docs\" && mintlify broken-links < /dev/null"
 
 run_labeled \
   "sysg.dev" \
