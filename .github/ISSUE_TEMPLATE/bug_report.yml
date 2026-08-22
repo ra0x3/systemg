@@ -1,0 +1,66 @@
+name: Bug report
+description: Something sysg does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What went wrong, in a sentence or two.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: >
+        A reproduction we can run is the single biggest thing that gets a bug fixed.
+        Best is a Docker repro — see `tests/docker/repro/` for the pattern, and open a
+        PR adding yours. Otherwise give us the smallest `sysg.yaml` and the exact
+        commands.
+      placeholder: |
+        version: "2"
+        services:
+          api:
+            command: "python app.py"
+
+        1. sysg start -c sysg.yaml
+        2. sysg status
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Paste the output. `sysg logs` and `sysg status` are usually the useful ones.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Output of `sysg version`, your OS, and how you installed sysg.
+      placeholder: |
+        sysg version: 0.66.3
+        OS: Ubuntu 24.04 x86_64
+        installed via: curl | sh
+    validations:
+      required: true
+
+  - type: input
+    id: code
+    attributes:
+      label: Diagnostic code
+      description: If sysg printed an `SG####` code, put it here.
+      placeholder: SG0203
