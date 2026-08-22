@@ -34,8 +34,21 @@ check "$?" "cron project starts"
 # Three boundaries of a 20s schedule, plus room for the 2s command.
 sleep 65
 
-section "the run is recorded as the failure it was"
+# Sample only while no run is in flight. `runs.log` is written when a run
+# STARTS and `onerr` writes `alerts.log` when it fails, so a mid-body sample
+# counts a run that has not alerted yet. The unit also reads `running` with no
+# `last_exit` from the fire until the supervisor publishes the outcome --
+# measured at phase 1.6s-7.7s of the 20s cycle. Second 13 sits clear of both
+# ends: 5s after the outcome lands, 7s before the next fire.
+while [ "$(( $(date +%s) % 20 ))" -ne 13 ]; do sleep 0.1; done
+
+# One snapshot, asserted against below, so every check describes the same runs.
 S="$(sysg status --format json)"
+SUPLOG="$(sysg logs --supervisor 2>/dev/null)"
+RUNS="$(wc -l < /tmp/runs.log 2>/dev/null || echo 0)"
+ALERTS="$(wc -l < /tmp/alerts.log 2>/dev/null || echo 0)"
+
+section "the run is recorded as the failure it was"
 [ "$(unit_field "$S" nightly state)" = "failed" ]
 check "$?" "status reports the cron unit as failed"
 
@@ -50,22 +63,20 @@ else: print("absent")
 [ "$EXIT_CODE" = "4" ]
 check "$?" "the recorded exit code is the command's own (got: $EXIT_CODE)"
 
-sysg logs --supervisor 2>/dev/null | grep -q "Cron job 'nightly' failed: Process exited with code 4"
+printf '%s' "$SUPLOG" | grep -q "Cron job 'nightly' failed: Process exited with code 4"
 check "$?" "the supervisor log names the failure and its code"
 
-! sysg logs --supervisor 2>/dev/null | grep -q "Cron job 'nightly' completed successfully"
+! printf '%s' "$SUPLOG" | grep -q "Cron job 'nightly' completed successfully"
 check "$?" "a failed run is never reported as completed successfully"
 
 section "the failure alerts exactly once per run"
-RUNS="$(wc -l < /tmp/runs.log 2>/dev/null || echo 0)"
-ALERTS="$(wc -l < /tmp/alerts.log 2>/dev/null || echo 0)"
 [ "$RUNS" -ge 2 ]
 check "$?" "the schedule fired at least twice in the window (runs: $RUNS)"
 [ "$ALERTS" = "$RUNS" ]
 check "$?" "onerr fired once per failed run (runs: $RUNS, alerts: $ALERTS)"
 
 section "a cron unit is never restarted off its schedule"
-! sysg logs --supervisor 2>/dev/null | grep -qE "Restarting 'nightly'|Service 'nightly' crashed"
+! printf '%s' "$SUPLOG" | grep -qE "Restarting 'nightly'|Service 'nightly' crashed"
 check "$?" "no crash-restart for a unit whose next run is its schedule"
 
 # A backoff re-run would land ~5s after the previous exit; the schedule is 20s.
