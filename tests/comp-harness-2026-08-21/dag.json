@@ -1,0 +1,32 @@
+{
+ "db": [],
+ "queue": [],
+ "cache": [
+  "db"
+ ],
+ "worker1": [
+  "cache"
+ ],
+ "worker2": [
+  "cache"
+ ],
+ "worker3": [
+  "cache"
+ ],
+ "ingest1": [
+  "queue"
+ ],
+ "ingest2": [
+  "queue"
+ ],
+ "aggregator": [
+  "worker1",
+  "worker2",
+  "worker3",
+  "ingest1",
+  "ingest2"
+ ],
+ "reporter": [
+  "aggregator"
+ ]
+}

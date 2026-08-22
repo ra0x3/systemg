@@ -1,5 +1,6 @@
 import { Box, Flex, Stack, Text } from "@chakra-ui/react";
 import { Link } from "react-router";
+import { ARTICLES } from "~/content/articles";
 import { formatDate, RELEASES } from "~/content/releases";
 import { Eyebrow } from "~/ds/components";
 
@@ -44,6 +45,25 @@ export default function Blog() {
       </Box>
 
       <Stack gap="0" mt="48px">
+        {ARTICLES.map((a) => (
+          <Box key={a.slug} borderTop="1px solid" borderColor="border.rule">
+            <Link to={`/blog/${a.date}/${a.slug}`}>
+              <Flex py="24px" gap="18px" align="baseline" wrap="wrap">
+                <Text fontFamily="mono" fontSize="micro" color="accent.500" minW="86px">
+                  {formatDate(a.date)}
+                </Text>
+                <Box flex="1" minW="260px">
+                  <Text fontSize="20px" letterSpacing="-0.02em" fontWeight="bold" color="text.heading">
+                    {a.title}
+                  </Text>
+                  <Text mt="6px" fontSize="14px" lineHeight="1.5" color="text.secondary">
+                    {a.summary}
+                  </Text>
+                </Box>
+              </Flex>
+            </Link>
+          </Box>
+        ))}
         {RELEASES.map((release) => {
           const y = release.date.slice(0, 4);
           const newYear = y !== year;

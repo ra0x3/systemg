@@ -92,6 +92,10 @@ const config = defineConfig({
           500: { value: v("warn-500") },
           tint: { value: v("warn-tint") },
         },
+        verdict: {
+          good: { value: v("verdict-good") },
+          bad: { value: v("verdict-bad") },
+        },
         channel: {
           blue: { value: v("channel-blue") },
           violet: { value: v("channel-violet") },

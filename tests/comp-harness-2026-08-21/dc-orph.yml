@@ -1,0 +1,4 @@
+services:
+  w:
+    image: debian:bookworm-slim
+    command: ["/bin/sh","-c","sleep 3600 & sh -c 'sleep 3600' & setsid sh -c 'sleep 3600' >/dev/null 2>&1 & exec sleep 3600"]

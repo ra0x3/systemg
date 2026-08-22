@@ -1,0 +1,6 @@
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+# Baseline = what a stock Ubuntu 22.04 dev box already has. Installed here so
+# it is NEVER inside a timed window.
+RUN apt-get update -qq && apt-get install -y -qq python3 curl ca-certificates gnupg procps \
+    && rm -rf /var/lib/apt/lists/*
