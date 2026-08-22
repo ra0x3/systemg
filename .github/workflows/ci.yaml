@@ -287,6 +287,12 @@ jobs:
       - name: Build Site
         run: npm run build
 
+      # A relative MDX link resolves against the page it sits on, so a wrong one
+      # renders fine in review and 404s in production. This walks the built
+      # output the way a browser would.
+      - name: Check Links
+        run: npm run links
+
       # `prebuild` regenerates content/search.json from the MDX sources, so a
       # dirty tree here means the committed search index is stale.
       - name: Check Search Index Freshness
@@ -733,6 +739,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .claude-plugin/plugin.json
           git commit -m "chore(plugin): sync claude plugin version to ${{ needs.extract-version.outputs.tag }}"
+          # publish-release-post writes to main on the same release; rebase so
+          # whichever lands second does not fail on a non-fast-forward.
+          git pull --rebase origin main
           git push origin main
 
   create-github-release:
@@ -1129,3 +1138,82 @@ jobs:
           else
             cargo publish --locked --no-verify
           fi
+
+  publish-release-post:
+    name: Publish Release Blog Post
+    runs-on: ubuntu-latest
+    # The blog reads content/releases.json, which is generated from the GitHub
+    # release, so this runs only once that release exists.
+    needs:
+      - extract-version
+      - detect-version-bump
+      - create-github-release
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: sysg.dev
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.detect-version-bump.outputs.bumped == 'true' && needs.create-github-release.result == 'success'
+    steps:
+      - name: Checkout Repository
+        # Full history and tags: each release post lists the commits in its own
+        # tag range, which a shallow clone reports as empty.
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set Up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: sysg.dev/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Generate release post
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run releases
+
+      # The search index embeds every release post, so it goes stale the moment
+      # a new one is written — and the web job fails on a stale index.
+      # fetch-releases keeps the cached file when the API call fails, so a green
+      # step is not evidence the post exists. Prove this release is in there.
+      - name: Verify release post was written
+        env:
+          RELEASE_TAG: ${{ needs.extract-version.outputs.tag }}
+        run: |
+          node -e '
+            const releases = require("./content/releases.json");
+            const tag = process.env.RELEASE_TAG;
+            if (!releases.some((r) => r.tag === tag)) {
+              console.error(`releases.json has no entry for ${tag}`);
+              process.exit(1);
+            }
+            console.log(`release post present for ${tag}`);
+          '
+
+      - name: Rebuild search index
+        run: npm run search
+
+      - name: Commit release post
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- content/releases.json content/search.json; then
+            echo "Release post already published."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add content/releases.json content/search.json
+          git commit -m "docs(blog): publish release post for ${{ needs.extract-version.outputs.tag }}"
+          # sync-plugin-version pushes to main on the same release, so rebase
+          # rather than lose this commit to a non-fast-forward race.
+          git pull --rebase origin main
+          git push origin main

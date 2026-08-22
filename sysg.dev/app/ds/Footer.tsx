@@ -16,7 +16,7 @@ const COLUMNS = [
   {
     header: "Reference",
     items: [
-      { label: "CLI commands", href: "/reference" },
+      { label: "CLI commands", href: "/reference/commands" },
       { label: "Diagnostics", href: "/reference/dialog/codes" },
       { label: "Configuration", href: "/docs/how-it-works/configuration" },
     ],
