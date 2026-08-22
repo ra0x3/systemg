@@ -849,7 +849,13 @@ impl From<String> for DependsOn {
 }
 
 /// Configuration for an individual service.
+///
+/// Unknown keys are refused rather than ignored: a misspelled or retired key
+/// reads as configuration that is in force when it is not — a manifest can
+/// declare alerting, isolation or a schedule and get none of it, with nothing
+/// in `validate` or the logs to say so.
 #[derive(Debug, Default, Deserialize, Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
     /// Command used to start the service, run through `sh -c`.
     ///

@@ -421,6 +421,13 @@ fn classify_yaml(err: &serde_yaml::Error) -> Diagnostic {
             "Give the health_check a `url:` or a `command:` (plus optional interval/attempt_timeout/retries).",
             "/how-it-works/configuration",
         )
+    } else if lower.contains("unknown field") {
+        (
+            "unknown-field",
+            "systemg accepts only the documented keys for a service; anything else is a typo or a key from an older schema.",
+            "Delete the key or write its documented spelling — service hooks, for example, are `hooks:` with `onstart:` and `onerr:` beneath it.",
+            "/how-it-works/configuration",
+        )
     } else if lower.contains("project.id") {
         (
             "invalid-project-id",

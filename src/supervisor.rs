@@ -56,6 +56,11 @@ use crate::{
 
 /// Interval between cron scheduler scans.
 const CRON_TICK_INTERVAL: Duration = Duration::from_secs(1);
+/// Reason recorded when a cron run's exit status was consumed elsewhere and
+/// never routed back to the run that owned it. The outcome is unknown, and an
+/// unknown outcome is never a success.
+const CRON_STATUS_LOST_REASON: &str =
+    "the run's exit status was consumed by another reaper before it could be read";
 /// Delay before retrying a failed control-socket accept.
 const CONTROL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Maximum time allowed for a live-upgrade acceptance response to reach its client.
@@ -417,6 +422,27 @@ fn persist_cron_state(
         && let Err(err) = state_file.set(service_hash, status, None, exit_code, None)
     {
         warn!("Failed to persist cron job '{service_name}' exit state: {err}");
+    }
+}
+
+/// Runs a unit's `onerr` hook for a cron run that did not succeed.
+///
+/// A cron run is judged in exactly one place — the completion path — so it is
+/// announced from exactly one place too. The monitor skips its own hook for
+/// these units; firing from both would alert twice for a single failure.
+fn notify_cron_failure(
+    daemon: &Daemon,
+    service_name: &str,
+    service_config: &crate::config::ServiceConfig,
+    status: &CronExecutionStatus,
+) {
+    match status {
+        CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => {
+            daemon.run_onerr(service_name, service_config);
+        }
+        // An interrupted run reports a lost outcome, not a failed one: the
+        // command may well have succeeded, and alerting on it would cry wolf.
+        CronExecutionStatus::Success | CronExecutionStatus::Interrupted(_) => {}
     }
 }
 
@@ -3432,7 +3458,8 @@ impl Supervisor {
                 }
 
                 let due_jobs = cron_manager.get_due_job_refs();
-                if !due_jobs.is_empty() {
+                let overlaps = cron_manager.take_overlaps();
+                if !due_jobs.is_empty() || !overlaps.is_empty() {
                     let projects = match cron_projects.read() {
                         Ok(projects) => projects.clone(),
                         Err(err) => {
@@ -3440,6 +3467,25 @@ impl Supervisor {
                             Vec::new()
                         }
                     };
+
+                    for overlap in overlaps {
+                        let Some(project) = projects.iter().find(|project| {
+                            project.config.state_key(&overlap.service_name)
+                                == overlap.service_hash
+                        }) else {
+                            continue;
+                        };
+                        if let Some(service_config) =
+                            project.config.services.get(&overlap.service_name)
+                        {
+                            notify_cron_failure(
+                                &project.daemon,
+                                &overlap.service_name,
+                                service_config,
+                                &CronExecutionStatus::OverlapError,
+                            );
+                        }
+                    }
 
                     for due_job in due_jobs {
                         let project = projects.iter().find(|project| {
@@ -3505,6 +3551,11 @@ impl Supervisor {
                                 .spawn(move || {
                                 let _completion_claim =
                                     daemon.claim_completion(&job_name_clone);
+                                // Anything still addressed to this unit belongs
+                                // to a run nobody is waiting on; clearing it
+                                // before the spawn keeps it from being read as
+                                // this run's outcome.
+                                crate::reaper::drop_claims(&job_name_clone);
                                 match daemon
                                     .start_service(&job_name_clone, &service_config)
                                 {
@@ -3618,6 +3669,12 @@ impl Supervisor {
                                                                 &job_name_clone,
                                                                 pid,
                                                             );
+                                                            notify_cron_failure(
+                                                                &daemon,
+                                                                &job_name_clone,
+                                                                &service_config,
+                                                                &status,
+                                                            );
                                                             cron_manager_clone.complete_job_run(
                                                                 &service_hash,
                                                                 run_started_at,
@@ -3648,12 +3705,20 @@ impl Supervisor {
                                                                 &job_name_clone,
                                                                 pid,
                                                             );
+                                                            let status =
+                                                                CronExecutionStatus::Failed(
+                                                                    e.to_string(),
+                                                                );
+                                                            notify_cron_failure(
+                                                                &daemon,
+                                                                &job_name_clone,
+                                                                &service_config,
+                                                                &status,
+                                                            );
                                                             cron_manager_clone.complete_job_run(
                                                                 &service_hash,
                                                                 run_started_at,
-                                                                CronExecutionStatus::Failed(
-                                                                    e.to_string(),
-                                                                ),
+                                                                status,
                                                                 None,
                                                                 metrics,
                                                             );
@@ -3715,13 +3780,21 @@ impl Supervisor {
                                                             ServiceLifecycleStatus::ExitedWithError,
                                                             None,
                                                         );
-                                                        cron_manager_clone.complete_job_run(
-                                                            &service_hash,
-                                                            run_started_at,
+                                                        let status =
                                                             CronExecutionStatus::Failed(
                                                                 "Failed to get PID from PID file"
                                                                     .to_string(),
-                                                            ),
+                                                            );
+                                                        notify_cron_failure(
+                                                            &daemon,
+                                                            &job_name_clone,
+                                                            &service_config,
+                                                            &status,
+                                                        );
+                                                        cron_manager_clone.complete_job_run(
+                                                            &service_hash,
+                                                            run_started_at,
+                                                            status,
                                                             None,
                                                             vec![],
                                                         );
@@ -3741,10 +3814,18 @@ impl Supervisor {
                                                 user.clone(),
                                                 command.clone(),
                                             );
+                                        let status =
+                                            CronExecutionStatus::Failed(e.to_string());
+                                        notify_cron_failure(
+                                            &daemon,
+                                            &job_name_clone,
+                                            &service_config,
+                                            &status,
+                                        );
                                         cron_manager_clone.complete_job_run(
                                             &service_hash,
                                             run_started_at,
-                                            CronExecutionStatus::Failed(e.to_string()),
+                                            status,
                                             None,
                                             vec![],
                                         );
@@ -6268,6 +6349,46 @@ running project does not declare; restart the project to apply structural change
     }
 
     /// Waits for a cron job process to complete and returns the final outcome.
+    /// Maps an exit status reaped elsewhere onto this run's outcome.
+    fn cron_outcome_from_status(
+        job_name: &str,
+        status: std::process::ExitStatus,
+    ) -> CronCompletionOutcome {
+        if let Some(signal) = status.signal() {
+            warn!(
+                "Cron job '{}' was terminated by signal {}",
+                job_name, signal
+            );
+            return CronCompletionOutcome {
+                status: CronExecutionStatus::Failed(format!(
+                    "Terminated by signal {signal}"
+                )),
+                exit_code: None,
+            };
+        }
+        match status.code() {
+            Some(0) => CronCompletionOutcome {
+                status: CronExecutionStatus::Success,
+                exit_code: Some(0),
+            },
+            Some(code) => {
+                debug!("Cron job '{}' exited with code {}", job_name, code);
+                CronCompletionOutcome {
+                    status: CronExecutionStatus::Failed(format!(
+                        "Process exited with code {code}"
+                    )),
+                    exit_code: Some(code),
+                }
+            }
+            None => CronCompletionOutcome {
+                status: CronExecutionStatus::Failed(
+                    "Process exited without reporting a status".to_string(),
+                ),
+                exit_code: None,
+            },
+        }
+    }
+
     fn wait_for_cron_completion(
         pid: u32,
         job_name: &str,
@@ -6295,6 +6416,12 @@ running project does not declare; restart the project to apply structural change
         let start = std::time::Instant::now();
 
         loop {
+            // The monitor reaps managed children too, and on Linux a pidfd
+            // wakes it the instant one exits. When it gets there first it
+            // routes the status here rather than leaving this thread to guess.
+            if let Some(status) = crate::reaper::take_for(pid as i32, job_name) {
+                return Ok(Self::cron_outcome_from_status(job_name, status));
+            }
             match waitpid(wait_pid, Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::StillAlive) => {
                     if start.elapsed() > max_wait_time {
@@ -6350,13 +6477,18 @@ running project does not declare; restart the project to apply structural change
                     thread::sleep(poll_interval);
                 }
                 Err(nix::errno::Errno::ECHILD) => {
-                    debug!(
-                        "Cron job '{}' already reaped before wait, assuming success",
+                    if let Some(status) = crate::reaper::take_for(pid as i32, job_name) {
+                        return Ok(Self::cron_outcome_from_status(job_name, status));
+                    }
+                    warn!(
+                        "Cron job '{}' was reaped without routing its exit status; recording the run as interrupted",
                         job_name
                     );
                     return Ok(CronCompletionOutcome {
-                        status: CronExecutionStatus::Success,
-                        exit_code: Some(0),
+                        status: CronExecutionStatus::Interrupted(
+                            CRON_STATUS_LOST_REASON.to_string(),
+                        ),
+                        exit_code: None,
                     });
                 }
                 Err(e) => {
@@ -6567,6 +6699,68 @@ mod tests {
             }
             Err(err) => panic!("failed to inspect timed-out cron process: {err}"),
         }
+    }
+
+    #[test]
+    fn cron_completion_reads_a_status_the_monitor_reaped_first() {
+        // A pid this thread never parented: `waitpid` can only answer ECHILD,
+        // so the outcome has to come from the routed status — exactly the
+        // position the cron thread is in when the monitor wins the race.
+        let pid = 4_000_001u32;
+        crate::reaper::drop_claims("routed-cron");
+        crate::reaper::publish(
+            pid as i32,
+            "routed-cron",
+            std::process::ExitStatus::from_raw(1024),
+        );
+
+        let outcome = Supervisor::wait_for_cron_completion_with_timeout(
+            pid,
+            "routed-cron",
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+        )
+        .expect("a routed status resolves the run");
+
+        assert!(matches!(
+            outcome.status,
+            CronExecutionStatus::Failed(ref reason) if reason.contains("code 4")
+        ));
+        assert_eq!(outcome.exit_code, Some(4));
+    }
+
+    #[test]
+    fn cron_completion_never_invents_success_for_a_lost_status() {
+        let pid = 4_000_002u32;
+        crate::reaper::drop_claims("lost-cron");
+
+        let outcome = Supervisor::wait_for_cron_completion_with_timeout(
+            pid,
+            "lost-cron",
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+        )
+        .expect("a lost status still resolves the run");
+
+        assert!(matches!(
+            outcome.status,
+            CronExecutionStatus::Interrupted(_)
+        ));
+        assert_eq!(outcome.exit_code, None);
+    }
+
+    #[test]
+    fn a_signalled_cron_run_is_a_failure() {
+        let outcome = Supervisor::cron_outcome_from_status(
+            "killed-cron",
+            std::process::ExitStatus::from_raw(9),
+        );
+
+        assert!(matches!(
+            outcome.status,
+            CronExecutionStatus::Failed(ref reason) if reason.contains("signal")
+        ));
+        assert_eq!(outcome.exit_code, None);
     }
 
     #[test]

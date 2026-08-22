@@ -1,0 +1,17 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      # Fails on every boundary, and says so twice: an exit code for status and
+      # an `onerr` hook for alerting. `restart_policy: always` is deliberate —
+      # a cron unit's next run comes from its schedule, never from a restart.
+      nightly:
+        command: "sh -c 'date +%s >> /tmp/runs.log; sleep 2; exit 4'"
+        restart_policy: always
+        backoff: 5s
+        hooks:
+          onerr:
+            command: "sh -c 'echo ALERT >> /tmp/alerts.log'"
+        cron:
+          expression: "*/20 * * * * *"

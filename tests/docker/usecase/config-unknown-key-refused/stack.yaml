@@ -1,0 +1,13 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      # `on_error` is not a systemg key and never was. Spelled at service level
+      # it looks like alerting and does nothing at all.
+      nightly:
+        command: "sh -c 'exit 4'"
+        restart_policy: never
+        on_error: /usecase/alert.sh
+        cron:
+          expression: "0 3 * * *"
