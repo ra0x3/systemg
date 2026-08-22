@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://sysg.dev/docs
+    about: Configuration, commands, and how sysg works.
+  - name: Diagnostic codes
+    url: https://sysg.dev/reference/dialog/codes
+    about: Look up an SG#### code before filing.
