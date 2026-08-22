@@ -238,7 +238,7 @@ one-shot, dependency chain, slow pre-start, and long-running services.
 The command used `arbiration-dev`, while the loaded id was
 `arbitration-dev`. The supervisor correctly listed both arbitration and
 gamecast, but config resolution produced
-[`SG0201`](https://sysg.dev/how-it-works/dialog/codes#sg0201) because the
+[`SG0201`](https://sysg.dev/reference/dialog/codes#sg0201) because the
 requested id did not match the resolved manifest.
 
 Always copy stable ids from structured status. Do not infer them from the
@@ -274,7 +274,7 @@ Use these as review questions for every lifecycle change:
 1. One resident supervisor owns the control socket.
 2. One project id owns one runtime and one state directory.
 3. A mutation either acquires the operation slot or returns
-   [`SG0107`](https://sysg.dev/how-it-works/dialog/codes#sg0107).
+   [`SG0107`](https://sysg.dev/reference/dialog/codes#sg0107).
 4. Validation happens before teardown.
 5. Unchanged services retain their PID during manifest reconciliation.
 6. A targeted restart includes required dependents but not unrelated units.
@@ -333,7 +333,7 @@ Do not move on until all applicable statements are true:
 - status, PID/process group, and persisted state agree
 - no old process generation or orphan remains
 - the user receives a specific SG code instead of
-  [`SG0001`](https://sysg.dev/how-it-works/dialog/codes#sg0001) where possible
+  [`SG0001`](https://sysg.dev/reference/dialog/codes#sg0001) where possible
 - the complete automated gates pass
 - the live workflow succeeds on the installed artifact
 

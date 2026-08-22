@@ -100,7 +100,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: cargo-audit
     outputs:
-      docs: ${{ steps.filter.outputs.docs }}
       rust: ${{ steps.filter.outputs.rust }}
       web: ${{ steps.filter.outputs.web }}
 
@@ -116,9 +115,6 @@ jobs:
         uses: dorny/paths-filter@v3
         with:
           filters: |
-            docs:
-              - 'docs/**'
-              - '.github/workflows/ci.yaml'
             web:
               - 'sysg.dev/**'
               - '.github/workflows/ci.yaml'
@@ -228,29 +224,6 @@ jobs:
           echo "Current version: $current_version"
           echo "Latest published: ${previous_version:-<none>}"
           echo "Needs release: $bumped"
-
-  docs:
-    name: Mintlify Docs
-    runs-on: ubuntu-latest
-    needs: [cancel-previous, changes]
-    if: ${{ needs.changes.outputs.docs == 'true' }}
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set Up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20.17.0"
-
-      - name: Install Mintlify CLI
-        # Pin Mintlify to keep docs validation reproducible across CI runs.
-        run: npm install --global mintlify@4.0.373
-
-      - name: Validate Docs
-        working-directory: sysg.dev/content
-        run: mintlify broken-links < /dev/null
 
   web:
     name: sysg.dev

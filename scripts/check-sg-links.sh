@@ -18,7 +18,7 @@ while IFS= read -r file; do
       $whole = $&;
       $code = lc($1);
       $url = $2;
-      $url =~ m{^(?:https://sysg\.dev)?/how-it-works/dialog/codes#$code$}
+      $url =~ m{^(?:https://sysg\.dev)?/reference/dialog/codes#$code$}
         ? ""
         : $whole;
     }gex;
@@ -26,7 +26,7 @@ while IFS= read -r file; do
       $whole = $&;
       $url = $1;
       $code = lc($2);
-      $url =~ m{^(?:https://sysg\.dev)?/how-it-works/dialog/codes#$code$}
+      $url =~ m{^(?:https://sysg\.dev)?/reference/dialog/codes#$code$}
         ? ""
         : $whole;
     }gex;
