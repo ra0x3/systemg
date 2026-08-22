@@ -7,6 +7,11 @@
   "trailingSlash": false,
   "redirects": [
     {
+      "source": "/reference",
+      "destination": "/reference/configuration",
+      "permanent": false
+    },
+    {
       "source": "/docs/index",
       "destination": "/docs",
       "permanent": true

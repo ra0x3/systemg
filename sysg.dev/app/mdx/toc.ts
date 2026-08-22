@@ -1,3 +1,4 @@
+import GithubSlugger from "github-slugger";
 import { visit } from "unist-util-visit";
 
 function text(node: Record<string, unknown>): string {
@@ -6,22 +7,19 @@ function text(node: Record<string, unknown>): string {
   return children.map(text).join("");
 }
 
-function slug(value: string) {
-  return value
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "-");
-}
-
 export function remarkToc() {
   return (tree: Record<string, unknown>) => {
     const items: { depth: number; id: string; title: string }[] = [];
+    // The heading ids themselves come from rehype-slug, which slugs with
+    // github-slugger. Anything else here drifts on the first heading holding
+    // punctuation — "Linux / macOS" is `linux--macos` to one and `linux-macos`
+    // to the other — and the contents links land nowhere.
+    const slugger = new GithubSlugger();
     visit(tree as never, "heading", (node: Record<string, unknown>) => {
       const depth = node.depth as number;
       if (depth < 2 || depth > 3) return;
       const title = text(node);
-      if (title) items.push({ depth, id: slug(title), title });
+      if (title) items.push({ depth, id: slugger.slug(title), title });
     });
     (tree.children as unknown[]).push({
       type: "mdxjsEsm",

@@ -14,9 +14,9 @@ systemg exists to run a handful of related processes as one unit — with depend
 
 **Correct process lifecycle.** Services start in dependency order and are supervised for real: unsuccessful exits restart with backoff, process-group teardown does not orphan children, and persisted state makes ownership recoverable after a supervisor restart.
 
-**Secure because it's the default, not because you configured it.** A service that drops to another user starts from a clean environment with reset supplementary groups and trimmed capabilities — you don't have to remember to ask. The [control socket](security) is authenticated and owner-only. Least privilege is the path of least resistance.
+**Secure because it's the default, not because you configured it.** A service that drops to another user starts from a clean environment with reset supplementary groups and trimmed capabilities — you don't have to remember to ask. The [control socket](/docs/security) is authenticated and owner-only. Least privilege is the path of least resistance.
 
-**Honest about its boundaries.** When a feature isn't implemented, systemg says so and warns — it never silently pretends a seccomp profile or namespace is in effect. The [trust model](security) is written down, and the code is audited against it.
+**Honest about its boundaries.** When a feature isn't implemented, systemg says so and warns — it never silently pretends a seccomp profile or namespace is in effect. The [trust model](/docs/security) is written down, and the code is audited against it.
 
 ## What we're not
 
@@ -24,6 +24,6 @@ systemg is not a container runtime, an orchestrator, or a replacement for PID 1 
 
 ## See also
 
-- [Introduction](intro) — what systemg does
-- [Security](security) — trust model and hardening
-- [Configuration](how-it-works/configuration) — define your system
+- [Introduction](/docs/intro) — what systemg does
+- [Security](/docs/security) — trust model and hardening
+- [Configuration](/docs/how-it-works/configuration) — define your system
