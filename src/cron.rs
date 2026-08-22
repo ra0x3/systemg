@@ -628,6 +628,21 @@ pub struct CronManager {
     /// Ownership therefore lives here, in the process that staked it, where it
     /// is exact and outlives any `sync_from_configs`.
     in_flight: Arc<Mutex<HashMap<String, SystemTime>>>,
+    /// Overlapping boundaries recorded but not yet reported to the scheduler.
+    ///
+    /// An overlap is decided here, inside the jobs lock, and the run it would
+    /// have started never reaches the scheduler — so the scheduler cannot see
+    /// the failure unless the event is handed to it.
+    overlaps: Arc<Mutex<Vec<CronOverlap>>>,
+}
+
+/// A boundary skipped because the previous run of that unit was still going.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronOverlap {
+    /// Unit whose boundary was skipped.
+    pub service_name: String,
+    /// Stable state key of that unit.
+    pub service_hash: String,
 }
 
 impl Default for CronManager {
@@ -646,6 +661,7 @@ impl CronManager {
             jobs: Arc::new(Mutex::new(Vec::new())),
             stores: Arc::new(Mutex::new(stores)),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            overlaps: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -882,6 +898,10 @@ impl CronManager {
                     job.add_execution_record(record);
                     job.update_next_execution();
                     self.persist_job_state(job);
+                    lock_recover(&self.overlaps).push(CronOverlap {
+                        service_name: job.service_name.clone(),
+                        service_hash: job.service_hash.clone(),
+                    });
                     continue;
                 }
 
@@ -915,6 +935,11 @@ impl CronManager {
         }
 
         due_jobs
+    }
+
+    /// Takes the overlapping boundaries recorded since the last call.
+    pub fn take_overlaps(&self) -> Vec<CronOverlap> {
+        std::mem::take(&mut *lock_recover(&self.overlaps))
     }
 
     /// Removes all scheduled jobs owned by one project.

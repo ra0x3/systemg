@@ -1,0 +1,13 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      nightly:
+        command: "sh -c 'exit 4'"
+        restart_policy: never
+        hooks:
+          onerr:
+            command: /usecase/alert.sh
+        cron:
+          expression: "0 3 * * *"

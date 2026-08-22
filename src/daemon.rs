@@ -5464,10 +5464,12 @@ impl Daemon {
         ) {
             Ok(state) => state,
             Err(err) => {
-                if matches!(
-                    self.recorded_status(service_name),
-                    Some(ServiceLifecycleStatus::ExitedWithError)
-                ) {
+                if service.cron.is_none()
+                    && matches!(
+                        self.recorded_status(service_name),
+                        Some(ServiceLifecycleStatus::ExitedWithError)
+                    )
+                {
                     self.run_onerr(service_name, service);
                 }
                 return Err(err);
@@ -5484,10 +5486,12 @@ impl Daemon {
             if let Err(err) =
                 self.wait_for_health_check(service_name, health_check, started_at)
             {
-                if matches!(
-                    self.recorded_status(service_name),
-                    Some(ServiceLifecycleStatus::ExitedWithError)
-                ) {
+                if service.cron.is_none()
+                    && matches!(
+                        self.recorded_status(service_name),
+                        Some(ServiceLifecycleStatus::ExitedWithError)
+                    )
+                {
                     self.run_onerr(service_name, service);
                 }
                 // The unit came up as a process but never passed its health
@@ -5512,7 +5516,7 @@ impl Daemon {
         Ok(state)
     }
 
-    fn run_onerr(&self, service_name: &str, service: &ServiceConfig) {
+    pub(crate) fn run_onerr(&self, service_name: &str, service: &ServiceConfig) {
         if let Some(action) = service
             .hooks
             .as_ref()
@@ -8743,8 +8747,22 @@ impl Daemon {
                     let signal = exit_status.signal();
                     #[cfg(not(unix))]
                     let signal = None;
+                    // A cron unit's run is owned by its completion thread: the
+                    // monitor only reaped the child first. Route the status to
+                    // that owner and leave the outcome — hooks, restarts — to
+                    // it, or the same run gets judged twice by two threads that
+                    // disagree.
+                    let is_cron = ctx
+                        .config
+                        .services
+                        .get(&name)
+                        .is_some_and(|service| service.cron.is_some());
+                    if is_cron {
+                        crate::reaper::publish(exited_pid as i32, &name, exit_status);
+                    }
                     if !manually_stopped
                         && !exit_success
+                        && !is_cron
                         && let Some(service) = ctx.config.services.get(&name)
                     {
                         let env = service.env.clone();
@@ -8808,11 +8826,11 @@ impl Daemon {
                         if let Ok(mut gate) = ctx.lock_restart_gate() {
                             gate.entry(name.clone()).or_default().settle(Instant::now());
                         }
-                        let should_restart = ctx
-                            .config
-                            .services
-                            .get(&name)
-                            .is_some_and(|service| service.restarts_after_failure());
+                        let should_restart =
+                            !is_cron
+                                && ctx.config.services.get(&name).is_some_and(
+                                    |service| service.restarts_after_failure(),
+                                );
 
                         if should_restart {
                             let already = ctx
@@ -8826,6 +8844,10 @@ impl Daemon {
                                 }
                                 restarted_services.push((name.clone(), recorded_pgid));
                             }
+                        } else if is_cron {
+                            debug!(
+                                "Cron unit '{name}' failed; its next run comes from the schedule, not a restart."
+                            );
                         } else {
                             warn!(
                                 "Service '{name}' crashed but restart_policy does not allow restart."
