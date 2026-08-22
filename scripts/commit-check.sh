@@ -15,9 +15,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 
-# Pinned to match .github/workflows/ci.yaml; a drifting CLI resolves links differently.
-MINTLIFY_VERSION="4.0.373"
-
 trap 'rm -rf "${TMP_DIR}"' EXIT INT TERM
 
 run_labeled() {
@@ -86,11 +83,6 @@ run_labeled \
   "rust:docs" \
   "${BLUE}" \
   "cd \"${REPO_ROOT}\" && cargo rustdoc --lib -- -D warnings -D missing_docs"
-
-run_labeled \
-  "docs:mintlify" \
-  "${BLUE}" \
-  "cd \"${REPO_ROOT}/sysg.dev/content\" && npx -y mintlify@${MINTLIFY_VERSION} broken-links < /dev/null"
 
 run_labeled \
   "sysg.dev" \

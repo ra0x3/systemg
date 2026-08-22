@@ -71,10 +71,10 @@ handoff schema match the resident. Residents from `0.56.0` through `0.57.0`
 enforce the original same-major/minor rule; earlier residents do not support
 live re-execution. An incompatible or unsafe handoff leaves the active version
 unchanged and reports
-[`SG0501`](https://sysg.dev/how-it-works/dialog/codes#sg0501) through
-[`SG0505`](https://sysg.dev/how-it-works/dialog/codes#sg0505).
+[`SG0501`](https://sysg.dev/reference/dialog/codes#sg0501) through
+[`SG0505`](https://sysg.dev/reference/dialog/codes#sg0505).
 
-For [`SG0502`](https://sysg.dev/how-it-works/dialog/codes#sg0502), stop the
+For [`SG0502`](https://sysg.dev/reference/dialog/codes#sg0502), stop the
 supervisor, rerun the installer, then restart each required project:
 
 ```bash

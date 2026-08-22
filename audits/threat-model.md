@@ -25,18 +25,18 @@ output, and — in system mode — every non-root local user.
 |---|---|---|---|
 | Control socket | local non-root user | connect, forge frames | 0700 dir + 0600 socket; SO_PEERCRED/getpeereid on every accept; reject before read |
 | IPC frame decode | authenticated-but-malicious same-UID process; compromised admin tool | oversized/malformed/deeply-nested JSON | 1 MiB frame cap; typed Serde enum; fuzz target (`fuzz/fuzz_targets/ipc_frame.rs`) |
-| Manifest + !include parse | operator typo → confused deputy; service-writable include path | YAML expansion, include cycles, TOCTOU swap | O_NOFOLLOW + fstat-same-fd parse; [SG0207](/how-it-works/dialog/codes#sg0207)–0209 include validation; YAML parser migrated to maintained `serde_yaml_ng` |
+| Manifest + !include parse | operator typo → confused deputy; service-writable include path | YAML expansion, include cycles, TOCTOU swap | O_NOFOLLOW + fstat-same-fd parse; [SG0207](/reference/dialog/codes#sg0207)–0209 include validation; YAML parser migrated to maintained `serde_yaml_ng` |
 | Privilege drop ordering | misordered syscalls re-grant authority | groups/caps retained across setuid | ordered transaction (unshare→rlimit→caps-pre→setgroups→setgid→setuid→caps-post); always-reset supplementary groups; env_clear on switch |
 | FD inheritance | dropped child inherits supervisor FDs | leaked socket/log/lock FDs | FD_CLOEXEC default; handoff FDs cleared briefly and restored |
 | Signals/PID identity | PID reuse → signal wrong process | stale pid.xml, recycled PID | PID+start-time identity; SID-scoped teardown; provenance ledger; no command-string inference (locked invariant) |
 | Log paths | socket-supplied service name | path traversal to root-owned file read/create | validated service names; confined log resolution (fixed 2026-07-13 P0) |
-| Live upgrade handoff | crafted snapshot/state | schema confusion across versions | version+protocol probe; refusal on mismatch ([SG0502](/how-it-works/dialog/codes#sg0502)); forbidden entirely as container PID 1 (red-team decision) |
+| Live upgrade handoff | crafted snapshot/state | schema confusion across versions | version+protocol probe; refusal on mismatch ([SG0502](/reference/dialog/codes#sg0502)); forbidden entirely as container PID 1 (red-team decision) |
 
 ## Kernel-mode deltas (added as phases land)
 
 - **Phase 1a (parity)**: root-without-`--sys` misdirection becomes a typed
-  warning ([SG0701](/how-it-works/dialog/codes#sg0701)) and a typed refusal when system-mode
-  state exists ([SG0702](/how-it-works/dialog/codes#sg0702)); system/user state cross-targeting is a correctness
+  warning ([SG0701](/reference/dialog/codes#sg0701)) and a typed refusal when system-mode
+  state exists ([SG0702](/reference/dialog/codes#sg0702)); system/user state cross-targeting is a correctness
   *and* privilege issue since user-writable state must never steer a root
   supervisor.
 - **Phase 1b (container-init)**: PID 1 inherits every orphan on the host

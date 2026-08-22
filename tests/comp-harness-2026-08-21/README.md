@@ -708,7 +708,7 @@ Positive means the tool claimed readiness it did not have.
   late costs time; erring early costs an outage.
 
 **A real finding about sysg's defaults.** The first attempt failed the service
-outright with [`SG0104`](https://sysg.dev/how-it-works/dialog/codes#sg0104),
+outright with [`SG0104`](https://sysg.dev/reference/dialog/codes#sg0104),
 "service `w` failed to become healthy". sysg's
 default health-check budget is 3 attempts; at a 1 s interval, anything needing
 more than ~3 s is torn down at boot unless `retries`/`total_timeout` are raised.

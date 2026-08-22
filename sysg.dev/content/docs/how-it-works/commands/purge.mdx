@@ -22,7 +22,7 @@ supervisor's view of the world. Stop the supervisor first, or pass `--force`.
 
 <pre>
   <code>
-    {"error["}<a href="/docs/how-it-works/dialog/codes#sg0401">SG0401</a>{"]: refused to purge: a supervisor is still managing processes\n\n  2 unit(s) are live under the running supervisor; purging its state now would strand them\n\n  help:\n    stop the supervisor first  sysg stop --supervisor\n    then purge                 sysg purge\n    or force it (stops + wipes) sysg purge --force\n"}
+    {"error["}<a href="/reference/dialog/codes#sg0401">SG0401</a>{"]: refused to purge: a supervisor is still managing processes\n\n  2 unit(s) are live under the running supervisor; purging its state now would strand them\n\n  help:\n    stop the supervisor first  sysg stop --supervisor\n    then purge                 sysg purge\n    or force it (stops + wipes) sysg purge --force\n"}
   </code>
 </pre>
 </Note>
@@ -83,10 +83,10 @@ Purged state for project 'arbitration'
 ```
 
 A `-p` naming a project with no state on disk refuses with
-[`SG0403`](/docs/how-it-works/dialog/codes#sg0403) and deletes nothing.
+[`SG0403`](/reference/dialog/codes#sg0403) and deletes nothing.
 
 A project id is one path segment. A `-p` that is empty, traversing, or absolute
-refuses with [`SG0404`](/docs/how-it-works/dialog/codes#sg0404); a `-c` purge resolves
+refuses with [`SG0404`](/reference/dialog/codes#sg0404); a `-c` purge resolves
 every project the config declares before deleting any, so one bad target refuses
 the whole purge rather than leaving it half-done.
 
@@ -102,6 +102,6 @@ supervisor, kills its services, and removes the state.
 
 ## See also
 
-- [`stop`](/docs/how-it-works/commands/stop) - Stop services without removing state
-- [`start`](/docs/how-it-works/commands/start) - Start fresh after purging
-- [Diagnostics](/docs/how-it-works/dialog) - [`SG0401`](/docs/how-it-works/dialog/codes#sg0401), [`SG0402`](/docs/how-it-works/dialog/codes#sg0402), [`SG0403`](/docs/how-it-works/dialog/codes#sg0403), [`SG0404`](/docs/how-it-works/dialog/codes#sg0404)
+- [`stop`](/reference/commands/stop) - Stop services without removing state
+- [`start`](/reference/commands/start) - Start fresh after purging
+- [Diagnostics](/reference/dialog) - [`SG0401`](/reference/dialog/codes#sg0401), [`SG0402`](/reference/dialog/codes#sg0402), [`SG0403`](/reference/dialog/codes#sg0403), [`SG0404`](/reference/dialog/codes#sg0404)

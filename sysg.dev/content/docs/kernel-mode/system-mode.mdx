@@ -25,12 +25,12 @@ daemons.
 `--sys` is always explicit. sysg never guesses the runtime from your EUID or
 from what exists on disk — it tells you when the modes cross:
 
-- [SG0701](/docs/how-it-works/dialog/codes#sg0701) — running as root *without*
+- [SG0701](/reference/dialog/codes#sg0701) — running as root *without*
   `--sys`: warns that state will land in root's user-mode paths.
-- [SG0702](/docs/how-it-works/dialog/codes#sg0702) — system-mode state exists but
+- [SG0702](/reference/dialog/codes#sg0702) — system-mode state exists but
   the command targets the user runtime: refuses rather than touch the wrong
   supervisor.
-- [SG0704](/docs/how-it-works/dialog/codes#sg0704) — `--sys` without root: refused.
+- [SG0704](/reference/dialog/codes#sg0704) — `--sys` without root: refused.
 
 ## Running services as other users
 
