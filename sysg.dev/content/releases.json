@@ -1,5 +1,41 @@
 [
   {
+    "tag": "v0.66.3",
+    "slug": "0.66.3",
+    "title": "v0.66.3",
+    "date": "2026-08-22T19:29:07Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.3",
+    "summary": "fix(ci): run mintlify against the real docs root and update the README logos (869aa4c)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): run mintlify against the real docs root and update the README logos (<code>869aa4c</code>)</li>\n<li>feat(brew): install sysg from a homebrew tap and publish it on release (<code>2c91a13</code>)</li>\n<li>docs(bench): rewrite the comparative harness README for readability (<code>7fa558e</code>)</li>\n<li>feat(web): publish release posts from CI and fix every broken sysg.dev link (<code>46287e6</code>)</li>\n<li>fix(cron): address routed statuses by state key and let the owner judge the run (<code>718b468</code>)</li>\n<li>fix(cron): route cron exit status to its owner and refuse unknown config keys (<code>6933c61</code>)</li>\n<li>enhancement(blog): ensure posts are mobile friendly (<code>eaf20d0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.1...v0.66.3\">Full changelog on GitHub</a></p>",
+    "commits": 7
+  },
+  {
+    "tag": "v0.66.1",
+    "slug": "0.66.1",
+    "title": "v0.66.1",
+    "date": "2026-08-22T00:55:44Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.1",
+    "summary": "chore: retagline systemg as a general-purpose program orchestrator (1d8835f)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>chore: retagline systemg as a general-purpose program orchestrator (<code>1d8835f</code>)</li>\n<li>enhancement(blog): add sysg intro blog post (<code>4ebe315</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.0 (<code>9fde2ca</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.0...v0.66.1\">Full changelog on GitHub</a></p>",
+    "commits": 3
+  },
+  {
+    "tag": "v0.66.0",
+    "slug": "0.66.0",
+    "title": "v0.66.0",
+    "date": "2026-08-21T19:53:56Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.0",
+    "summary": "perf(supervisor): bound live-log and metrics memory, add argv exec form (ffcfabd)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>perf(supervisor): bound live-log and metrics memory, add argv exec form (<code>ffcfabd</code>)</li>\n<li>fix(sysg.dev): sanitize release HTML before rendering it (<code>4e09e26</code>)</li>\n<li>feat(sysg.dev): rebuild sysg.dev on the systemg design system (<code>ed52a83</code>)</li>\n<li>feat(cli): color the --help doc links (<code>5234511</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.65.0 (<code>ec7c877</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.65.0...v0.66.0\">Full changelog on GitHub</a></p>",
+    "commits": 5
+  },
+  {
     "tag": "v0.65.0",
     "slug": "0.65.0",
     "title": "v0.65.0",
