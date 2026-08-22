@@ -47,7 +47,7 @@ services:
 ```
 
 An unsupported kernel or a malformed policy **refuses the service**
-([SG0722](/how-it-works/dialog/codes#sg0722)/[SG0724](/how-it-works/dialog/codes#sg0724))
+([SG0722](/docs/how-it-works/dialog/codes#sg0722)/[SG0724](/docs/how-it-works/dialog/codes#sg0724))
 rather than running it unprotected. `baseline-v1` is frozen; a different or
 stricter policy will ship as `baseline-v2`, never as a silent edit.
 
@@ -60,22 +60,22 @@ protection.
 
 <Warning>
 **Deprecation window.** Each of these keys emits
-[SG0721](/how-it-works/dialog/codes#sg0721) at service start. A future release
+[SG0721](/docs/how-it-works/dialog/codes#sg0721) at service start. A future release
 refuses them instead of running unprotected, behind a manifest schema bump.
 Remove the keys or plan for the refusal.
 </Warning>
 
 ## Diagnostics
 
-- [SG0721](/how-it-works/dialog/codes#sg0721) — a security key was accepted
+- [SG0721](/docs/how-it-works/dialog/codes#sg0721) — a security key was accepted
   but cannot be enforced; the service runs unprotected
-- [SG0722](/how-it-works/dialog/codes#sg0722) — seccomp filter could not be
+- [SG0722](/docs/how-it-works/dialog/codes#sg0722) — seccomp filter could not be
   built, compiled, or applied; service refused
-- [SG0723](/how-it-works/dialog/codes#sg0723) — `no_new_privs` could not be
+- [SG0723](/docs/how-it-works/dialog/codes#sg0723) — `no_new_privs` could not be
   set; service refused
-- [SG0724](/how-it-works/dialog/codes#sg0724) — Landlock requested but the
+- [SG0724](/docs/how-it-works/dialog/codes#sg0724) — Landlock requested but the
   kernel ABI is unavailable or insufficient; service refused
-- [SG0725](/how-it-works/dialog/codes#sg0725) — unknown seccomp profile; the
+- [SG0725](/docs/how-it-works/dialog/codes#sg0725) — unknown seccomp profile; the
   only built-in is `baseline-v1`
-- [SG0726](/how-it-works/dialog/codes#sg0726) — seccomp is unsupported on this
+- [SG0726](/docs/how-it-works/dialog/codes#sg0726) — seccomp is unsupported on this
   CPU architecture

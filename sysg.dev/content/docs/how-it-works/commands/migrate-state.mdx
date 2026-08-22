@@ -26,7 +26,7 @@ loads state *before* it takes its lock — so a migration running at boot could 
 observed half-finished by a second `sysg` invocation. Running it explicitly means
 it happens once, with no supervisor alive, with the report in front of you.
 
-It refuses with [`SG0602`](/how-it-works/dialog/codes#sg0602) while a supervisor
+It refuses with [`SG0602`](/docs/how-it-works/dialog/codes#sg0602) while a supervisor
 is running. `--dry-run` is always allowed.
 
 ## What it will not do
@@ -79,14 +79,14 @@ state root and checksum-verified before the migration proceeds, and the legacy
 `projects/__loose__/` tree is left in place. A run records its progress in a
 journal, so an interrupted migration resumes where it stopped rather than leaving
 a layout that is part old and part new
-([`SG0604`](/how-it-works/dialog/codes#sg0604)).
+([`SG0604`](/docs/how-it-works/dialog/codes#sg0604)).
 
 The journal and archive live *outside* the state root, so
-[`purge`](/how-it-works/commands/purge) cannot destroy the record of a migration
+[`purge`](/docs/how-it-works/commands/purge) cannot destroy the record of a migration
 still in progress.
 
 ## See also
 
-- [`migrate`](/how-it-works/commands/migrate) - Convert a manifest's shape
-- [Projects](/how-it-works/projects) - How one supervisor hosts many projects
-- [Diagnostics](/how-it-works/dialog) - [`SG0601`](/how-it-works/dialog/codes#sg0601), [`SG0602`](/how-it-works/dialog/codes#sg0602), [`SG0603`](/how-it-works/dialog/codes#sg0603), [`SG0604`](/how-it-works/dialog/codes#sg0604), [`SG0605`](/how-it-works/dialog/codes#sg0605)
+- [`migrate`](/docs/how-it-works/commands/migrate) - Convert a manifest's shape
+- [Projects](/docs/how-it-works/projects) - How one supervisor hosts many projects
+- [Diagnostics](/docs/how-it-works/dialog) - [`SG0601`](/docs/how-it-works/dialog/codes#sg0601), [`SG0602`](/docs/how-it-works/dialog/codes#sg0602), [`SG0603`](/docs/how-it-works/dialog/codes#sg0603), [`SG0604`](/docs/how-it-works/dialog/codes#sg0604), [`SG0605`](/docs/how-it-works/dialog/codes#sg0605)

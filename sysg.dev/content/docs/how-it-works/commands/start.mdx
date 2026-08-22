@@ -122,7 +122,7 @@ projects.
   command printed by systemg.
 </Info>
 
-See [Units](/examples/units) for the complete stage, apply, inspect, and stop
+See [Units](/docs/examples/units) for the complete stage, apply, inspect, and stop
 workflow.
 
 ### Child mode for orchestrators (replacement for `spawn`)
@@ -150,7 +150,7 @@ its longest dependency chain rather than the sum of every service's readiness
 wait. A service never waits on one it did not declare.
 
 Set `start.max_concurrent` in
-[`supervisor.xml`](/how-it-works/configuration#supervisor-configuration) to `1`
+[`supervisor.xml`](/docs/how-it-works/configuration#supervisor-configuration) to `1`
 to start services one at a time, or to a positive number to cap how many run at
 once. The cap is worth reaching for when a wide boot contends for something the
 supervisor cannot see — every service opening connections to the same database
@@ -158,6 +158,6 @@ at the same moment.
 
 ## See also
 
-- [`stop`](/how-it-works/commands/stop) - Stop running services
-- [`status`](/how-it-works/commands/status) - Check service health
-- [`restart`](/how-it-works/commands/restart) - Restart services
+- [`stop`](/docs/how-it-works/commands/stop) - Stop running services
+- [`status`](/docs/how-it-works/commands/status) - Check service health
+- [`restart`](/docs/how-it-works/commands/restart) - Restart services

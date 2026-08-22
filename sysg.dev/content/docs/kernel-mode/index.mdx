@@ -16,10 +16,10 @@ not the user session — is the counterparty.
 
 | Capability | What executes where | Status |
 |---|---|---|
-| [System mode](/kernel-mode/system-mode) | Userspace, root; drops privileges per service | Linux and macOS (`--sys`) |
-| [Container-init](/kernel-mode/container-init) | Userspace, PID 1 duties | Linux (`sysg init`) |
-| [Kernel-enforced sandboxing](/kernel-mode/sandboxing) | Kernel enforces; sysg configures | Linux, schema v3 |
-| [Kernel-assisted observation](/kernel-mode/kernel-assisted) | pidfd | Linux 5.3+ |
+| [System mode](/docs/kernel-mode/system-mode) | Userspace, root; drops privileges per service | Linux and macOS (`--sys`) |
+| [Container-init](/docs/kernel-mode/container-init) | Userspace, PID 1 duties | Linux (`sysg init`) |
+| [Kernel-enforced sandboxing](/docs/kernel-mode/sandboxing) | Kernel enforces; sysg configures | Linux, schema v3 |
+| [Kernel-assisted observation](/docs/kernel-mode/kernel-assisted) | pidfd | Linux 5.3+ |
 
 ## Mode parity contract
 
@@ -32,5 +32,5 @@ runtimes.
 
 ## Security
 
-See [Security & audits](/kernel-mode/security) for the threat model and the
+See [Security & audits](/docs/kernel-mode/security) for the threat model and the
 per-milestone audit records in the repository.

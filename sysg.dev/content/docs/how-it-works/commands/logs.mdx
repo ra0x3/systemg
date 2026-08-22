@@ -50,7 +50,7 @@ $ sysg logs -p myapp
 ## Scoping
 
 Logs are always scoped — a bare `sysg logs` is refused
-([`SG0019`](/how-it-works/dialog/codes#sg0019)) so you never get the wrong
+([`SG0019`](/docs/how-it-works/dialog/codes#sg0019)) so you never get the wrong
 project's output. Each project's logs live in their own place
 (`{project}/{service}`), so two projects can share a service name without their
 logs colliding.
@@ -61,13 +61,13 @@ logs colliding.
 | `logs -p <project> -s <service>` | that one service |
 | `logs -s <service>` (no `-p`) | the loose (`__loose__`) service of that name only |
 | `logs --supervisor` | the supervisor's own log |
-| `logs` (nothing) | refused — [`SG0019`](/how-it-works/dialog/codes#sg0019) |
+| `logs` (nothing) | refused — [`SG0019`](/docs/how-it-works/dialog/codes#sg0019) |
 
 <Note>
 A bare `-s <service>` reads only the loose bundle. If the service is in a
 project, pass `-p`; naming a non-loose service without `-p` is refused with
-[`SG0021`](/how-it-works/dialog/codes#sg0021). Combining `--supervisor` with a
-selector is [`SG0020`](/how-it-works/dialog/codes#sg0020).
+[`SG0021`](/docs/how-it-works/dialog/codes#sg0021). Combining `--supervisor` with a
+selector is [`SG0020`](/docs/how-it-works/dialog/codes#sg0020).
 </Note>
 
 ## Modes
@@ -75,7 +75,7 @@ selector is [`SG0020`](/how-it-works/dialog/codes#sg0020).
 `logs` is really five modes: show (the default), follow (`--follow`), print-path
 (`--path`), purge (`--purge`), and prune (`--prune`). The mode flags are mutually
 exclusive, and none combines with `--follow` — an illegal combination is refused
-with [`SG0204`](/how-it-works/dialog/codes#sg0204) rather than guessed at.
+with [`SG0204`](/docs/how-it-works/dialog/codes#sg0204) rather than guessed at.
 
 <Note>
 `--purge` clears logs **through the running supervisor** when one is up, so both
@@ -86,7 +86,7 @@ showing the "purged" lines.
 
 <Warning>
 `--prune` needs a bound to prune against. Running it with neither `--max-size`
-nor `--max-age` is refused with [`SG0017`](/how-it-works/dialog/codes#sg0017).
+nor `--max-age` is refused with [`SG0017`](/docs/how-it-works/dialog/codes#sg0017).
 </Warning>
 
 ## Examples
@@ -335,5 +335,5 @@ For high-output production workloads, configure `logs.sink: none` globally or pe
 
 ## See also
 
-- [`status`](/how-it-works/commands/status) - Check service health
-- [`inspect`](/how-it-works/commands/inspect) - View detailed metrics
+- [`status`](/docs/how-it-works/commands/status) - Check service health
+- [`inspect`](/docs/how-it-works/commands/inspect) - View detailed metrics
