@@ -233,12 +233,12 @@ export function Blocks({
 }) {
   const max = Math.max(...items.map((i) => i.value));
   const MAX_PX = 300;
-  const MIN_PX = 30;
   return (
     <Flex gap="44px" align="flex-end" wrap="wrap" justify="space-between">
       {items.map((it, i) => {
-        const scale = Math.sqrt(it.value / max);
-        const size = MIN_PX + scale * (MAX_PX - MIN_PX);
+        // Side is sqrt of the ratio, so AREA is proportional to the value --
+        // which is what the legend claims. A minimum size would break that.
+        const size = MAX_PX * Math.sqrt(it.value / max);
         const p = ease(Math.max(0, Math.min(1, t * 1.6 - i * 0.18)));
         return (
           <Box key={it.label}>
@@ -341,9 +341,12 @@ export function LineChart({
             width="100%"
             height="100%"
             role="img"
+            // A <title> child would be hoisted as document metadata on the
+            // client but not in SSR, which breaks hydration; aria-label reads
+            // the same to a screen reader and stays put.
+            aria-label={`${yLabel} against services supervised`}
             style={{ display: "block", overflow: "visible" }}
           >
-            <title>{yLabel} against services supervised</title>
             {yTicks.map((v) => (
               <line
                 key={v}

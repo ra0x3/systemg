@@ -13,7 +13,7 @@ export function meta() {
 
 const INSTALL = [
   { id: "curl", cmd: "curl --proto '=https' -fsSL https://sh.sysg.dev/ | sh" },
-  { id: "brew", cmd: "brew install systemg/tap/sysg" },
+  { id: "brew", cmd: "brew install ra0x3/tap/sysg" },
   { id: "cargo", cmd: "cargo install systemg" },
 ];
 
@@ -76,7 +76,7 @@ const METRICS = [
     heading: "What the supervisor itself costs",
     compare: "28× less supervisor overhead than Docker Compose · 1.5× less than Supervisor",
     blurb:
-      "Memory for the supervisor itself, minus the same ten near-idle services run bare — orders of magnitude apart, so each block is sized against the largest rather than on a shared axis.",
+      "Memory for the supervisor itself, minus the same ten near-idle services run bare — orders of magnitude apart, so each block is drawn with its area proportional to megabytes.",
     caption: (
       <>
         Compose is dockerd + containerd + one containerd-shim per container, measured inside the VM; on macOS Docker
