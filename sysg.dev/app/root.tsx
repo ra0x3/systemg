@@ -1,6 +1,6 @@
 import { ChakraProvider } from "@chakra-ui/react";
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
-import { GTAG_ID, gtagInitScript } from "~/ds/analytics";
+import { conversionScript, GTAG_ID, gtagInitScript } from "~/ds/analytics";
 import { Footer } from "~/ds/Footer";
 import { Navbar } from "~/ds/Navbar";
 import { system } from "~/ds/system";
@@ -51,6 +51,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
         <script async src={`https://www.googletagmanager.com/gtag/js?id=${GTAG_ID}`} />
         <script dangerouslySetInnerHTML={{ __html: gtagInitScript }} />
+        <script dangerouslySetInnerHTML={{ __html: conversionScript }} />
       </head>
       <body suppressHydrationWarning>
         <ChakraProvider value={system}>{children}</ChakraProvider>
