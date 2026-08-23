@@ -1,8 +1,15 @@
 import { Box, Flex, Stack, Text } from "@chakra-ui/react";
 import { Link } from "react-router";
-import { ARTICLES } from "~/content/articles";
-import { formatDate, RELEASES } from "~/content/releases";
+import { type Article, ARTICLES } from "~/content/articles";
+import { formatDate, type Release, RELEASES } from "~/content/releases";
 import { Eyebrow } from "~/ds/components";
+
+type Post = ({ kind: "article" } & Article) | ({ kind: "release" } & Release);
+
+const POSTS: Post[] = [
+  ...ARTICLES.map((a) => ({ kind: "article" as const, ...a })),
+  ...RELEASES.map((r) => ({ kind: "release" as const, ...r })),
+].sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
 
 export function meta() {
   return [
@@ -40,84 +47,83 @@ export default function Blog() {
           textTransform="uppercase"
           color="text.faint"
         >
-          {RELEASES.length} posts
+          {POSTS.length} posts
         </Text>
       </Box>
 
       <Stack gap="0" mt="48px">
-        {ARTICLES.map((a) => (
-          <Box key={a.slug} borderTop="1px solid" borderColor="border.rule">
-            <Link to={`/blog/${a.date}/${a.slug}`}>
-              <Flex py="24px" gap="18px" align="baseline" wrap="wrap">
-                <Text fontFamily="mono" fontSize="micro" color="accent.500" minW="86px">
-                  {formatDate(a.date)}
-                </Text>
-                <Box flex="1" minW="260px">
-                  <Text fontSize="20px" letterSpacing="-0.02em" fontWeight="bold" color="text.heading">
-                    {a.title}
-                  </Text>
-                  <Text mt="6px" fontSize="14px" lineHeight="1.5" color="text.secondary">
-                    {a.summary}
-                  </Text>
-                </Box>
-              </Flex>
-            </Link>
-          </Box>
-        ))}
-        {RELEASES.map((release) => {
-          const y = release.date.slice(0, 4);
+        {POSTS.map((post) => {
+          const y = post.date.slice(0, 4);
           const newYear = y !== year;
           if (newYear) year = y;
           return (
-            <Box key={release.slug} borderTop="1px solid" borderColor="border.rule">
+            <Box key={`${post.kind}:${post.slug}`} borderTop="1px solid" borderColor="border.rule">
               {newYear ? (
                 <Text mt="24px" fontFamily="mono" fontSize="micro" letterSpacing="0.06em" color="text.faint">
                   {y}
                 </Text>
               ) : null}
-              <Link to={`/blog/${release.slug}`}>
-                <Flex
-                  py="24px"
-                  gap={{ base: "8px", sm: "32px" }}
-                  direction={{ base: "column", sm: "row" }}
-                  css={{ "&:hover h2": { color: "var(--accent-700)" } }}
-                >
-                  <Stack gap="8px" flex="0 0 auto" width={{ base: "auto", sm: "140px" }} align="flex-start">
-                    <Text fontFamily="mono" fontSize="meta" color="text.muted">
-                      {formatDate(release.date)}
+              {post.kind === "article" ? (
+                <Link to={`/blog/${post.date}/${post.slug}`}>
+                  <Flex py="24px" gap="18px" align="baseline" wrap="wrap">
+                    <Text fontFamily="mono" fontSize="micro" color="accent.500" minW="86px">
+                      {formatDate(post.date)}
                     </Text>
-                    <Box
-                      fontFamily="mono"
-                      fontSize="micro"
-                      px="10px"
-                      py="3px"
-                      borderRadius="pill"
-                      bg={release.prerelease ? "status.warnBg" : "status.okBg"}
-                      color={release.prerelease ? "status.warnFg" : "status.okFg"}
-                    >
-                      {release.prerelease ? "prerelease" : "release"}
-                    </Box>
-                  </Stack>
-                  <Box minW="0">
-                    <Box
-                      as="h2"
-                      fontSize="h3"
-                      lineHeight="1.3"
-                      letterSpacing="-0.02em"
-                      fontWeight="bold"
-                      color="text.heading"
-                      transition="var(--transition-hover)"
-                    >
-                      {release.title}
-                    </Box>
-                    {release.summary ? (
-                      <Text mt="6px" fontSize="bodySm" lineHeight="1.55" color="text.secondary">
-                        {release.summary}
+                    <Box flex="1" minW="260px">
+                      <Text fontSize="20px" letterSpacing="-0.02em" fontWeight="bold" color="text.heading">
+                        {post.title}
                       </Text>
-                    ) : null}
-                  </Box>
-                </Flex>
-              </Link>
+                      <Text mt="6px" fontSize="14px" lineHeight="1.5" color="text.secondary">
+                        {post.summary}
+                      </Text>
+                    </Box>
+                  </Flex>
+                </Link>
+              ) : (
+                <Link to={`/blog/${post.slug}`}>
+                  <Flex
+                    py="24px"
+                    gap={{ base: "8px", sm: "32px" }}
+                    direction={{ base: "column", sm: "row" }}
+                    css={{ "&:hover h2": { color: "var(--accent-700)" } }}
+                  >
+                    <Stack gap="8px" flex="0 0 auto" width={{ base: "auto", sm: "140px" }} align="flex-start">
+                      <Text fontFamily="mono" fontSize="meta" color="text.muted">
+                        {formatDate(post.date)}
+                      </Text>
+                      <Box
+                        fontFamily="mono"
+                        fontSize="micro"
+                        px="10px"
+                        py="3px"
+                        borderRadius="pill"
+                        bg={post.prerelease ? "status.warnBg" : "status.okBg"}
+                        color={post.prerelease ? "status.warnFg" : "status.okFg"}
+                      >
+                        {post.prerelease ? "prerelease" : "release"}
+                      </Box>
+                    </Stack>
+                    <Box minW="0">
+                      <Box
+                        as="h2"
+                        fontSize="h3"
+                        lineHeight="1.3"
+                        letterSpacing="-0.02em"
+                        fontWeight="bold"
+                        color="text.heading"
+                        transition="var(--transition-hover)"
+                      >
+                        {post.title}
+                      </Box>
+                      {post.summary ? (
+                        <Text mt="6px" fontSize="bodySm" lineHeight="1.55" color="text.secondary">
+                          {post.summary}
+                        </Text>
+                      ) : null}
+                    </Box>
+                  </Flex>
+                </Link>
+              )}
             </Box>
           );
         })}
