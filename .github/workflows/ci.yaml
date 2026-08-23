@@ -720,6 +720,9 @@ jobs:
   publish-homebrew:
     name: Publish Homebrew Tap
     runs-on: ubuntu-latest
+    # HOMEBREW_TAP_TOKEN lives in the CI environment, and an environment secret
+    # only reaches a job that declares that environment.
+    environment: ci
     # The tap is pushed on the same gate as the Claude plugin: only once the
     # crate is on crates.io, and therefore only once every release asset the
     # formula hashes -- GitHub release and sh.sysg.dev mirror alike -- is
