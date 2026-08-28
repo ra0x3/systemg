@@ -144,8 +144,26 @@ It sits in the gap between systemd and Docker Compose. systemd wants to own the 
 | **Config** | YAML | Unit files | INI | YAML |
 | **Dependencies** | Topological, health-aware | Unit chains | Manual ordering | Service links |
 | **Deployments** | Built-in rolling | External tooling | Manual restarts | Recreate/rolling |
-| **Runtime deps** | None | DBus, journal | Python | Docker daemon |
-| **Install / removal** | Rootless: ~12 MB executable + symlink; optional system service | OS-integrated; replacement is distro-wide | Python package + runtime | Compose plugin + local Docker Engine/daemon (Linux VM on macOS) |
+| **Runtime deps** | No interpreter or VM; `command:` uses a POSIX shell | DBus, journal | Python | Docker daemon |
+
+### Measured
+
+| | systemg | systemd | Supervisor | Docker Compose |
+|---------|---------|---------|------------|----------------|
+| Install to first service | 1.49s | — | 5.53s | 15.85s+ (package only) |
+| Pulled over network | 6.8 MB | — | 48.0 MB | 172.5 MB |
+| Installed on disk | 19.5 MB | 14.6 MB | 26.8 MB | 278.6 MB |
+| Ten-service graph | 6.91s | — | n/a | 8.31s |
+| Overhead at ten services | 12.4 MB | — | 18.1 MB | ~354 MB |
+| Added per service | 0.035 MB | — | 0.020 MB | 7.26 MB |
+| Expresses a dependency graph | ✓ | ✓ | ✗ | ✓ |
+| Gates on a probe, not a timer | ✓ | ✓ | ✗ | ✓ |
+| Leaves nothing behind on stop | ✓ | — | ✗ | ✓ |
+| Workload survives its crash | ✓ | — | ✓ | ✗ |
+| Starts no duplicate after | ✓ | — | ✗ | ✓ |
+| Recovers without an operator | ✓ | — | ✓ | ✗ |
+| Runs without a separate runtime | ✓ | ✓ | ✗ | ✗ |
+| Installs without root | ✓ | ✗ | ✓ | ✗ |
 
 Full documentation lives at [sysg.dev](https://sysg.dev). Maintainers and
 agents investigating supervisor behavior should begin with

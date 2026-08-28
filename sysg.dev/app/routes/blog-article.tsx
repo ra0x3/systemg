@@ -1,4 +1,4 @@
-import { Box, chakra, Flex, Stack, Text } from "@chakra-ui/react";
+import { Box, chakra, Flex, Text } from "@chakra-ui/react";
 import type { ReactNode } from "react";
 import { useLocation } from "react-router";
 import { ARTICLES } from "~/content/articles";
@@ -133,7 +133,6 @@ const LEVEL: Record<string, number> = {
 const NAMES = Object.keys(LEVEL);
 const STEP = 1.38;
 
-const SERIAL: GanttUnit[] = NAMES.map((name, i) => ({ name, start: i * STEP, dur: STEP }));
 const PARALLEL: GanttUnit[] = NAMES.map((name) => ({ name, start: LEVEL[name] * STEP, dur: STEP }));
 
 /* ---------------- article ---------------- */
@@ -263,46 +262,34 @@ export default function BlogArticle() {
         {/* 2. BOOT — then you start your services */}
         <H2 kicker="Dependency graph">Ten services, five levels deep</H2>
         <P>
-          Two independent roots, a five-wide fan-in. 0.64 walked the topological order one unit at a time; 0.65
-          dispatches every unit whose dependencies are already satisfied.
+          Two independent roots, a five-wide fan-in. Every unit whose dependencies are already satisfied is dispatched
+          at once, so the graph boots in five waves rather than ten steps — concurrency without violating a single edge.
         </P>
 
         <Figure caption="Each bar is one service becoming ready. Playhead is wall-clock.">
-          <Stack gap="30px">
-            <Box>
-              <Text fontFamily="mono" fontSize="15px" color="text.muted" mb="12px">
-                sysg 0.64.4 — one at a time
-              </Text>
-              <Replay ms={2600} label="10 steps">
-                {(t) => <Gantt units={SERIAL} span={14} t={t} total="13.83s" />}
-              </Replay>
-            </Box>
-            <Box height="1px" bg="border.rule" />
-            <Box>
-              <Text fontFamily="mono" fontSize="15px" color="text.muted" mb="12px">
-                sysg 0.65.0 — by dependency level
-              </Text>
-              <Replay ms={2600} label="5 waves">
-                {(t) => <Gantt units={PARALLEL} span={14} t={t} accent total="6.91s" />}
-              </Replay>
-            </Box>
-          </Stack>
+          <Box>
+            <Text fontFamily="mono" fontSize="15px" color="text.muted" mb="12px">
+              by dependency level
+            </Text>
+            <Replay ms={2600} label="5 waves">
+              {(t) => <Gantt units={PARALLEL} span={14} t={t} accent total="6.91s" />}
+            </Replay>
+          </Box>
         </Figure>
 
         <Box mt="34px">
-          <Mult to={2.0} decimals={2} suffix="×" of="faster than sysg 0.64.4" />
+          <Mult to={1.2} decimals={2} suffix="×" of="faster than Docker Compose" />
         </Box>
 
         <Figure caption="Same graph, same clock. Each marker stops when its last service reports healthy.">
-          <Replay ms={2800} label="all four, one clock">
+          <Replay ms={2800} label="all three, one clock">
             {(t) => (
               <Race
                 t={t}
                 span={14}
                 lanes={[
-                  { label: "sysg 0.65.0", time: 6.91, subject: true },
+                  { label: "sysg", time: 6.91, subject: true },
                   { label: "Docker Compose", time: 8.31, note: "1.20× slower" },
-                  { label: "sysg 0.64.4", time: 13.83, note: "2.00× slower" },
                   { label: "Supervisor", time: null },
                 ]}
               />
@@ -388,8 +375,8 @@ export default function BlogArticle() {
         {/* 5. SLOPE — and as you add more */}
         <H2 kicker="Scaling">Cost per service, as services are added</H2>
         <P>
-          The intercept matters less than the slope. sysg 0.66 adds an <InlineCode>exec:</InlineCode> argv form that
-          runs a service directly instead of through a shell, which removes a resident process per service.
+          The intercept matters less than the slope. sysg's <InlineCode>exec:</InlineCode> argv form runs a service
+          directly instead of through a shell, which removes a resident process per service.
         </P>
 
         <Figure caption="Fitted from N = 1, 10, 40. Drawn to N = 500.">
