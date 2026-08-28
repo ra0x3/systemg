@@ -59,9 +59,8 @@ const METRICS = [
         t={t}
         span={14}
         lanes={[
-          { label: "sysg 0.65.0", time: 6.91, subject: true },
+          { label: "sysg", time: 6.91, subject: true },
           { label: "Docker Compose", time: 8.31, note: "1.20× slower" },
-          { label: "sysg 0.64.4", time: 13.83, note: "2.00× slower" },
           { label: "Supervisor", time: null },
         ]}
       />
