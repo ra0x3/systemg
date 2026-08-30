@@ -1220,7 +1220,10 @@ fn cpu_max_is_valid(raw: &str) -> bool {
     let Some(quota) = parts.next() else {
         return false;
     };
-    let quota_ok = quota.eq_ignore_ascii_case("max") || quota.parse::<u64>().is_ok();
+    // The kernel spells the sentinel lowercase, and rejects a zero quota or
+    // period outright; accepting either here would bless a value that fails at
+    // the controller and leaves the service unbounded.
+    let quota_ok = quota == "max" || quota.parse::<u64>().is_ok_and(|value| value > 0);
     let period_ok = match parts.next() {
         Some(period) => period.parse::<u64>().is_ok_and(|value| value > 0),
         None => true,
@@ -1290,23 +1293,22 @@ fn check_byte_size(
     }
 }
 
-/// Rejects a field whose value must be one of a fixed set.
-fn check_one_of(
-    path: &str,
-    raw: Option<&str>,
-    allowed: &[&str],
-) -> Result<(), ProcessManagerError> {
+/// Rejects a deployment strategy the runtime cannot parse.
+///
+/// Delegates to the runtime's own parser rather than restating the accepted
+/// spellings: a validator that accepted a spelling `start` then silently
+/// downgraded to the default is the exact drift this check exists to stop.
+fn check_strategy(path: &str, raw: Option<&str>) -> Result<(), ProcessManagerError> {
     let Some(raw) = raw else {
         return Ok(());
     };
-    if allowed.iter().any(|value| raw.eq_ignore_ascii_case(value)) {
-        return Ok(());
-    }
-    Err(ProcessManagerError::ManifestFieldInvalid {
-        path: path.to_string(),
-        value: raw.to_string(),
-        reason: format!("expected one of: {}", allowed.join(", ")),
-    })
+    <crate::constants::DeploymentStrategy as std::str::FromStr>::from_str(raw)
+        .map(|_| ())
+        .map_err(|_| ProcessManagerError::ManifestFieldInvalid {
+            path: path.to_string(),
+            value: raw.to_string(),
+            reason: "expected one of: rolling, immediate".to_string(),
+        })
 }
 
 /// Rejects every duration on a health check. `interval` additionally refuses
@@ -1809,11 +1811,7 @@ impl Config {
             let base = format!("{base}.deployment");
             // An unrecognised strategy used to fall through to `immediate`, so a
             // typo silently turned a rolling deployment into a hard restart.
-            check_one_of(
-                &format!("{base}.strategy"),
-                deployment.strategy.as_deref(),
-                &["rolling", "immediate"],
-            )?;
+            check_strategy(&format!("{base}.strategy"), deployment.strategy.as_deref())?;
             check_duration(
                 &format!("{base}.grace_period"),
                 deployment.grace_period.as_deref(),

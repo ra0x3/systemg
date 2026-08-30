@@ -351,15 +351,23 @@ impl DynamicSpawnManager {
 
             // Only pay for the walk when a quota is actually declared.
             let quota_roots = tree.memory_quota.is_some().then(|| {
-                root_pid_of(&root_service, &self.service_pids)
-                    .into_iter()
-                    .chain(
+                // Only this unit's own generation and its own children count
+                // against its quota. Summing every tracked child charged one
+                // project's workers to another project's ceiling.
+                let generation = root_pid_of(&root_service, &self.service_pids);
+                let mut roots: Vec<u32> = generation.into_iter().collect();
+                if let Some(generation) = generation {
+                    roots.extend(
                         children
                             .values()
                             .filter(|child| child.last_exit.is_none())
+                            .filter(|child| {
+                                descends_from(child.pid, generation, &children)
+                            })
                             .map(|child| child.pid),
-                    )
-                    .collect::<Vec<u32>>()
+                    );
+                }
+                roots
             });
             (root_service, depth, quota_roots)
         };
@@ -805,6 +813,18 @@ impl DynamicSpawnManager {
                 Some(parent) => pid = parent,
                 None => return None,
             }
+        }
+    }
+}
+
+/// Whether a tracked child ultimately hangs off `root_pid`.
+fn descends_from(pid: u32, root_pid: u32, children: &HashMap<u32, SpawnedChild>) -> bool {
+    let mut current = pid;
+    loop {
+        match children.get(&current) {
+            Some(child) if child.parent_pid == root_pid => return true,
+            Some(child) => current = child.parent_pid,
+            None => return false,
         }
     }
 }

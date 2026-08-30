@@ -681,13 +681,26 @@ services:
 </Warning>
 
 <Info>
-  A cgroup that cannot be applied **fails the service** rather than starting it
-  unconfined — no root supervisor, an unwritable controller file, a value the
-  kernel rejects. A manifest that says a service is bounded and a service that
-  is not bounded must never both be true. Sizes are written in the units the
-  kernel expects, so `512M` is accepted here and converted; a value systemg
-  cannot read is refused at load with [`SG0210`](/reference/dialog/codes#sg0210).
+  The cgroup is created and its ceilings written **before** the service is
+  forked, and the service joins it itself before it execs. Everything it goes on
+  to fork is created inside the cgroup — there is no window in which an early
+  child lands outside the ceiling and stays there.
 </Info>
+
+<Warning>
+  What happens when a cgroup **cannot** be applied — no root supervisor, an
+  undelegated or read-only controller, a value the kernel rejects — depends on
+  the manifest's schema, exactly as it does for an unenforceable sandbox key:
+
+  - **version 3** refuses the service. A manifest that says a service is bounded
+    and a service that is not bounded must never both be true.
+  - **version 2** logs a warning and starts it unbounded, so a manifest that
+    runs today in a container without a delegated controller keeps running.
+
+  Sizes are written in the units the kernel expects, so `512M` is accepted here
+  and converted to bytes. A value systemg cannot read is refused at load with
+  [`SG0210`](/reference/dialog/codes#sg0210).
+</Warning>
 
 ### `isolation`
 

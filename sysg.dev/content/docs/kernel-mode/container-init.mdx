@@ -12,6 +12,9 @@ with one supervisor that already owns lifecycle, logs, and diagnostics.
 ENTRYPOINT ["sysg", "init", "--config", "/etc/systemg/systemg.yaml"]
 ```
 
+See [Docker](/docs/integrations/docker) for the image, compose, and
+`docker exec` recipes around it.
+
 `sysg init` requires that the process actually is PID 1 and implies system
 mode. It boots the manifest, reaps adopted orphans, handles shutdown signals,
 and exits with the teardown verdict.
