@@ -2368,6 +2368,37 @@ mod tests {
         }
     }
 
+    /// A scoped purge must reclaim the project's logs too. They live under the
+    /// log root, not the state root, so deleting only `projects/<id>` left every
+    /// captured line behind — a workload that churns projects grew the log root
+    /// without bound and only a full `purge` reclaimed it.
+    #[test]
+    fn scoped_purge_targets_the_project_log_dir() {
+        let logs = project_log_dir("slot-7").expect("resolve log dir");
+        assert_eq!(
+            logs,
+            runtime::log_dir().join("slot-7"),
+            "a project's logs must be resolved under the log root"
+        );
+        assert_ne!(
+            logs,
+            runtime::log_dir(),
+            "an id must never resolve to the log root itself"
+        );
+    }
+
+    /// The traversal guard that protects the state root has to protect the log
+    /// root too, or a crafted id turns a scoped purge into a wider delete.
+    #[test]
+    fn project_log_dir_refuses_traversing_ids() {
+        for id in ["..", "a/b", "/etc", ""] {
+            assert!(
+                project_log_dir(id).is_err(),
+                "id {id:?} must be refused before any deletion"
+            );
+        }
+    }
+
     #[test]
     fn a_finished_row_is_marked_and_a_running_row_spins() {
         use systemg::start::RowState;
@@ -4877,7 +4908,11 @@ fn execute_purge(plan: systemg::purge::PurgePlan) -> Result<(), Box<dyn Error>> 
                     systemg::purge::project_not_found(&project),
                 ))));
             }
+            let logs = project_log_dir(&project)?;
             remove_tree(&dir)?;
+            if logs.exists() {
+                remove_tree(&logs)?;
+            }
             forget_loose_projects(std::slice::from_ref(&project));
             println!("Purged state for project '{project}'");
         }
@@ -4958,9 +4993,13 @@ fn purge_projects(projects: &[String]) -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|project| project_state_dir(&root, project))
         .collect::<Result<Vec<_>, _>>()?;
-    for dir in dirs {
+    let log_dirs = projects
+        .iter()
+        .map(|project| project_log_dir(project))
+        .collect::<Result<Vec<_>, _>>()?;
+    for dir in dirs.iter().chain(log_dirs.iter()) {
         if dir.exists() {
-            remove_tree(&dir)?;
+            remove_tree(dir)?;
         }
     }
     forget_loose_projects(projects);
@@ -5002,6 +5041,16 @@ fn project_state_dir(root: &Path, project: &str) -> Result<PathBuf, Box<dyn Erro
         }
     };
     Ok(root.join(named))
+}
+
+/// Resolves a project's log directory under the log root.
+///
+/// Logs live outside the state root, so a scoped purge that only removed
+/// `projects/<id>` left every captured line behind: a workload that creates and
+/// destroys projects grew the log root without bound and nothing but a full
+/// `purge` reclaimed it.
+fn project_log_dir(project: &str) -> Result<PathBuf, Box<dyn Error>> {
+    project_state_dir(&runtime::log_dir(), project)
 }
 
 /// Removes the supervisor-level runtime files (socket, pid, config hint).

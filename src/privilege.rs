@@ -603,21 +603,30 @@ impl PrivilegeContext {
         if let Some(limits) = &self.limits
             && let Some(cgroup_cfg) = &limits.cgroup
         {
-            if getuid().is_root() {
-                if let Err(err) =
-                    apply_cgroup_settings(&self.service_hash, cgroup_cfg, pid)
-                {
-                    warn!(
-                        "Failed to configure cgroup for '{}': {}",
-                        self.service_name, err
-                    );
-                }
-            } else {
-                warn!(
-                    "Cgroup configuration requested for '{}' but systemg is not running as root",
-                    self.service_name
-                );
+            // A resource ceiling that silently fails to apply is worse than no
+            // ceiling: the manifest says the service is bounded and it is not.
+            // Both failures are reported to the caller, which tears the service
+            // down rather than leaving it running unconfined.
+            if !getuid().is_root() {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "service '{}' declares limits.cgroup, which needs a root supervisor",
+                        self.service_name
+                    ),
+                ));
             }
+            apply_cgroup_settings(&self.service_hash, cgroup_cfg, pid).map_err(
+                |err| {
+                    io::Error::new(
+                        err.kind(),
+                        format!(
+                            "failed to configure cgroup for '{}': {err}",
+                            self.service_name
+                        ),
+                    )
+                },
+            )?;
         }
 
         if let Some(isolation) = &self.isolation
@@ -736,7 +745,23 @@ fn apply_cgroup_settings(
     fs::write(unit_dir.join("cgroup.procs"), pid.to_string())?;
 
     if let Some(memory_max) = &cfg.memory_max {
-        fs::write(unit_dir.join("memory.max"), memory_max.as_bytes())?;
+        // `memory.max` accepts a decimal byte count or the literal `max`. A
+        // suffixed size like `512M` is rejected by the kernel, so the manifest's
+        // own documented spelling silently left the service unconfined.
+        let raw = memory_max.trim();
+        let encoded = if raw.eq_ignore_ascii_case("max") {
+            "max".to_string()
+        } else {
+            crate::config::parse_byte_limit(raw)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("memory_max value `{raw}` is not a byte size"),
+                    )
+                })?
+                .to_string()
+        };
+        fs::write(unit_dir.join("memory.max"), encoded.as_bytes())?;
     }
 
     if let Some(cpu_max) = &cfg.cpu_max {

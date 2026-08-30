@@ -1,0 +1,165 @@
+---
+title: Dynamic Spawn
+---
+
+# Dynamic Spawn
+
+Most units are declared in the manifest. Some cannot be: a scheduler that runs
+one worker per job, an orchestrator that fans out per task, a slot manager that
+starts a pipeline on demand. **Dynamic spawn** lets a running service ask the
+supervisor to start a child process for it, under limits the manifest declares
+in advance.
+
+## The model in one paragraph
+
+The `spawn:` block in a service definition is not a mechanism for creating
+processes. It is an **authorization**: it says this unit may ask for children,
+and states the ceilings those requests are checked against. The request itself
+is made at runtime, by the service, over the supervisor's control socket.
+
+<Info>
+  Config authorizes; the CLI requests. A unit with no `spawn` block has every
+  spawn request refused, no matter who makes it. This is why the two share a
+  name.
+</Info>
+
+## Declaring it
+
+```yaml
+services:
+  scheduler:
+    command: "python scheduler.py"
+    spawn:
+      mode: dynamic
+      limits:
+        children: 10
+```
+
+### `mode`
+
+| Value | Meaning |
+|---|---|
+| `static` | No dynamic spawning. The default when `spawn` is omitted. |
+| `dynamic` | The unit may request children at runtime. |
+
+`mode` is the switch on its own. `spawn: {mode: dynamic}` with no `limits` block
+is valid and means "dynamic, with the default ceilings" — it is not a unit that
+can never spawn.
+
+### `limits`
+
+Every field is optional; each has a default.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `children` | `100` | Maximum **direct** children of one parent process |
+| `depth` | `3` | Levels of nesting permitted — a direct child is level 1 |
+| `descendants` | `500` | Maximum total descendants across all levels |
+| `total_memory` | unlimited | Resident-memory ceiling shared by the whole tree (e.g. `2G`) |
+| `termination_policy` | `cascade` | What happens to children when the parent goes away |
+
+<Info>
+  A per-parent rate limit of **10 spawn requests per second** applies on top of
+  these, and is not configurable. A request over the limit is refused rather
+  than queued.
+</Info>
+
+<Info>
+  `total_memory` is **admission control**, not an OOM killer. When a spawn is
+  requested, systemg measures the tree's current resident memory — the unit, its
+  tracked children, and everything they have forked — and refuses the request if
+  it is already at or over the ceiling. Children already running are never killed
+  to get under it. For a hard kernel-enforced cap, use
+  [`limits.cgroup`](/docs/how-it-works/configuration#limitscgroup).
+</Info>
+
+<Warning>
+  A limit systemg cannot read is refused at load, not ignored. `total_memory:
+  "lots"` used to parse to "no limit at all" — the manifest asked for a ceiling
+  and got none. It now fails `validate` and `start`
+  ([`SG0210`](/reference/dialog/codes#sg0210)), naming the field.
+</Warning>
+
+### `termination_policy`
+
+| Value | On the parent stopping or exiting |
+|---|---|
+| `cascade` | Children are terminated with it. **Default.** |
+| `orphan` | Children keep running; systemg stops tracking them. |
+| `reparent` | Children keep running, reassigned to init. |
+
+<Warning>
+  `orphan` and `reparent` mean you own the cleanup. systemg will not kill those
+  processes later, and it will not report them — they are no longer its
+  descendants in any sense. Use `cascade` unless a child genuinely must outlive
+  the unit that asked for it.
+</Warning>
+
+## Requesting a child
+
+From inside the service, over the control socket:
+
+```sh
+sysg start --parent-pid <pid> --name worker_1 -- python worker.py
+```
+
+```python
+import os, subprocess
+
+subprocess.run([
+    "sysg", "start",
+    "--parent-pid", str(os.getpid()),
+    "--name", f"job_{job.id}",
+    "--", "python", "worker.py", job.id,
+])
+```
+
+`--ttl <seconds>` gives the child a deadline: when it elapses, systemg
+terminates the child and everything beneath it. A TTL overrides the unit's
+`termination_policy` — the policy governs what happens when the *parent* goes
+away, while a TTL is an explicit instruction about that one child.
+
+`--parent-pid` identifies the requesting unit. It does not have to be the unit's
+own pid: a process anywhere under the unit works, so `$$` from a wrapper script
+is fine — systemg walks up to the unit that owns it.
+
+<Info>
+  `sysg spawn` is the deprecated spelling of this same request and still works.
+  New code should use `sysg start --parent-pid`. See
+  [start vs spawn](/reference/commands/start-vs-spawn).
+</Info>
+
+## Lifecycle
+
+Dynamic children are forked by the **supervisor**, not by the parent service, so
+they are not descendants of it and are not in its process group. systemg tracks
+them explicitly, records each against the parent's current **generation**, and
+gives each its own session.
+
+- Stopping or restarting the parent reclaims that generation's children,
+  according to `termination_policy`.
+- A child that exits takes its own subtree with it under `cascade`.
+- A rolling restart cannot reach the replacement's children — they belong to a
+  different generation.
+
+<Warning>
+  A dynamic child is **not** a manifest unit. It has no `restart_policy`, no
+  health check, and no `depends_on`; if it dies, nothing restarts it. Anything
+  that must be supervised belongs in the manifest.
+</Warning>
+
+Children are visible in [`sysg inspect`](/reference/commands/inspect), which
+reports the spawn tree, and their output is captured under the log directory
+alongside their parent unit's.
+
+## Limits are per unit, per project
+
+Spawn trees are keyed by project **and** service name, so two projects that use
+the same service name get independent trees and independent ceilings. A stop in
+one project never sweeps the other's children.
+
+## See also
+
+- [Process trees](/docs/how-it-works/process-trees) — how teardown works
+- [`start`](/reference/commands/start) — the request side
+- [Configuration](/docs/how-it-works/configuration) — full service schema

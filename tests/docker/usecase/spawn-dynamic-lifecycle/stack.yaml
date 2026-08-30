@@ -1,0 +1,10 @@
+version: "2"
+projects:
+  slots:
+    name: Slots
+    services:
+      orchestrator:
+        command: "bash /usecase/orchestrate.sh"
+        restart_policy: "never"
+        spawn:
+          mode: dynamic

@@ -73,13 +73,26 @@ this, plain `sysg status` reports `No running supervisor`.
 ## What happens
 
 1. Services stop in reverse dependency order
-2. Each service receives `SIGTERM`
+2. Each service receives `SIGTERM` — **the whole tree, not just the named
+   process**
 3. After a short grace period (about 1 second), `SIGKILL` is sent if needed
 4. The supervisor remains available unless you used `--supervisor`
 
-When stopping a single service manually, its dependents keep running. A
-dependency crash temporarily stops its dependents; after the dependency
-recovers, the supervisor starts eligible dependents again.
+<Info>
+  **Descendants are included.** Every service leads its own session, so a stop
+  sweeps the union of the service's descendants, its process group and its
+  session — a forked shell, a browser's renderers, a worker pool. A stop reports
+  success only when nothing from the unit is left alive. Dynamically spawned
+  children are reclaimed too, subject to their
+  [`termination_policy`](/docs/how-it-works/spawn#termination_policy).
+  [Process trees](/docs/how-it-works/process-trees) has the full mechanism.
+</Info>
+
+When stopping a single service manually, its dependents keep running — an
+operator stopping one unit is a decision, not a failure. A dependency that
+**crashes or fails its health check** does stop its dependents; once it is
+healthy again the supervisor starts the eligible ones back up. See
+[dependency failure](/docs/how-it-works/configuration#dependency-failure).
 
 ## Reloading a manifest after stop
 
@@ -92,5 +105,6 @@ which reuses the project's stored config path.
 
 ## See also
 
+- [Process trees](/docs/how-it-works/process-trees) - What teardown reaches
 - [`start`](/reference/commands/start) - Launch services
 - [`restart`](/reference/commands/restart) - Restart services

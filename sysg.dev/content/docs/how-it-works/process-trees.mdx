@@ -1,0 +1,136 @@
+---
+title: Process Trees
+---
+
+# Process Trees
+
+Most supervised programs are not one process. A browser forks a zygote and a
+renderer per tab; a shell script forks every command it runs; a JVM, a dev
+server, a `make` invocation all leave descendants behind. This page states
+exactly what systemg does with those descendants — on stop, on restart, on
+crash, and when the supervisor itself goes away.
+
+## Every service leads its own session
+
+At spawn, systemg calls `setsid` for each service. The service process becomes
+the leader of a new **session** and a new **process group**, and everything it
+forks inherits both unless it deliberately leaves them.
+
+That single fact is what makes teardown decidable. It gives systemg three
+independent handles on a service's descendants:
+
+| Handle | Catches | Escaped by |
+|---|---|---|
+| **Ancestry** — walk the process table for descendants of the service pid | Every child, grandchild, and deeper | A process that reparents to init after a double fork |
+| **Process group** — `killpg` on the service's pgid | Every process still in the group | A wrapper that `exec`s its payload into a new group |
+| **Session** — every process sharing the service's sid | Both of the above cases | Only a descendant that calls `setsid` itself |
+
+<Info>
+  The three overlap on purpose. Ancestry and process groups each have an escape
+  hatch, and they are not the same hatch — the session survives both. Because
+  every service gets its own `setsid`, a session is never shared with another
+  unit, so widening the sweep to it can never touch a sibling service.
+</Info>
+
+## What `stop` actually does
+
+`sysg stop` tears a unit down in escalating stages, re-reading the process table
+between each one:
+
+1. Collect the union of the service's descendants, process-group members, and
+   session members.
+2. `SIGTERM` the process group, then every collected pid.
+3. Wait up to **1 second** (ten 100 ms checks) for them to exit.
+4. Re-collect group and session members — a survivor may have forked while the
+   signals were going out.
+5. `SIGKILL` anything left, and wait again.
+6. Re-collect once more and verify.
+
+A stop only reports success when nothing from the unit is left alive.
+
+<Warning>
+  If systemg cannot read the process table, the stop **fails** rather than
+  reporting success. A unit whose process group cannot be declared dead is not
+  declared dead. You will see an error, not a silent pass.
+</Warning>
+
+## Dynamically spawned children
+
+Children created through [dynamic spawn](/docs/how-it-works/spawn) are a special
+case: they are forked by the **supervisor**, not by the parent service. They are
+therefore not descendants of the service pid, and they are not in its process
+group.
+
+systemg tracks them explicitly instead. Each dynamic child gets its own session,
+and every child is recorded against the **generation** of the parent unit that
+asked for it — the specific pid that was running at the time. Stopping the unit
+reclaims exactly that generation's children.
+
+<Info>
+  Generation scoping is what makes a rolling restart safe. A stop aimed at the
+  outgoing process cannot reach the replacement's children, because they were
+  recorded against a different pid.
+</Info>
+
+Whether they are killed at all is the unit's
+[`termination_policy`](/docs/how-it-works/spawn#termination_policy): `cascade`
+(the default) tears them down with the parent; `orphan` and `reparent` leave them
+running and simply stop tracking them.
+
+## Restart, crash, and dependency failure
+
+- **Restart** tears the unit down by the rules above, then starts a fresh
+  generation. Dynamic children of the outgoing generation are reclaimed
+  according to its termination policy.
+- **Crash** — an unsuccessful exit — is handled by the monitor, which stops the
+  unit's dependents as casualties and revives them once the dependency is
+  healthy again. See
+  [dependency failure](/docs/how-it-works/configuration#dependency-failure).
+- **A failed health check** stops the unit exactly as a crash would, and
+  cascades to dependents the same way. `restart_policy` then decides whether it
+  comes back.
+
+## When the supervisor dies
+
+Services are not children of the supervisor's session, so they survive a
+supervisor that is killed outright. systemg records a **generation ledger** —
+pid, session, process group, and start time per unit — so a new supervisor can
+identify what the previous one left running and reap it rather than starting a
+second copy.
+
+<Warning>
+  This is provenance-based, not heuristic. systemg never identifies a stray
+  process by matching command strings or by scanning for a listening port: two
+  services with the same command are indistinguishable that way, and reaping the
+  wrong one is worse than leaking.
+</Warning>
+
+## Supervising a program that forks heavily
+
+Nothing special is required — the session sweep already covers the ordinary
+cases. Two things are worth knowing:
+
+<Info>
+  **A wrapper script is fine.** `command: "./run.sh"` runs under `sh -c`, and
+  everything the script forks stays in the unit's session. It is torn down with
+  the unit.
+</Info>
+
+<Warning>
+  **A program that daemonizes itself is not supervised.** If your process double
+  forks and exits, systemg supervises the short-lived parent and reports it as
+  completed. Run the program in its foreground mode (`--foreground`,
+  `-D`, `daemon off`, and similar) so the process systemg started is the process
+  that does the work.
+</Warning>
+
+For hard resource ceilings on a tree — memory, CPU — see
+[`limits.cgroup`](/docs/how-it-works/configuration#limits). Note that a cgroup is
+a **resource boundary, not a kill boundary**: systemg does not use it to
+terminate anything.
+
+## See also
+
+- [`stop`](/reference/commands/stop) — command reference
+- [Dynamic spawn](/docs/how-it-works/spawn) — supervisor-managed child processes
+- [Configuration](/docs/how-it-works/configuration) — `limits`, `isolation`, `depends_on`

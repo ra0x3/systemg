@@ -42,6 +42,13 @@ supervisor's view of the world. Stop the supervisor first, or pass `--force`.
 
 ## Scope
 
+<Info>
+  A scoped purge (`-p` or `-c`) reclaims each named project's **state directory
+  and its log directory**, and leaves every other project untouched. This is the
+  intended cleanup for a workload that churns projects — see
+  [state growth](/docs/how-it-works/state#growth-and-reclamation).
+</Info>
+
 Purge is deliberately explicit about what it deletes:
 
 - **`sysg purge`** — the whole state root: every project, the `__loose__` bundle,
