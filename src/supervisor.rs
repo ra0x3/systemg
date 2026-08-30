@@ -18,6 +18,7 @@ use std::{
 };
 
 use nix::unistd::{Uid, User};
+use sysinfo::{ProcessesToUpdate, System};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -225,6 +226,10 @@ struct CronProjectRuntime {
     mode: ProjectRunMode,
     config_path: PathBuf,
 }
+
+/// How far up the process ancestry a spawn request is traced before giving up
+/// on linking it to a managed unit.
+const MAX_SPAWN_PARENT_WALK: usize = 32;
 
 /// Parameters for spawning a child process.
 struct SpawnParams {
@@ -850,7 +855,7 @@ impl start::Units for ProjectBoot<'_> {
             && let Some(&pid) = pid_file.services().get(service_name)
         {
             self.spawn_manager
-                .register_service_pid(service_name.to_string(), pid);
+                .register_service_pid(self.project_id, service_name, pid);
         }
 
         Ok(resolution)
@@ -934,16 +939,30 @@ impl Supervisor {
         Ok(order)
     }
 
-    /// Registers dynamic spawn limits from a project config.
+    /// Brings the spawn registry in line with a project config.
+    ///
+    /// `mode` is the switch and `limits` only tunes the ceilings. Registering on
+    /// the presence of `limits` meant `spawn: {mode: dynamic}` on its own
+    /// registered nothing, so every spawn the unit made was refused for having
+    /// no tree — while `limits` written under a static unit silently authorized
+    /// one. Both readings were wrong, and the two registration paths disagreed
+    /// about which to use.
     fn register_spawn_limits_for_config(
         spawn_manager: &DynamicSpawnManager,
         config: &Config,
     ) -> Result<(), SupervisorError> {
+        let project = &config.project.id;
         for (service_name, service_config) in &config.services {
-            if let Some(spawn_config) = &service_config.spawn
-                && let Some(limits) = &spawn_config.limits
-            {
-                spawn_manager.register_service(service_name.clone(), limits)?;
+            let dynamic = service_config
+                .spawn
+                .as_ref()
+                .filter(|spawn| matches!(spawn.mode, Some(SpawnMode::Dynamic)));
+            match dynamic {
+                Some(spawn_config) => {
+                    let limits = spawn_config.limits.clone().unwrap_or_default();
+                    spawn_manager.register_service(project, service_name, &limits)?;
+                }
+                None => spawn_manager.unregister_service(project, service_name),
             }
         }
 
@@ -1423,7 +1442,7 @@ impl Supervisor {
             && let Some(&pid) = pid_file.services().get(service_name)
         {
             self.spawn_manager
-                .register_service_pid(service_name.to_string(), pid);
+                .register_service_pid(&target_project, service_name, pid);
         }
 
         Ok((target_project, service_name.to_string()))
@@ -2034,14 +2053,7 @@ impl Supervisor {
         let status_cache = StatusCache::new(StatusSnapshot::empty());
 
         let spawn_manager = DynamicSpawnManager::new();
-        for (service_name, service_config) in &config.services {
-            if let Some(ref spawn) = service_config.spawn
-                && let Some(SpawnMode::Dynamic) = spawn.mode
-                && let Some(ref limits) = spawn.limits
-            {
-                spawn_manager.register_service(service_name.clone(), limits)?;
-            }
-        }
+        Self::register_spawn_limits_for_config(&spawn_manager, &config)?;
         let boot_projects = Arc::new(RwLock::new(HashMap::from([(
             config_arc.project.id.clone(),
             daemon.clone(),
@@ -4626,18 +4638,89 @@ impl Supervisor {
         }
     }
 
-    /// Resolves a service configuration by name across the primary daemon and
-    /// any additional managed projects.
-    fn resolve_service_config(
-        &self,
-        service_name: &str,
-    ) -> Option<crate::config::ServiceConfig> {
-        if let Some(config) = self.daemon.config().services.get(service_name) {
-            return Some(config.clone());
+    /// Returns the daemon owning `project`, primary or extra.
+    ///
+    /// A dynamic child belongs to the project that spawned it. Resolving its
+    /// definition, its service hash and its pid row through the primary daemon
+    /// meant an extra project's `worker` could inherit the primary `worker`'s
+    /// privileges and write its spawn rows into the wrong project's `pid.xml`.
+    fn daemon_for_project(&self, project: &str) -> Option<&Daemon> {
+        if self.daemon.config().project.id == project {
+            return Some(&self.daemon);
         }
-        self.extra_projects.values().find_map(|project| {
-            project.daemon.config().services.get(service_name).cloned()
-        })
+        self.extra_projects
+            .get(project)
+            .map(|runtime| &runtime.daemon)
+    }
+
+    /// Links a requesting pid to the unit that owns it, registering the unit's
+    /// generation pid if the boot has not done so yet.
+    ///
+    /// The boot registers a unit's pid only once it has been judged started, so
+    /// a unit that spawns as soon as it runs — the whole point of a dynamic
+    /// orchestrator — raced that registration and had its first children
+    /// refused with "no spawn tree found". Walking up from the requester also
+    /// covers the ordinary case where the process asking is a descendant of the
+    /// unit's own process rather than the recorded pid itself.
+    fn bind_spawn_parent(&self, parent_pid: u32) -> u32 {
+        // Already linked: either the registered generation pid itself or a
+        // tracked child of one, both of which authorize as they stand.
+        if self.spawn_manager.root_pid_for(parent_pid).is_some() {
+            return parent_pid;
+        }
+
+        let mut owners: Vec<(String, HashMap<String, u32>, Arc<Config>)> = Vec::new();
+        let primary = self.daemon.config();
+        if let Ok(pid_file) = self.daemon.pid_file_handle().lock() {
+            owners.push((
+                primary.project.id.clone(),
+                pid_file.services().clone(),
+                primary.clone(),
+            ));
+        }
+        for (project_id, runtime) in &self.extra_projects {
+            let config = runtime.daemon.config();
+            if let Ok(pid_file) = runtime.daemon.pid_file_handle().lock() {
+                owners.push((
+                    project_id.clone(),
+                    pid_file.services().clone(),
+                    config.clone(),
+                ));
+            }
+        }
+
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::All, true);
+        let mut current = parent_pid;
+        for _ in 0..MAX_SPAWN_PARENT_WALK {
+            for (project_id, services, config) in &owners {
+                let Some((service, _)) =
+                    services.iter().find(|(_, pid)| **pid == current)
+                else {
+                    continue;
+                };
+                let dynamic = config.services.get(service).is_some_and(|declared| {
+                    declared.spawn.as_ref().is_some_and(|spawn| {
+                        matches!(spawn.mode, Some(SpawnMode::Dynamic))
+                    })
+                });
+                if dynamic {
+                    self.spawn_manager
+                        .register_service_pid(project_id, service, current);
+                    return current;
+                }
+                return parent_pid;
+            }
+
+            let Some(parent) = system
+                .process(sysinfo::Pid::from_u32(current))
+                .and_then(|process| process.parent())
+            else {
+                return parent_pid;
+            };
+            current = parent.as_u32();
+        }
+        parent_pid
     }
 
     /// Handles handle spawn.
@@ -4649,20 +4732,38 @@ impl Supervisor {
             )));
         };
 
+        // A requester is usually the unit's own process, but a shell wrapper
+        // makes it a descendant; either way the tree is keyed by the unit's
+        // recorded generation pid.
+        let parent_pid = self.bind_spawn_parent(params.parent_pid);
         let spawn_auth = self
             .spawn_manager
-            .authorize_spawn(params.parent_pid, &params.name)?;
+            .authorize_spawn(parent_pid, &params.name)?;
         let depth = spawn_auth.depth;
 
-        let privilege = spawn_auth
+        let auth_unit = spawn_auth
             .root_service
             .as_deref()
-            .and_then(|name| self.resolve_service_config(name))
-            .map(|service_config| {
+            .and_then(crate::spawn::split_unit_key)
+            .map(|(project, service)| (project.to_string(), service.to_string()));
+        let privilege = auth_unit
+            .as_ref()
+            .and_then(|(project, service)| {
+                let daemon = self.daemon_for_project(project)?;
+                let config = daemon.config();
+                let declared = config.services.get(service).cloned()?;
+                Some((service.clone(), declared, config.version.is_fail_closed()))
+            })
+            .map(|(service, service_config, fail_closed)| {
+                // A dynamic child inherits its unit's security posture. Passing
+                // `false` here meant a v3 manifest's fail-closed guarantee
+                // stopped at the unit boundary: the service was refused for an
+                // unenforceable key while the children it spawned ran with the
+                // same key silently ignored.
                 crate::privilege::PrivilegeContext::from_service(
-                    &spawn_auth.root_service.clone().unwrap_or_default(),
+                    &service,
                     &service_config,
-                    false,
+                    fail_closed,
                 )
             })
             .transpose()
@@ -4692,7 +4793,7 @@ impl Supervisor {
         }
 
         cmd.env("SPAWN_DEPTH", depth.to_string());
-        cmd.env("SPAWN_PARENT_PID", params.parent_pid.to_string());
+        cmd.env("SPAWN_PARENT_PID", parent_pid.to_string());
 
         if let Some(log_level) = params.log_level {
             cmd.env("RUST_LOG", log_level);
@@ -4701,17 +4802,26 @@ impl Supervisor {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        if let Some(privilege) = privilege.clone() {
-            let privilege_pre_exec = privilege.clone();
-            unsafe {
-                // No logging here: this runs after fork, where allocating or
-                // taking the logger lock can deadlock the child.
-                cmd.pre_exec(move || {
-                    privilege_pre_exec
-                        .apply_pre_exec()
-                        .map_err(|fault| std::io::Error::from_raw_os_error(fault.errno))
-                });
-            }
+        // A dynamic child is forked by the SUPERVISOR, so without this it
+        // inherits the supervisor's session and process group — the two the
+        // teardown sweep deliberately refuses to signal. It was therefore
+        // unreachable by every kill path, and its own forked tree with it.
+        // Leading its own session makes the child sweepable as a unit.
+        let privilege_pre_exec = privilege.clone();
+        unsafe {
+            // No logging or allocation here: this runs after fork, where taking
+            // the logger lock can deadlock the child.
+            cmd.pre_exec(move || {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some(privilege) = &privilege_pre_exec {
+                    privilege.apply_pre_exec().map_err(|fault| {
+                        std::io::Error::from_raw_os_error(fault.errno)
+                    })?;
+                }
+                Ok(())
+            });
         }
 
         let mut child = cmd.spawn()?;
@@ -4721,10 +4831,13 @@ impl Supervisor {
         if let Some(privilege) = &privilege
             && let Err(err) = privilege.apply_post_spawn(child_pid as libc::pid_t)
         {
-            warn!(
-                "Failed post-spawn privilege setup for '{}': {err}",
+            error!(
+                "Post-spawn privilege setup failed for dynamic child '{}': {err}",
                 params.name
             );
+            let _ = Daemon::terminate_process_tree(&params.name, child_pid, None);
+            let _ = child.wait();
+            return Err(SupervisorError::Io(err));
         }
 
         let command_string = params.command.join(" ");
@@ -4734,7 +4847,7 @@ impl Supervisor {
         let spawned_child = SpawnedChild {
             name: child_name.clone(),
             pid: child_pid,
-            parent_pid: params.parent_pid,
+            parent_pid,
             command: command_string.clone(),
             started_at,
             ttl: params.ttl.map(Duration::from_secs),
@@ -4747,17 +4860,25 @@ impl Supervisor {
         };
 
         let root_service = self.spawn_manager.record_spawn(
-            params.parent_pid,
+            parent_pid,
             spawned_child,
             spawn_auth.root_service.clone(),
         )?;
         let effective_root = root_service.or(spawn_auth.root_service);
+        // The registry key is `{project}:{service}`; log paths and service
+        // hashes are addressed by the bare service name, resolved against the
+        // project that actually owns the unit.
+        let root_unit = effective_root
+            .as_deref()
+            .and_then(crate::spawn::split_unit_key)
+            .map(|(project, service)| (project.to_string(), service.to_string()));
+        let root_service_name = root_unit.as_ref().map(|(_, service)| service.clone());
 
         let echo_to_console = !self.detach_children;
         let log_result = (|| -> io::Result<()> {
             if let Some(stdout) = child.stdout.take() {
                 spawn_dynamic_child_log_writer(
-                    effective_root.as_deref(),
+                    root_service_name.as_deref(),
                     &child_name,
                     child_pid,
                     stdout,
@@ -4767,7 +4888,7 @@ impl Supervisor {
             }
             if let Some(stderr) = child.stderr.take() {
                 spawn_dynamic_child_log_writer(
-                    effective_root.as_deref(),
+                    root_service_name.as_deref(),
                     &child_name,
                     child_pid,
                     stderr,
@@ -4784,11 +4905,15 @@ impl Supervisor {
             return Err(err.into());
         }
 
-        let pid_file_handle = self.daemon.pid_file_handle();
+        let owning_daemon = root_unit
+            .as_ref()
+            .and_then(|(project, _)| self.daemon_for_project(project))
+            .unwrap_or(&self.daemon);
+        let pid_file_handle = owning_daemon.pid_file_handle();
         if let Ok(mut pid_file) = pid_file_handle.lock() {
-            let service_hash = effective_root
+            let service_hash = root_service_name
                 .as_deref()
-                .and_then(|name| self.daemon.get_service_hash(name));
+                .and_then(|name| owning_daemon.get_service_hash(name));
             let persisted = PersistedSpawnChild {
                 pid: child_pid,
                 name: child_name.clone(),
@@ -4803,6 +4928,53 @@ impl Supervisor {
                 last_exit: None,
             };
             let _ = pid_file.record_spawn(persisted);
+        }
+
+        // `--ttl` was recorded and reported but never acted on, so a child the
+        // docs promised would terminate after its deadline ran forever. The
+        // timer is armed here rather than in a global sweep because the waiter
+        // below still holds the unreaped child: signalling its pid cannot hit a
+        // recycled process. A TTL is an explicit instruction about THIS child,
+        // so it overrides `termination_policy` — that policy governs what
+        // happens when the parent goes away, not a deadline the caller set.
+        if let Some(ttl) = params.ttl.map(Duration::from_secs).filter(|d| !d.is_zero()) {
+            let ttl_manager = self.spawn_manager.clone();
+            let ttl_pid_file = Arc::clone(&pid_file_handle);
+            let ttl_name = child_name.clone();
+            if let Err(err) = thread::Builder::new()
+                .name(format!("sysg-ttl-{child_pid}"))
+                .spawn(move || {
+                    thread::sleep(ttl);
+                    // A child that already exited has nothing tracked; the
+                    // waiter cleared it and there is no deadline to enforce.
+                    if ttl_manager.get_spawn_tree(child_pid).is_none()
+                        && ttl_manager.root_pid_for(child_pid).is_none()
+                    {
+                        return;
+                    }
+                    info!("Dynamic child '{ttl_name}' (pid {child_pid}) reached its TTL");
+                    let removed = ttl_manager.remove_subtree(child_pid);
+                    for target in std::iter::once((ttl_name.clone(), child_pid))
+                        .chain(removed.iter().map(|c| (c.name.clone(), c.pid)))
+                    {
+                        if let Err(err) =
+                            Daemon::terminate_process_tree(&target.0, target.1, None)
+                        {
+                            warn!(
+                                "Failed to terminate '{}' (pid {}) at its TTL: {err}",
+                                target.0, target.1
+                            );
+                        }
+                    }
+                    if let Ok(mut pid_file) = ttl_pid_file.lock()
+                        && let Err(err) = pid_file.remove_spawn_subtree(child_pid)
+                    {
+                        warn!("Failed to clear TTL-expired spawn rows for {child_pid}: {err}");
+                    }
+                })
+            {
+                warn!("Could not arm the TTL timer for '{child_name}': {err}");
+            }
         }
 
         let spawn_manager_for_exit = self.spawn_manager.clone();
@@ -4839,8 +5011,11 @@ impl Supervisor {
                             );
                         }
 
-                        for descendant in removed.iter().filter(|c| c.parent_pid == child_pid)
-                        {
+                        // Every dynamic child is forked by the supervisor, so
+                        // depth-2 children are siblings of depth-1 ones in
+                        // process terms — ancestry does not chain and killing
+                        // only the direct children left the rest running.
+                        for descendant in removed.iter().filter(|c| c.pid != child_pid) {
                             if let Err(err) = Daemon::terminate_process_tree(
                                 &descendant.name,
                                 descendant.pid,
@@ -5989,14 +6164,13 @@ running project does not declare; restart the project to apply structural change
             .services
             .get(service)
             .and_then(|declared| declared.spawn.as_ref());
-        let limits = spawn
-            .filter(|spawn| matches!(spawn.mode, Some(SpawnMode::Dynamic)))
-            .and_then(|spawn| spawn.limits.as_ref());
-        match limits {
-            Some(limits) => {
-                spawn_manager.register_service(service.to_string(), limits)?
+        let project = &adopted.project.id;
+        match spawn.filter(|spawn| matches!(spawn.mode, Some(SpawnMode::Dynamic))) {
+            Some(spawn) => {
+                let limits = spawn.limits.clone().unwrap_or_default();
+                spawn_manager.register_service(project, service, &limits)?
             }
-            None => spawn_manager.unregister_service(service),
+            None => spawn_manager.unregister_service(project, service),
         }
         Ok(())
     }
@@ -6087,7 +6261,12 @@ running project does not declare; restart the project to apply structural change
         let primary_project = self.daemon.config().project.id.clone();
 
         if target_project == primary_project {
-            Self::stop_watched(&self.daemon, service_name)?;
+            Self::stop_watched(
+                &self.spawn_manager,
+                &self.daemon,
+                &target_project,
+                service_name,
+            )?;
             return Ok((target_project, service_name.to_string()));
         }
 
@@ -6112,7 +6291,12 @@ running project does not declare; restart the project to apply structural change
             .into());
         }
 
-        Self::stop_watched(&project_runtime.daemon, service_name)?;
+        Self::stop_watched(
+            &self.spawn_manager,
+            &project_runtime.daemon,
+            &target_project,
+            service_name,
+        )?;
         Ok((target_project, service_name.to_string()))
     }
 
@@ -6122,9 +6306,33 @@ running project does not declare; restart the project to apply structural change
     /// reason the bulk path documents: a restart stops each unit before
     /// starting it, and instrumenting the inner call would resolve a unit ✔ the
     /// moment it went down.
-    fn stop_watched(daemon: &Daemon, service: &str) -> Result<(), SupervisorError> {
+    fn stop_watched(
+        spawn_manager: &DynamicSpawnManager,
+        daemon: &Daemon,
+        project: &str,
+        service: &str,
+    ) -> Result<(), SupervisorError> {
         daemon.note_unit_starting(service);
-        match daemon.stop_service(service) {
+        // Read the generation's pid before the stop clears it; afterwards there
+        // is nothing left to tie the tracked children to this run of the unit.
+        let root_pid = daemon
+            .pid_file_handle()
+            .lock()
+            .ok()
+            .and_then(|pid_file| pid_file.services().get(service).copied());
+        let result = daemon.stop_service(service);
+        // Only reclaim children when the parent is actually down: a failed stop
+        // leaves the unit running, and its workers with it.
+        if let (Ok(()), Some(root_pid)) = (&result, root_pid) {
+            Self::sweep_dynamic_children(
+                spawn_manager,
+                daemon,
+                project,
+                service,
+                root_pid,
+            );
+        }
+        match result {
             Ok(()) => {
                 daemon.note_unit_done(service, start::Outcome::Stopped);
                 Ok(())
@@ -6134,6 +6342,61 @@ running project does not declare; restart the project to apply structural change
                 daemon.note_unit_done(service, Self::cascade_failure(service, &err));
                 Err(err)
             }
+        }
+    }
+
+    /// Reclaims the dynamic children one generation of a unit spawned.
+    ///
+    /// The ordinary teardown sweep cannot reach them: they are forked by the
+    /// supervisor, so they are not descendants of the service pid and — before
+    /// they were given their own session — sat in the supervisor's own session
+    /// and process group, which the sweep refuses to signal. Stopping a unit
+    /// left every worker it had spawned running, and nothing but a full
+    /// supervisor shutdown collected them.
+    ///
+    /// Scoped to `root_pid` so a rolling restart cannot kill the replacement's
+    /// children, and honours the unit's `termination_policy`: `orphan` and
+    /// `reparent` mean the children are meant to outlive the parent, so they are
+    /// only dropped from tracking.
+    fn sweep_dynamic_children(
+        spawn_manager: &DynamicSpawnManager,
+        daemon: &Daemon,
+        project: &str,
+        service: &str,
+        root_pid: u32,
+    ) {
+        let orphaned = spawn_manager.take_generation_children(project, service, root_pid);
+        if orphaned.is_empty() {
+            return;
+        }
+        let policy = spawn_manager.policy_for_unit(project, service);
+        let cascade = matches!(policy, TerminationPolicy::Cascade);
+
+        for child in &orphaned {
+            if cascade
+                && let Err(err) =
+                    Daemon::terminate_process_tree(&child.name, child.pid, None)
+            {
+                warn!(
+                    "Failed to terminate dynamic child '{}' (pid {}) of '{service}': {err}",
+                    child.name, child.pid
+                );
+                continue;
+            }
+            if let Ok(mut pid_file) = daemon.pid_file_handle().lock()
+                && let Err(err) = pid_file.remove_spawn(child.pid)
+            {
+                warn!(
+                    "Failed to clear spawn row for pid {} of '{service}': {err}",
+                    child.pid
+                );
+            }
+        }
+        if cascade {
+            info!(
+                "Reclaimed {} dynamic child process(es) of '{service}'",
+                orphaned.len()
+            );
         }
     }
 
@@ -6206,6 +6469,32 @@ running project does not declare; restart the project to apply structural change
         Ok(())
     }
 
+    /// Records every dynamic unit's current generation pid before a project-wide
+    /// stop, so its children can be reclaimed once the services are down.
+    fn dynamic_generations(daemon: &Daemon) -> Vec<(String, u32)> {
+        let config = daemon.config();
+        let handle = daemon.pid_file_handle();
+        let Ok(pid_file) = handle.lock() else {
+            return Vec::new();
+        };
+        config
+            .services
+            .iter()
+            .filter(|(_, service)| {
+                service
+                    .spawn
+                    .as_ref()
+                    .is_some_and(|spawn| matches!(spawn.mode, Some(SpawnMode::Dynamic)))
+            })
+            .filter_map(|(name, _)| {
+                pid_file
+                    .services()
+                    .get(name)
+                    .map(|pid| (name.clone(), *pid))
+            })
+            .collect()
+    }
+
     /// Stops every service in one managed project.
     fn stop_project(&mut self, project_id: &str) -> Result<(), SupervisorError> {
         let primary_project = self.daemon.config().project.id.clone();
@@ -6213,7 +6502,17 @@ running project does not declare; restart the project to apply structural change
             self.daemon.cancel_boot();
             self.cron_manager.remove_project_jobs(project_id);
             self.daemon.shutdown_monitor();
+            let generations = Self::dynamic_generations(&self.daemon);
             let stop_result = self.daemon.stop_services();
+            for (service, root_pid) in generations {
+                Self::sweep_dynamic_children(
+                    &self.spawn_manager,
+                    &self.daemon,
+                    project_id,
+                    &service,
+                    root_pid,
+                );
+            }
             if let Err(err) = stop_result {
                 self.daemon.begin_boot();
                 let _ = self.daemon.ensure_monitoring();
@@ -6235,7 +6534,18 @@ running project does not declare; restart the project to apply structural change
         project.daemon.cancel_boot();
         self.cron_manager.remove_project_jobs(project_id);
         project.daemon.shutdown_monitor();
-        if let Err(err) = project.daemon.stop_services() {
+        let generations = Self::dynamic_generations(&project.daemon);
+        let stop_result = project.daemon.stop_services();
+        for (service, root_pid) in generations {
+            Self::sweep_dynamic_children(
+                &self.spawn_manager,
+                &project.daemon,
+                project_id,
+                &service,
+                root_pid,
+            );
+        }
+        if let Err(err) = stop_result {
             project.daemon.begin_boot();
             let _ = project.daemon.ensure_monitoring();
             let _ = self.sync_cron_projects();
@@ -6785,7 +7095,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_service_config_finds_primary_service_only() {
+    fn daemon_for_project_resolves_only_its_own_project() {
         let _guard = crate::test_utils::env_lock();
 
         let base = std::env::current_dir()
@@ -6817,11 +7127,22 @@ services:
         let supervisor =
             Supervisor::new(config_path, false, None).expect("create supervisor");
 
+        let project = supervisor.daemon.config().project.id.clone();
+        let owner = supervisor
+            .daemon_for_project(&project)
+            .expect("the primary project resolves to a daemon");
         assert_eq!(
-            supervisor.resolve_service_config("api").map(|c| c.command),
+            owner
+                .config()
+                .services
+                .get("api")
+                .map(|c| c.command.clone()),
             Some("/bin/true".to_string())
         );
-        assert!(supervisor.resolve_service_config("missing").is_none());
+        assert!(
+            supervisor.daemon_for_project("no-such-project").is_none(),
+            "an unmanaged project must not fall back to the primary daemon"
+        );
 
         match original_home {
             Some(val) => unsafe { std::env::set_var("HOME", val) },

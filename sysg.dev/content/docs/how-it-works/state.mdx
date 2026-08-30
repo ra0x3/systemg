@@ -110,6 +110,36 @@ Clean shutdown removes `sysg.pid`, `control.sock`, and `config_hint`. Stale file
   run `sysg purge`, then start on the new release.
 </Warning>
 
+## Growth and reclamation
+
+Two things on disk grow with use, and they are bounded differently.
+
+**Logs rotate on their own.** Each service's active log is capped at **10 MB**,
+after which it rotates and at most **5** numbered backups are kept — roughly
+60 MB per service, ceiling. Override per service with `logs.max_bytes` and
+`logs.max_files`, or globally in
+[`supervisor.xml`](/docs/how-it-works/configuration#supervisor-configuration).
+`sysg logs --prune` trims rotated backups further by age or total size.
+
+**State does not shrink on its own.** A project's state directory persists after
+its services stop — that is what makes a project a durable namespace, and what
+lets `sysg status` still tell you what happened. Stopping a project does not
+reclaim it.
+
+<Info>
+  For a workload that creates and destroys projects — one project per job, per
+  tenant, per slot — pair the stop with a scoped purge:
+
+  ```sh
+  $ sysg stop -p slot-42     # take the project's services down
+  $ sysg purge -p slot-42    # reclaim its state and its logs
+  ```
+
+  `purge -p` deletes that project's state directory **and** its log directory,
+  and nothing else. Without it, a churning workload accumulates one directory
+  per project it has ever run.
+</Info>
+
 ## See also
 
 - [`purge`](/reference/commands/purge) - Clear all state

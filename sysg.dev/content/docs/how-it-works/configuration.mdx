@@ -451,6 +451,33 @@ Position in the manifest has never ordered anything and does not now.
   while you add the missing `depends_on` entries.
 </Warning>
 
+#### Dependency failure
+
+`depends_on` orders startup, and it also propagates failure. When a dependency
+stops being usable, systemg stops everything that depends on it — directly or
+transitively — and marks them casualties of that dependency:
+
+- the dependency **exits unsuccessfully** (crash, non-zero exit, killed), or
+- the dependency **fails its health check**, which stops it the same way a crash
+  would.
+
+Once every dependency that felled them is healthy again, the casualties are
+restarted automatically. A multi-level stack heals bottom-up over successive
+monitor ticks; a `skip: true` service is not revived.
+
+<Info>
+  This is why a health check on a dependency is worth declaring even when the
+  process never crashes. A display server, message bus or database that is up
+  but not *serving* takes its dependents down and brings them back with it —
+  instead of leaving them running against something that stopped working.
+</Info>
+
+<Warning>
+  A **manual** `sysg stop` of a dependency does not cascade. Stopping one service
+  by hand stops that service; it is read as an operator decision, not a failure.
+  Use `sysg stop -p <project>` to take a whole stack down.
+</Warning>
+
 ### `env`
 
 Service-specific environment configuration.
@@ -588,7 +615,7 @@ Primary keys available on each service definition.
 | `deployment` | object | Update strategy configuration |
 | `logs` | object | Service stdout/stderr capture and rotation settings |
 | `skip` | bool or string | Skip this service, or a command whose success skips it |
-| `spawn` | object | Dynamic child-process policy (`mode`, `limits`) |
+| `spawn` | object | [Dynamic child-process policy](/docs/how-it-works/spawn) (`mode`, `limits`) |
 | `user` / `group` | string | Run the service as this user/group (privileged mode) |
 | `supplementary_groups` | array | Extra groups applied before dropping privileges |
 | `capabilities` | array | Linux capabilities retained after the privilege drop |
@@ -601,6 +628,98 @@ Primary keys available on each service definition.
 
 Health checks are configured under `deployment.health_check`, not as a
 top-level service key.
+
+<Warning>
+  **Unknown keys are refused, at every level.** A misspelled key is an error from
+  `validate` and from `start`, not something quietly dropped — inside `spawn`,
+  `limits`, `isolation`, `logs`, `cron`, `hooks` and `deployment` as well as at
+  the top of a service. A manifest cannot declare alerting, isolation or a
+  schedule and silently get none of it.
+</Warning>
+
+### `limits`
+
+Resource ceilings applied to the service process.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `nofile` | number or `unlimited` | Open file descriptors (`RLIMIT_NOFILE`) |
+| `nproc` | number or `unlimited` | Processes (`RLIMIT_NPROC`) |
+| `memlock` | number or `unlimited` | Locked memory (`RLIMIT_MEMLOCK`) |
+| `nice` | number | Scheduling priority, `-20`..`19` |
+| `cpu_affinity` | array | CPU indices the service may run on |
+| `cgroup` | object | cgroup v2 controls, below |
+
+#### `limits.cgroup`
+
+Linux only, and **requires a root supervisor** (`sudo sysg --sys ...`). systemg
+creates one cgroup per unit and writes the service pid into it after spawn.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `root` | string | Base directory. Defaults to `/sys/fs/cgroup/systemg` |
+| `memory_max` | string | Written to `memory.max` (e.g. `512M`, `max`) |
+| `cpu_max` | string | Written to `cpu.max` (e.g. `max`, `200000 100000`) |
+| `cpu_weight` | number | Written to `cpu.weight`, `1`..`10000` |
+
+```yaml
+services:
+  render:
+    command: "./render.sh"
+    limits:
+      cgroup:
+        memory_max: "2G"
+        cpu_weight: 200
+```
+
+<Warning>
+  A cgroup here is a **resource boundary, not a kill boundary**. systemg never
+  terminates anything through it — teardown is by session, process group and
+  ancestry, as described in
+  [Process trees](/docs/how-it-works/process-trees). Setting `memory_max` bounds
+  what the tree may consume; it does not change what `stop` kills.
+</Warning>
+
+<Info>
+  A cgroup that cannot be applied **fails the service** rather than starting it
+  unconfined — no root supervisor, an unwritable controller file, a value the
+  kernel rejects. A manifest that says a service is bounded and a service that
+  is not bounded must never both be true. Sizes are written in the units the
+  kernel expects, so `512M` is accepted here and converted; a value systemg
+  cannot read is refused at load with [`SG0210`](/reference/dialog/codes#sg0210).
+</Info>
+
+### `isolation`
+
+Per-service kernel isolation. Linux only, and requires a root supervisor.
+
+| Field | Enforced | Notes |
+|-------|----------|-------|
+| `network` | Yes | `CLONE_NEWNET` |
+| `mount` | Yes | `CLONE_NEWNS` |
+| `pid` | Partly | `CLONE_NEWPID` takes effect for processes the service forks **after** it starts, not for the service process itself |
+| `user` | Yes | `CLONE_NEWUSER` |
+| `seccomp` | Yes | Compiled and applied before `exec` |
+| `landlock` | Yes | Filesystem confinement; see [Sandboxing](/docs/kernel-mode/sandboxing) |
+| `apparmor_profile` | No | Accepted by the schema, never applied |
+| `selinux_context` | No | Accepted by the schema, never applied |
+| `private_devices` | No | Accepted by the schema, never applied |
+| `private_tmp` | No | Accepted by the schema, never applied |
+
+<Info>
+  Under schema **version 3**, requesting an unenforceable key **refuses the
+  service** rather than running it unprotected — a security control you asked
+  for and did not get is a failure, not a warning. Under version 2 the same
+  request starts the service and logs a warning. Prefer `version: "3"` for
+  anything that relies on isolation.
+</Info>
+
+<Warning>
+  A namespace the kernel refuses to grant (`EPERM`/`EINVAL`, the usual case
+  inside an unprivileged container) is skipped so the service still starts. Do
+  not assume `isolation` is in force because the service came up — confirm it on
+  the host you actually deploy to.
+</Warning>
 
 ### Environment object
 

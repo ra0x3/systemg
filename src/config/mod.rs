@@ -167,6 +167,7 @@ struct ManifestHeader {
 
 /// Version 1 manifest schema as accepted from YAML before migration.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigV1 {
     /// Configuration version.
     pub version: Version,
@@ -200,6 +201,7 @@ pub struct ConfigV1 {
 /// One project inside a `projects:` map. The map key supplies the id; the entry
 /// carries its display name and services, plus optional per-project overrides.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectEntry {
     /// Human-friendly display name. Defaults to the project id (the map key).
     #[serde(default)]
@@ -564,6 +566,7 @@ pub enum LogSink {
 /// Logging configuration shared by global and service-level config blocks.
 #[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct LogsConfig {
     /// Where service stdout/stderr should be sent.
     pub sink: Option<LogSink>,
@@ -640,6 +643,7 @@ pub enum StatusSnapshotMode {
 /// Status and inspect snapshot configuration.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct StatusConfig {
     /// Snapshot collection mode.
     pub snapshot_mode: StatusSnapshotMode,
@@ -666,6 +670,7 @@ impl StatusConfig {
 /// Top-level metrics configuration block.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     /// Number of minutes to retain in-memory samples (minimum: 1).
     pub retention_minutes: u64,
@@ -756,6 +761,7 @@ pub enum SpawnMode {
 
 /// Configuration for dynamic process spawning.
 #[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnConfig {
     /// Spawn mode (static or dynamic).
     pub mode: Option<SpawnMode>,
@@ -765,6 +771,7 @@ pub struct SpawnConfig {
 
 /// Resource limits and policies for dynamically spawned children.
 #[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnLimitsConfig {
     /// Maximum number of direct children allowed.
     pub children: Option<u32>,
@@ -925,6 +932,7 @@ pub struct ServiceConfig {
 
 /// Resource limit overrides configured per service.
 #[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
     /// Maximum number of open file descriptors (`RLIMIT_NOFILE`).
     pub nofile: Option<LimitValue>,
@@ -942,6 +950,7 @@ pub struct LimitsConfig {
 
 /// Configuration options for cgroup v2 controllers.
 #[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CgroupConfig {
     /// Absolute path for the cgroup base; defaults to `/sys/fs/cgroup/systemg` when omitted.
     pub root: Option<String>,
@@ -1085,6 +1094,7 @@ impl std::error::Error for LimitParseError {}
 
 /// Linux namespace and confinement options.
 #[derive(Debug, Deserialize, Clone, serde::Serialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct IsolationConfig {
     /// Enable network namespace isolation.
     pub network: Option<bool>,
@@ -1111,6 +1121,7 @@ pub struct IsolationConfig {
 /// Landlock filesystem confinement. Paths not covered here become inaccessible
 /// to the service. Enforced fail-closed under schema v3.
 #[derive(Debug, Deserialize, Clone, serde::Serialize, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct LandlockConfig {
     /// Paths the service may read (and traverse).
     #[serde(default)]
@@ -1194,6 +1205,29 @@ pub fn manifest_field_diag(
     .help_docs()
 }
 
+/// Parses a byte size such as `512M` into a plain byte count.
+///
+/// Exposed so the cgroup writer can turn a manifest's suffixed size into the
+/// decimal count `memory.max` actually accepts.
+pub fn parse_byte_limit(raw: &str) -> Option<u64> {
+    parse_limit(raw).ok()
+}
+
+/// Whether a `cpu.max` value is one the kernel will accept: `max`, or a quota
+/// and period pair.
+fn cpu_max_is_valid(raw: &str) -> bool {
+    let mut parts = raw.split_whitespace();
+    let Some(quota) = parts.next() else {
+        return false;
+    };
+    let quota_ok = quota.eq_ignore_ascii_case("max") || quota.parse::<u64>().is_ok();
+    let period_ok = match parts.next() {
+        Some(period) => period.parse::<u64>().is_ok_and(|value| value > 0),
+        None => true,
+    };
+    quota_ok && period_ok && parts.next().is_none()
+}
+
 /// Renders argv as a copy-pasteable command line for display and identity.
 fn render_argv(argv: &[String]) -> String {
     argv.iter()
@@ -1223,6 +1257,55 @@ fn check_duration(path: &str, raw: Option<&str>) -> Result<(), ProcessManagerErr
             value: raw.to_string(),
             reason: reason.to_string(),
         }
+    })
+}
+
+/// Rejects a byte-size field, naming its dotted path. Absent fields pass.
+///
+/// An unreadable size used to fall back to "no limit at all": the parse
+/// returned `None` and the ceiling simply vanished, so a manifest that asked
+/// for a memory cap ran with none and nothing said so.
+fn check_byte_size(
+    path: &str,
+    raw: Option<&str>,
+    allow_max: bool,
+) -> Result<(), ProcessManagerError> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    if allow_max && raw.trim().eq_ignore_ascii_case("max") {
+        return Ok(());
+    }
+    match parse_limit(raw) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(ProcessManagerError::ManifestFieldInvalid {
+            path: path.to_string(),
+            value: raw.to_string(),
+            reason: if allow_max {
+                "expected a byte size such as 512M, or `max`".to_string()
+            } else {
+                "expected a byte size such as 512M".to_string()
+            },
+        }),
+    }
+}
+
+/// Rejects a field whose value must be one of a fixed set.
+fn check_one_of(
+    path: &str,
+    raw: Option<&str>,
+    allowed: &[&str],
+) -> Result<(), ProcessManagerError> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    if allowed.iter().any(|value| raw.eq_ignore_ascii_case(value)) {
+        return Ok(());
+    }
+    Err(ProcessManagerError::ManifestFieldInvalid {
+        path: path.to_string(),
+        value: raw.to_string(),
+        reason: format!("expected one of: {}", allowed.join(", ")),
     })
 }
 
@@ -1257,6 +1340,7 @@ fn check_health_check(
 
 /// Deployment strategy configuration for a service.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeploymentConfig {
     /// Deployment strategy: "rolling" or "immediate".
     pub strategy: Option<String>,
@@ -1272,6 +1356,7 @@ pub struct DeploymentConfig {
 
 /// Blue/green rollout configuration used by rolling deployments on a single host.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlueGreenDeploymentConfig {
     /// Environment variable used to inject the selected slot value (defaults to "PORT").
     pub env_var: Option<String>,
@@ -1491,6 +1576,7 @@ impl EnvConfig {
 
 /// Command executed for a service hook.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookAction {
     /// Shell command to execute for this hook.
     pub command: String,
@@ -1510,6 +1596,7 @@ pub struct Hooks {
 
 /// Cron configuration for scheduled service execution.
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CronConfig {
     /// Cron expression defining the schedule (e.g., "0 * * * * *").
     pub expression: String,
@@ -1677,10 +1764,56 @@ impl Config {
                 }
             }
 
+            if let Some(spawn) = &service.spawn
+                && let Some(limits) = &spawn.limits
+            {
+                check_byte_size(
+                    &format!("{base}.spawn.limits.total_memory"),
+                    limits.total_memory.as_deref(),
+                    false,
+                )?;
+            }
+
+            if let Some(cgroup) = service.limits.as_ref().and_then(|l| l.cgroup.as_ref())
+            {
+                let cgroup_base = format!("{base}.limits.cgroup");
+                check_byte_size(
+                    &format!("{cgroup_base}.memory_max"),
+                    cgroup.memory_max.as_deref(),
+                    true,
+                )?;
+                if let Some(weight) = cgroup.cpu_weight
+                    && !(1..=10_000).contains(&weight)
+                {
+                    return Err(ProcessManagerError::ManifestFieldInvalid {
+                        path: format!("{cgroup_base}.cpu_weight"),
+                        value: weight.to_string(),
+                        reason: "expected a value between 1 and 10000".to_string(),
+                    });
+                }
+                if let Some(cpu_max) = cgroup.cpu_max.as_deref()
+                    && !cpu_max_is_valid(cpu_max)
+                {
+                    return Err(ProcessManagerError::ManifestFieldInvalid {
+                        path: format!("{cgroup_base}.cpu_max"),
+                        value: cpu_max.to_string(),
+                        reason: "expected `max`, or a quota and period such as `200000 100000`"
+                            .to_string(),
+                    });
+                }
+            }
+
             let Some(deployment) = &service.deployment else {
                 continue;
             };
             let base = format!("{base}.deployment");
+            // An unrecognised strategy used to fall through to `immediate`, so a
+            // typo silently turned a rolling deployment into a hard restart.
+            check_one_of(
+                &format!("{base}.strategy"),
+                deployment.strategy.as_deref(),
+                &["rolling", "immediate"],
+            )?;
             check_duration(
                 &format!("{base}.grace_period"),
                 deployment.grace_period.as_deref(),
@@ -3634,6 +3767,167 @@ services:
             err.to_string().contains("unknown field `total_timout`"),
             "unexpected error: {err}"
         );
+    }
+
+    /// Every nested block a manifest can write must refuse an unknown key, not
+    /// ignore it. `ServiceConfig` alone was strict, so a typo one level down —
+    /// in `spawn`, `limits`, `isolation`, `landlock` — read as configuration
+    /// that was in force when it was not. The docs' own `spawn: {limit: 50}`
+    /// parsed cleanly and did nothing.
+    #[test]
+    fn nested_blocks_reject_unknown_keys() {
+        let cases = [
+            (
+                "spawn",
+                "    spawn:\n      mode: dynamic\n      limit: 50\n",
+                "limit",
+            ),
+            (
+                "spawn.limits",
+                "    spawn:\n      mode: dynamic\n      limits:\n        childs: 4\n",
+                "childs",
+            ),
+            ("limits", "    limits:\n      nofiles: 1024\n", "nofiles"),
+            (
+                "limits.cgroup",
+                "    limits:\n      cgroup:\n        memory_maxx: 512M\n",
+                "memory_maxx",
+            ),
+            (
+                "isolation",
+                "    isolation:\n      netwrok: true\n",
+                "netwrok",
+            ),
+            (
+                "isolation.landlock",
+                "    isolation:\n      landlock:\n        ro_path:\n          - /usr\n",
+                "ro_path",
+            ),
+            ("logs", "    logs:\n      max_byte: 100\n", "max_byte"),
+            (
+                "cron",
+                "    cron:\n      expresion: \"* * * * * *\"\n",
+                "expresion",
+            ),
+            (
+                "hooks",
+                "    hooks:\n      onstart:\n        cmd: \"echo hi\"\n",
+                "cmd",
+            ),
+            (
+                "deployment",
+                "    deployment:\n      strategey: rolling\n",
+                "strategey",
+            ),
+        ];
+
+        for (block, snippet, bad_key) in cases {
+            let dir = tempdir().expect("tempdir");
+            let yaml_path = dir.path().join("systemg.yaml");
+            let mut yaml_file = File::create(&yaml_path).expect("create yaml");
+            write!(
+                yaml_file,
+                "version: \"2\"\nservices:\n  web:\n    command: \"python app.py\"\n{snippet}"
+            )
+            .expect("write yaml");
+
+            let err = load_config(Some(yaml_path.to_str().expect("yaml path")))
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("{block}: a typo must be refused, not silently ignored")
+                });
+            assert!(
+                err.to_string().contains(bad_key),
+                "{block}: error should name `{bad_key}`, got: {err}"
+            );
+        }
+    }
+
+    /// A value the runtime cannot read must be refused, not silently downgraded
+    /// to "no limit" or to a different strategy than the one written.
+    #[test]
+    fn unreadable_values_are_refused_not_defaulted() {
+        let cases = [
+            (
+                "spawn.limits.total_memory",
+                "    spawn:\n      mode: dynamic\n      limits:\n        total_memory: \"lots\"\n",
+            ),
+            (
+                "limits.cgroup.memory_max",
+                "    limits:\n      cgroup:\n        memory_max: \"half\"\n",
+            ),
+            (
+                "limits.cgroup.cpu_weight",
+                "    limits:\n      cgroup:\n        cpu_weight: 99999\n",
+            ),
+            (
+                "limits.cgroup.cpu_max",
+                "    limits:\n      cgroup:\n        cpu_max: \"fast\"\n",
+            ),
+            (
+                "deployment.strategy",
+                "    deployment:\n      strategy: rollling\n",
+            ),
+        ];
+
+        for (field, snippet) in cases {
+            let dir = tempdir().expect("tempdir");
+            let yaml_path = dir.path().join("systemg.yaml");
+            let mut yaml_file = File::create(&yaml_path).expect("create yaml");
+            write!(
+                yaml_file,
+                "version: \"2\"\nservices:\n  web:\n    command: \"python app.py\"\n{snippet}"
+            )
+            .expect("write yaml");
+
+            let err = load_config(Some(yaml_path.to_str().expect("yaml path")))
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("{field}: an unreadable value must be refused")
+                });
+            assert!(
+                err.to_string().contains(field),
+                "{field}: the error should name the field, got: {err}"
+            );
+        }
+    }
+
+    /// The readable forms must keep working — the point is refusing nonsense,
+    /// not tightening what a valid manifest may say.
+    #[test]
+    fn readable_limit_values_still_load() {
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        let mut yaml_file = File::create(&yaml_path).expect("create yaml");
+        write!(
+            yaml_file,
+            r#"version: "2"
+services:
+  web:
+    command: "python app.py"
+    spawn:
+      mode: dynamic
+      limits:
+        total_memory: "2G"
+    limits:
+      cgroup:
+        memory_max: "512M"
+        cpu_max: "200000 100000"
+        cpu_weight: 200
+    deployment:
+      strategy: rolling
+"#
+        )
+        .expect("write yaml");
+
+        load_config(Some(yaml_path.to_str().expect("yaml path")))
+            .expect("a manifest with readable limits must load");
+    }
+
+    #[test]
+    fn cgroup_memory_max_is_encoded_as_bytes() {
+        assert_eq!(parse_byte_limit("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_byte_limit("nope"), None);
     }
 
     #[test]

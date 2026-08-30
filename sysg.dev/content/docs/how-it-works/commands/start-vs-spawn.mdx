@@ -84,8 +84,15 @@ services:
     depends_on: ["queue"]
     spawn:
       mode: dynamic
-      limit: 50
+      limits:
+        children: 50
 ```
+
+<Info>
+  `mode` is the switch on its own — `spawn: {mode: dynamic}` with no `limits`
+  block is valid and uses the default ceilings. See
+  [Dynamic spawn](/docs/how-it-works/spawn) for the full schema.
+</Info>
 
 The scheduler reads from queue and spawns workers:
 
@@ -102,6 +109,7 @@ while job := queue.pop():
 
 ## See also
 
+- [Dynamic spawn](/docs/how-it-works/spawn) - The `spawn:` config block and its limits
 - [`start`](/reference/commands/start) - Launch services
 - [`spawn`](/reference/commands/spawn) - Deprecated command reference
 - [Configuration](/docs/how-it-works/configuration) - Service definitions

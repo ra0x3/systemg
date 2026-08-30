@@ -5031,10 +5031,20 @@ impl Daemon {
                     .lock()?
                     .insert(service_name.to_string(), child.into());
 
+                // A declared resource ceiling that could not be applied leaves
+                // the service running outside the bounds its manifest states.
+                // Tear it down instead of reporting a start that is not the one
+                // that was asked for.
                 if let Err(err) = privilege.apply_post_spawn(pid as libc::pid_t) {
-                    warn!(
-                        "Failed to apply post-spawn privilege adjustments for '{service_name}': {err}"
+                    error!(
+                        "Post-spawn privilege setup failed for '{service_name}': {err}; stopping it"
                     );
+                    processes.lock()?.remove(service_name);
+                    let _ = Self::terminate_process_tree(service_name, pid, None);
+                    return Err(ProcessManagerError::ServiceStartError {
+                        service: service_name.to_string(),
+                        source: err,
+                    });
                 }
                 let pgid = Self::process_group_for_pid(pid).or_else(|| {
                     debug!("Could not get pgid for {service_name} (pid {pid}), assuming pid == pgid");
@@ -9025,6 +9035,7 @@ impl Daemon {
             Ok(guard) => guard.keys().cloned().collect(),
             Err(_) => return,
         };
+        let reverse = ctx.config.reverse_dependencies();
 
         for name in running {
             let Some(service) = ctx.config.services.get(&name) else {
@@ -9105,6 +9116,16 @@ impl Daemon {
                 ) {
                     warn!("Failed to stop unhealthy service '{name}': {err}");
                 }
+
+                // A crash reaches `stop_dependents` through the monitor's exit
+                // scan, but this stop removes the child handle and reaps it
+                // here, so the monitor never sees an exit and the cascade was
+                // skipped entirely. Dependents kept running against a
+                // dependency that had already been declared unhealthy — a
+                // browser still pointed at a display that failed its probe.
+                // Cascade even when the stop reported an error: the verdict is
+                // the probe's, not the teardown's.
+                Self::stop_dependents(&name, &reverse, ctx);
             }
         }
     }
