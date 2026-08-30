@@ -4769,6 +4769,16 @@ impl Supervisor {
             .transpose()
             .map_err(|source| SupervisorError::from(io::Error::other(source)))?;
 
+        // Same contract as a manifest unit: the ceiling is built before the
+        // fork, so the child is inside it before it can create anything.
+        let privilege = match privilege {
+            Some(mut privilege) => {
+                privilege.prepare_resources().map_err(SupervisorError::Io)?;
+                Some(privilege)
+            }
+            None => None,
+        };
+
         let mut cmd = std::process::Command::new(program);
         if params.command.len() > 1 {
             cmd.args(&params.command[1..]);
@@ -4831,13 +4841,10 @@ impl Supervisor {
         if let Some(privilege) = &privilege
             && let Err(err) = privilege.apply_post_spawn(child_pid as libc::pid_t)
         {
-            error!(
-                "Post-spawn privilege setup failed for dynamic child '{}': {err}",
+            warn!(
+                "Post-spawn reporting failed for dynamic child '{}': {err}",
                 params.name
             );
-            let _ = Daemon::terminate_process_tree(&params.name, child_pid, None);
-            let _ = child.wait();
-            return Err(SupervisorError::Io(err));
         }
 
         let command_string = params.command.join(" ");
@@ -4937,25 +4944,38 @@ impl Supervisor {
         // recycled process. A TTL is an explicit instruction about THIS child,
         // so it overrides `termination_policy` — that policy governs what
         // happens when the parent goes away, not a deadline the caller set.
+        // Set once the waiter has reaped the child. After that point its pid may
+        // belong to an unrelated process, so the TTL must never signal it.
+        let reaped = Arc::new(AtomicBool::new(false));
         if let Some(ttl) = params.ttl.map(Duration::from_secs).filter(|d| !d.is_zero()) {
             let ttl_manager = self.spawn_manager.clone();
             let ttl_pid_file = Arc::clone(&pid_file_handle);
             let ttl_name = child_name.clone();
+            let ttl_reaped = Arc::clone(&reaped);
             if let Err(err) = thread::Builder::new()
                 .name(format!("sysg-ttl-{child_pid}"))
                 .spawn(move || {
                     thread::sleep(ttl);
-                    // A child that already exited has nothing tracked; the
-                    // waiter cleared it and there is no deadline to enforce.
-                    if ttl_manager.get_spawn_tree(child_pid).is_none()
-                        && ttl_manager.root_pid_for(child_pid).is_none()
-                    {
+                    // The waiter reaps the child, so once it has run the pid is
+                    // free to be reused and signalling it could hit an unrelated
+                    // process. Tracking alone is not a safe test: a non-cascade
+                    // policy leaves the entry in place after the child is gone.
+                    if ttl_reaped.load(Ordering::SeqCst) {
                         return;
                     }
                     info!("Dynamic child '{ttl_name}' (pid {child_pid}) reached its TTL");
+                    // `remove_subtree` returns the root as well as its
+                    // descendants, so the root must not be listed again.
                     let removed = ttl_manager.remove_subtree(child_pid);
-                    for target in std::iter::once((ttl_name.clone(), child_pid))
-                        .chain(removed.iter().map(|c| (c.name.clone(), c.pid)))
+                    for target in removed
+                        .iter()
+                        .map(|c| (c.name.clone(), c.pid))
+                        .chain(
+                            removed
+                                .iter()
+                                .all(|c| c.pid != child_pid)
+                                .then(|| (ttl_name.clone(), child_pid)),
+                        )
                     {
                         if let Err(err) =
                             Daemon::terminate_process_tree(&target.0, target.1, None)
@@ -4980,10 +5000,14 @@ impl Supervisor {
         let spawn_manager_for_exit = self.spawn_manager.clone();
         let pid_file_for_exit = Arc::clone(&pid_file_handle);
         let child_name_for_exit = child_name.clone();
+        let reaped_for_exit = Arc::clone(&reaped);
         if let Err(err) = thread::Builder::new()
             .name(format!("sysg-child-{child_pid}"))
             .spawn(move || match child.wait() {
                 Ok(status) => {
+                    // From here the pid is reaped and may be reused; stand the
+                    // TTL timer down before touching any tracking.
+                    reaped_for_exit.store(true, Ordering::SeqCst);
                     let exit = SpawnedExit {
                         exit_code: status.code(),
                         #[cfg(unix)]
@@ -5037,6 +5061,7 @@ impl Supervisor {
                     }
                 }
                 Err(err) => {
+                    reaped_for_exit.store(true, Ordering::SeqCst);
                     error!("Failed to wait for spawned child {child_pid}: {err}");
                 }
             })

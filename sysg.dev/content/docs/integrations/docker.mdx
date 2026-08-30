@@ -1,0 +1,148 @@
+---
+title: Docker
+---
+
+# Docker
+
+`sysg` runs inside a container the same way it runs on a laptop: one binary, one
+manifest, one supervisor. There are two useful shapes — sysg as the container's
+init process, or sysg alongside an existing entrypoint — and in both you drive it
+from the host with `docker exec`.
+
+## Put sysg in the image
+
+The installer drops the binary in `~/.local/bin`, which is not on `PATH` for a
+container's `ENTRYPOINT`, so copy it somewhere that is:
+
+```dockerfile
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh \
+    && install -m 0755 /root/.local/bin/sysg /usr/local/bin/sysg
+```
+
+## sysg as PID 1
+
+`sysg init` boots the manifest, reaps orphans, and tears the stack down in
+reverse dependency order when the container is stopped — replacing a
+tini + supervisord pairing with one binary.
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.sysg.dev/ | sh \
+    && install -m 0755 /root/.local/bin/sysg /usr/local/bin/sysg
+
+COPY systemg.yaml /etc/systemg/systemg.yaml
+ENTRYPOINT ["sysg", "init", "-c", "/etc/systemg/systemg.yaml"]
+```
+
+```yaml
+version: "2"
+projects:
+  app:
+    services:
+      db:
+        command: "sleep 3000"
+      api:
+        command: "sleep 3000"
+        depends_on: [db]
+```
+
+```bash
+$ docker build -t myapp .
+$ docker run -d --name myapp myapp
+```
+
+`docker stop` sends `SIGTERM` to PID 1, sysg stops every service in reverse
+dependency order, and the container's exit code is the teardown verdict — `0`
+when everything died, non-zero ([SG0713](/reference/dialog/codes#sg0713)) when
+something survived.
+
+```bash
+$ docker stop myapp && docker inspect -f '{{.State.ExitCode}}' myapp
+0
+```
+
+:::warning Do not add `--init`
+`sysg init` must actually be PID 1. `docker run --init` inserts tini ahead of it
+and sysg refuses to boot with
+[SG0711](/reference/dialog/codes#sg0711).
+:::
+
+## sysg beside an existing entrypoint
+
+If the container already has an entrypoint of its own — a dev container, a CI
+image, an app image you don't want to restructure — start sysg from it and leave
+PID 1 alone:
+
+```dockerfile
+ENTRYPOINT ["sh", "-c", "sysg --sys start -c /etc/systemg/systemg.yaml --daemonize && exec my-app"]
+```
+
+The supervisor still starts, restarts, and logs your services. What you give up
+is shutdown: `SIGTERM` goes to the entrypoint, not to sysg, so `docker stop`
+usually ends in `SIGKILL` (exit `137`) with no ordered teardown. Call
+`sysg --sys stop --supervisor` yourself if that matters.
+
+## Drive it from the host
+
+The control channel is a unix socket inside the container, so `docker exec` is
+how you reach it:
+
+```bash
+$ docker exec myapp sysg --sys status
+$ docker exec myapp sysg --sys logs -s api --no-follow
+$ docker exec myapp sysg --sys restart -s api
+```
+
+For scripts and agents, ask for stable output:
+
+```bash
+$ docker exec myapp sysg --sys status --format json | jq '.units[].state'
+$ docker exec myapp sysg --sys status --plain
+```
+
+:::info Why `--sys`
+`sysg init` runs in system mode, so its state lives in `/var/lib/systemg`. A
+command without `--sys` targets the user runtime and is refused with
+[SG0702](/reference/dialog/codes#sg0702); `--sys` as a non-root user is refused
+with [SG0704](/reference/dialog/codes#sg0704). `docker exec` runs as root by
+default, so `--sys` is all you need.
+:::
+
+## Compose
+
+```yaml
+services:
+  app:
+    build: .
+    stop_grace_period: 30s
+    volumes:
+      - sysg-logs:/var/log/systemg
+
+volumes:
+  sysg-logs:
+```
+
+```bash
+$ docker compose exec app sysg --sys status
+```
+
+`stop_grace_period` should exceed your slowest service's shutdown, or Docker
+kills the container mid-teardown. Mounting `/var/log/systemg` keeps service logs
+after the container is gone; mount `/var/lib/systemg` too if you want supervisor
+state to survive a recreate.
+
+## Running the CLI on the host
+
+Reaching a container's supervisor from a host `sysg` — by sharing its socket over
+a bind mount — is not supported. The client and supervisor disagree about PIDs
+across the namespace boundary, and Docker Desktop cannot carry a unix socket
+across its VM at all. Use `docker exec`.
+
+## See also
+
+- [Container-Init (PID 1)](/docs/kernel-mode/container-init) — what changes when
+  sysg is PID 1, and the SG0711–SG0714 diagnostics.
+- [System Mode](/docs/kernel-mode/system-mode) — what `--sys` means outside a
+  container.

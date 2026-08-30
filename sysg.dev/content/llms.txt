@@ -20,6 +20,7 @@ Primary links:
 - Configuration: https://sysg.dev/how-it-works/configuration
 - Validate command: https://sysg.dev/how-it-works/commands/validate
 - Claude Code integration: https://sysg.dev/integrations/claude-code
+- Docker integration: https://sysg.dev/integrations/docker
 - Debugging method: https://github.com/ra0x3/systemg/blob/main/DEBUGGING.md
 - Repository: https://github.com/ra0x3/systemg
 

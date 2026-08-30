@@ -333,6 +333,17 @@ export const ENTRIES: Entry[] = [
     legacy: ["/integrations/claude-code"],
   },
   {
+    source: "integrations/docker.mdx",
+    slug: "integrations/docker",
+    section: "docs",
+    group: "Integrations",
+    route: "/docs/integrations/docker",
+    title: "Docker",
+    description: null,
+    canonical: null,
+    legacy: ["/integrations/docker"],
+  },
+  {
     source: "how-it-works/configuration.mdx",
     slug: "how-it-works/configuration",
     section: "reference",

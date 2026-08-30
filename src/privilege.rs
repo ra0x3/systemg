@@ -112,6 +112,21 @@ pub struct PrivilegeContext {
     pub capabilities: Vec<String>,
     /// Namespace isolation configuration for the process
     pub isolation: Option<IsolationConfig>,
+    /// Whether this manifest's schema refuses a control it cannot enforce.
+    ///
+    /// The same value that makes an unenforceable sandbox key refuse the
+    /// service decides whether a resource ceiling that failed to apply is fatal
+    /// or a warning: a v2 manifest that ran unconfined in a constrained
+    /// container keeps running, a v3 one refuses.
+    pub fail_closed: bool,
+    /// Write handle on the unit's `cgroup.procs`, opened in the parent.
+    ///
+    /// The child joins the cgroup itself, between `fork` and `exec`. Attaching
+    /// from the parent after the spawn returned left everything the service
+    /// forked in that window in the parent cgroup, permanently — a fast-forking
+    /// service escaped the ceiling its manifest declared.
+    #[cfg(target_os = "linux")]
+    pub cgroup_procs: Option<std::sync::Arc<fs::File>>,
     /// The exact supplementary group list to install, target gid first.
     ///
     /// Built in the parent: the child cannot allocate, so the vector it hands
@@ -225,6 +240,7 @@ impl PrivilegeContext {
             limits: service.limits.clone(),
             capabilities: service.capabilities.clone().unwrap_or_default(),
             isolation: service.isolation.clone(),
+            fail_closed,
             ..PrivilegeContext::default()
         };
 
@@ -337,6 +353,7 @@ impl PrivilegeContext {
     /// it in the supervisor context will mutate the supervisor's privileges and
     /// can leave the process in an inconsistent state.
     pub unsafe fn apply_pre_exec(&self) -> Result<(), ApplyFault> {
+        self.join_cgroup()?;
         self.apply_isolation()?;
         self.apply_limits()?;
         self.apply_nice()?;
@@ -346,6 +363,33 @@ impl PrivilegeContext {
             self.apply_user_switch()?;
         }
         self.apply_capabilities_post_user()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    /// Joins the prepared cgroup from inside the child, before `exec`.
+    ///
+    /// Writes to a descriptor the parent already opened, so this allocates
+    /// nothing and takes no lock — the post-fork contract. `0` names the
+    /// calling process.
+    fn join_cgroup(&self) -> Result<(), ApplyFault> {
+        use std::os::fd::AsRawFd;
+
+        let Some(procs) = &self.cgroup_procs else {
+            return Ok(());
+        };
+        let written = unsafe { libc::write(procs.as_raw_fd(), c"0".as_ptr().cast(), 1) };
+        if written != 1 {
+            // A cgroup the child could not join is a resource limit that did
+            // not take effect, which is exactly what this fault reports.
+            return Err(ApplyFault::last(ChildFault::ResourceLimit));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    /// Cgroups are Linux-only.
+    fn join_cgroup(&self) -> Result<(), ApplyFault> {
         Ok(())
     }
 
@@ -597,38 +641,66 @@ impl PrivilegeContext {
     }
 
     #[cfg(target_os = "linux")]
-    /// Performs post-spawn privilege work (e.g. cgroup attachments) that must
-    /// run after the child PID is known.
-    pub fn apply_post_spawn(&self, pid: libc::pid_t) -> io::Result<()> {
-        if let Some(limits) = &self.limits
-            && let Some(cgroup_cfg) = &limits.cgroup
-        {
-            // A resource ceiling that silently fails to apply is worse than no
-            // ceiling: the manifest says the service is bounded and it is not.
-            // Both failures are reported to the caller, which tears the service
-            // down rather than leaving it running unconfined.
-            if !getuid().is_root() {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "service '{}' declares limits.cgroup, which needs a root supervisor",
-                        self.service_name
-                    ),
-                ));
-            }
-            apply_cgroup_settings(&self.service_hash, cgroup_cfg, pid).map_err(
-                |err| {
-                    io::Error::new(
-                        err.kind(),
-                        format!(
-                            "failed to configure cgroup for '{}': {err}",
-                            self.service_name
-                        ),
-                    )
-                },
-            )?;
-        }
+    /// Creates the unit's cgroup, writes its ceilings, and opens `cgroup.procs`
+    /// so the child can join before it execs.
+    ///
+    /// Everything happens in the parent, before `fork`. The previous design
+    /// attached the pid after the spawn had already returned, which left a
+    /// window in which the service could fork children into the parent cgroup;
+    /// those children never moved, so a fast-forking service ran outside the
+    /// ceiling its manifest declared.
+    ///
+    /// The schema decides what a failure means, exactly as it does for an
+    /// unenforceable sandbox key: v3 refuses the service rather than run it
+    /// unbounded, v2 keeps the previous warn-and-run so a manifest that works
+    /// in a container without a delegated controller still works.
+    pub fn prepare_resources(&mut self) -> io::Result<()> {
+        let Some(cgroup_cfg) = self.limits.as_ref().and_then(|l| l.cgroup.clone()) else {
+            return Ok(());
+        };
 
+        let outcome = if getuid().is_root() {
+            apply_cgroup_settings(&self.service_hash, &cgroup_cfg)
+                .map(|procs| self.cgroup_procs = Some(std::sync::Arc::new(procs)))
+                .map_err(|err| {
+                    format!(
+                        "failed to configure cgroup for '{}': {err}",
+                        self.service_name
+                    )
+                })
+        } else {
+            Err(format!(
+                "service '{}' declares limits.cgroup, which needs a root supervisor",
+                self.service_name
+            ))
+        };
+
+        if let Err(reason) = outcome {
+            if self.fail_closed {
+                return Err(io::Error::other(format!(
+                    "{reason}; schema v3 refuses it rather than run unbounded (pin the manifest to version 2 to keep the previous warn-and-run)"
+                )));
+            }
+            warn!("{reason}; the service will run without it");
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    /// Cgroups are Linux-only; a request is reported once and ignored.
+    pub fn prepare_resources(&mut self) -> io::Result<()> {
+        if self.limits.as_ref().is_some_and(|l| l.cgroup.is_some()) {
+            warn!(
+                "Cgroup configuration requested for '{}' but is only supported on Linux",
+                self.service_name
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    /// Reports post-spawn facts that need the child's pid.
+    pub fn apply_post_spawn(&self, pid: libc::pid_t) -> io::Result<()> {
         if let Some(isolation) = &self.isolation
             && isolation.pid.unwrap_or(false)
         {
@@ -641,17 +713,8 @@ impl PrivilegeContext {
     }
 
     #[cfg(not(target_os = "linux"))]
-    /// No-op on non-Linux targets; logs when unsupported features were
-    /// requested so the supervisor can surface actionable warnings.
+    /// No-op on non-Linux targets.
     pub fn apply_post_spawn(&self, _pid: libc::pid_t) -> io::Result<()> {
-        if let Some(limits) = &self.limits
-            && limits.cgroup.is_some()
-        {
-            warn!(
-                "Cgroup configuration requested for '{}' but is only supported on Linux",
-                self.service_name
-            );
-        }
         Ok(())
     }
 }
@@ -728,11 +791,7 @@ fn caps_errno(err: &CapsError) -> Option<Errno> {
 
 #[cfg(target_os = "linux")]
 /// Handles apply cgroup settings.
-fn apply_cgroup_settings(
-    service_hash: &str,
-    cfg: &CgroupConfig,
-    pid: libc::pid_t,
-) -> io::Result<()> {
+fn apply_cgroup_settings(service_hash: &str, cfg: &CgroupConfig) -> io::Result<fs::File> {
     let root = cfg
         .root
         .as_deref()
@@ -741,8 +800,6 @@ fn apply_cgroup_settings(
 
     let unit_dir = root.join(sanitize_for_fs(service_hash));
     fs::create_dir_all(&unit_dir)?;
-
-    fs::write(unit_dir.join("cgroup.procs"), pid.to_string())?;
 
     if let Some(memory_max) = &cfg.memory_max {
         // `memory.max` accepts a decimal byte count or the literal `max`. A
@@ -772,7 +829,12 @@ fn apply_cgroup_settings(
         fs::write(unit_dir.join("cpu.weight"), weight.to_string())?;
     }
 
-    Ok(())
+    // Opened last, once the ceilings are in place: the child writes `0` to this
+    // between fork and exec, so it is already inside the bounded cgroup before
+    // it can create anything.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(unit_dir.join("cgroup.procs"))
 }
 
 #[cfg(target_os = "linux")]
@@ -970,16 +1032,28 @@ mod linux_tests {
             cpu_weight: Some(500),
         };
 
-        apply_cgroup_settings("demo.service", &cfg, 4242).expect("cgroup settings");
-
+        // On a real cgroupfs `cgroup.procs` already exists; the tempdir stands
+        // in for the controller, so create it for the open to land on.
         let unit_dir = root.path().join("demo_service");
+        std::fs::create_dir_all(&unit_dir).expect("unit dir");
+        std::fs::write(unit_dir.join("cgroup.procs"), b"").expect("seed procs");
+
+        let procs = apply_cgroup_settings("demo.service", &cfg).expect("cgroup settings");
+        drop(procs);
+
+        // The parent must NOT write a pid: the child joins itself before exec,
+        // so nothing it forks can predate the ceiling.
         let contents = std::fs::read_to_string(unit_dir.join("cgroup.procs"))
             .expect("cgroup.procs exists");
-        assert_eq!(contents.trim(), "4242");
+        assert!(
+            contents.trim().is_empty(),
+            "the parent must leave the join to the child, got: {contents:?}"
+        );
 
+        // The kernel takes a decimal byte count here, not a suffixed size.
         let memory = std::fs::read_to_string(unit_dir.join("memory.max"))
             .expect("memory.max exists");
-        assert_eq!(memory.trim(), "256M");
+        assert_eq!(memory.trim(), (256 * 1024 * 1024).to_string());
 
         let cpu_max =
             std::fs::read_to_string(unit_dir.join("cpu.max")).expect("cpu.max exists");

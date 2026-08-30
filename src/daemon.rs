@@ -4859,7 +4859,7 @@ impl Daemon {
         let mut merged_env =
             collect_service_env(&service_config.env, &working_dir, service_name);
 
-        let privilege = crate::privilege::PrivilegeContext::from_service(
+        let mut privilege = crate::privilege::PrivilegeContext::from_service(
             service_name,
             service_config,
             fail_closed,
@@ -4867,6 +4867,15 @@ impl Daemon {
         .map_err(|source| ProcessManagerError::PrivilegeSetupFailed {
             service: service_name.to_string(),
             source,
+        })?;
+
+        // Ceilings are built before the fork so the child is already inside
+        // them when it execs; nothing it forks can predate them.
+        privilege.prepare_resources().map_err(|source| {
+            ProcessManagerError::PrivilegeSetupFailed {
+                service: service_name.to_string(),
+                source,
+            }
         })?;
 
         for (key, value) in privilege.user.env_overrides() {
@@ -5036,15 +5045,7 @@ impl Daemon {
                 // Tear it down instead of reporting a start that is not the one
                 // that was asked for.
                 if let Err(err) = privilege.apply_post_spawn(pid as libc::pid_t) {
-                    error!(
-                        "Post-spawn privilege setup failed for '{service_name}': {err}; stopping it"
-                    );
-                    processes.lock()?.remove(service_name);
-                    let _ = Self::terminate_process_tree(service_name, pid, None);
-                    return Err(ProcessManagerError::ServiceStartError {
-                        service: service_name.to_string(),
-                        source: err,
-                    });
+                    warn!("Post-spawn reporting failed for '{service_name}': {err}");
                 }
                 let pgid = Self::process_group_for_pid(pid).or_else(|| {
                     debug!("Could not get pgid for {service_name} (pid {pid}), assuming pid == pgid");
