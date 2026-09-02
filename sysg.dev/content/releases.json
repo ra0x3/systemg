@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.66.9",
+    "slug": "0.66.9",
+    "title": "v0.66.9",
+    "date": "2026-09-02T06:47:48Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.9",
+    "summary": "fix(restart): fail a restart that bounced nothing and bound each use-case run (479edf3)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): fail a restart that bounced nothing and bound each use-case run (<code>479edf3</code>)</li>\n<li>fix(restart): bounce every unit by default and fail a restart that touched nothing (<code>b13b047</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.7 (<code>f55a993</code>)</li>\n<li>docs(blog): publish release post for v0.66.7 (<code>0143280</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.7...v0.66.9\">Full changelog on GitHub</a></p>",
+    "commits": 4
+  },
+  {
     "tag": "v0.66.7",
     "slug": "0.66.7",
     "title": "v0.66.7",
