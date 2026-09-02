@@ -267,11 +267,12 @@ pub enum Commands {
         #[arg(long)]
         daemonize: bool,
 
-        /// Bounce only the units the manifest changed, plus their dependents,
-        /// instead of every declared unit. A rebuilt binary at an unchanged
-        /// path is invisible to this, so it will leave that process running.
+        /// Bounce every declared unit, not just the ones the manifest changed.
+        /// Use this when the manifest is unchanged but what it runs is not —
+        /// a rebuilt binary at the same path hashes identically, so the default
+        /// reconcile cannot see it.
         #[arg(long)]
-        reconcile: bool,
+        all: bool,
     },
 
     /// Show the status of currently running services.

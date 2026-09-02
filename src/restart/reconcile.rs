@@ -18,16 +18,22 @@ use crate::config::Config;
 
 /// How much of a project a restart is allowed to touch.
 ///
-/// `restart` means restart: the default bounces every declared unit, because a
-/// caller that redeployed a binary at an unchanged path has no way to express
-/// that in a manifest hash. Scoping to the diff is a deliberate opt-in
-/// (`--reconcile`) for callers who only want the manifest delta applied.
+/// The default reconciles: a restart applies the manifest delta and adopts
+/// unchanged units rather than bouncing them, so adding one service does not
+/// take the whole stack down and a completed one-shot is not re-run.
+///
+/// The cost of that is real and is why [`SgCode::RestartTouchedNothing`] exists:
+/// a rebuilt binary at an unchanged path hashes identically, so the delta cannot
+/// see it. A reconcile that ends up bouncing nothing therefore FAILS rather than
+/// reporting success, and `--all` is the way to say "bounce everything anyway".
+///
+/// [`SgCode::RestartTouchedNothing`]: crate::diag::SgCode::RestartTouchedNothing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RestartScope {
-    /// Bounce every unit the manifest declares.
-    #[default]
+    /// Bounce every unit the manifest declares — `restart --all`.
     Everything,
     /// Bounce only added and changed units, plus their transitive dependents.
+    #[default]
     Changed,
     /// Apply a manifest delta on behalf of a registration (`start`, `AddProject`)
     /// rather than a restart. Selects the same units as [`RestartScope::Changed`],

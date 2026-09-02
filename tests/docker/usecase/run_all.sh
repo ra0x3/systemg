@@ -25,6 +25,22 @@ fi
 JOBS="${USECASE_JOBS:-${DEFAULT_JOBS}}"
 [ "${JOBS}" -ge 1 ] 2>/dev/null || JOBS=1
 
+# Wall-clock ceiling for ONE case. Without this a single wedged container blocks
+# `wait -n` forever and the whole job dies on the CI step timeout with no idea
+# which case hung — a red test that reads as infrastructure flake. A case that
+# blows this budget is reported RED and named, like any other failure.
+CASE_TIMEOUT="${USECASE_TIMEOUT:-420}"
+TIMEOUT_BIN=""
+for candidate in timeout gtimeout; do
+  if command -v "${candidate}" >/dev/null 2>&1; then
+    TIMEOUT_BIN="${candidate}"
+    break
+  fi
+done
+if [ -z "${TIMEOUT_BIN}" ]; then
+  echo "!! no timeout(1) found; cases run unbounded (brew install coreutils)"
+fi
+
 BASE_DOCKERFILE="${USECASE_BASE_DOCKERFILE:-tests/docker/usecase/Dockerfile.base}"
 echo "== building shared base image (sysg-usecase-base) from ${BASE_DOCKERFILE} =="
 if ! docker build -f "${BASE_DOCKERFILE}" -t sysg-usecase-base .; then
@@ -64,6 +80,17 @@ run_case() {
     elif ! docker build -f "${dir}/Dockerfile" -t "sysg-usecase-${case}" "${REPO_ROOT}"; then
       echo "!! build failed for '${case}'"
       rc=2
+    elif [ -n "${TIMEOUT_BIN}" ]; then
+      local container="sysg-usecase-run-${case}-$$"
+      # `timeout` kills the docker CLI, not the container it is attached to, so
+      # name the container and reap it explicitly or the next run collides.
+      "${TIMEOUT_BIN}" --foreground "${CASE_TIMEOUT}" \
+        docker run --rm --init --name "${container}" "sysg-usecase-${case}"
+      rc=$?
+      if [ "${rc}" = "124" ]; then
+        echo "!! case '${case}' exceeded ${CASE_TIMEOUT}s and was killed"
+        docker rm -f "${container}" >/dev/null 2>&1
+      fi
     else
       docker run --rm --init "sysg-usecase-${case}"
       rc=$?
