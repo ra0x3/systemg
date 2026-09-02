@@ -266,6 +266,12 @@ pub enum Commands {
         /// rather than waiting for the restart to finish.
         #[arg(long)]
         daemonize: bool,
+
+        /// Bounce only the units the manifest changed, plus their dependents,
+        /// instead of every declared unit. A rebuilt binary at an unchanged
+        /// path is invisible to this, so it will leave that process running.
+        #[arg(long)]
+        reconcile: bool,
     },
 
     /// Show the status of currently running services.

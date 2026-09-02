@@ -1113,6 +1113,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             service,
             project,
             daemonize,
+            reconcile,
         } => {
             if args.drop_privileges && supervisor_running() {
                 warn!(
@@ -1145,7 +1146,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     return Err(Box::new(DiagError(diag)));
                 }
                 systemg::restart::Preflight::Ready(plan) => {
-                    dispatch_restart(plan, daemonize, verbose)?;
+                    dispatch_restart(plan, daemonize, reconcile, verbose)?;
                 }
             }
         }
@@ -3581,6 +3582,7 @@ mod tests {
             command: vec![],
         }));
         assert!(drop_privileges_applies_to_command(&Commands::Restart {
+            reconcile: false,
             config: "systemg.yaml".to_string(),
             service: None,
             project: None,
@@ -6115,6 +6117,7 @@ fn wait_for_supervisor_ready(child_pid: libc::pid_t) -> Result<(), Box<dyn Error
 fn dispatch_restart(
     plan: systemg::restart::RestartPlan,
     daemonize: bool,
+    reconcile: bool,
     verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
     use systemg::restart::RestartPlan;
@@ -6147,12 +6150,14 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config: restart_scoped_config(&config),
             service: None,
             project: None,
+            reconcile,
             watch: None,
         },
         RestartPlan::Project { config, project } => ControlCommand::Restart {
             config: restart_scoped_config(&config),
             service: None,
             project: Some(project),
+            reconcile,
             watch: None,
         },
         RestartPlan::Service {
@@ -6166,6 +6171,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config: restart_scoped_config(&config),
             service: Some(service),
             project,
+            reconcile,
             watch: None,
         },
     };
