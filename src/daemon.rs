@@ -2761,6 +2761,21 @@ pub enum ServiceReadyState {
     Skipped,
 }
 
+/// What a successful subset restart actually did.
+///
+/// A restart that returns `Ok` has historically said nothing about whether it
+/// moved a single process. Callers need that: a reconcile whose whole target
+/// set turns out to be cron-managed finishes clean while every long-running
+/// unit keeps the process it already had.
+#[derive(Debug, Default)]
+pub(crate) struct RestartTally {
+    /// Units that were actually stopped and brought back up.
+    pub bounced: Vec<String>,
+    /// Units that were targeted but deliberately passed over — cron-managed,
+    /// skip-gated, or skipped because a dependency was.
+    pub passed_over: Vec<String>,
+}
+
 /// Outcome of a failed subset restart, carrying the units that actually missed
 /// their target alongside the originating error.
 ///
@@ -6161,6 +6176,7 @@ impl Daemon {
     pub fn restart_services(&self) -> Result<(), ProcessManagerError> {
         let services: HashSet<String> = self.cfg().services.keys().cloned().collect();
         self.restart_services_subset(&services)
+            .map(|_| ())
             .map_err(ProcessManagerError::from)
     }
 
@@ -6168,8 +6184,20 @@ impl Daemon {
     pub(crate) fn restart_services_subset(
         &self,
         services: &HashSet<String>,
-    ) -> Result<(), RestartFailure> {
-        info!("Restarting all services...");
+    ) -> Result<RestartTally, RestartFailure> {
+        let declared = self.cfg().services.len();
+        let mut targets: Vec<&str> = services.iter().map(String::as_str).collect();
+        targets.sort_unstable();
+        if targets.len() == declared {
+            info!("Restarting all {declared} services...");
+        } else {
+            info!(
+                "Restarting {} of {declared} services: {}",
+                targets.len(),
+                targets.join(", ")
+            );
+        }
+        let mut passed_over = Vec::new();
 
         // Explicit operator intent re-arms every breaker in the subset.
         for service_name in services {
@@ -6210,6 +6238,7 @@ impl Daemon {
                     service_name
                 );
                 completed_services.insert(service_name.clone());
+                passed_over.push(service_name.clone());
                 continue;
             }
 
@@ -6232,6 +6261,7 @@ impl Daemon {
                         failed_services.insert(service_name.clone());
                         continue;
                     }
+                    passed_over.push(service_name.clone());
                     skipped_services.insert(service_name.clone());
                     continue;
                 }
@@ -6259,6 +6289,7 @@ impl Daemon {
                             first_error.get_or_insert(err);
                             failed_services.insert(service_name.clone());
                         } else {
+                            passed_over.push(service_name.clone());
                             skipped_services.insert(service_name.clone());
                         }
                         continue 'services;
@@ -6363,6 +6394,7 @@ impl Daemon {
                 }
                 Ok(ServiceReadyState::Skipped) => {
                     self.note_unit_done(&service_name, crate::start::Outcome::Skipped);
+                    passed_over.push(service_name.clone());
                     skipped_services.insert(service_name);
                 }
                 Err(err) => {
@@ -6397,8 +6429,17 @@ impl Daemon {
         }
 
         if first_error.is_none() && global_error.is_none() {
-            info!("All services restarted successfully.");
-            return Ok(());
+            passed_over.sort_unstable();
+            passed_over.dedup();
+            info!(
+                "Restarted {} service(s); {} passed over.",
+                restarted_services.len(),
+                passed_over.len()
+            );
+            return Ok(RestartTally {
+                bounced: restarted_services,
+                passed_over,
+            });
         }
 
         let mut failed: Vec<String> = failed_services.into_iter().collect();

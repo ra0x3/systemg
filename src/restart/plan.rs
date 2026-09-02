@@ -238,6 +238,34 @@ pub fn reconcile_incomplete(
         .help_docs()
 }
 
+/// Builds the SG0304 diagnostic for a restart that finished without bouncing a
+/// single unit.
+///
+/// The dangerous case this exists for: a deploy ships a new binary, edits only
+/// a cron unit in the manifest, and a `--reconcile` restart finds nothing else
+/// changed. Every long-running unit keeps its old process and the caller sees
+/// exit 0. Naming the units that were considered — and why each was passed
+/// over — is the difference between a silent stale deploy and a loud one.
+pub fn restart_touched_nothing(project: &str, considered: &[String]) -> Diagnostic {
+    let note = if considered.is_empty() {
+        "the restart targeted no units at all".to_string()
+    } else {
+        format!(
+            "units considered but not bounced (cron-managed, skipped, or unchanged): {}",
+            considered.join(", ")
+        )
+    };
+    Diagnostic::error(
+        SgCode::RestartTouchedNothing,
+        format!("restart of project '{project}' bounced no units; every process is the one that was already running"),
+    )
+    .note(note)
+    .note("a redeployed binary at an unchanged path is invisible to a manifest diff")
+    .help_cmd("bounce one unit outright", "sysg restart -s <service>")
+    .help_cmd("bounce everything", "sysg restart")
+    .help_docs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

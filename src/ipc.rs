@@ -194,6 +194,12 @@ pub enum ControlCommand {
         /// Optional project id to target.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// Apply only the manifest delta instead of bouncing every unit.
+        ///
+        /// Defaults to false so an old CLI talking to a new supervisor gets a
+        /// real restart, which is the safe direction to be wrong in.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reconcile: bool,
         /// Client-generated id for this operation's progress journal.
         ///
         /// Carried on the mutation so the supervisor registers exactly the
@@ -1240,6 +1246,7 @@ mod tests {
 
     fn restart_all() -> ControlCommand {
         ControlCommand::Restart {
+            reconcile: false,
             service: None,
             project: None,
             config: None,
@@ -1546,6 +1553,7 @@ mod tests {
         assert!(json.contains("Stop"));
 
         let restart = ControlCommand::Restart {
+            reconcile: false,
             config: Some("config.yaml".to_string()),
             service: Some("service".to_string()),
             project: None,
@@ -1580,6 +1588,7 @@ mod tests {
     #[test]
     fn restart_omits_null_optional_fields() {
         let restart = ControlCommand::Restart {
+            reconcile: false,
             config: Some("sysg.config.yaml".to_string()),
             service: None,
             project: None,

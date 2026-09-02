@@ -16,6 +16,35 @@ use std::collections::BTreeSet;
 
 use crate::config::Config;
 
+/// How much of a project a restart is allowed to touch.
+///
+/// `restart` means restart: the default bounces every declared unit, because a
+/// caller that redeployed a binary at an unchanged path has no way to express
+/// that in a manifest hash. Scoping to the diff is a deliberate opt-in
+/// (`--reconcile`) for callers who only want the manifest delta applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RestartScope {
+    /// Bounce every unit the manifest declares.
+    #[default]
+    Everything,
+    /// Bounce only added and changed units, plus their transitive dependents.
+    Changed,
+    /// Apply a manifest delta on behalf of a registration (`start`, `AddProject`)
+    /// rather than a restart. Selects the same units as [`RestartScope::Changed`],
+    /// but bouncing nothing is a legitimate outcome here — the caller never asked
+    /// for a restart, so it must not be told one failed.
+    Register,
+}
+
+impl RestartScope {
+    /// Whether a run under this scope that bounced nothing is a failure.
+    ///
+    /// Only a caller that actually asked for a restart is owed that error.
+    pub fn expects_a_bounce(self) -> bool {
+        matches!(self, RestartScope::Everything | RestartScope::Changed)
+    }
+}
+
 /// The set of changes needed to bring a running project to a new manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ManifestDiff {
