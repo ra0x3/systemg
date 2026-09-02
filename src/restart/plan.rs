@@ -261,8 +261,8 @@ pub fn restart_touched_nothing(project: &str, considered: &[String]) -> Diagnost
     )
     .note(note)
     .note("a redeployed binary at an unchanged path is invisible to a manifest diff")
+    .help_cmd("bounce every unit anyway", "sysg restart --all")
     .help_cmd("bounce one unit outright", "sysg restart -s <service>")
-    .help_cmd("bounce everything", "sysg restart")
     .help_docs()
 }
 

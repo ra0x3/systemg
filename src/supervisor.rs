@@ -512,6 +512,41 @@ fn bounceable_units(config: &Config) -> Vec<String> {
     units
 }
 
+/// What one project's reconcile did.
+///
+/// A whole-config restart reconciles several projects, and "this restart bounced
+/// nothing" is a verdict on the operation, not on each project in isolation —
+/// otherwise a stack whose second project is entirely cron-managed would fail a
+/// restart that correctly bounced the first.
+#[derive(Debug)]
+struct ReconcileOutcome {
+    /// The project this outcome belongs to.
+    project: String,
+    /// Whether this project bounced at least one unit.
+    bounced: bool,
+    /// Whether this project ended up bouncing nothing when it should have.
+    touched_nothing: bool,
+    /// Units this project deliberately passed over, for the diagnostic.
+    passed_over: Vec<String>,
+}
+
+/// Turns per-project outcomes into the operation's verdict.
+///
+/// SG0304 is raised only when NOTHING moved anywhere: one project that bounced
+/// a unit is enough to make the restart real.
+fn verdict_for_outcomes(
+    outcomes: &[ReconcileOutcome],
+) -> Option<crate::diag::Diagnostic> {
+    if outcomes.iter().any(|outcome| outcome.bounced) {
+        return None;
+    }
+    let quiet = outcomes.iter().find(|outcome| outcome.touched_nothing)?;
+    Some(crate::restart::restart_touched_nothing(
+        &quiet.project,
+        &quiet.passed_over,
+    ))
+}
+
 /// Whether a finished reconcile left the caller's processes exactly as it found
 /// them, when it had asked for them to be replaced.
 ///
@@ -1578,13 +1613,17 @@ impl Supervisor {
         };
         let config = configs.swap_remove(index);
 
-        if project_id == primary_project {
-            self.reconcile_primary_project(config, scope)?;
+        let outcome = if project_id == primary_project {
+            let outcome = self.reconcile_primary_project(config, scope)?;
             self.config_path = resolved;
             ipc::write_config_hint(&self.config_path)?;
             self.respawn_status_refresher()?;
+            outcome
         } else {
-            self.reconcile_extra_project(config, resolved, scope)?;
+            self.reconcile_extra_project(config, resolved, scope)?
+        };
+        if let Some(diag) = verdict_for_outcomes(std::slice::from_ref(&outcome)) {
+            return Err(ProcessManagerError::Diag(Box::new(diag)).into());
         }
         Ok(())
     }
@@ -1641,7 +1680,7 @@ impl Supervisor {
         &mut self,
         new_config: Config,
         scope: RestartScope,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<ReconcileOutcome, SupervisorError> {
         let old_config = self.daemon.config();
         let old_metrics = self.metrics_store.clone();
         let metrics_settings = new_config
@@ -1700,13 +1739,12 @@ impl Supervisor {
         };
         sync_result?;
         workers_result?;
-        if restart_touched_nothing(scope, &diff, &bounceable, &tally) {
-            return Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::restart_touched_nothing(&project_id, &tally.passed_over),
-            ))
-            .into());
-        }
-        Ok(())
+        Ok(ReconcileOutcome {
+            bounced: !tally.bounced.is_empty(),
+            touched_nothing: restart_touched_nothing(scope, &diff, &bounceable, &tally),
+            passed_over: tally.passed_over,
+            project: project_id,
+        })
     }
 
     /// Reconciles an additional project in place so unchanged services retain
@@ -1716,7 +1754,7 @@ impl Supervisor {
         new_config: Config,
         config_path: PathBuf,
         scope: RestartScope,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<ReconcileOutcome, SupervisorError> {
         let project_id = new_config.project.id.clone();
         let daemon = self
             .extra_projects
@@ -1776,13 +1814,12 @@ impl Supervisor {
             }
         };
         sync_result?;
-        if restart_touched_nothing(scope, &diff, &bounceable, &tally) {
-            return Err(ProcessManagerError::Diag(Box::new(
-                crate::restart::restart_touched_nothing(&project_id, &tally.passed_over),
-            ))
-            .into());
-        }
-        Ok(())
+        Ok(ReconcileOutcome {
+            bounced: !tally.bounced.is_empty(),
+            touched_nothing: restart_touched_nothing(scope, &diff, &bounceable, &tally),
+            passed_over: tally.passed_over,
+            project: project_id,
+        })
     }
 
     /// Stops primary-project background workers before its daemon state changes.
@@ -4577,13 +4614,13 @@ impl Supervisor {
                 config,
                 service,
                 project,
-                reconcile,
+                all,
                 ..
             } => {
-                let scope = if reconcile {
-                    RestartScope::Changed
-                } else {
+                let scope = if all {
                     RestartScope::Everything
+                } else {
+                    RestartScope::Changed
                 };
                 if let Some(service) = service {
                     self.restart_single_service_target(
@@ -5176,7 +5213,7 @@ impl Supervisor {
         &mut self,
         path: &Path,
         scope: RestartScope,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<Vec<ReconcileOutcome>, SupervisorError> {
         let (resolved, configs) = self.load_restart_manifest(path)?;
         let owned = self
             .extra_projects
@@ -5195,7 +5232,11 @@ impl Supervisor {
         scope: RestartScope,
     ) -> Result<(), SupervisorError> {
         if let Some(path) = config_path {
-            return self.reload_config(path, scope);
+            let outcomes = self.reload_config(path, scope)?;
+            return match verdict_for_outcomes(&outcomes) {
+                Some(diag) => Err(ProcessManagerError::Diag(Box::new(diag)).into()),
+                None => Ok(()),
+            };
         }
 
         let primary_path = self.config_path.clone();
@@ -5234,10 +5275,20 @@ impl Supervisor {
             loaded.push((resolved, configs, path == primary_path, owned));
         }
         loaded.sort_by_key(|(_, _, owns_primary, _)| !*owns_primary);
+        let mut outcomes = Vec::new();
         for (resolved, configs, owns_primary, owned) in loaded {
-            self.apply_restart_manifest(resolved, configs, owns_primary, owned, scope)?;
+            outcomes.extend(self.apply_restart_manifest(
+                resolved,
+                configs,
+                owns_primary,
+                owned,
+                scope,
+            )?);
         }
-        Ok(())
+        match verdict_for_outcomes(&outcomes) {
+            Some(diag) => Err(ProcessManagerError::Diag(Box::new(diag)).into()),
+            None => Ok(()),
+        }
     }
 
     /// Applies one fully validated manifest to the runtimes sourced from it.
@@ -5248,8 +5299,9 @@ impl Supervisor {
         owns_primary: bool,
         owned_extras: BTreeSet<String>,
         scope: RestartScope,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<Vec<ReconcileOutcome>, SupervisorError> {
         info!("Reloading configuration from {:?}", resolved);
+        let mut outcomes = Vec::new();
         let declared = configs
             .iter()
             .map(|config| config.project.id.clone())
@@ -5263,7 +5315,7 @@ impl Supervisor {
                 .unwrap_or(0);
             let primary = configs.remove(index);
             if primary.project.id == primary_id {
-                self.reconcile_primary_project(primary, scope)?;
+                outcomes.push(self.reconcile_primary_project(primary, scope)?);
                 self.config_path = resolved.clone();
                 ipc::write_config_hint(&self.config_path)?;
             } else {
@@ -5292,7 +5344,11 @@ impl Supervisor {
                 .into());
             }
             if self.extra_projects.contains_key(&project_id) {
-                self.reconcile_extra_project(config, resolved.clone(), scope)?;
+                outcomes.push(self.reconcile_extra_project(
+                    config,
+                    resolved.clone(),
+                    scope,
+                )?);
             } else {
                 self.add_extra_project(config, resolved.clone())?;
             }
@@ -5308,7 +5364,7 @@ impl Supervisor {
         self.sync_cron_projects()?;
         self.refresh_status_cache();
         self.respawn_status_refresher()?;
-        Ok(())
+        Ok(outcomes)
     }
 
     /// Registers a new project synchronously so restart can report its outcome.
@@ -5620,7 +5676,7 @@ impl Supervisor {
             return Ok(BootFailures::new(Vec::new(), None));
         }
         if !unchanged {
-            self.reconcile_primary_project(config, RestartScope::Register)?;
+            let _ = self.reconcile_primary_project(config, RestartScope::Register)?;
             self.primary_project_mode = mode;
             self.config_path = resolved;
             let _ = ipc::write_config_hint(&self.config_path);
@@ -6769,7 +6825,7 @@ running project does not declare; restart the project to apply structural change
         &mut self,
         path: &std::path::Path,
     ) -> Result<(), SupervisorError> {
-        self.reload_config(path, RestartScope::Changed)
+        self.reload_config(path, RestartScope::Changed).map(|_| ())
     }
 
     /// Shutdown for testing.
@@ -6998,7 +7054,7 @@ mod tests {
     fn op_project_reads_the_project_out_of_a_selector() {
         assert_eq!(
             Supervisor::op_project(&ControlCommand::Restart {
-                reconcile: false,
+                all: false,
                 config: None,
                 service: Some("web/api".into()),
                 project: None,
@@ -7055,12 +7111,11 @@ mod tests {
         }
     }
 
-    /// The arbitration incident, as a unit test: a deploy edits only a cron
-    /// unit's schedule, so the manifest diff names nothing else. A restart must
-    /// still bounce the server, or the freshly built binary at an unchanged
-    /// path stays unloaded behind a green exit code.
+    /// `--all` is the escape hatch from the delta: it bounces every declared
+    /// unit no matter what the manifest hash says, which is what a caller who
+    /// rebuilt a binary at an unchanged path actually needs.
     #[test]
-    fn a_cron_only_manifest_change_still_restarts_every_unit() {
+    fn the_all_scope_bounces_every_unit_whatever_the_diff_says() {
         let old = reconcile_config(&[
             ("server", "arb-rs serve", false),
             ("retag", "arb-py retag", true),
@@ -7078,8 +7133,10 @@ mod tests {
         assert_eq!(affected.len(), 2);
     }
 
+    /// The default: a manifest change bounces only what changed, so adding one
+    /// service never takes the rest of the stack down with it.
     #[test]
-    fn changed_scope_is_the_opt_in_that_narrows_to_the_delta() {
+    fn the_default_scope_narrows_to_the_delta() {
         let old = reconcile_config(&[
             ("server", "arb-rs serve", false),
             ("retag", "arb-py retag", true),
@@ -7125,6 +7182,39 @@ mod tests {
         assert_eq!(bounceable_units(&config), vec!["server".to_string()]);
     }
 
+    fn outcome(project: &str, bounced: bool, touched_nothing: bool) -> ReconcileOutcome {
+        ReconcileOutcome {
+            project: project.to_string(),
+            bounced,
+            touched_nothing,
+            passed_over: vec!["retag".to_string()],
+        }
+    }
+
+    /// A whole-config restart spans several projects. One of them being
+    /// entirely cron-managed is normal; failing the operation over it would
+    /// make a restart that did real work elsewhere report as a no-op.
+    #[test]
+    fn one_project_that_bounced_makes_the_whole_restart_real() {
+        let outcomes = [outcome("web", true, false), outcome("jobs", false, true)];
+        assert!(verdict_for_outcomes(&outcomes).is_none());
+    }
+
+    #[test]
+    fn a_restart_where_no_project_moved_anything_is_reported() {
+        let outcomes = [outcome("web", false, true), outcome("jobs", false, false)];
+        let diag = verdict_for_outcomes(&outcomes).expect("verdict");
+        assert_eq!(diag.code, crate::diag::SgCode::RestartTouchedNothing);
+    }
+
+    /// Every project stayed quiet for a legitimate reason (all cron, all
+    /// skip-gated). Nothing was owed a bounce, so nothing failed.
+    #[test]
+    fn quiet_projects_that_owed_no_bounce_do_not_fail_the_restart() {
+        let outcomes = [outcome("cron_only", false, false)];
+        assert!(verdict_for_outcomes(&outcomes).is_none());
+    }
+
     fn tally(bounced: &[&str], passed_over: &[&str]) -> crate::daemon::RestartTally {
         crate::daemon::RestartTally {
             bounced: bounced.iter().map(|s| s.to_string()).collect(),
@@ -7132,8 +7222,10 @@ mod tests {
         }
     }
 
-    /// The arbitration incident under `--reconcile`: the delta named only a
-    /// cron unit, so the server was never even considered and kept its process.
+    /// The arbitration incident: the delta named only a cron unit, so the
+    /// server was never even considered and kept its process. The reconcile is
+    /// the default, so this is the case that has to fail loudly rather than
+    /// return a green exit code over a stale binary.
     #[test]
     fn a_bounceable_unit_the_run_never_considered_is_a_no_op_restart() {
         let diff = crate::restart::ManifestDiff {
@@ -7721,7 +7813,7 @@ services:
 
         let restart_err = supervisor
             .handle_command(ControlCommand::Restart {
-                reconcile: false,
+                all: false,
                 config: None,
                 service: Some("beta_cron".into()),
                 project: Some("beta".into()),
@@ -7736,7 +7828,7 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                reconcile: false,
+                all: false,
                 config: Some(beta_config.to_string_lossy().to_string()),
                 service: Some("beta_worker".into()),
                 project: None,
@@ -7771,7 +7863,7 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                reconcile: false,
+                all: false,
                 config: Some(beta_updated_config.to_string_lossy().to_string()),
                 service: None,
                 project: Some("beta".into()),
@@ -7879,7 +7971,7 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                reconcile: false,
+                all: false,
                 config: None,
                 service: None,
                 project: Some("primary".into()),
@@ -7997,9 +8089,7 @@ services:
 
         let error = supervisor
             .handle_command(ControlCommand::Restart {
-                // Preserving an unchanged unit's process is the `--reconcile`
-                // contract specifically, not what a bare restart promises.
-                reconcile: true,
+                all: false,
                 config: Some(config_path.to_string_lossy().to_string()),
                 service: None,
                 project: Some("primary".into()),
@@ -8114,7 +8204,7 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                reconcile: false,
+                all: false,
                 config: None,
                 service: None,
                 project: Some("beta".into()),

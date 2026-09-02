@@ -27,8 +27,23 @@ check "$?" "port 39187 is occupied"
 section "start web (tries to bind the taken 39187) -> failed start"
 sysg start --config "$CONFIG" --daemonize >/tmp/s.out 2>/tmp/s.err
 cat /tmp/s.err | grep -v WARN | head -8
-sleep 3
-if grep -q "SG0105" /tmp/s.err || grep -q "SG0105" "$HOME/.local/share/systemg/logs/supervisor.log" 2>/dev/null; then
+
+# `command` is `sleep 1; python3 ...`, so the bind is not even ATTEMPTED until a
+# second after the unit starts, and the supervisor needs another cycle to type
+# the failure. A fixed `sleep 3` gave that maybe a second of slack and lost the
+# race about a third of the time. Poll instead: the invariant is that SG0105
+# arrives, not that it arrives inside an arbitrary window.
+saw_code() {
+  grep -q "SG0105" /tmp/s.err && return 0
+  grep -q "SG0105" "$HOME/.local/share/systemg/logs/supervisor.log" 2>/dev/null
+}
+WAITED=0
+while [ "$WAITED" -lt 20 ]; do
+  saw_code && break
+  WAITED=$((WAITED + 1))
+  sleep 1
+done
+if saw_code; then
   check 0 "bind failure is typed as port-in-use (SG0105)"
 else
   echo "--- log tail ---"; grep -iE "SG0|Address already|failed" "$HOME/.local/share/systemg/logs/supervisor.log" 2>/dev/null | grep -v capability | tail -4
