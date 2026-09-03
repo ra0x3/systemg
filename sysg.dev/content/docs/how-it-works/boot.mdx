@@ -55,6 +55,31 @@ is enabled for that account. `install-boot` prints the
 down until someone logs in.
 </Warning>
 
+## Linux without systemd
+
+`install-boot` renders two things: systemd units and launchd plists. It refuses
+to write either onto a machine that runs neither
+([SG0706](/reference/dialog/codes#sg0706)) — on a host booted by runit, s6,
+OpenRC or a bare container entrypoint, a systemd unit is a file nothing reads.
+Rendering one is still allowed, since a unit generated on a build box is the
+right unit for the systemd host it gets copied to; only writing it here is not.
+
+The supervisor itself needs none of this. `start --attached` does not fork, so
+whatever runs it supervises it:
+
+```bash
+$ sysg start --attached --config /opts/app/sysg.prod.yaml
+```
+
+Point your own service manager at that line and give it what the generated unit
+would have set: the account to run as, `HOME` for that account, the manifest's
+directory as the working directory, restart-on-failure, and a stop that sends
+SIGTERM to that process and waits. sysg does the rest — the signal reaches its
+graceful teardown, and services stop in reverse dependency order.
+
+Container PID 1 is a different job. Use [`sysg init`](/docs/kernel-mode/container-init),
+which adds orphan reaping that a supervisor started as any other PID cannot do.
+
 ## Running as a non-root account
 
 A machine-wide unit that runs the supervisor as an ordinary user — the common
