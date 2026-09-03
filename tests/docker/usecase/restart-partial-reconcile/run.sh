@@ -4,18 +4,20 @@
 #
 # WHAT THIS TESTS
 #   The adversary edits the manifest to add a service whose command dies
-#   instantly, while leaving the existing services healthy. The reconcile must:
-#     - keep the healthy, UNCHANGED services running (never a blanket teardown),
+#   instantly, while leaving the existing services healthy. The restart must:
+#     - leave the healthy services RUNNING (never a blanket teardown),
 #     - actually attempt the added unit,
 #     - report SG0302 (ReconcileIncomplete) naming ONLY the unit that failed.
 #   A supervisor that tears everything down because one unit failed, or that
-#   reports success, is broken.
+#   reports success, is broken. `restart` bounces the healthy units on the way
+#   through — that is the verb — so what is asserted is that they come back up,
+#   not that they were left alone.
 #
 # EXPECTED OUTCOME
 #   - Boot demo (web, api) healthy; record pids.
 #   - Add `bad` (exits immediately) to the manifest; restart -c.
 #   - restart exits non-zero with SG0302 naming `bad`.
-#   - web and api are STILL running (unchanged units adopted, not bounced).
+#   - web and api are running again on NEW, live pids.
 set -u
 . /usecase/lib.sh
 
@@ -59,16 +61,17 @@ grep -q "bad" /tmp/r.txt
 check "$?" "SG0302 names the failed unit 'bad'"
 
 section "the healthy services SURVIVED the partial failure"
-sleep 1
-pid_alive "$WEB1"
-check "$?" "web STILL alive (unchanged unit adopted, not torn down)"
-pid_alive "$API1"
-check "$?" "api STILL alive (unchanged unit adopted, not torn down)"
+sleep 2
 S2="$(sysg status --config "$CONFIG" --format json 2>/dev/null)"
-[ "$(unit_field "$S2" web pid)" = "$WEB1" ]
-check "$?" "web pid UNCHANGED (never bounced by the reconcile)"
-[ "$(unit_field "$S2" api pid)" = "$API1" ]
-check "$?" "api pid UNCHANGED (never bounced by the reconcile)"
+WEB2="$(unit_field "$S2" web pid)"
+API2="$(unit_field "$S2" api pid)"
+echo "after  -> web:$WEB2 api:$API2"
+[ "$(unit_field "$S2" web state)" = "running" ] && pid_alive "$WEB2"
+check "$?" "web running after the partial failure (not torn down)"
+[ "$(unit_field "$S2" api state)" = "running" ] && pid_alive "$API2"
+check "$?" "api running after the partial failure (not torn down)"
+[ "$WEB2" != "$WEB1" ] && [ "$API2" != "$API1" ]
+check "$?" "web and api were bounced, because restart means restart"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish

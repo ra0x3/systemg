@@ -13,7 +13,7 @@
 #   - Boot demo (web, worker); record worker's pid.
 #   - Remove `worker` from the manifest; restart -c.
 #   - worker is ABSENT from status AND its old pid is DEAD in the process table.
-#   - web is still running (untouched).
+#   - web is running again on a NEW pid (a restart bounces what it keeps).
 set -u
 . /usecase/lib.sh
 
@@ -61,7 +61,9 @@ fi
 
 WEB2="$(unit_field "$S2" web pid)"
 [ -n "$WEB2" ] && pid_alive "$WEB2"
-check "$?" "web still running (untouched by the removal)"
+check "$?" "web still running after the removal"
+[ "$WEB2" != "$WEB1" ]
+check "$?" "web pid CHANGED (the restart bounced the unit it kept)"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish

@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# USE CASE: restart -c reconciles a CHANGED service command.
+# USE CASE: restart -c --delta reconciles a CHANGED service command.
 #
 # WHAT THIS TESTS
 #   Project `demo` has one service, worker, whose command writes a marker file
 #   (V1) then sleeps. We then rewrite the config to change worker's command to
-#   write V2 and run `sysg restart --config`. Reconcile must BOUNCE worker onto
+#   write V2 and run `sysg restart --config --delta`. The delta must BOUNCE worker onto
 #   the new command — the marker flips to V2 and worker gets a new pid, with no
 #   stale V1 instance left behind.
 #
 # EXPECTED OUTCOME
 #   - Before: marker.txt contains V1.
-#   - After restart -c: marker.txt contains V2 (the new command actually ran),
+#   - After restart -c --delta: marker.txt contains V2 (the new command ran),
 #     worker has a NEW pid, is running, and that pid is alive.
-#
-# NOTE: expected RED until the reconcile-on-restart behavior lands.
+
 set -u
 . /usecase/lib.sh
 
@@ -41,8 +40,8 @@ projects:
         command: "sh -c 'echo V2 > /usecase/marker.txt && exec sleep 3000'"
         restart_policy: "always"
 EOF
-sysg restart --config "$CONFIG"
-check "$?" "restart -c exits 0"
+sysg restart --config "$CONFIG" --delta
+check "$?" "restart -c --delta exits 0"
 sleep 3
 S2="$(sysg status --format json 2>/dev/null)"
 WORKER_2="$(unit_field "$S2" worker pid demo)"

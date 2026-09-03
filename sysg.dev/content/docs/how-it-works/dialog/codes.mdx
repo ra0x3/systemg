@@ -312,20 +312,25 @@ A supervisor recycle stopped the old daemon but the new one did not come up.
 
 ### [SG0304](/reference/dialog/codes#sg0304)
 
-A restart finished without bouncing a single unit, so every process is the one
-that was already running.
+A restart finished without bouncing a single unit, so every process it left
+running is the one that was already running.
 
-`restart` reconciles: it applies the manifest delta and adopts unchanged units
-rather than bouncing them, so adding one service does not take the stack down
-and a completed one-shot is not re-run. The cost is that a rebuilt binary at an
-unchanged path hashes identically and is invisible to the diff — so a deploy
-whose only manifest change is to a cron-managed or skip-gated unit reconciles
-successfully while every long-running process stays on the old binary.
+`restart` bounces every declared unit, so this only follows a run that narrowed
+itself: `--delta`, which applies the manifest delta and adopts unchanged units.
+A rebuilt binary at an unchanged path hashes identically and is invisible to
+that diff, so a `--delta` deploy whose only manifest change is to a cron-managed
+or skip-gated unit reconciles successfully while every long-running process
+stays on the old binary. A project with no bounceable unit at all — every unit
+cron-managed or skip-gated — never raises this: nothing was owed a bounce.
 
-This code turns that into a hard failure instead of a green exit code. Pass
-`--all` to bounce every declared unit regardless of the diff, or `-s <service>`
-to bounce one outright. Stopping a removed unit counts as work, and `start` or
-`sysg add` never raise this — neither asked for a restart.
+This code turns that into a hard failure instead of a green exit code. Drop
+`--delta` to bounce every declared unit, or use `-s <service>` to bounce one
+outright. Removing a unit does NOT excuse it — stopping a dropped unit replaces
+no running process, and a production deploy that removed one cron entry rode
+that exemption to a green exit over a stale binary. The run is not rolled back
+when this fires — added units started and removed units stopped before the
+verdict; what did not happen is a bounce. `start` and `sysg add` never raise
+this: neither asked for a restart.
 
 ## Purge
 

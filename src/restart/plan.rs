@@ -257,7 +257,7 @@ pub fn reconcile_incomplete(
 /// single unit.
 ///
 /// The dangerous case this exists for: a deploy ships a new binary, edits only
-/// a cron unit in the manifest, and a `--reconcile` restart finds nothing else
+/// a cron unit in the manifest, and a `--delta` restart finds nothing else
 /// changed. Every long-running unit keeps its old process and the caller sees
 /// exit 0. Naming the units that were considered — and why each was passed
 /// over — is the difference between a silent stale deploy and a loud one.
@@ -272,11 +272,11 @@ pub fn restart_touched_nothing(project: &str, considered: &[String]) -> Diagnost
     };
     Diagnostic::error(
         SgCode::RestartTouchedNothing,
-        format!("restart of project '{project}' bounced no units; every process is the one that was already running"),
+        format!("restart of project '{project}' bounced no units; every process it left running is the one that was already running"),
     )
     .note(note)
     .note("a redeployed binary at an unchanged path is invisible to a manifest diff")
-    .help_cmd("bounce every unit anyway", "sysg restart --all")
+    .help_cmd("bounce every unit anyway", "sysg restart")
     .help_cmd("bounce one unit outright", "sysg restart -s <service>")
     .help_docs()
 }

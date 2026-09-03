@@ -9,3 +9,6 @@ projects:
       worker:
         command: "sleep 3000"
         restart_policy: "always"
+      sidecar:
+        command: "sleep 3000"
+        restart_policy: "always"

@@ -8,9 +8,10 @@
 //!    **changed** (command/settings differ). No side effects.
 //! 2. The caller validates the whole new manifest first; a bad manifest refuses
 //!    the restart wholesale (SG0301) and touches nothing.
-//! 3. The caller applies the diff surgically — only added/removed/changed units
-//!    are touched, each gated through the came-up ladder. Any unit that misses
-//!    its target is a hard failure (SG0302); unchanged units are never bounced.
+//! 3. The caller applies the diff, each unit gated through the came-up ladder;
+//!    any unit that misses its target is a hard failure (SG0302). A `restart`
+//!    bounces the unchanged units too; only a registration — or an explicit
+//!    `--delta` — adopts them in place.
 
 use std::collections::BTreeSet;
 
@@ -18,27 +19,32 @@ use crate::config::Config;
 
 /// How much of a project a restart is allowed to touch.
 ///
-/// The default reconciles: a restart applies the manifest delta and adopts
-/// unchanged units rather than bouncing them, so adding one service does not
-/// take the whole stack down and a completed one-shot is not re-run.
+/// `restart` means restart: the default bounces every declared unit, whatever
+/// the manifest diff says. A rebuilt binary at an unchanged path hashes
+/// identically, so a scope derived from the diff cannot see the single most
+/// common reason anyone restarts anything — and silently leaves the old process
+/// running behind a green exit code.
 ///
-/// The cost of that is real and is why [`SgCode::RestartTouchedNothing`] exists:
-/// a rebuilt binary at an unchanged path hashes identically, so the delta cannot
-/// see it. A reconcile that ends up bouncing nothing therefore FAILS rather than
-/// reporting success, and `--all` is the way to say "bounce everything anyway".
+/// The additive path already has a home: registering a manifest for the primary
+/// project with `start -c` applies its delta under [`RestartScope::Register`],
+/// adopting unchanged units rather than bouncing them. `--delta` asks `restart`
+/// for that same delta explicitly, and [`SgCode::RestartTouchedNothing`] guards
+/// it — a run that bounces nothing fails rather than reporting success.
 ///
 /// [`SgCode::RestartTouchedNothing`]: crate::diag::SgCode::RestartTouchedNothing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RestartScope {
-    /// Bounce every unit the manifest declares — `restart --all`.
-    Everything,
-    /// Bounce only added and changed units, plus their transitive dependents.
+    /// Bounce every unit the manifest declares — what `restart` does.
     #[default]
-    Changed,
-    /// Apply a manifest delta on behalf of a registration (`start`, `AddProject`)
-    /// rather than a restart. Selects the same units as [`RestartScope::Changed`],
-    /// but bouncing nothing is a legitimate outcome here — the caller never asked
-    /// for a restart, so it must not be told one failed.
+    Everything,
+    /// Bounce only added and changed units, plus their transitive dependents —
+    /// `restart --delta`.
+    Delta,
+    /// Apply a manifest delta on behalf of a registration rather than a restart.
+    /// Selects the same units as [`RestartScope::Delta`], but bouncing nothing is
+    /// a legitimate outcome here — the caller never asked for a restart, so it
+    /// must not be told one failed. Reached by registering the primary project's
+    /// manifest; a changed EXTRA project is replaced wholesale instead.
     Register,
 }
 
@@ -47,7 +53,7 @@ impl RestartScope {
     ///
     /// Only a caller that actually asked for a restart is owed that error.
     pub fn expects_a_bounce(self) -> bool {
-        matches!(self, RestartScope::Everything | RestartScope::Changed)
+        matches!(self, RestartScope::Everything | RestartScope::Delta)
     }
 }
 
