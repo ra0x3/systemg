@@ -266,11 +266,6 @@ jobs:
       - name: Check Links
         run: npm run links
 
-      # `prebuild` regenerates content/search.json from the MDX sources, so a
-      # dirty tree here means the committed search index is stale.
-      - name: Check Search Index Freshness
-        run: git diff --exit-code -- content/search.json
-
   rustdoc:
     name: Rust Doc
     runs-on: ubuntu-latest
@@ -1178,8 +1173,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: npm run releases
 
-      # The search index embeds every release post, so it goes stale the moment
-      # a new one is written — and the web job fails on a stale index.
       # fetch-releases keeps the cached file when the API call fails, so a green
       # step is not evidence the post exists. Prove this release is in there.
       - name: Verify release post was written
@@ -1196,20 +1189,17 @@ jobs:
             console.log(`release post present for ${tag}`);
           '
 
-      - name: Rebuild search index
-        run: npm run search
-
       - name: Commit release post
         shell: bash
         run: |
           set -euo pipefail
-          if git diff --quiet -- content/releases.json content/search.json; then
+          if git diff --quiet -- content/releases.json; then
             echo "Release post already published."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add content/releases.json content/search.json
+          git add content/releases.json
           git commit -m "docs(blog): publish release post for ${{ needs.extract-version.outputs.tag }}"
           # sync-plugin-version pushes to main on the same release, so rebase
           # rather than lose this commit to a non-fast-forward race.

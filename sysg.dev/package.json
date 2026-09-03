@@ -14,6 +14,7 @@
     "prebuild": "npm run search",
     "build": "react-router build",
     "start": "react-router-serve ./build/server/index.js",
+    "pretypecheck": "npm run search",
     "typecheck": "react-router typegen && tsc"
   },
   "dependencies": {
