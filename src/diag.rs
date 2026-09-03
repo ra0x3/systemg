@@ -206,6 +206,8 @@ pub enum SgCode {
     /// SG0705 — the manifest declares root-only keys and is not startable in
     /// user mode.
     ManifestRequiresSystemMode,
+    /// SG0706 — a boot unit could not be generated or installed as asked.
+    BootUnitRefused,
     /// SG0711 — container-init was requested on a platform or process that
     /// cannot be PID 1 (not Linux, or not actually PID 1).
     ContainerInitUnsupported,
@@ -329,6 +331,7 @@ impl SgCode {
             SgCode::SystemIntegrationBroken => "SG0703",
             SgCode::SystemModeRequiresRoot => "SG0704",
             SgCode::ManifestRequiresSystemMode => "SG0705",
+            SgCode::BootUnitRefused => "SG0706",
             SgCode::ContainerInitUnsupported => "SG0711",
             SgCode::ContainerInitPrereqMissing => "SG0712",
             SgCode::ContainerInitShutdownIncomplete => "SG0713",
@@ -357,7 +360,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 86] = [
+    pub const ALL: [SgCode; 87] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -425,6 +428,7 @@ impl SgCode {
         SgCode::SystemIntegrationBroken,
         SgCode::SystemModeRequiresRoot,
         SgCode::ManifestRequiresSystemMode,
+        SgCode::BootUnitRefused,
         SgCode::ContainerInitUnsupported,
         SgCode::ContainerInitPrereqMissing,
         SgCode::ContainerInitShutdownIncomplete,

@@ -121,3 +121,6 @@ pub mod privilege;
 
 /// Reports this binary's version alongside the resident supervisor's.
 pub mod version;
+
+/// Boot integration: the service-manager unit that starts a manifest at boot.
+pub mod boot;

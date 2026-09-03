@@ -15,7 +15,7 @@ commands — only the runtime it targets changes.
 | State | `~/.local/share/systemg/` | `/var/lib/systemg/` | `/Library/Application Support/systemg/` |
 | Logs | `~/.local/share/systemg/logs/` | `/var/log/systemg/` | `/Library/Logs/systemg/` |
 | Config search | `~/.config/systemg/` | `/etc/systemg/` | `/Library/Application Support/systemg/etc/` |
-| Boot integration | — | systemd unit | launchd daemon |
+| Boot integration | `systemd --user` unit, LaunchAgent | systemd unit | launchd daemon |
 | Owner | invoking user | root | root |
 
 System mode uses each platform's native locations: the FHS on Linux, the
@@ -53,41 +53,44 @@ for the target account. Namespace unshare failures can warn and proceed
 (EPERM under nested containers), and cgroup attach happens post-spawn; see
 [Sandboxing](/docs/kernel-mode/sandboxing) for what is and is not enforced.
 
-## Boot integration (systemd)
+## Boot integration
 
-`scripts/install-systemg.sh` installs `/etc/systemd/system/sysg.service`.
-Every sysg invocation in a unit must carry `--sys` — including `ExecStop`:
+`sysg install-boot` writes the unit that starts the system supervisor at boot —
+a systemd unit on Linux, a LaunchDaemon on macOS:
+
+```bash
+$ sudo sysg --sys install-boot --config /etc/systemg/systemg.yaml --write --enable
+```
 
 ```ini
 [Service]
-ExecStart=/usr/bin/sysg --sys start --config /etc/systemg/systemg.yaml --daemonize
-ExecStop=/usr/bin/sysg --sys stop --config /etc/systemg/systemg.yaml
+Type=simple
+ExecStart=/usr/bin/sysg --sys start --attached --config /etc/systemg/systemg.yaml
+KillMode=mixed
+Restart=on-failure
 ```
 
-Every sysg self-exec (supervisor boot, live upgrade, recycle) forwards the
-mode across the exec boundary; the `parity-supervisor-recycle` lane guards
-this invariant.
-
-## Boot integration (macOS launchd)
-
-`scripts/install-systemg.sh` on macOS installs a launchd daemon at
-`/Library/LaunchDaemons/dev.sysg.supervisor.plist`:
-
-```bash
-$ sudo ./scripts/install-systemg.sh ./sysg
-$ sudo launchctl load -w /Library/LaunchDaemons/dev.sysg.supervisor.plist
-```
+Every sysg invocation in a unit carries `--sys`, and the unit runs
+`start --attached` so the process systemd tracks *is* the supervisor rather than
+a client that forked one. Every sysg self-exec (supervisor boot, live upgrade,
+recycle) forwards the mode across the exec boundary; the
+`parity-supervisor-recycle` lane guards this invariant.
 
 <Info>
-**launchd bootstraps; sysg supervises.** The plist sets `KeepAlive: false`.
-launchd starts sysg once at boot (`RunAtLoad`); sysg then owns every service's
-lifecycle, restarts, and health, exactly as on Linux. Letting launchd also
-restart sysg would be double supervision with conflicting restart policies.
+**launchd bootstraps; sysg supervises.** The generated plist restarts the
+supervisor only when it *fails* (`KeepAlive: { SuccessfulExit: false }`) — the
+launchd analogue of `Restart=on-failure`. sysg still owns every service's
+lifecycle, restarts, and health. Letting the manager also restart services would
+be double supervision with conflicting restart policies.
 
-macOS system mode is boot integration plus native paths. The Linux-only
-kernel mechanisms — container-init, seccomp, Landlock, cgroups, namespaces —
-are refused with a diagnostic rather than silently ignored.
+macOS system mode is boot integration plus native paths. The Linux-only kernel
+mechanisms — container-init, seccomp, Landlock, cgroups, namespaces — are
+refused with a diagnostic rather than silently ignored.
 </Info>
+
+See [Booting at Startup](/docs/how-it-works/boot) for user-scope units, running
+the supervisor as a non-root account, and what each setting in the generated
+unit is for.
 
 ## Operator access
 

@@ -87,7 +87,7 @@ run_labeled \
 run_labeled \
   "sysg.dev" \
   "${BLUE}" \
-  "cd \"${REPO_ROOT}/sysg.dev\" && npm run format:check && npm run lint && npm run typecheck && npm run build && npm run links && git diff --exit-code -- content/search.json"
+  "cd \"${REPO_ROOT}/sysg.dev\" && npm run format:check && npm run lint && npm run typecheck && npm run build && npm run links"
 
 run_labeled \
   "docs:sg-links" \

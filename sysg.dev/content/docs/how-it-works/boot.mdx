@@ -1,0 +1,140 @@
+---
+title: Booting at Startup
+---
+
+# Booting at Startup
+
+sysg supervises services; nothing supervises sysg. After a reboot the machine
+comes back with no supervisor and no services unless the platform's service
+manager — systemd on Linux, launchd on macOS — has been told to start one.
+
+`sysg install-boot` writes that unit for you, from the manifest you point it at:
+
+```bash
+$ sysg install-boot --config /opts/app/sysg.prod.yaml
+```
+
+It prints the unit and where it would go. Nothing is written until you add
+`--write`, and nothing is activated until you add `--enable`.
+
+## Why the unit runs `start --attached`
+
+A service manager can only supervise the process it started. `sysg start` and
+`sysg start --daemonize` both fork a supervisor and leave the invoking process
+behind as a client, so a manager tracking that client is watching the wrong
+process: it sees a clean exit when the supervisor dies, never restarts it, and
+sends its stop signal somewhere the supervisor will never read it.
+
+`start --attached` doesn't fork. This process *is* the supervisor, so:
+
+- the manager's `Restart=` fires on a real supervisor crash,
+- its stop signal reaches sysg's own graceful teardown, which stops services in
+  reverse dependency order,
+- and its exit status is the supervisor's exit status.
+
+`--attached` refuses to run when a supervisor is already resident
+([SG0007](/reference/dialog/codes#sg0007)) — it cannot adopt one it did not
+start, and neither can the manager.
+
+## Scopes
+
+| | `--scope user` | `--scope system` |
+|---|---|---|
+| Linux | `systemd --user` unit under `~/.config/systemd/user/` | system unit in `/etc/systemd/system/` |
+| macOS | LaunchAgent under `~/Library/LaunchAgents/` | LaunchDaemon in `/Library/LaunchDaemons/` |
+| Runs as | the invoking user | root, or the `--run-as` account |
+| Starts at | that user's login | boot |
+
+The default follows the runtime: `--sys` gives `system`, everything else gives
+`user`.
+
+<Warning>
+A `systemd --user` unit starts at *login* and stops at logout unless lingering
+is enabled for that account. `install-boot` prints the
+`loginctl enable-linger <user>` step; without it, a reboot leaves the services
+down until someone logs in.
+</Warning>
+
+## Running as a non-root account
+
+A machine-wide unit that runs the supervisor as an ordinary user — the common
+shape for an app deployed under its own account — is a system-scope unit with
+`--run-as`:
+
+```bash
+$ sudo sysg install-boot \
+    --config /opts/app/sysg.prod.yaml \
+    --scope system --run-as app --write --enable
+```
+
+That renders `User=app` **and** `Environment=HOME=/home/app`, read from the
+passwd database. The `HOME` line is not decoration: the user runtime resolves
+its state directory from `HOME`, and a `User=` unit that does not set it would
+put every project's state under `/.local/share/systemg`.
+
+A system-scope unit must say whose runtime it boots — either `--sys` for the
+root-owned system runtime or `--run-as` for an account. Naming neither is
+refused with [SG0706](/reference/dialog/codes#sg0706) rather than quietly
+running the user runtime as root.
+
+## What the generated unit sets, and why
+
+```ini
+[Unit]
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sysg --sys start --attached --config /etc/systemg/systemg.yaml
+WorkingDirectory=/etc/systemg
+KillMode=mixed
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- **`Type=simple`, no `PIDFile`** — the tracked process is the supervisor, so
+  there is no pidfile to chase.
+- **No `ExecStop`** — systemd's SIGTERM already reaches the supervisor's
+  graceful teardown, and `TimeoutStopSec` governs how long that gets. An
+  `ExecStop` running `sysg stop` would impose its own shorter deadline.
+- **`KillMode=mixed`** — SIGTERM goes to the supervisor alone, so sysg stops
+  services in its own order; anything still alive at the timeout is killed by
+  cgroup. `control-group` would SIGTERM every service directly and destroy that
+  ordering.
+- **`WorkingDirectory`** — the manifest's own directory, so relative commands
+  and script paths resolve the same way they do when you run `sysg start` by
+  hand there. Override it with `--workdir`.
+- **`StartLimitBurst`** — a manifest that fails on boot stops after three
+  attempts instead of restarting forever.
+- **`After=network.target`** is ordering, not readiness. If services need a
+  configured address, pass `--wait-online` for
+  `Wants=/After=network-online.target`. launchd has no equivalent, so
+  `--wait-online` is refused there rather than silently dropped.
+
+On macOS the same decisions come out as `RunAtLoad`, `ThrottleInterval`,
+`ExitTimeOut`, and `KeepAlive: { SuccessfulExit: false }` — restart the
+supervisor when it fails, never when it exited cleanly.
+
+<Note>
+launchd has no equivalent of `StartLimitBurst`. A manifest that fails at every
+boot stops after three tries under systemd, but launchd keeps retrying it every
+`ThrottleInterval` seconds indefinitely. A failure that happens before the
+supervisor starts never reaches `sysg logs` — read the plist's
+`StandardErrorPath`, `<log dir>/<name>.err.log`, instead.
+</Note>
+
+## Replacing a unit
+
+Every generated unit carries a marker line naming the sysg version that wrote
+it. `--write` replaces a unit carrying that marker and refuses to touch one
+without it ([SG0706](/reference/dialog/codes#sg0706)), so a hand-written unit at
+the same path is never overwritten.
+
+Regenerate after moving the binary or the manifest: the unit names absolute
+paths, and a stale `ExecStart` is a unit that fails at boot.

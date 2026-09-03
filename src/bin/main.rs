@@ -91,6 +91,11 @@ const SUPERVISOR_RUNTIME_TIMEOUT: Duration = Duration::from_secs(5);
 const SUPERVISOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Interval between foreground attachment and reconnect checks.
 const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How long a signalled shutdown keeps retrying the control socket before the
+/// bridge gives up on a supervisor that never published one. Matched to the
+/// stop timeout a generated boot unit carries, so the manager's own deadline is
+/// what ends a slow teardown.
+const SHUTDOWN_SIGNAL_RETRY_WINDOW: Duration = Duration::from_secs(90);
 /// Interval between visible boot progress probes.
 const BOOT_PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 /// Prefix used for foreground boot progress.
@@ -1017,7 +1022,8 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     if euid.is_root()
         && runtime_mode == RuntimeMode::User
-        && !matches!(args.command, Commands::Validate { .. })
+        && !matches!(&args.command, Commands::Validate { .. })
+        && !install_boot_names_its_runtime(&args.command)
     {
         use systemg::diag::{Diagnostic, SgCode};
         if system_mode_state_detected() {
@@ -1049,6 +1055,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Commands::Start {
             config,
             daemonize,
+            attached,
             service,
             project,
             name,
@@ -1085,7 +1092,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 )))
             })?;
 
-            if daemonize {
+            if attached {
+                dispatch_start_attached(plan, stderr)?;
+            } else if daemonize {
                 dispatch_start_daemonize(plan, stderr, verbose, args.drop_privileges)?;
             } else {
                 dispatch_start_foreground(plan, stderr)?;
@@ -2108,7 +2117,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             verbose: _,
             foreground,
             handoff,
+            managed,
         } => {
+            if managed {
+                runtime::set_managed();
+                install_shutdown_signal_bridge("managed supervisor");
+            }
             let mode = if foreground {
                 ProjectRunMode::Foreground
             } else {
@@ -2164,7 +2178,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 ));
             }
             runtime::set_init_mode();
-            install_init_signal_bridge();
+            install_shutdown_signal_bridge("init");
             run_supervisor_in_process(
                 PathBuf::from(config),
                 None,
@@ -2172,6 +2186,29 @@ fn run() -> Result<(), Box<dyn Error>> {
                 ProjectRunMode::Foreground,
                 None,
             );
+        }
+        Commands::InstallBoot {
+            config,
+            scope,
+            name,
+            workdir,
+            exe,
+            run_as,
+            wait_online,
+            write,
+            enable,
+        } => {
+            dispatch_install_boot(InstallBoot {
+                config,
+                scope,
+                name,
+                workdir,
+                exe,
+                run_as,
+                wait_online,
+                write,
+                enable,
+            })?;
         }
         Commands::Version { format } => {
             let report = systemg::version::VersionReport::collect();
@@ -2217,10 +2254,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// PID 1 signal bridge: TERM/INT handlers may only set a flag
-/// (async-signal-safe); a watcher thread turns the flag into the supervisor's
-/// own graceful Shutdown command, reusing the verified teardown path.
-fn install_init_signal_bridge() {
+/// Signal bridge for a supervisor that owns its own process — container-init
+/// (PID 1) or an `--attached` start under a service manager. TERM/INT handlers
+/// may only set a flag (async-signal-safe); a watcher thread turns the flag
+/// into the supervisor's own graceful Shutdown command, reusing the verified
+/// teardown path.
+///
+/// The command travels over the control socket, which does not exist until the
+/// supervisor has booted. A signal landing mid-boot therefore retries until the
+/// socket answers rather than being dropped on the floor, which would leave the
+/// service manager waiting out its stop timeout and then SIGKILLing the whole
+/// cgroup — services included, ungracefully.
+fn install_shutdown_signal_bridge(context: &'static str) {
     static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
     extern "C" fn request_shutdown(_sig: libc::c_int) {
         SHUTDOWN_REQUESTED.store(true, Ordering::Release);
@@ -2231,12 +2276,19 @@ fn install_init_signal_bridge() {
         libc::signal(libc::SIGTERM, handler);
         libc::signal(libc::SIGINT, handler);
     }
-    thread::spawn(|| {
+    thread::spawn(move || {
+        let mut deadline = None;
         loop {
             if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
-                info!("init received shutdown signal; stopping services");
-                let _ = ipc::send_command_detached(&ControlCommand::Shutdown);
-                return;
+                let deadline = *deadline.get_or_insert_with(|| {
+                    info!("{context} received shutdown signal; stopping services");
+                    Instant::now() + SHUTDOWN_SIGNAL_RETRY_WINDOW
+                });
+                if ipc::send_command_detached(&ControlCommand::Shutdown).is_ok()
+                    || Instant::now() >= deadline
+                {
+                    return;
+                }
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -3588,6 +3640,7 @@ mod tests {
         assert!(drop_privileges_applies_to_command(&Commands::Start {
             config: "systemg.yaml".to_string(),
             daemonize: false,
+            attached: false,
             service: None,
             project: None,
             name: None,
@@ -6914,6 +6967,361 @@ fn error_is_supervisor_shutting_down(err: &(dyn Error + 'static)) -> bool {
         || message.contains("supervisor is shutting down")
 }
 
+/// Dispatches an `--attached` start: this process *becomes* the supervisor
+/// rather than forking one and streaming its logs. A service manager can only
+/// supervise what it started, so the process it tracks has to be the supervisor
+/// itself — that is what makes `Restart=` fire on a real supervisor crash and
+/// what lets a stop signal reach the graceful teardown path.
+///
+/// Never returns: the supervisor's own exit status becomes the process's.
+fn dispatch_start_attached(
+    plan: systemg::start::StartPlan,
+    stderr: bool,
+) -> Result<(), Box<dyn Error>> {
+    use systemg::{
+        diag::{Diagnostic, SgCode},
+        start::StartPlan,
+    };
+
+    if supervisor_running() {
+        return Err(Box::new(DiagError(Box::new(
+            Diagnostic::error(
+                SgCode::SupervisorRestartConflict,
+                "a supervisor is already running, so this process cannot become one",
+            )
+            .note(
+                "--attached hands this process's lifetime to the supervisor, but a resident supervisor already owns the runtime",
+            )
+            .help_cmd("stop the resident supervisor first", "sysg stop --supervisor")
+            .help_docs(),
+        ))));
+    }
+
+    let (config, service) = match plan {
+        StartPlan::WholeConfig { config }
+        | StartPlan::StageAdHoc { config }
+        | StartPlan::Project { config, .. } => (config, None),
+        StartPlan::Service {
+            config, service, ..
+        } => (config, Some(service)),
+    };
+
+    load_config(Some(config.to_string_lossy().as_ref()))?;
+    runtime::set_managed();
+    install_shutdown_signal_bridge("attached start");
+    run_supervisor_in_process(config, service, stderr, ProjectRunMode::Daemon, None)
+}
+
+/// Selectors for `install-boot`, gathered so the dispatcher takes one argument
+/// rather than eight positional ones.
+struct InstallBoot {
+    config: String,
+    scope: Option<systemg::cli::BootScope>,
+    name: Option<String>,
+    workdir: Option<String>,
+    exe: Option<String>,
+    run_as: Option<String>,
+    wait_online: bool,
+    write: bool,
+    enable: bool,
+}
+
+/// Renders the service-manager unit that boots a manifest, and installs it when
+/// asked. Printing is the default: a unit is a change to how the machine boots,
+/// so the operator reads exactly what would land before anything is written.
+///
+/// Writing a `--run-as` unit also prepares that account's runtime directory,
+/// creating what is missing and handing over what root already owns — a
+/// supervisor that cannot write its own state directory fails at every boot,
+/// and the manager only reports the exit code.
+fn dispatch_install_boot(args: InstallBoot) -> Result<(), Box<dyn Error>> {
+    use systemg::{
+        boot::{self, Scope},
+        cli::BootScope,
+    };
+
+    let scope = match args.scope {
+        Some(BootScope::User) => Scope::User,
+        Some(BootScope::System) => Scope::System,
+        None if runtime::mode() == RuntimeMode::System => Scope::System,
+        None => Scope::User,
+    };
+
+    load_config(Some(&args.config))?;
+    let config = unit_path(&args.config)?;
+    let mut unit = boot::Unit::new(config, scope).map_err(boot_refused)?;
+    unit.wait_online = args.wait_online;
+    if let Some(name) = args.name {
+        unit.name = name;
+    }
+    if let Some(workdir) = args.workdir {
+        unit.workdir = unit_path(&workdir)?;
+    }
+    if let Some(exe) = args.exe {
+        unit.exe = PathBuf::from(exe);
+    }
+    if let Some(account) = args.run_as {
+        let home = boot::account_home(&account)
+            .ok_or_else(|| boot_refused(boot::Error::AccountUnknown(account.clone())))?;
+        unit.log_dir = boot::log_dir_for_home(&home);
+        unit.home = Some(home);
+        unit.account = Some(account);
+    }
+    unit.check().map_err(boot_refused)?;
+
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let path = unit.path(home.as_deref()).map_err(boot_refused)?;
+    let rendered = unit.render();
+
+    if !args.write {
+        print!("{rendered}");
+        io::stdout().flush()?;
+        eprintln!();
+        eprintln!("Install to: {}", path.display());
+        eprintln!("Write it there by adding --write to this command.");
+        return Ok(());
+    }
+
+    if path.exists() && !boot::Unit::owns(&path) {
+        return Err(boot_refused(boot::Error::Foreign(path)));
+    }
+    if let Some(other) = unit_already_booting(&unit, &path) {
+        return Err(boot_refused(boot::Error::AlreadyInstalled(other)));
+    }
+    if args.enable {
+        boot_activation_is_clear(&unit)?;
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match (&unit.account, &unit.home) {
+        (Some(account), Some(home)) => {
+            boot::make_tree_for_account(&unit.log_dir, home, account)
+                .map_err(boot_refused)?;
+        }
+        _ if unit.manager == boot::Manager::Launchd => fs::create_dir_all(&unit.log_dir)?,
+        _ => {}
+    }
+    fs::write(&path, &rendered)?;
+    fs::set_permissions(
+        &path,
+        <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
+    )?;
+    println!("Wrote {}", path.display());
+
+    let steps = unit.enable_steps(&path);
+    if !args.enable {
+        println!("Enable it with:");
+        for step in steps.iter().filter(|step| step.required) {
+            println!("  {}", step.line());
+        }
+        return Ok(());
+    }
+    for step in steps {
+        let (program, rest) = step
+            .argv
+            .split_first()
+            .expect("enable step names a program");
+        println!("+ {}", step.line());
+        let status = process::Command::new(program).args(rest).status()?;
+        if !status.success() && step.required {
+            return Err(boot_refused(boot::Error::EnableFailed(
+                step.line(),
+                status.code(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether two paths name the same thing on disk. Spellings differ — a release
+/// symlink, a bind-mounted home — while the target is one directory, and every
+/// question asked here is about the target, not the spelling.
+///
+/// Two paths that both exist are compared by device and inode, which sees
+/// through bind mounts as well as links. A runtime directory that has not been
+/// created yet cannot be compared that way, so its deepest existing ancestor is
+/// resolved and the missing tail appended.
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    if let (Ok(left), Ok(right)) = (fs::metadata(left), fs::metadata(right)) {
+        use std::os::unix::fs::MetadataExt;
+
+        return left.dev() == right.dev() && left.ino() == right.ino();
+    }
+    match (
+        resolved_through_existing(left),
+        resolved_through_existing(right),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// A path with its deepest existing ancestor canonicalized and the rest of it
+/// appended, so two spellings of a directory that does not exist yet still
+/// compare equal when their existing parents are the same place.
+fn resolved_through_existing(path: &Path) -> Option<PathBuf> {
+    let mut tail = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(resolved) = fs::canonicalize(current) {
+            return Some(
+                tail.iter()
+                    .rev()
+                    .fold(resolved, |whole, name| whole.join(name)),
+            );
+        }
+        tail.push(current.file_name()?);
+        current = current.parent()?;
+    }
+}
+
+/// The absolute form of a path a unit will name, with its symlinks left intact.
+///
+/// Resolving them would pin a release-symlink deployment to whichever release
+/// was current when the unit was written, and `WorkingDirectory` would follow —
+/// so relative includes, env files and commands would resolve somewhere else
+/// after the next release swap.
+fn unit_path(raw: &str) -> io::Result<PathBuf> {
+    let raw = Path::new(raw);
+    if raw.is_absolute() {
+        return std::path::absolute(raw);
+    }
+    let logical = std::env::var_os("PWD").map(PathBuf::from).filter(|pwd| {
+        pwd.is_absolute()
+            && match (fs::canonicalize(pwd), std::env::current_dir()) {
+                (Ok(resolved), Ok(cwd)) => resolved == cwd,
+                _ => false,
+            }
+    });
+    match logical {
+        Some(pwd) => std::path::absolute(pwd.join(raw)),
+        None => std::path::absolute(raw),
+    }
+}
+
+/// Another installed unit that already boots the runtime this one targets.
+///
+/// A runtime holds exactly one supervisor, so two units for it are two managers
+/// starting two supervisors that contend at every boot — whatever manifests
+/// they name. The same manifest under two accounts is two runtimes and is left
+/// alone. Both install directories for the platform are searched, since the
+/// colliding pair can be split across the system one and the user one.
+fn unit_already_booting(unit: &systemg::boot::Unit, path: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let target = unit.runtime_dir(home.as_deref())?;
+
+    let manager = systemg::boot::Manager::native();
+    let mut scans = vec![(systemg::boot::system_install_dir(manager), None)];
+    for target in [unit.home.as_deref(), home.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let dir = systemg::boot::user_install_dir(manager, target);
+        if !scans.iter().any(|(known, _)| known == &dir) {
+            scans.push((dir, Some(target.to_path_buf())));
+        }
+    }
+
+    scans.into_iter().find_map(|(dir, fallback)| {
+        fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+            let candidate = entry.path();
+            if candidate == path {
+                return None;
+            }
+            let text = fs::read_to_string(&candidate).ok()?;
+            let other = systemg::boot::runtime_dir_in_unit(&text, fallback.as_deref())?;
+            same_path(&other, &target).then_some(candidate)
+        })
+    })
+}
+
+/// Refuses to activate a unit whose runtime is already spoken for.
+///
+/// One runtime holds one supervisor. If something else is already running there
+/// the unit can only start and lose the race — every boot, forever, since a
+/// service manager keeps retrying. The runtime checked is the one the unit will
+/// target, which for `--run-as` is the account's, not the caller's.
+fn boot_activation_is_clear(unit: &systemg::boot::Unit) -> Result<(), Box<dyn Error>> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let runtime_dir = unit
+        .runtime_dir(home.as_deref())
+        .unwrap_or_else(runtime::state_dir);
+
+    match ipc::managed_owner_in(&runtime_dir) {
+        Some(config) if same_path(&config, &unit.config) => Ok(()),
+        Some(config) => Err(boot_refused(systemg::boot::Error::RuntimeTaken(config))),
+        None if ipc::live_supervisor_pid_in(&runtime_dir).is_some() => {
+            Err(boot_refused(systemg::boot::Error::SupervisorResident))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Whether the command is an `install-boot` that has already said whose runtime
+/// the unit boots. Those are exempt from the root-without-`--sys` warnings:
+/// they write a unit for a runtime they name outright, rather than operating
+/// one. A bare `sudo sysg install-boot` names nothing, so it still gets the
+/// warning that its unit would target root's user-mode paths.
+fn install_boot_names_its_runtime(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::InstallBoot {
+            scope: Some(systemg::cli::BootScope::System),
+            ..
+        } | Commands::InstallBoot {
+            run_as: Some(_),
+            ..
+        }
+    )
+}
+
+/// Renders a boot-unit refusal as SG0706.
+fn boot_refused(err: systemg::boot::Error) -> Box<dyn Error> {
+    use systemg::diag::{Diagnostic, SgCode};
+
+    let title = match &err {
+        systemg::boot::Error::EnableFailed(..) => {
+            "boot unit was written but not activated"
+        }
+        _ => "boot unit was not installed",
+    };
+    let mut diagnostic =
+        Diagnostic::error(SgCode::BootUnitRefused, title).note(err.to_string());
+    diagnostic = match &err {
+        systemg::boot::Error::Foreign(path) => diagnostic
+            .note(format!(
+                "sysg replaces only units carrying its own marker, so {} is left untouched",
+                path.display()
+            ))
+            .help_cmd("inspect it first", format!("cat {}", path.display())),
+        systemg::boot::Error::AlreadyInstalled(other) => diagnostic
+            .note("a runtime holds one supervisor, so both units would contend at every boot")
+            .help_cmd("replace that one instead", format!("rm {}", other.display()))
+            .help_cmd(
+                "or add this manifest to the supervisor it starts",
+                "sysg start -c <config> --daemonize",
+            ),
+        systemg::boot::Error::RuntimeTaken(_) => diagnostic
+            .note("one runtime holds one supervisor; a second unit for it would fail at every boot")
+            .help_cmd(
+                "add this manifest to the running supervisor instead",
+                "sysg start -c <config> --daemonize",
+            ),
+        systemg::boot::Error::SupervisorResident => diagnostic
+            .help_cmd("stop it, then enable the unit", "sysg stop --supervisor")
+            .help_cmd("or write the unit now and enable it later", "sysg install-boot --write"),
+        systemg::boot::Error::SysUnderUserScope => {
+            diagnostic.help_cmd("install it for the machine", "sudo sysg --sys install-boot --scope system --write")
+        }
+        _ => diagnostic,
+    };
+    Box::new(DiagError(Box::new(diagnostic.help_docs())))
+}
+
 /// Dispatches a foreground (non-daemonize) start plan.
 fn dispatch_start_foreground(
     plan: systemg::start::StartPlan,
@@ -7058,6 +7466,9 @@ fn reexec_supervisor(
     if mode == ProjectRunMode::Foreground {
         push(&mut args, "--foreground");
     }
+    if runtime::managed() {
+        push(&mut args, "--managed");
+    }
     let _ = nix::unistd::execv(&args[0], &args);
 }
 
@@ -7116,6 +7527,13 @@ fn run_supervisor_in_process(
     exit_supervisor(supervisor.run());
 }
 
+/// Turns the supervisor's outcome into this process's exit status.
+///
+/// Losing the runtime race is a clean exit for a CLI-launched supervisor —
+/// another one is already running — but a failure for a managed one: its
+/// service manager would read success, stop tracking, and leave the box with a
+/// supervisor nothing supervises. Non-zero there lets the manager retry inside
+/// its start limit.
 fn exit_supervisor(result: Result<(), SupervisorError>) -> ! {
     match result {
         Ok(()) => {
@@ -7140,7 +7558,7 @@ fn exit_supervisor(result: Result<(), SupervisorError>) -> ! {
         }
         Err(SupervisorError::Control(ControlError::RuntimeBusy)) => {
             info!("Another supervisor acquired the runtime first");
-            process::exit(0);
+            process::exit(i32::from(runtime::managed()));
         }
         Err(err) => {
             error!("Supervisor exited with error: {err}");
@@ -8182,6 +8600,12 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
         ))));
     }
 
+    if ipc::supervisor_is_managed() {
+        return Err(Box::new(DiagError(Box::new(
+            systemg::restart::recycle_manager_owned(manager_restart_hint()),
+        ))));
+    }
+
     stop_supervisors()?;
     wait_for_runtime_cleared(SUPERVISOR_RUNTIME_TIMEOUT);
     cleanup_stopped_runtime();
@@ -8192,6 +8616,16 @@ fn recycle_supervisor_for_restart(config_path: PathBuf) -> Result<(), Box<dyn Er
             err.to_string(),
         )))) as Box<dyn Error>
     })
+}
+
+/// The command that restarts a manager-owned supervisor, named for whichever
+/// manager this platform uses.
+fn manager_restart_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "sudo launchctl kickstart -k system/dev.sysg.<name>"
+    } else {
+        "systemctl restart <unit>"
+    }
 }
 
 fn control_error_is_restart_upgrade_boundary(err: &ControlError) -> bool {

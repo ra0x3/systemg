@@ -70,6 +70,12 @@ $ brew install ra0x3/tap/sysg
 
 For system-wide deployments, `scripts/install-systemg.sh` sets up `/usr/bin/sysg`, `/etc/systemg`, and `/var/lib/systemg` — see the [security guide](docs/security.mdx).
 
+Nothing supervises the supervisor, so a reboot leaves the machine bare until a service manager starts one. `sysg install-boot` writes that unit — a systemd unit or a launchd daemon, for the machine or for your own account:
+
+```console
+$ sysg install-boot --config /opts/app/sysg.prod.yaml --write --enable
+```
+
 ### Usage
 
 Describe your system in a `systemg.yaml`:

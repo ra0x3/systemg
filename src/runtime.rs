@@ -100,6 +100,13 @@ impl RuntimeContext {
     }
 }
 
+/// The system runtime's state directory on this platform, independent of the
+/// mode this process is running in — needed to reason about a *unit's* runtime
+/// rather than the caller's.
+pub fn system_state_dir() -> PathBuf {
+    RuntimeContext::system_directories().state_dir
+}
+
 static INIT_MODE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -111,6 +118,20 @@ pub fn set_init_mode() {
 /// Whether this process runs as container-init (PID 1).
 pub fn init_mode() -> bool {
     INIT_MODE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+static MANAGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Marks this supervisor as owned by an external service manager (systemd,
+/// launchd), which starts it, signals it, and restarts it. One-way, and
+/// forwarded across every self-exec the way the runtime mode is.
+pub fn set_managed() {
+    MANAGED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Whether a service manager owns this supervisor's lifetime.
+pub fn managed() -> bool {
+    MANAGED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Sets runtime mode. Can be called multiple times (e.g., supervisor forks).

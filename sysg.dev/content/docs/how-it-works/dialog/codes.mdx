@@ -604,3 +604,13 @@ The manifest declares root-only keys (`user`, `group`, `capabilities`,
 validated against — or started in — user mode, which cannot enforce them.
 Validate against the system runtime with `sysg validate --sys` (no root
 needed), start with `sudo sysg --sys start`, or remove the keys.
+
+### [SG0706](/reference/dialog/codes#sg0706)
+
+`install-boot` refused to write or activate a service-manager unit. Either the
+request cannot produce a working unit — `--sys` under a user manager, `--run-as`
+on a user-scope unit, a system-scope unit that names neither `--sys` nor an
+account — or a file already sits at the install path without sysg's marker, in
+which case it is left exactly as it is. When the unit was written and the
+manager's own activation command failed, the diagnostic reports that command
+and its exit status.

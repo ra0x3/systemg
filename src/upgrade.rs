@@ -252,6 +252,9 @@ pub fn rollback_handoff(path: &Path, reason: impl Into<String>) -> io::Result<()
         "--handoff".to_string(),
         path.to_string_lossy().to_string(),
     ]);
+    if crate::runtime::managed() {
+        values.push("--managed".to_string());
+    }
     let args = values
         .iter()
         .map(|value| {

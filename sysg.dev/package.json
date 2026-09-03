@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "npm run search",
     "dev": "react-router dev",
     "releases": "node --experimental-strip-types scripts/fetch-releases.mjs",
     "search": "node --experimental-strip-types scripts/build-search.mjs",
