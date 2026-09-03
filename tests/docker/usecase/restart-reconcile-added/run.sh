@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# USE CASE: restart -c reconciles an ADDED service into a running project.
+# USE CASE: restart -c starts an ADDED service, and --delta says who else moves.
 #
 # WHAT THIS TESTS
-#   Project `demo` starts with one service, web. We then rewrite the config to
-#   ADD a second service, worker, and run `sysg restart --config`. Reconcile
-#   must START the newly-added worker WITHOUT disturbing the already-running
-#   web — adding a service is additive, not a full teardown.
+#   Project `demo` starts with one service, web. We rewrite the config to ADD a
+#   second service, worker, and restart.
+#
+#   `restart -c` means restart: worker starts AND web is bounced, because a
+#   manifest diff cannot see a rebuilt binary at an unchanged path and a scope
+#   read off that diff would leave the old process running behind exit 0.
+#   `--delta` is how a caller asks for the additive reconcile instead: the added
+#   unit starts and everything already running keeps its pid.
 #
 # EXPECTED OUTCOME
-#   - After restart -c: worker is running with a live pid (reconcile added it).
-#   - web is STILL running and its pid is UNCHANGED (existing service left alone).
-#
-# NOTE: expected RED until the reconcile-on-restart behavior lands.
+#   - After restart -c: worker is running with a live pid, and web has a NEW pid.
+#   - After a --delta restart that adds sidecar: sidecar runs and web/worker pids
+#     are UNCHANGED.
 set -u
 . /usecase/lib.sh
 
@@ -54,8 +57,39 @@ check "$?" "worker's pid is actually alive"
 
 [ "$(unit_field "$S2" web state demo)" = "running" ]
 check "$?" "web is still running"
-[ "$WEB_2" = "$WEB_1" ]
-check "$?" "web pid UNCHANGED (existing service not disturbed)"
+[ "$WEB_2" != "$WEB_1" ] && pid_alive "$WEB_2"
+check "$?" "web pid CHANGED (restart means restart)"
+
+section "add sidecar and reconcile with --delta"
+cat > "$CONFIG" <<'EOF'
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "sleep 3000"
+        restart_policy: "always"
+      worker:
+        command: "sleep 3000"
+        restart_policy: "always"
+      sidecar:
+        command: "sleep 3000"
+        restart_policy: "always"
+EOF
+sysg restart --config "$CONFIG" --delta
+check "$?" "restart --delta exits 0"
+sleep 3
+S3="$(sysg status --format json 2>/dev/null)"
+WEB_3="$(unit_field "$S3" web pid demo)"
+WORKER_3="$(unit_field "$S3" worker pid demo)"
+SIDECAR_3="$(unit_field "$S3" sidecar pid demo)"
+echo "delta  -> web:$WEB_3 worker:$WORKER_3 sidecar:$SIDECAR_3"
+
+[ "$(unit_field "$S3" sidecar state demo)" = "running" ] && pid_alive "$SIDECAR_3"
+check "$?" "sidecar started under --delta"
+[ "$WEB_3" = "$WEB_2" ] && [ "$WORKER_3" = "$WORKER_2" ]
+check "$?" "web and worker pids UNCHANGED (--delta adopts what it did not change)"
 
 sysg stop --supervisor >/dev/null 2>&1
 finish

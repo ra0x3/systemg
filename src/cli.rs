@@ -281,11 +281,16 @@ pub enum Commands {
         #[arg(long)]
         daemonize: bool,
 
-        /// Bounce every declared unit, not just the ones the manifest changed.
-        /// Use this when the manifest is unchanged but what it runs is not —
-        /// a rebuilt binary at the same path hashes identically, so the default
-        /// reconcile cannot see it.
+        /// Bounce only the units the manifest changed, plus their dependents,
+        /// instead of every declared unit. A rebuilt binary at an unchanged path
+        /// hashes identically, so a delta cannot see it and will leave that
+        /// process running.
         #[arg(long)]
+        delta: bool,
+
+        /// Accepted and ignored: bouncing every declared unit is what `restart`
+        /// now does. Kept so deploy scripts written against 0.66.9 keep working.
+        #[arg(long, hide = true, conflicts_with = "delta")]
         all: bool,
     },
 

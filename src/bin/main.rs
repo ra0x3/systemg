@@ -1122,6 +1122,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             service,
             project,
             daemonize,
+            delta,
             all,
         } => {
             if args.drop_privileges && supervisor_running() {
@@ -1129,19 +1130,24 @@ fn run() -> Result<(), Box<dyn Error>> {
                     "--drop-privileges is managed by the running supervisor and has no effect for this restart request"
                 );
             }
-            if all && service.is_some() {
+            if all {
+                warn!(
+                    "--all is the default now and is ignored; restart bounces every declared unit"
+                );
+            }
+            if delta && service.is_some() {
                 // Silently ignoring the flag is how a caller ends up believing
-                // it forced a bounce that the service path was always going to
-                // do anyway — and believing --all works where it does not.
+                // it narrowed a bounce that the service path was always going to
+                // do in full — and believing --delta works where it does not.
                 return Err(Box::new(DiagError(Box::new(
                     systemg::diag::Diagnostic::error(
                         systemg::diag::SgCode::ConflictingSelectors,
-                        "--all cannot be combined with -s",
+                        "--delta cannot be combined with -s",
                     )
                     .note("-s already bounces the named service and its dependents unconditionally")
-                    .note("--all widens a project or whole-config restart; it has nothing to widen here")
+                    .note("--delta narrows a project or whole-config restart; it has nothing to narrow here")
                     .help_cmd("bounce one service", "sysg restart -s <service>")
-                    .help_cmd("bounce every unit", "sysg restart --all")
+                    .help_cmd("apply the manifest delta", "sysg restart --delta")
                     .help_docs(),
                 ))));
             }
@@ -1171,7 +1177,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     return Err(Box::new(DiagError(diag)));
                 }
                 systemg::restart::Preflight::Ready(plan) => {
-                    dispatch_restart(plan, daemonize, all, verbose)?;
+                    dispatch_restart(plan, daemonize, delta, verbose)?;
                 }
             }
         }
@@ -3651,6 +3657,7 @@ mod tests {
             command: vec![],
         }));
         assert!(drop_privileges_applies_to_command(&Commands::Restart {
+            delta: false,
             all: false,
             config: "systemg.yaml".to_string(),
             service: None,
@@ -6186,7 +6193,7 @@ fn wait_for_supervisor_ready(child_pid: libc::pid_t) -> Result<(), Box<dyn Error
 fn dispatch_restart(
     plan: systemg::restart::RestartPlan,
     daemonize: bool,
-    all: bool,
+    delta: bool,
     verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
     use systemg::restart::RestartPlan;
@@ -6219,14 +6226,16 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config: restart_scoped_config(&config),
             service: None,
             project: None,
-            all,
+            delta,
+            all: !delta,
             watch: None,
         },
         RestartPlan::Project { config, project } => ControlCommand::Restart {
             config: restart_scoped_config(&config),
             service: None,
             project: Some(project),
-            all,
+            delta,
+            all: !delta,
             watch: None,
         },
         RestartPlan::Service {
@@ -6240,7 +6249,8 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             config: restart_scoped_config(&config),
             service: Some(service),
             project,
-            all,
+            delta,
+            all: !delta,
             watch: None,
         },
     };

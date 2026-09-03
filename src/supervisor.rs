@@ -550,23 +550,26 @@ fn verdict_for_outcomes(
 /// Whether a finished reconcile left the caller's processes exactly as it found
 /// them, when it had asked for them to be replaced.
 ///
-/// Every clause is here to keep a legitimately quiet run quiet:
+/// Two clauses keep a legitimately quiet run quiet:
 ///
 /// - a registration never asked for a bounce, so it is never owed this error;
-/// - stopping a removed unit is real work, even when nothing was restarted;
 /// - a unit the run deliberately passed over (cron, skip-gated, or skipped
 ///   because a dependency was) is accounted for, not silently missed.
 ///
-/// What survives all of that is the case worth failing on: a bounceable unit
-/// that the run never even considered, while nothing else moved.
+/// Removing a unit is deliberately NOT a third clause. Stopping a dropped unit
+/// replaces no running process, so a `--delta` run that removes one cron entry
+/// and bounces nothing else is exactly the stale deploy this code exists to
+/// catch — a live production restart passed green on that hole.
+///
+/// What survives is the case worth failing on: a bounceable unit that the run
+/// never even considered, while nothing was bounced.
 fn restart_touched_nothing(
     scope: RestartScope,
-    diff: &crate::restart::ManifestDiff,
+    _diff: &crate::restart::ManifestDiff,
     bounceable: &[String],
     tally: &crate::daemon::RestartTally,
 ) -> bool {
-    if !scope.expects_a_bounce() || !tally.bounced.is_empty() || !diff.removed.is_empty()
-    {
+    if !scope.expects_a_bounce() || !tally.bounced.is_empty() {
         return false;
     }
     bounceable
@@ -1674,8 +1677,8 @@ impl Supervisor {
         }
     }
 
-    /// Reconciles an active primary project by manifest delta and an inactive
-    /// primary project to its complete target.
+    /// Reconciles an active primary project to `scope` and an inactive primary
+    /// project to its complete target.
     fn reconcile_primary_project(
         &mut self,
         new_config: Config,
@@ -1747,8 +1750,10 @@ impl Supervisor {
         })
     }
 
-    /// Reconciles an additional project in place so unchanged services retain
-    /// their identity and changed services use their configured deployment strategy.
+    /// Reconciles an additional project in place: under a restart every declared
+    /// unit is bounced, under [`RestartScope::Delta`] or a registration only the
+    /// manifest delta is, and changed services use their configured deployment
+    /// strategy either way.
     fn reconcile_extra_project(
         &mut self,
         new_config: Config,
@@ -1882,24 +1887,26 @@ impl Supervisor {
     /// Returns the units a reconcile must touch.
     ///
     /// Under [`RestartScope::Everything`] that is every declared service. Under
-    /// [`RestartScope::Changed`] it is the added and changed units plus every
-    /// transitive dependent whose lifecycle must be reevaluated.
+    /// [`RestartScope::Delta`] and [`RestartScope::Register`] it is the added and
+    /// changed units plus every transitive dependent whose lifecycle must be
+    /// reevaluated.
     fn reconcile_targets(
         config: &Config,
         diff: &crate::restart::ManifestDiff,
         scope: RestartScope,
     ) -> Result<HashSet<String>, ProcessManagerError> {
         let order = config.service_start_order()?;
-        // `restart` means restart. Scoping to the manifest delta is only ever
-        // reached by explicit opt-in, because a redeployed binary at an
-        // unchanged path produces an identical config hash and would otherwise
-        // be left running forever behind a green exit code.
-        let mut affected: HashSet<String> =
-            if matches!(scope, RestartScope::Everything) || diff.is_empty() {
-                config.services.keys().cloned().collect()
-            } else {
+        // `restart` means restart: every declared unit, whatever the diff says.
+        // A redeployed binary at an unchanged path produces an identical config
+        // hash, so a scope read off the diff would leave it running forever
+        // behind a green exit code. Only a registration — or the explicit
+        // `--delta` that asks for one — narrows to the manifest delta.
+        let mut affected: HashSet<String> = match scope {
+            RestartScope::Everything => config.services.keys().cloned().collect(),
+            RestartScope::Delta | RestartScope::Register => {
                 diff.added.union(&diff.changed).cloned().collect()
-            };
+            }
+        };
         for name in order {
             if config.services.get(&name).is_some_and(|service| {
                 service.depends_on.as_ref().is_some_and(|dependencies| {
@@ -4623,13 +4630,13 @@ impl Supervisor {
                 config,
                 service,
                 project,
-                all,
+                delta,
                 ..
             } => {
-                let scope = if all {
-                    RestartScope::Everything
+                let scope = if delta {
+                    RestartScope::Delta
                 } else {
-                    RestartScope::Changed
+                    RestartScope::Everything
                 };
                 if let Some(service) = service {
                     self.restart_single_service_target(
@@ -6834,7 +6841,7 @@ running project does not declare; restart the project to apply structural change
         &mut self,
         path: &std::path::Path,
     ) -> Result<(), SupervisorError> {
-        self.reload_config(path, RestartScope::Changed).map(|_| ())
+        self.reload_config(path, RestartScope::Delta).map(|_| ())
     }
 
     /// Shutdown for testing.
@@ -7063,7 +7070,8 @@ mod tests {
     fn op_project_reads_the_project_out_of_a_selector() {
         assert_eq!(
             Supervisor::op_project(&ControlCommand::Restart {
-                all: false,
+                delta: false,
+                all: true,
                 config: None,
                 service: Some("web/api".into()),
                 project: None,
@@ -7120,11 +7128,11 @@ mod tests {
         }
     }
 
-    /// `--all` is the escape hatch from the delta: it bounces every declared
-    /// unit no matter what the manifest hash says, which is what a caller who
-    /// rebuilt a binary at an unchanged path actually needs.
+    /// The default: `restart` bounces every declared unit no matter what the
+    /// manifest hash says, which is what a caller who rebuilt a binary at an
+    /// unchanged path actually needs.
     #[test]
-    fn the_all_scope_bounces_every_unit_whatever_the_diff_says() {
+    fn the_default_scope_bounces_every_unit_whatever_the_diff_says() {
         let old = reconcile_config(&[
             ("server", "arb-rs serve", false),
             ("retag", "arb-py retag", true),
@@ -7142,10 +7150,10 @@ mod tests {
         assert_eq!(affected.len(), 2);
     }
 
-    /// The default: a manifest change bounces only what changed, so adding one
-    /// service never takes the rest of the stack down with it.
+    /// `--delta` is the opt-in: a manifest change bounces only what changed, so
+    /// adding one service never takes the rest of the stack down with it.
     #[test]
-    fn the_default_scope_narrows_to_the_delta() {
+    fn the_delta_scope_narrows_to_the_delta() {
         let old = reconcile_config(&[
             ("server", "arb-rs serve", false),
             ("retag", "arb-py retag", true),
@@ -7157,12 +7165,15 @@ mod tests {
         let diff = crate::restart::ManifestDiff::compute(&old, &new);
 
         let affected =
-            Supervisor::reconcile_targets(&new, &diff, RestartScope::Changed).unwrap();
+            Supervisor::reconcile_targets(&new, &diff, RestartScope::Delta).unwrap();
         assert_eq!(affected, HashSet::from(["retag".to_string()]));
     }
 
+    /// The scope is read off the caller's intent, never off the diff. An
+    /// unchanged manifest is the redeployed-binary case, and it is the default
+    /// that has to bounce it — a delta asked for is a delta, empty or not.
     #[test]
-    fn an_unchanged_manifest_restarts_everything_under_either_scope() {
+    fn an_unchanged_manifest_bounces_everything_only_under_the_default() {
         let config = reconcile_config(&[
             ("server", "arb-rs serve", false),
             ("retag", "arb-py retag", true),
@@ -7170,10 +7181,14 @@ mod tests {
         let diff = crate::restart::ManifestDiff::compute(&config, &config);
         assert!(diff.is_empty());
 
-        for scope in [RestartScope::Everything, RestartScope::Changed] {
-            let affected = Supervisor::reconcile_targets(&config, &diff, scope).unwrap();
-            assert_eq!(affected.len(), 2, "{scope:?} narrowed an empty diff");
-        }
+        let everything =
+            Supervisor::reconcile_targets(&config, &diff, RestartScope::Everything)
+                .unwrap();
+        assert_eq!(everything.len(), 2);
+
+        let delta =
+            Supervisor::reconcile_targets(&config, &diff, RestartScope::Delta).unwrap();
+        assert!(delta.is_empty());
     }
 
     /// Cron and skip-gated units are launched by something other than a
@@ -7232,9 +7247,9 @@ mod tests {
     }
 
     /// The arbitration incident: the delta named only a cron unit, so the
-    /// server was never even considered and kept its process. The reconcile is
-    /// the default, so this is the case that has to fail loudly rather than
-    /// return a green exit code over a stale binary.
+    /// server was never even considered and kept its process. Under `--delta`
+    /// that is still reachable, so it has to fail loudly rather than return a
+    /// green exit code over a stale binary.
     #[test]
     fn a_bounceable_unit_the_run_never_considered_is_a_no_op_restart() {
         let diff = crate::restart::ManifestDiff {
@@ -7242,15 +7257,15 @@ mod tests {
             ..Default::default()
         };
         assert!(restart_touched_nothing(
-            RestartScope::Changed,
+            RestartScope::Delta,
             &diff,
             &["server".to_string()],
             &tally(&[], &["retag"]),
         ));
     }
 
-    /// `start` and `AddProject` reconcile a delta without ever asking for a
-    /// bounce, so a cron-only change must not fail them.
+    /// Registering a manifest reconciles a delta without ever asking for a
+    /// bounce, so a cron-only change must not fail it.
     #[test]
     fn a_registration_is_never_owed_a_no_op_restart_error() {
         let diff = crate::restart::ManifestDiff {
@@ -7265,18 +7280,22 @@ mod tests {
         ));
     }
 
-    /// Stopping a removed unit is real work; the caller's world did change.
+    /// The exact prod shape that passed green: the deploy dropped one cron unit
+    /// and added seven, so the diff was busy while every long-running process
+    /// stayed on the old binary. Stopping a removed unit replaces nothing, so it
+    /// must not buy the run an exemption.
     #[test]
-    fn a_pure_removal_is_not_a_no_op_restart() {
+    fn a_removal_does_not_excuse_a_restart_that_bounced_nothing() {
         let diff = crate::restart::ManifestDiff {
-            removed: BTreeSet::from(["worker".to_string()]),
+            added: BTreeSet::from(["brief_check".to_string()]),
+            removed: BTreeSet::from(["sports_context".to_string()]),
             ..Default::default()
         };
-        assert!(!restart_touched_nothing(
-            RestartScope::Changed,
+        assert!(restart_touched_nothing(
+            RestartScope::Delta,
             &diff,
             &["server".to_string()],
-            &tally(&[], &[]),
+            &tally(&[], &["brief_check"]),
         ));
     }
 
@@ -7822,7 +7841,8 @@ services:
 
         let restart_err = supervisor
             .handle_command(ControlCommand::Restart {
-                all: false,
+                delta: false,
+                all: true,
                 config: None,
                 service: Some("beta_cron".into()),
                 project: Some("beta".into()),
@@ -7837,7 +7857,8 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                all: false,
+                delta: false,
+                all: true,
                 config: Some(beta_config.to_string_lossy().to_string()),
                 service: Some("beta_worker".into()),
                 project: None,
@@ -7872,7 +7893,8 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                all: false,
+                delta: false,
+                all: true,
                 config: Some(beta_updated_config.to_string_lossy().to_string()),
                 service: None,
                 project: Some("beta".into()),
@@ -7980,7 +8002,8 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                all: false,
+                delta: false,
+                all: true,
                 config: None,
                 service: None,
                 project: Some("primary".into()),
@@ -8031,8 +8054,12 @@ services:
     }
 
     #[test]
-    /// Verifies a failed added unit leaves unchanged primary processes intact.
-    fn primary_reconcile_failure_preserves_unchanged_processes() {
+    /// Verifies a failed added unit leaves the rest of the project running.
+    ///
+    /// `restart` bounces every declared unit, so the survivors carry NEW pids —
+    /// what must never happen is one failed unit taking the project down with
+    /// it, or the failure being reported as success.
+    fn primary_reconcile_failure_leaves_the_project_running() {
         let _guard = crate::test_utils::env_lock();
 
         let base = std::env::current_dir()
@@ -8098,7 +8125,8 @@ services:
 
         let error = supervisor
             .handle_command(ControlCommand::Restart {
-                all: false,
+                delta: false,
+                all: true,
                 config: Some(config_path.to_string_lossy().to_string()),
                 service: None,
                 project: Some("primary".into()),
@@ -8118,9 +8146,10 @@ services:
             .services()
             .clone();
         for service in ["web", "api"] {
-            let pid = before.get(service).copied().expect("original service pid");
-            assert_eq!(after.get(service), Some(&pid));
-            assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+            let old_pid = before.get(service).copied().expect("original service pid");
+            let new_pid = after.get(service).copied().expect("restarted service pid");
+            assert_ne!(new_pid, old_pid, "{service} was not bounced by the restart");
+            assert_eq!(unsafe { libc::kill(new_pid as libc::pid_t, 0) }, 0);
         }
         assert!(supervisor.daemon.config().services.contains_key("bad"));
 
@@ -8213,7 +8242,8 @@ services:
 
         supervisor
             .handle_command(ControlCommand::Restart {
-                all: false,
+                delta: false,
+                all: true,
                 config: None,
                 service: None,
                 project: Some("beta".into()),

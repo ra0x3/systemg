@@ -194,11 +194,22 @@ pub enum ControlCommand {
         /// Optional project id to target.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
-        /// Bounce every declared unit instead of reconciling the manifest delta.
+        /// Reconcile the manifest delta instead of bouncing every declared unit.
         ///
-        /// Defaults to false, which is the reconcile the supervisor has always
-        /// done — so an old CLI talking to a new supervisor keeps its exact
-        /// behavior, including the SG0304 that now guards it.
+        /// Defaults to false, so an old CLI — which never sends this field —
+        /// gets a real restart. That is the safe direction to be wrong in: a
+        /// stack bounced once too often beats a deploy that silently kept every
+        /// old process.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        delta: bool,
+        /// The 0.66/0.67 spelling of the same decision, inverted: "bounce
+        /// everything". Supervisors of that vintage read only this field, and a
+        /// new CLI reaches one whenever the resident daemon has not been
+        /// recycled yet — a scoped `-p` restart never recycles. Sending both
+        /// keeps that combination honest instead of silently delta-scoped.
+        /// Ignored on the way in: `delta` decides, so a 0.66/0.67 CLI's default
+        /// `all: false` gets a full bounce here rather than its old delta. That
+        /// asymmetry is deliberate — delta-by-default is the bug this removes.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all: bool,
         /// Client-generated id for this operation's progress journal.
@@ -1308,7 +1319,8 @@ mod tests {
 
     fn restart_all() -> ControlCommand {
         ControlCommand::Restart {
-            all: false,
+            delta: false,
+            all: true,
             service: None,
             project: None,
             config: None,
@@ -1615,7 +1627,8 @@ mod tests {
         assert!(json.contains("Stop"));
 
         let restart = ControlCommand::Restart {
-            all: false,
+            delta: false,
+            all: true,
             config: Some("config.yaml".to_string()),
             service: Some("service".to_string()),
             project: None,
@@ -1650,7 +1663,8 @@ mod tests {
     #[test]
     fn restart_omits_null_optional_fields() {
         let restart = ControlCommand::Restart {
-            all: false,
+            delta: false,
+            all: true,
             config: Some("sysg.config.yaml".to_string()),
             service: None,
             project: None,
@@ -1659,7 +1673,59 @@ mod tests {
 
         let json = serde_json::to_string(&restart).expect("serialize restart");
 
-        assert_eq!(json, r#"{"Restart":{"config":"sysg.config.yaml"}}"#);
+        assert_eq!(
+            json,
+            r#"{"Restart":{"config":"sysg.config.yaml","all":true}}"#
+        );
+    }
+
+    /// A new CLI reaches an old supervisor whenever the resident daemon has not
+    /// been recycled — a scoped `-p` restart never recycles it. That supervisor
+    /// reads only `all`, so a plain restart has to carry it, or it silently
+    /// scopes itself to the manifest delta and leaves the redeployed binary
+    /// running. `--delta` carries neither claim to everything.
+    #[test]
+    fn a_restart_speaks_both_wire_spellings_of_its_scope() {
+        let bounce_everything = ControlCommand::Restart {
+            delta: false,
+            all: true,
+            config: None,
+            service: None,
+            project: Some("demo".to_string()),
+            watch: None,
+        };
+        let json = serde_json::to_string(&bounce_everything).expect("serialize");
+        assert!(json.contains(r#""all":true"#), "{json}");
+        assert!(!json.contains("delta"), "{json}");
+
+        let delta_only = ControlCommand::Restart {
+            delta: true,
+            all: false,
+            config: None,
+            service: None,
+            project: Some("demo".to_string()),
+            watch: None,
+        };
+        let json = serde_json::to_string(&delta_only).expect("serialize");
+        assert!(json.contains(r#""delta":true"#), "{json}");
+        assert!(!json.contains("all"), "{json}");
+    }
+
+    /// A CLI that names no scope at all, and a 0.66/0.67 CLI whose default said
+    /// `all: false` (its delta), both land on a full bounce here. The second is
+    /// deliberately NOT that CLI's exact behavior: delta-by-default is the bug
+    /// this release removes, and a stack bounced once too often beats a deploy
+    /// that silently kept every old process.
+    #[test]
+    fn a_restart_that_does_not_ask_for_a_delta_bounces_everything() {
+        for wire in [r#"{"Restart":{}}"#, r#"{"Restart":{"all":false}}"#] {
+            let parsed: ControlCommand =
+                serde_json::from_str(wire).expect("deserialize restart");
+            assert!(
+                matches!(parsed, ControlCommand::Restart { delta: false, .. }),
+                "{wire}"
+            );
+        }
     }
 
     #[test]

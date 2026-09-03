@@ -1,0 +1,12 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      server:
+        command: "sh -c 'cat /usecase/build > /usecase/serving && exec sleep 3000'"
+        restart_policy: "always"
+      nightly:
+        command: "sh -c 'echo nightly >> /usecase/cron-runs'"
+        cron:
+          expression: "15 3 * * *"
