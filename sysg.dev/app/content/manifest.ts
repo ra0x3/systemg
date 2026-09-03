@@ -168,6 +168,17 @@ export const ENTRIES: Entry[] = [
     legacy: ["/how-it-works/logs"],
   },
   {
+    source: "how-it-works/boot.mdx",
+    slug: "how-it-works/boot",
+    section: "docs",
+    group: "How It Works",
+    route: "/docs/how-it-works/boot",
+    title: "Booting at Startup",
+    description: null,
+    canonical: null,
+    legacy: ["/how-it-works/boot"],
+  },
+  {
     source: "kernel-mode/index.mdx",
     slug: "kernel-mode",
     section: "docs",

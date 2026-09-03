@@ -83,6 +83,15 @@ impl FromStr for LogLevelArg {
     }
 }
 
+/// Which service manager a generated boot unit is installed into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum BootScope {
+    /// The invoking user's own manager: `systemd --user`, or a LaunchAgent.
+    User,
+    /// The machine's manager: a systemd system unit, or a LaunchDaemon.
+    System,
+}
+
 /// Type of logs to display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogKind {
@@ -182,6 +191,11 @@ pub enum Commands {
         /// Whether to daemonize systemg.
         #[arg(long)]
         daemonize: bool,
+
+        /// Run the supervisor in this process instead of detaching, so a
+        /// service manager (systemd, launchd) owns its lifetime.
+        #[arg(long, conflicts_with_all = ["daemonize", "child", "parent_pid", "ttl"])]
+        attached: bool,
 
         /// Optionally start only the named service.
         #[arg(short, long)]
@@ -581,6 +595,11 @@ pub enum Commands {
         /// Private state record inherited from a live supervisor re-exec.
         #[arg(long)]
         handoff: Option<String>,
+
+        /// A service manager owns this supervisor: handle its shutdown signal
+        /// rather than dying on it.
+        #[arg(long)]
+        managed: bool,
     },
 
     /// Run as a container's PID 1: boot the manifest, reap adopted orphans,
@@ -593,6 +612,46 @@ pub enum Commands {
         /// Pipe service stderr through the supervisor.
         #[arg(long)]
         pipe_stderr: bool,
+    },
+
+    /// Print, or install, the service-manager unit that boots a manifest.
+    InstallBoot {
+        /// Path to the configuration file the unit boots.
+        #[arg(short, long, default_value = "systemg.yaml")]
+        config: String,
+
+        /// Which service manager owns the unit. Defaults to the runtime mode:
+        /// `--sys` gives `system`, everything else `user`.
+        #[arg(long, value_enum)]
+        scope: Option<BootScope>,
+
+        /// Unit name, without extension (defaults to the manifest's filename).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Directory the supervisor runs from (defaults to the manifest's).
+        #[arg(long)]
+        workdir: Option<String>,
+
+        /// Path the unit invokes sysg by (defaults to this binary's own).
+        #[arg(long)]
+        exe: Option<String>,
+
+        /// Account a system-scope unit runs the supervisor as.
+        #[arg(long, value_name = "ACCOUNT")]
+        run_as: Option<String>,
+
+        /// Order the supervisor after the network is actually configured.
+        #[arg(long)]
+        wait_online: bool,
+
+        /// Write the unit to its install path instead of printing it.
+        #[arg(long)]
+        write: bool,
+
+        /// Activate the written unit with the platform's service manager.
+        #[arg(long, requires = "write")]
+        enable: bool,
     },
 
     /// Check the persisted runtime state against the invariant oracle.
@@ -647,6 +706,7 @@ impl Commands {
             Commands::Migrate { .. } => "migrate",
             Commands::MigrateState { .. } => "migrate-state",
             Commands::Purge { .. } => "purge",
+            Commands::InstallBoot { .. } => "install-boot",
             Commands::Version { .. } => "version",
             Commands::UpgradeInfo => "upgrade-info",
             Commands::UpgradeSupervisor { .. } => "upgrade-supervisor",

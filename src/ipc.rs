@@ -980,6 +980,61 @@ pub fn write_supervisor_pid(pid: libc::pid_t) -> Result<(), ControlError> {
     Ok(())
 }
 
+/// Records that a service manager owns the supervisor with this PID, so a CLI
+/// that would otherwise stop and respawn it can refuse instead: recycling a
+/// managed supervisor fights the manager for ownership and leaves the winner
+/// unsupervised. Stale records are harmless — the PID is compared against the
+/// live supervisor's.
+pub fn write_managed_marker(pid: libc::pid_t, config: &Path) -> Result<(), ControlError> {
+    let path = managed_marker_path()?;
+    if let Some(parent) = path.parent() {
+        runtime::create_private_dir(parent)?;
+    }
+    runtime::write_private_file(&path, format!("{pid}\n{}", config.display()))?;
+    Ok(())
+}
+
+/// Drops any manager-ownership record, so a supervisor this manager did not
+/// start never inherits its predecessor's claim — a record left behind by a
+/// killed supervisor would otherwise block a legitimate recycle the moment the
+/// kernel reissued its PID.
+pub fn clear_managed_marker() -> Result<(), ControlError> {
+    let path = managed_marker_path()?;
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+/// Whether a service manager owns the supervisor that is running now.
+pub fn supervisor_is_managed() -> bool {
+    managed_owner_in(&runtime::state_dir()).is_some()
+}
+
+/// The manifest a manager-owned supervisor is booting in `runtime_dir`, when
+/// one is live there. Reads another account's runtime as well as this one's, so
+/// a unit can be checked against the runtime it will actually target rather
+/// than the runtime of whoever ran the command.
+pub fn managed_owner_in(runtime_dir: &Path) -> Option<PathBuf> {
+    let pid = live_supervisor_pid_in(runtime_dir)?;
+    let recorded = std::fs::read_to_string(runtime_dir.join("managed")).ok()?;
+    let (marked_pid, config) = recorded.split_once('\n')?;
+    (marked_pid.trim().parse::<libc::pid_t>().ok()? == pid)
+        .then(|| PathBuf::from(config.trim()))
+}
+
+/// The PID of a supervisor that is running in `runtime_dir` right now.
+pub fn live_supervisor_pid_in(runtime_dir: &Path) -> Option<libc::pid_t> {
+    let recorded = std::fs::read_to_string(runtime_dir.join("sysg.pid")).ok()?;
+    let pid = recorded.trim().parse::<libc::pid_t>().ok()?;
+    (unsafe { libc::kill(pid, 0) } == 0).then_some(pid)
+}
+
+/// Where the manager-ownership record lives.
+fn managed_marker_path() -> Result<PathBuf, ControlError> {
+    Ok(runtime_dir()?.join("managed"))
+}
+
 /// Persists the resolved config path to assist CLI fallbacks.
 pub fn write_config_hint(config: &Path) -> Result<(), ControlError> {
     let hint_path = config_hint_path()?;
@@ -1072,6 +1127,12 @@ pub fn cleanup_runtime() -> Result<(), ControlError> {
         && config_path.exists()
     {
         let _ = fs::remove_file(config_path);
+    }
+
+    if let Ok(managed_path) = managed_marker_path()
+        && managed_path.exists()
+    {
+        let _ = fs::remove_file(managed_path);
     }
 
     Ok(())

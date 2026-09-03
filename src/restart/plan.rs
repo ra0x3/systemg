@@ -191,6 +191,21 @@ pub fn recycle_refused(
     .help_docs()
 }
 
+/// Builds the SG0007 diagnostic for a recycle refused because a service manager
+/// owns the running supervisor. Recycling stops the supervisor and starts a
+/// replacement of its own, which the manager neither started nor tracks: the
+/// two then race for the runtime and whichever wins is unsupervised.
+pub fn recycle_manager_owned(unit_hint: &str) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::SupervisorRestartConflict,
+        "refused to recycle a supervisor a service manager owns",
+    )
+    .note("this supervisor was started by systemd or launchd, which restarts it and owns its lifetime")
+    .note("stopping it here would leave the manager to start a second one while this command starts its own")
+    .help_cmd("restart it through the manager", unit_hint)
+    .help_docs()
+}
+
 /// Builds the SG0303 diagnostic for a recycle that stopped the old supervisor
 /// but could not start the new one — the box is now unsupervised. The help
 /// carries the exact command to bring supervision back.

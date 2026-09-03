@@ -3381,6 +3381,9 @@ impl Supervisor {
             "--handoff".to_string(),
             prepared.path.to_string_lossy().to_string(),
         ]);
+        if crate::runtime::managed() {
+            values.push("--managed".to_string());
+        }
         let args = values
             .iter()
             .map(|value| {
@@ -3469,7 +3472,13 @@ impl Supervisor {
         );
 
         ipc::write_config_hint(&self.config_path)?;
-        ipc::write_supervisor_pid(unsafe { libc::getpid() })?;
+        let pid = unsafe { libc::getpid() };
+        ipc::write_supervisor_pid(pid)?;
+        if crate::runtime::managed() {
+            ipc::write_managed_marker(pid, &self.config_path)?;
+        } else {
+            ipc::clear_managed_marker()?;
+        }
 
         match self.collect_aggregate_snapshot(false) {
             Ok(snapshot) => self.status_cache.replace(snapshot),
