@@ -611,6 +611,9 @@ needed), start with `sudo sysg --sys start`, or remove the keys.
 request cannot produce a working unit — `--sys` under a user manager, `--run-as`
 on a user-scope unit, a system-scope unit that names neither `--sys` nor an
 account — or a file already sits at the install path without sysg's marker, in
-which case it is left exactly as it is. When the unit was written and the
-manager's own activation command failed, the diagnostic reports that command
-and its exit status.
+which case it is left exactly as it is. It also refuses to write a unit for a
+manager this machine does not run: on a Linux host booted by runit, s6, OpenRC
+or a bare container entrypoint there is nothing to read a systemd unit, so the
+diagnostic points at running `start --attached` under that manager instead.
+When the unit was written and the manager's own activation command failed or
+could not be run at all, the diagnostic reports that command and why.

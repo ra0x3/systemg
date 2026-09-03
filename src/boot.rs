@@ -62,6 +62,11 @@ pub enum Manager {
 
 impl Manager {
     /// The manager native to this platform.
+    ///
+    /// This says which manager a unit would be *written for*, not that the
+    /// manager is running — a systemd unit rendered on a runit box is still a
+    /// valid unit for the systemd host it gets copied to. Ask
+    /// [`running_manager`] before putting one on disk.
     pub fn native() -> Self {
         if cfg!(target_os = "macos") {
             Self::Launchd
@@ -69,6 +74,58 @@ impl Manager {
             Self::Systemd
         }
     }
+}
+
+/// The manager actually running on this machine, if it is one sysg renders for.
+///
+/// `None` means the host boots something else — runit, s6, OpenRC, a bare
+/// container entrypoint — and a unit written here would never be read.
+pub fn running_manager() -> Option<Manager> {
+    manager_under(Path::new("/"))
+}
+
+/// [`running_manager`], rooted at `root` so tests can stage a machine.
+///
+/// The Linux probe is the one `sd_booted(3)` uses: systemd creates
+/// `/run/systemd/system` when it boots the machine, and nothing else does.
+/// Checking for the `systemctl` binary would not do — a host can carry it as a
+/// dependency of something else while running a different init entirely.
+///
+/// `root` reaches only that probe. macOS answers launchd from the target alone,
+/// since nothing else has ever been PID 1 there, so staging a root directory
+/// cannot make a macOS build say anything else.
+fn manager_under(root: &Path) -> Option<Manager> {
+    if cfg!(target_os = "macos") {
+        return Some(Manager::Launchd);
+    }
+    root.join("run/systemd/system")
+        .is_dir()
+        .then_some(Manager::Systemd)
+}
+
+/// What PID 1 calls itself, for an error message that can name the init the
+/// operator is looking at.
+///
+/// Advisory only, and never a verdict: `/proc/1/comm` is a process name, so it
+/// can read `systemd` on a container where systemd never booted the machine and
+/// the run-directory probe rightly says no. Unreadable under some container
+/// configurations, and absent entirely off Linux.
+pub fn init_name() -> Option<String> {
+    plain_init_name(&std::fs::read_to_string("/proc/1/comm").ok()?)
+}
+
+/// Accepts `/proc/1/comm` only when it is a short, plain word.
+///
+/// The contents are whatever PID 1 was named, and this ends up inside a
+/// diagnostic; anything else is dropped rather than printed.
+fn plain_init_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    let plain = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    plain.then(|| name.to_string())
 }
 
 /// Everything a rendered unit needs to boot one manifest.
@@ -177,6 +234,18 @@ impl Unit {
             return Err(Error::Unsupported("--wait-online", self.manager));
         }
         check_name(&self.name)
+    }
+
+    /// Refuses a unit whose manager is not the one running this machine.
+    ///
+    /// Rendering stays host-neutral — a unit generated on a build box is the
+    /// right unit for the host it is copied to — so this is asked only before
+    /// the unit goes on disk, never in [`Unit::check`].
+    pub fn writable_here(&self, running: Option<Manager>) -> Result<(), Error> {
+        if running == Some(self.manager) {
+            return Ok(());
+        }
+        Err(Error::NoSupportedManager(init_name()))
     }
 
     /// Where the rendered unit is installed.
@@ -491,6 +560,13 @@ pub enum Error {
     AccountUnknown(String),
     /// An activation step the service manager ran came back non-zero.
     EnableFailed(String, Option<i32>),
+    /// An activation step could not be run at all — its program is missing, or
+    /// the spawn itself failed.
+    EnableSpawnFailed(String, String),
+    /// The manager this unit is written for is not the one running this
+    /// machine, so the unit would never be read. Carries what PID 1 calls
+    /// itself, when that could be read.
+    NoSupportedManager(Option<String>),
     /// A system-scope unit named neither the system runtime nor an account, so
     /// it would run the user runtime as root.
     SystemScopeNeedsOwner,
@@ -564,6 +640,18 @@ impl fmt::Display for Error {
             Self::EnableFailed(step, code) => match code {
                 Some(code) => write!(f, "`{step}` exited {code}"),
                 None => write!(f, "`{step}` was killed by a signal"),
+            },
+            Self::EnableSpawnFailed(step, reason) => {
+                write!(f, "`{step}` could not be run: {reason}")
+            }
+            Self::NoSupportedManager(init) => match init {
+                Some(init) => write!(
+                    f,
+                    "PID 1 is named `{init}`, and the manager this unit targets is not running here; sysg writes systemd units and launchd plists, nothing else"
+                ),
+                None => f.write_str(
+                    "the manager this unit targets is not running here; sysg writes systemd units and launchd plists, nothing else",
+                ),
             },
         }
     }
@@ -1256,6 +1344,67 @@ mod tests {
         assert!(matches!(
             Unit::new(PathBuf::from("systemg.yaml"), Scope::User),
             Err(Error::RelativePath("config", _))
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_linux_host_counts_as_systemd_only_once_systemd_has_booted_it() {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert_eq!(manager_under(root.path()), None);
+        std::fs::create_dir_all(root.path().join("run/systemd/system")).expect("run dir");
+        assert_eq!(manager_under(root.path()), Some(Manager::Systemd));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_is_always_launchd() {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert_eq!(manager_under(root.path()), Some(Manager::Launchd));
+    }
+
+    #[test]
+    fn a_host_running_neither_manager_names_its_init_when_it_can() {
+        let named = Error::NoSupportedManager(Some("runit".into())).to_string();
+        assert!(named.contains("runit"), "{named}");
+        let anonymous = Error::NoSupportedManager(None).to_string();
+        assert!(anonymous.contains("systemd"), "{anonymous}");
+        assert!(anonymous.contains("launchd"), "{anonymous}");
+    }
+
+    #[test]
+    fn an_activation_step_that_could_not_run_says_so() {
+        let err = Error::EnableSpawnFailed(
+            "systemctl daemon-reload".into(),
+            "No such file or directory (os error 2)".into(),
+        );
+        assert!(err.to_string().contains("could not be run"), "{err}");
+    }
+
+    #[test]
+    fn only_a_short_plain_word_may_name_the_init() {
+        assert_eq!(plain_init_name("runit\n"), Some("runit".into()));
+        assert_eq!(plain_init_name("s6-svscan"), Some("s6-svscan".into()));
+        assert_eq!(plain_init_name(""), None);
+        assert_eq!(plain_init_name("   "), None);
+        assert_eq!(plain_init_name("in it"), None);
+        assert_eq!(plain_init_name("init\nNote: owned"), None);
+        assert_eq!(plain_init_name("../../etc/passwd"), None);
+        assert_eq!(plain_init_name(&"a".repeat(33)), None);
+        assert_eq!(plain_init_name(&"a".repeat(32)), Some("a".repeat(32)));
+    }
+
+    #[test]
+    fn a_unit_is_written_only_where_its_own_manager_runs() {
+        let unit = unit(Scope::System, Manager::Systemd);
+        assert!(unit.writable_here(Some(Manager::Systemd)).is_ok());
+        assert!(matches!(
+            unit.writable_here(Some(Manager::Launchd)),
+            Err(Error::NoSupportedManager(_))
+        ));
+        assert!(matches!(
+            unit.writable_here(None),
+            Err(Error::NoSupportedManager(_))
         ));
     }
 

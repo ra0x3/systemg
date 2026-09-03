@@ -7078,9 +7078,18 @@ fn dispatch_install_boot(args: InstallBoot) -> Result<(), Box<dyn Error>> {
         io::stdout().flush()?;
         eprintln!();
         eprintln!("Install to: {}", path.display());
+        if boot::running_manager() != Some(unit.manager) {
+            eprintln!(
+                "Note: {:?} is not running here, so this unit is only useful on a host where it is.",
+                unit.manager
+            );
+        }
         eprintln!("Write it there by adding --write to this command.");
         return Ok(());
     }
+
+    unit.writable_here(boot::running_manager())
+        .map_err(boot_refused)?;
 
     if path.exists() && !boot::Unit::owns(&path) {
         return Err(boot_refused(boot::Error::Foreign(path)));
@@ -7123,7 +7132,16 @@ fn dispatch_install_boot(args: InstallBoot) -> Result<(), Box<dyn Error>> {
             .split_first()
             .expect("enable step names a program");
         println!("+ {}", step.line());
-        let status = process::Command::new(program).args(rest).status()?;
+        let status =
+            process::Command::new(program)
+                .args(rest)
+                .status()
+                .map_err(|err| {
+                    boot_refused(boot::Error::EnableSpawnFailed(
+                        step.line(),
+                        err.to_string(),
+                    ))
+                })?;
         if !status.success() && step.required {
             return Err(boot_refused(boot::Error::EnableFailed(
                 step.line(),
@@ -7284,7 +7302,8 @@ fn boot_refused(err: systemg::boot::Error) -> Box<dyn Error> {
     use systemg::diag::{Diagnostic, SgCode};
 
     let title = match &err {
-        systemg::boot::Error::EnableFailed(..) => {
+        systemg::boot::Error::EnableFailed(..)
+        | systemg::boot::Error::EnableSpawnFailed(..) => {
             "boot unit was written but not activated"
         }
         _ => "boot unit was not installed",
@@ -7314,6 +7333,17 @@ fn boot_refused(err: systemg::boot::Error) -> Box<dyn Error> {
         systemg::boot::Error::SupervisorResident => diagnostic
             .help_cmd("stop it, then enable the unit", "sysg stop --supervisor")
             .help_cmd("or write the unit now and enable it later", "sysg install-boot --write"),
+        systemg::boot::Error::NoSupportedManager(_) => diagnostic
+            .note(
+                "the supervisor itself needs no service manager: `start --attached` does not fork, so whatever runs it supervises it",
+            )
+            .help_cmd(
+                "have your init run this, restarting on failure and stopping with TERM",
+                "sysg start --attached --config <config>",
+            )
+            .note(
+                "give that service the user, HOME, working directory and restart policy this unit would have set",
+            ),
         systemg::boot::Error::SysUnderUserScope => {
             diagnostic.help_cmd("install it for the machine", "sudo sysg --sys install-boot --scope system --write")
         }

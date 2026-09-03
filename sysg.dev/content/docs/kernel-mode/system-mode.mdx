@@ -56,7 +56,9 @@ for the target account. Namespace unshare failures can warn and proceed
 ## Boot integration
 
 `sysg install-boot` writes the unit that starts the system supervisor at boot —
-a systemd unit on Linux, a LaunchDaemon on macOS:
+a systemd unit on a systemd-booted Linux host, a LaunchDaemon on macOS. A Linux
+box running some other init gets a refusal and the
+[wrapper recipe](/docs/how-it-works/boot#linux-without-systemd) instead:
 
 ```bash
 $ sudo sysg --sys install-boot --config /etc/systemg/systemg.yaml --write --enable
