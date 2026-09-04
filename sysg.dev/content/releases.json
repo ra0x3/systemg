@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.67.2",
+    "slug": "0.67.2",
+    "title": "v0.67.2",
+    "date": "2026-09-04T02:50:13Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.2",
+    "summary": "ci(audit): install cargo-audit locked and pinned instead of resolving it fresh (14b3835)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci(audit): install cargo-audit locked and pinned instead of resolving it fresh (<code>14b3835</code>)</li>\n<li>fix(restart): bounce every declared unit, and never let a removal excuse a no-op (<code>775d757</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.1 (<code>4034272</code>)</li>\n<li>docs(blog): publish release post for v0.67.1 (<code>5301c87</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.1...v0.67.2\">Full changelog on GitHub</a></p>",
+    "commits": 4
+  },
+  {
     "tag": "v0.67.1",
     "slug": "0.67.1",
     "title": "v0.67.1",
