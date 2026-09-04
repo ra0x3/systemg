@@ -58,15 +58,20 @@ jobs:
     needs: check-commit-message
     permissions:
       contents: read
-      checks: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # Installed here rather than through rustsec/audit-check, which resolves
+      # cargo-audit's dependencies fresh: that picked tinyvec 1.13.0, which does
+      # not build on the toolchain rust-toolchain.toml pins, so the job died
+      # before it ever read an advisory. --locked builds cargo-audit's own
+      # lockfile; the version pin keeps a future release's MSRV bump out of it.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+
       - name: Audit Dependencies for CVEs
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ github.token }}
+        run: cargo audit
 
   cargo-deny:
     name: Cargo Deny
@@ -300,7 +305,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-sort
-        run: cargo install cargo-sort
+        run: cargo install cargo-sort --locked --version 2.1.4
 
       - name: Check Cargo.toml Formatting
         run: cargo sort --check --workspace

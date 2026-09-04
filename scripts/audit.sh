@@ -13,7 +13,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if ! command -v cargo-audit >/dev/null 2>&1; then
   printf "${YELLOW}cargo-audit not found, installing...${RESET}\n"
-  cargo install cargo-audit
+  cargo install cargo-audit --locked
 fi
 
 printf "${BOLD}${YELLOW}Auditing dependencies for known CVEs...${RESET}\n\n"
