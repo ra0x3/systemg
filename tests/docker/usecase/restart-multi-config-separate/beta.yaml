@@ -1,0 +1,8 @@
+version: "2"
+projects:
+  beta:
+    name: Beta
+    services:
+      beta_svc:
+        command: "sleep 3000"
+        restart_policy: "always"

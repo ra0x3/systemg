@@ -5231,13 +5231,7 @@ impl Supervisor {
         scope: RestartScope,
     ) -> Result<Vec<ReconcileOutcome>, SupervisorError> {
         let (resolved, configs) = self.load_restart_manifest(path)?;
-        let owned = self
-            .extra_projects
-            .iter()
-            .filter(|(_, runtime)| runtime.config_path == self.config_path)
-            .map(|(project_id, _)| project_id.clone())
-            .collect();
-        self.apply_restart_manifest(resolved, configs, true, owned, scope)
+        self.apply_restart_manifest(resolved, configs, scope)
     }
 
     /// Reloads all registered manifests on a bare restart, validating every
@@ -5282,24 +5276,12 @@ impl Supervisor {
                     .into());
                 }
             }
-            let owned = self
-                .extra_projects
-                .iter()
-                .filter(|(_, runtime)| runtime.config_path == resolved)
-                .map(|(project_id, _)| project_id.clone())
-                .collect();
-            loaded.push((resolved, configs, path == primary_path, owned));
+            loaded.push((resolved, configs, path == primary_path));
         }
-        loaded.sort_by_key(|(_, _, owns_primary, _)| !*owns_primary);
+        loaded.sort_by_key(|(_, _, is_primary_file)| !*is_primary_file);
         let mut outcomes = Vec::new();
-        for (resolved, configs, owns_primary, owned) in loaded {
-            outcomes.extend(self.apply_restart_manifest(
-                resolved,
-                configs,
-                owns_primary,
-                owned,
-                scope,
-            )?);
+        for (resolved, configs, _) in loaded {
+            outcomes.extend(self.apply_restart_manifest(resolved, configs, scope)?);
         }
         match verdict_for_outcomes(&outcomes) {
             Some(diag) => Err(ProcessManagerError::Diag(Box::new(diag)).into()),
@@ -5308,12 +5290,17 @@ impl Supervisor {
     }
 
     /// Applies one fully validated manifest to the runtimes sourced from it.
+    ///
+    /// Ownership is decided here, from the manifest itself, rather than passed
+    /// in by callers that would each have to derive it. A manifest owns the
+    /// primary project when it declares it, or when it *is* the file the primary
+    /// was loaded from and the project was renamed inside it. A manifest that
+    /// owns neither is some other project's file, and applying it must leave the
+    /// primary running, along with every project it does not source.
     fn apply_restart_manifest(
         &mut self,
         resolved: PathBuf,
         mut configs: Vec<Config>,
-        owns_primary: bool,
-        owned_extras: BTreeSet<String>,
         scope: RestartScope,
     ) -> Result<Vec<ReconcileOutcome>, SupervisorError> {
         info!("Reloading configuration from {:?}", resolved);
@@ -5322,30 +5309,31 @@ impl Supervisor {
             .iter()
             .map(|config| config.project.id.clone())
             .collect::<BTreeSet<_>>();
+        let primary_id = self.daemon.config().project.id.clone();
+        let old_primary_path = self.config_path.clone();
+        let declares_primary = declared.contains(&primary_id);
+        let is_primary_file = resolved == old_primary_path;
 
-        if owns_primary {
-            let primary_id = self.daemon.config().project.id.clone();
-            let index = configs
-                .iter()
-                .position(|config| config.project.id == primary_id)
-                .unwrap_or(0);
+        if let Some(index) = configs
+            .iter()
+            .position(|config| config.project.id == primary_id)
+        {
             let primary = configs.remove(index);
-            if primary.project.id == primary_id {
-                outcomes.push(self.reconcile_primary_project(primary, scope)?);
-                self.config_path = resolved.clone();
-                ipc::write_config_hint(&self.config_path)?;
-            } else {
-                if self.extra_projects.contains_key(&primary.project.id) {
-                    return Err(ProcessManagerError::Diag(Box::new(
-                        crate::restart::manifest_rejected(format!(
-                            "project '{}' cannot replace the primary while it is already registered",
-                            primary.project.id
-                        )),
-                    ))
-                    .into());
-                }
-                self.replace_primary_project_runtime(primary, resolved.clone())?;
+            outcomes.push(self.reconcile_primary_project(primary, scope)?);
+            self.config_path = resolved.clone();
+            ipc::write_config_hint(&self.config_path)?;
+        } else if is_primary_file && !configs.is_empty() {
+            let primary = configs.remove(0);
+            if self.extra_projects.contains_key(&primary.project.id) {
+                return Err(ProcessManagerError::Diag(Box::new(
+                    crate::restart::manifest_rejected(format!(
+                        "project '{}' cannot replace the primary while it is already registered",
+                        primary.project.id
+                    )),
+                ))
+                .into());
             }
+            self.replace_primary_project_runtime(primary, resolved.clone())?;
         }
 
         let primary_id = self.daemon.config().project.id.clone();
@@ -5370,10 +5358,21 @@ impl Supervisor {
             }
         }
 
+        // A manifest may only retire what it sources. The old primary file is
+        // included when this manifest owns the primary, so replacing that file
+        // still removes the extra projects it dropped.
+        let owned_extras = self
+            .extra_projects
+            .iter()
+            .filter(|(_, runtime)| {
+                runtime.config_path == resolved
+                    || ((declares_primary || is_primary_file)
+                        && runtime.config_path == old_primary_path)
+            })
+            .map(|(project_id, _)| project_id.clone())
+            .collect::<Vec<_>>();
         for project_id in owned_extras {
-            if !declared.contains(&project_id)
-                && self.extra_projects.contains_key(&project_id)
-            {
+            if !declared.contains(&project_id) {
                 self.stop_project(&project_id)?;
             }
         }
@@ -8285,6 +8284,138 @@ services:
                 .get("beta_worker")
                 .map(|service| service.command.as_str()),
             Some("/bin/sleep 60")
+        );
+
+        supervisor
+            .shutdown_runtime()
+            .expect("shutdown test supervisor runtime");
+
+        unsafe {
+            if let Some(home) = original_home {
+                std::env::set_var("HOME", home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    /// Two projects, two files, one supervisor: restarting the sibling's own
+    /// manifest must reconcile that project and leave the primary running. The
+    /// reload used to assume every `-c` file owned the primary, so it either
+    /// refused the restart or swapped the primary runtime out from under it.
+    fn restart_of_a_sibling_manifest_leaves_the_primary_alone() {
+        let _guard = crate::test_utils::env_lock();
+
+        let base = std::env::current_dir()
+            .expect("current_dir")
+            .join("target/tmp-home");
+        fs::create_dir_all(&base).expect("create base dir");
+        let temp = tempdir_in(&base).expect("create tempdir");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&home).expect("create home");
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        runtime::init(runtime::RuntimeMode::User);
+        runtime::set_drop_privileges(false);
+
+        let alpha_config = temp.path().join("alpha.yaml");
+        fs::write(
+            &alpha_config,
+            r#"
+version: "2"
+project:
+  id: alpha
+services:
+  alpha_worker:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write alpha config");
+
+        let beta_config = temp.path().join("beta.yaml");
+        fs::write(
+            &beta_config,
+            r#"
+version: "2"
+project:
+  id: beta
+services:
+  beta_worker:
+    command: "/bin/sleep 45"
+"#,
+        )
+        .expect("write beta config");
+
+        let mut supervisor = Supervisor::new(alpha_config.clone(), false, None)
+            .expect("create supervisor");
+        supervisor
+            .handle_command(ControlCommand::AddProject {
+                config: beta_config.to_string_lossy().to_string(),
+                service: None,
+                mode: ProjectRunMode::Daemon,
+                watch: None,
+            })
+            .expect("add beta project");
+
+        fs::write(
+            &beta_config,
+            r#"
+version: "2"
+project:
+  id: beta
+services:
+  beta_worker:
+    command: "/bin/sleep 60"
+"#,
+        )
+        .expect("rewrite beta config");
+
+        supervisor
+            .handle_command(ControlCommand::Restart {
+                delta: false,
+                all: true,
+                config: Some(beta_config.to_string_lossy().to_string()),
+                service: None,
+                project: None,
+                watch: None,
+            })
+            .expect("restart the sibling manifest");
+
+        assert_eq!(
+            supervisor
+                .extra_projects
+                .get("beta")
+                .expect("beta runtime after restart")
+                .daemon
+                .config()
+                .services
+                .get("beta_worker")
+                .map(|service| service.command.as_str()),
+            Some("/bin/sleep 60"),
+            "beta was not reconciled to its new manifest"
+        );
+        assert_eq!(
+            supervisor.daemon.config().project.id,
+            "alpha",
+            "the sibling manifest replaced the primary project"
+        );
+        assert_eq!(
+            supervisor.config_path, alpha_config,
+            "the sibling manifest was adopted as the primary config"
+        );
+
+        assert_eq!(
+            supervisor
+                .daemon
+                .config()
+                .services
+                .get("alpha_worker")
+                .map(|service| service.command.as_str()),
+            Some("/bin/sleep 45"),
+            "the primary project lost its manifest to a sibling's restart"
         );
 
         supervisor

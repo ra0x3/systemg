@@ -6223,7 +6223,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
     let command = match plan {
         RestartPlan::Recycle { .. } => unreachable!("handled above"),
         RestartPlan::Everything { config } => ControlCommand::Restart {
-            config: restart_scoped_config(&config),
+            config: restart_scoped_config(&config, false),
             service: None,
             project: None,
             delta,
@@ -6231,7 +6231,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             watch: None,
         },
         RestartPlan::Project { config, project } => ControlCommand::Restart {
-            config: restart_scoped_config(&config),
+            config: restart_scoped_config(&config, true),
             service: None,
             project: Some(project),
             delta,
@@ -6246,7 +6246,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             // Thread the resolved config through so a scoped `restart -c <file>
             // -s svc` reloads the manifest and applies that service's changed
             // config on the bounce — dropping it here silently ignored -c.
-            config: restart_scoped_config(&config),
+            config: restart_scoped_config(&config, true),
             service: Some(service),
             project,
             delta,
@@ -6356,11 +6356,18 @@ fn restart_plan_config(plan: &systemg::restart::RestartPlan) -> PathBuf {
 /// so the changed service is reloaded and applied; but the default
 /// `systemg.yaml` that no one actually passed must not be sent (it may not
 /// exist), so it degrades to `None` and the supervisor uses what it has.
-fn restart_scoped_config(config: &Path) -> Option<String> {
+///
+/// `targeted` says a `-p`/`-s` selector named the unit. A default-named path is
+/// then dropped whether or not it exists: `restart -p beta` run from a directory
+/// that happens to hold a `systemg.yaml` would otherwise hand the supervisor a
+/// file that never declares beta, and beta reads as a project it does not
+/// manage. With no config the supervisor resolves the target's own registered
+/// manifest, which is the file that project was actually started from.
+fn restart_scoped_config(config: &Path, targeted: bool) -> Option<String> {
     let is_default_name = config
         .file_name()
         .is_some_and(|name| name == DEFAULT_CONFIG_PATH);
-    if is_default_name && !config.exists() {
+    if is_default_name && (targeted || !config.exists()) {
         return None;
     }
     Some(config.to_string_lossy().to_string())
