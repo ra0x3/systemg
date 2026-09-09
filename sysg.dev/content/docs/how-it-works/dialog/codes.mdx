@@ -332,6 +332,18 @@ when this fires — added units started and removed units stopped before the
 verdict; what did not happen is a bounce. `start` and `sysg add` never raise
 this: neither asked for a restart.
 
+### [SG0305](/reference/dialog/codes#sg0305)
+
+Something replaced a unit's process while a start was still bringing it up, so
+that start reached no verdict and reports none.
+
+The start launched a process and then found a different one holding the unit, so
+it stopped nothing on the way out: whatever runs now belongs to whoever replaced
+it. Ordinary causes are a second restart issued while the first was still
+waiting on readiness, and a `restart_policy` respawn after the launched process
+died. The unit itself may well be healthy; run `sysg status` to see what is
+running now, and `sysg logs -s <service>` for why the first process went away.
+
 ## Purge
 
 ### [SG0401](/reference/dialog/codes#sg0401)

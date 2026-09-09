@@ -281,6 +281,33 @@ pub fn restart_touched_nothing(project: &str, considered: &[String]) -> Diagnost
     .help_docs()
 }
 
+/// Builds the SG0305 diagnostic for a start that was abandoned because
+/// something replaced the process it launched.
+///
+/// The start observed nothing about the process that replaced it, so it reports
+/// no verdict on the unit and stopped nothing on the way out: whatever runs now
+/// belongs to whoever replaced it. That is worth its own code because the
+/// SG0001 catchall rendered it as a bare internal sentence and left the
+/// operator with no way to tell a race apart from a service that failed to
+/// come up.
+pub fn unit_superseded(unit: Option<&str>) -> Diagnostic {
+    let subject = match unit {
+        Some(unit) => format!("unit '{unit}'"),
+        None => "the unit".to_string(),
+    };
+    Diagnostic::error(
+        SgCode::UnitSuperseded,
+        format!("something replaced {subject} while this start was bringing it up"),
+    )
+    .note(
+        "the start launched a process, and that process was stopped or replaced before its readiness checks finished",
+    )
+    .note("nothing was rolled back, and no verdict is reported for the unit")
+    .help_cmd("see what is running now", "sysg status")
+    .help_cmd("see what happened", "sysg logs -s <service>")
+    .help_docs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +366,17 @@ mod tests {
         let rendered = format!("{diag}");
         assert!(rendered.contains("could not be attributed"));
         assert!(rendered.contains("monitor thread failed to spawn"));
+    }
+
+    #[test]
+    fn sg0305_names_the_unit_and_promises_nothing_about_it() {
+        let diag = unit_superseded(Some("arb_rs__dev"));
+        assert_eq!(diag.code, SgCode::UnitSuperseded);
+
+        let rendered = format!("{diag}");
+        assert!(rendered.contains("arb_rs__dev"));
+        assert!(rendered.contains("no verdict is reported"));
+        assert!(rendered.contains("sysg status"));
     }
 
     #[test]

@@ -849,6 +849,10 @@ impl Error for DiagError {}
 
 /// Wraps errors that never became a structured diagnostic, so every failure
 /// leaves the user with next steps instead of a bare message.
+///
+/// A supervisor of this version sends supersession as a typed
+/// [`systemg::diag::Diagnostic`], so the marker match below is reached only by
+/// a client talking to an older one, which answers with the message string.
 fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
     if message.contains("Failed to read config") {
         return config_read_diag(message);
@@ -873,6 +877,14 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
         .help_cmd("list what is loaded", "sysg status")
         .help_cmd("start it", format!("sysg start -p {project}"))
         .help_docs();
+    }
+
+    if message.contains(systemg::constants::SUPERSEDED_MARKER) {
+        let unit = message
+            .split_once("Failed to start service '")
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(unit, _)| unit);
+        return systemg::restart::plan::unit_superseded(unit);
     }
 
     let command = CURRENT_COMMAND.with(|c| c.get());

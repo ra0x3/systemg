@@ -1093,6 +1093,10 @@ impl PidFile {
     /// the file lock held, so the caller's own reasons to keep it — a pid that
     /// answers as alive, an owner that took the unit meanwhile — are read at
     /// the instant of the removal rather than moments before it.
+    ///
+    /// A record whose pid has been cleared, its group and start time still
+    /// matching, is the caller's own generation half torn down, not a
+    /// stranger's, and removing what is left of it is exactly the point.
     pub(crate) fn remove_if_unchanged<F>(
         &mut self,
         service: &str,
@@ -1104,25 +1108,61 @@ impl PidFile {
     where
         F: Fn(Option<u32>) -> bool,
     {
+        self.remove_generation(service, pid, pgid, started, may_remove)
+            .map(|outcome| matches!(outcome, GenerationRemoval::Removed))
+    }
+
+    /// [`Self::remove_if_unchanged`], reporting WHICH reason it declined.
+    ///
+    /// A caller deciding what a stop still owns has to tell a record that
+    /// vanished from one a different generation now holds. Both leave nothing
+    /// to remove, but only the second means somebody else owns the unit: read
+    /// as one, a unit whose record was already cleaned up looks like a unit
+    /// that was replaced, and the dependents of a process that really did die
+    /// are never felled.
+    pub(crate) fn remove_generation<F>(
+        &mut self,
+        service: &str,
+        pid: Option<u32>,
+        pgid: Option<i32>,
+        started: Option<u64>,
+        may_remove: F,
+    ) -> Result<GenerationRemoval, PidFileError>
+    where
+        F: Fn(Option<u32>) -> bool,
+    {
         let _lock = self.acquire_lock()?;
 
         let path = self.path();
         self.reload_into(&path)?;
 
-        if self.services.get(service).copied() != pid
-            || self.service_groups.get(service).copied() != pgid
-            || self.service_starts.get(service).copied() != started
-        {
-            return Ok(false);
+        let known = self.services.contains_key(service)
+            || self.service_groups.contains_key(service)
+            || self.service_starts.contains_key(service);
+        if !known {
+            return Ok(GenerationRemoval::Missing);
         }
 
-        if !may_remove(self.services.get(service).copied()) {
-            return Ok(false);
+        // A pid-less record is NOT somebody else's. `clear_pid` drops the pid
+        // and keeps the group and start time, so a generation whose process the
+        // monitor reaped before this cleanup ran leaves exactly that shape
+        // behind, and reading it as a replacement's record is what would strand
+        // the dependents of a unit that really did die. A replacement registers
+        // its pid, group and start together, so it can never look like this.
+        let recorded_pid = self.services.get(service).copied();
+        let identity_matches = self.service_groups.get(service).copied() == pgid
+            && self.service_starts.get(service).copied() == started;
+        if !identity_matches || (recorded_pid.is_some() && recorded_pid != pid) {
+            return Ok(GenerationRemoval::Superseded);
+        }
+
+        if !may_remove(recorded_pid) {
+            return Ok(GenerationRemoval::Kept);
         }
 
         match self.remove_locked(service, &path) {
-            Ok(()) => Ok(true),
-            Err(PidFileError::ServiceNotFound) => Ok(false),
+            Ok(()) => Ok(GenerationRemoval::Removed),
+            Err(PidFileError::ServiceNotFound) => Ok(GenerationRemoval::Missing),
             Err(err) => Err(err),
         }
     }
@@ -2246,13 +2286,19 @@ impl ServiceStateFile {
         let _lock = self.acquire_lock()?;
         self.reload_locked()?;
         // A lifecycle write must not silently assert anything about health. The
-        // probe result is carried over only while the unit keeps running; any
-        // other transition clears it, so a stale `Passing` can never outlive the
-        // process it described.
+        // probe result is carried over only while the unit keeps running AS THE
+        // SAME PROCESS; any other transition clears it, so a stale verdict can
+        // never outlive the process it described. The pid comparison is what
+        // stops a replacement from inheriting one: a verdict written for the
+        // outgoing generation is still on the record when the incoming one
+        // registers, and carrying it over on the strength of `Running` alone
+        // hands a fresh process a verdict nothing ever reached it to earn.
         let health = self
             .services
             .get(service_hash)
-            .filter(|_| matches!(status, ServiceLifecycleStatus::Running))
+            .filter(|entry| {
+                matches!(status, ServiceLifecycleStatus::Running) && entry.pid == pid
+            })
             .and_then(|entry| entry.health);
         self.services.insert(
             service_hash.to_string(),
@@ -2291,8 +2337,51 @@ impl ServiceStateFile {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ServiceStateError> {
+        self.write_stopped(service_hash, exit_code, signal, None)
+            .map(|_| ())
+    }
+
+    /// Records a stop only while the entry still names `expected_pid`, and
+    /// reports what it did.
+    ///
+    /// A stop resolves its target, signals it, and waits for death before it
+    /// writes. A replacement that registered during that window owns the unit
+    /// by the time the write lands, so a name-keyed write marks a live process
+    /// stopped. The comparison belongs under this lock, after the reload, for
+    /// the same reason the terminal-status decision does.
+    ///
+    /// A record that names no process is [`GenerationWrite::Unclaimed`], never
+    /// `Superseded`: another cleanup having already recorded this generation
+    /// stopped leaves the caller owning exactly what it owned, while a live
+    /// different pid means somebody else owns the unit.
+    pub fn set_stopped_for_pid(
+        &mut self,
+        service_hash: &str,
+        expected_pid: u32,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<GenerationWrite, ServiceStateError> {
+        self.write_stopped(service_hash, exit_code, signal, Some(expected_pid))
+    }
+
+    /// Shared body of the stop writers. `expected_pid` gates the write on the
+    /// record still naming that process.
+    fn write_stopped(
+        &mut self,
+        service_hash: &str,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+        expected_pid: Option<u32>,
+    ) -> Result<GenerationWrite, ServiceStateError> {
         let _lock = self.acquire_lock()?;
         self.reload_locked()?;
+        if let Some(expected) = expected_pid {
+            match self.services.get(service_hash).and_then(|entry| entry.pid) {
+                Some(recorded) if recorded == expected => {}
+                Some(_) => return Ok(GenerationWrite::Superseded),
+                None => return Ok(GenerationWrite::Unclaimed),
+            }
+        }
         let terminal = self.services.get(service_hash).filter(|entry| {
             matches!(
                 entry.status,
@@ -2317,7 +2406,8 @@ impl ServiceStateFile {
             },
         };
         self.services.insert(service_hash.to_string(), entry);
-        self.save()
+        self.save()?;
+        Ok(GenerationWrite::Wrote)
     }
 
     /// Corrects the entries that still claim `Running` with a pid the caller
@@ -2391,6 +2481,33 @@ impl ServiceStateFile {
             entry.health = Some(health);
         }
         self.save()
+    }
+
+    /// Records a health verdict only while the entry still names
+    /// `expected_pid`.
+    ///
+    /// A verdict describes the process that was probed, never the unit's name.
+    /// A replacement that registers between the probe and this write would
+    /// inherit a verdict nothing ever reached it to earn, and a fresh process
+    /// would show as failing until the next sweep.
+    pub fn set_health_for_pid(
+        &mut self,
+        service_hash: &str,
+        expected_pid: u32,
+        health: HealthProbe,
+    ) -> Result<bool, ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
+        let Some(entry) = self
+            .services
+            .get_mut(service_hash)
+            .filter(|entry| entry.pid == Some(expected_pid))
+        else {
+            return Ok(false);
+        };
+        entry.health = Some(health);
+        self.save()?;
+        Ok(true)
     }
 
     /// Removes a service from the state file by its configuration hash and persists to disk.
@@ -3012,6 +3129,72 @@ impl Drop for ReplacementGuard {
     }
 }
 
+/// Marks a unit as still inside its startup readiness gate.
+///
+/// A unit that has been launched but has not yet passed its readiness checks is
+/// expected to be unavailable: a `cargo watch` unit compiles before it serves,
+/// a database replays its log. Anything that judges units on availability has
+/// to leave those alone, or it condemns a unit for not having finished starting
+/// and kills the process the start it raced is still waiting on. The start's own
+/// probe is the single authority on that verdict, and it is bounded.
+///
+/// Counted rather than a flag, because starts of one unit overlap: a monitor
+/// respawn can adopt a unit an operator restart is still bringing up, and it
+/// finishes in milliseconds. A set-shaped claim let that short start's release
+/// clear the long start's claim, and the sweep killed the unit anyway.
+struct StartupGuard {
+    /// Shared count of open readiness gates per unit.
+    services: Arc<Mutex<HashMap<String, usize>>>,
+    /// Unit released when the guard is dropped.
+    name: String,
+}
+
+impl Drop for StartupGuard {
+    /// Releases this start's claim, leaving any overlapping start's intact.
+    fn drop(&mut self) {
+        let mut guard = self
+            .services
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(open) = guard.get_mut(&self.name) else {
+            return;
+        };
+        *open = open.saturating_sub(1);
+        if *open == 0 {
+            guard.remove(&self.name);
+        }
+    }
+}
+
+/// What a generation-scoped state write did, and when it declined, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationWrite {
+    /// The record named the expected generation and was written.
+    Wrote,
+    /// The record names no process, so nothing claims the unit and there is
+    /// nothing left to correct.
+    Unclaimed,
+    /// A different generation holds the record: the unit belongs to whoever
+    /// registered it.
+    Superseded,
+}
+
+/// What a generation-scoped pid record removal did, and when it declined, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenerationRemoval {
+    /// The record named the expected generation and was removed.
+    Removed,
+    /// The unit holds no record at all, so there was nothing to remove and
+    /// nobody else claims it.
+    Missing,
+    /// A different generation holds the record: the unit belongs to whoever
+    /// registered it, and the caller owns nothing here.
+    Superseded,
+    /// The record still names the expected generation, and the caller's own
+    /// predicate chose to keep it.
+    Kept,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 /// Represents blue green state.
 struct BlueGreenState {
@@ -3326,6 +3509,9 @@ struct DaemonContext {
     timeouts: Arc<RwLock<SupervisorTimeouts>>,
     /// Services currently being replaced through an explicit deployment strategy.
     replacements: Arc<Mutex<HashSet<String>>>,
+    /// Open readiness gates per unit, so nothing else judges a unit on
+    /// availability before its own probe has reached a verdict.
+    starting: Arc<Mutex<HashMap<String, usize>>>,
     /// Units whose terminal outcome their launcher is still settling.
     completion_claims: CompletionClaims,
 }
@@ -3379,6 +3565,13 @@ impl DaemonContext {
         &self,
     ) -> Result<OrderedLockGuard<'_, HashSet<String>>, ProcessManagerError> {
         acquire_lock(&self.restart_in_flight, DaemonLock::RestartInFlight)
+    }
+
+    /// Acquires the starting lock with ordering enforcement.
+    fn lock_starting(
+        &self,
+    ) -> Result<OrderedLockGuard<'_, HashMap<String, usize>>, ProcessManagerError> {
+        acquire_lock(&self.starting, DaemonLock::Starting)
     }
 
     /// Acquires the restart_gate lock with ordering enforcement.
@@ -3473,6 +3666,8 @@ pub struct Daemon {
     boot_epoch: Arc<AtomicU64>,
     boot_cancelled: Arc<AtomicBool>,
     replacements: Arc<Mutex<HashSet<String>>>,
+    /// Open readiness gates per unit.
+    starting: Arc<Mutex<HashMap<String, usize>>>,
     /// Units whose terminal outcome their launcher is still settling.
     completion_claims: CompletionClaims,
 }
@@ -3535,6 +3730,7 @@ impl Daemon {
             op_journal: Arc::clone(&self.op_journal),
             timeouts: Arc::clone(&self.timeouts),
             replacements: Arc::clone(&self.replacements),
+            starting: Arc::clone(&self.starting),
             completion_claims: Arc::clone(&self.completion_claims),
         }
     }
@@ -3567,6 +3763,7 @@ impl Daemon {
             boot_epoch: Arc::clone(&ctx.boot_epoch),
             boot_cancelled: Arc::clone(&ctx.boot_cancelled),
             replacements: Arc::clone(&ctx.replacements),
+            starting: Arc::clone(&ctx.starting),
             completion_claims: Arc::clone(&ctx.completion_claims),
         })
     }
@@ -4221,6 +4418,7 @@ impl Daemon {
             boot_epoch: Arc::new(AtomicU64::new(0)),
             boot_cancelled: Arc::new(AtomicBool::new(false)),
             replacements: Arc::new(Mutex::new(HashSet::new())),
+            starting: Arc::new(Mutex::new(HashMap::new())),
             completion_claims: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -4394,14 +4592,15 @@ impl Daemon {
     /// the process that replaced it, so it reports no verdict on the unit. The
     /// caller must not stop anything on the way out, because what runs now
     /// belongs to the newer start.
+    ///
+    /// Typed rather than a plain start error, because the control socket
+    /// carries a [`Diagnostic`] as itself: rendered from a message string the
+    /// condition reached the operator as the SG0001 catchall, which described a
+    /// race as an unexplained command failure.
     fn superseded(service: &str) -> ProcessManagerError {
-        ProcessManagerError::ServiceStartError {
-            service: service.to_string(),
-            source: std::io::Error::new(
-                ErrorKind::Interrupted,
-                "a newer generation replaced the process this start launched",
-            ),
-        }
+        ProcessManagerError::Diag(Box::new(crate::restart::plan::unit_superseded(Some(
+            service,
+        ))))
     }
 
     /// Builds the lifecycle error returned when project boot is cancelled.
@@ -4470,6 +4669,20 @@ impl Daemon {
             "Abandoning the readiness probe for '{service}': a newer process replaced the one it was started for"
         );
         Ok(true)
+    }
+
+    /// Claims `name` as starting until the returned guard drops.
+    fn claim_start(&self, name: &str) -> StartupGuard {
+        *self
+            .starting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(name.to_string())
+            .or_insert(0) += 1;
+        StartupGuard {
+            services: Arc::clone(&self.starting),
+            name: name.to_string(),
+        }
     }
 
     /// Claims replacement ownership for a service until the returned guard drops.
@@ -4685,6 +4898,14 @@ impl Daemon {
             ));
         }
         drop(in_flight);
+        let starting = self.starting.lock().map_err(ProcessManagerError::from)?;
+        if let Some(service) = starting.keys().next() {
+            return Err(Self::handoff_identity_error(
+                service,
+                "a unit is still inside its startup readiness gate",
+            ));
+        }
+        drop(starting);
         let mut manual_stops = self
             .manual_stop_flags
             .lock()
@@ -6586,11 +6807,19 @@ impl Daemon {
     }
 
     /// Restarts a single service, honoring its deployment strategy.
+    ///
+    /// Claims the unit as starting across the teardown as well as the launch.
+    /// The claim taken inside [`Daemon::start_service`] begins after the stop,
+    /// and the monitor's startup reconciler reads a unit that is stopped but
+    /// not yet relaunched as one that died during startup, so it respawned
+    /// units out from under a restart that was still running.
     pub fn restart_service(
         &self,
         name: &str,
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
+        let _starting = self.claim_start(name);
+
         // Explicit operator intent re-arms the breaker: the user is asking for
         // this attempt, having presumably addressed the cause.
         self.clear_restart_gate(name);
@@ -8123,11 +8352,17 @@ impl Daemon {
 
     /// Starts a service through the shared startup path, then performs
     /// readiness checks against the generation it just launched.
+    ///
+    /// The startup claim is held across the launch and the readiness gate, so
+    /// nothing judges the unit on availability while its own probe is still
+    /// deciding.
     pub fn start_service(
         &self,
         name: &str,
         service: &ServiceConfig,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
+        let _starting = self.claim_start(name);
+
         if let Some(state) = self.start_service_common(name, service)? {
             return Ok(state);
         }
@@ -8188,12 +8423,13 @@ impl Daemon {
         state_file: &Arc<Mutex<ServiceStateFile>>,
         config: &Arc<Config>,
         stop_verify_timeout: Duration,
-    ) -> Result<(), ProcessManagerError> {
+        expected: Option<ProbeTarget>,
+    ) -> Result<bool, ProcessManagerError> {
         let service_session = pid_file
             .lock()
             .ok()
             .and_then(|guard| guard.session_for(service_name));
-        let (pid, service_group_id, has_child, started) = {
+        let resolved = {
             let mut processes_guard = processes.lock()?;
             let (persisted_group, persisted_start) = pid_file
                 .lock()
@@ -8205,7 +8441,7 @@ impl Daemon {
                 })
                 .unwrap_or((None, None));
 
-            if let Some(child) = processes_guard.get_mut(service_name) {
+            let resolved = if let Some(child) = processes_guard.get_mut(service_name) {
                 let process_id = child.id();
                 let group_id =
                     Self::process_group_for_pid(process_id).or(persisted_group);
@@ -8220,7 +8456,30 @@ impl Daemon {
                 }
 
                 (stored_pid, group_id, false, persisted_start)
+            };
+
+            match expected {
+                Some(target)
+                    if resolved.0 != Some(target.pid)
+                        || resolved.3.unwrap_or_default() != target.start =>
+                {
+                    None
+                }
+                _ => Some((
+                    resolved.0,
+                    resolved.1,
+                    resolved.2,
+                    resolved.3,
+                    persisted_group,
+                )),
             }
+        };
+        let Some((pid, service_group_id, has_child, started, recorded_group)) = resolved
+        else {
+            debug!(
+                "Declining to stop '{service_name}': the process this stop was decided for is no longer the unit's"
+            );
+            return Ok(false);
         };
 
         if !has_child
@@ -8301,9 +8560,27 @@ impl Daemon {
             )?;
         }
 
+        // Whether the cleanup below still applied to the generation this stop
+        // was decided for. A replacement can register while the process is
+        // being terminated, and each guarded step then declines rather than
+        // stripping the newcomer's handle, record, or state. A stop that
+        // condemned nothing must report that, or a caller acts on a verdict
+        // about a process the unit no longer runs.
+        let mut applied = true;
+
         let child_handle = {
             let mut processes_guard = processes.lock()?;
-            processes_guard.remove(service_name)
+            match expected {
+                Some(target)
+                    if processes_guard
+                        .get(service_name)
+                        .is_some_and(|child| child.id() != target.pid) =>
+                {
+                    applied = false;
+                    None
+                }
+                _ => processes_guard.remove(service_name),
+            }
         };
 
         if let Some(mut child) = child_handle
@@ -8375,8 +8652,30 @@ impl Daemon {
             }
         }
 
-        match pid_file.lock()?.remove(service_name) {
-            Ok(_) | Err(PidFileError::ServiceNotFound) => {}
+        let removed = match expected {
+            Some(target) => pid_file.lock()?.remove_generation(
+                service_name,
+                Some(target.pid),
+                recorded_group,
+                started,
+                |_| true,
+            ),
+            None => match pid_file.lock()?.remove(service_name) {
+                Ok(_) | Err(PidFileError::ServiceNotFound) => {
+                    Ok(GenerationRemoval::Removed)
+                }
+                Err(err) => Err(err),
+            },
+        };
+        match removed {
+            // A record that was already gone leaves this stop owning what it
+            // owned: the process it terminated is dead either way, and the
+            // dependents of a dead unit still have to fall.
+            Ok(GenerationRemoval::Removed | GenerationRemoval::Missing) => {}
+            Ok(GenerationRemoval::Superseded | GenerationRemoval::Kept) => {
+                applied = false;
+            }
+            Err(PidFileError::ServiceNotFound) => {}
             Err(err) => return Err(err.into()),
         }
 
@@ -8391,14 +8690,34 @@ impl Daemon {
             // left to stop in this case; only the record would change. The same
             // holds for a skipped unit, and the check belongs under the write's
             // own lock rather than in a read that precedes it.
-            state_file
-                .lock()?
-                .set_stopped_preserving_terminal(&key, None, None)?;
+            match expected {
+                Some(target) => {
+                    match state_file
+                        .lock()?
+                        .set_stopped_for_pid(&key, target.pid, None, None)?
+                    {
+                        GenerationWrite::Wrote | GenerationWrite::Unclaimed => {}
+                        GenerationWrite::Superseded => applied = false,
+                    }
+                }
+                None => {
+                    state_file
+                        .lock()?
+                        .set_stopped_preserving_terminal(&key, None, None)?;
+                }
+            }
+        }
+
+        if !applied {
+            debug!(
+                "Stopped '{service_name}', but a replacement took the unit over before the records could be cleared"
+            );
+            return Ok(false);
         }
 
         debug!("Service '{service_name}' stopped successfully.");
 
-        Ok(())
+        Ok(true)
     }
 
     /// Stops a specific service by name.
@@ -8427,6 +8746,7 @@ impl Daemon {
             &self.state_file,
             &config,
             self.timeouts().stop_verify_timeout(),
+            None,
         );
 
         if result.is_err() {
@@ -8445,7 +8765,7 @@ impl Daemon {
         // by command line, so scanning would reap same-command siblings (even in
         // other projects, whose pids this daemon does not know).
 
-        result
+        result.map(|_| ())
     }
 
     /// Stops a specific service and suppresses automatic restarts.
@@ -8491,6 +8811,7 @@ impl Daemon {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .stop_verify_timeout(),
+                None,
             ) {
                 error!(
                     "Failed to stop dependent service '{service}' after '{root}' failure: {err}"
@@ -9210,6 +9531,52 @@ impl Daemon {
         thread::sleep(timeout);
     }
 
+    /// Whether a unit's own lifecycle already owns its availability verdict, so
+    /// the periodic sweep must not render one of its own.
+    ///
+    /// Replacement and reconcile-restart claims cover a unit that is being
+    /// swapped. The startup claim covers the case that broke operator restarts:
+    /// a unit is launched, its own probe is given the readiness budget the
+    /// manifest asked for, and the sweep fires 30s into it, finds nothing
+    /// listening yet, and kills the process the start is still waiting on.
+    /// A claim set that cannot be read is not a licence to tear a unit down, so
+    /// an unreadable one counts as a claim. Only a lock-order violation gets
+    /// there: poisoning is recovered, here as everywhere else, so one panic
+    /// cannot disable health enforcement for the life of the supervisor.
+    fn exempt_from_health_sweep(ctx: &DaemonContext, service: &str) -> bool {
+        let replacing = ctx
+            .replacements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(service);
+        let restarting = match ctx.lock_restart_in_flight() {
+            Ok(guard) => guard.contains(service),
+            Err(err) => {
+                warn!("Could not read the restart claim for '{service}': {err}");
+                true
+            }
+        };
+        let starting = match ctx.lock_starting() {
+            Ok(guard) => guard.contains_key(service),
+            Err(err) => {
+                warn!("Could not read the startup claim for '{service}': {err}");
+                true
+            }
+        };
+        replacing || restarting || starting
+    }
+
+    /// The process a unit is currently registered as, or `None` when it holds
+    /// no record.
+    fn registered_generation(ctx: &DaemonContext, service: &str) -> Option<ProbeTarget> {
+        let guard = ctx.lock_pid_file().ok()?;
+        let pid = guard.pid_for(service)?;
+        Some(ProbeTarget {
+            pid,
+            start: guard.start_for(service).unwrap_or_default(),
+        })
+    }
+
     /// Restarts services that died during startup and were reaped out of the
     /// process map before the monitor could observe the exit.
     ///
@@ -9228,6 +9595,12 @@ impl Daemon {
     /// A failure does NOT decide policy here. The unit is stopped exactly as a
     /// failed startup probe stops it, and `restart_policy` remains the single
     /// authority on whether it comes back.
+    ///
+    /// A verdict belongs to the generation it was probed against, never to the
+    /// unit's name. The unit can be relaunched while a probe is in flight, and
+    /// a name-keyed stop then kills a replacement this sweep never probed, so
+    /// the generation is captured before the probe and carried into the
+    /// teardown, which declines if the unit has moved on.
     fn probe_declared_health(ctx: &DaemonContext) {
         let running: Vec<String> = match ctx.lock_processes() {
             Ok(guard) => guard.keys().cloned().collect(),
@@ -9256,21 +9629,16 @@ impl Daemon {
             let Some(url) = health_check.url.as_deref() else {
                 continue;
             };
-            // A unit being replaced or restarted is expected to be briefly
-            // unavailable; probing it would report a failure that is really
-            // just a restart in progress.
-            if ctx
-                .replacements
-                .lock()
-                .map(|guard| guard.contains(&name))
-                .unwrap_or(false)
-                || ctx
-                    .lock_restart_in_flight()
-                    .map(|guard| guard.contains(&name))
-                    .unwrap_or(false)
-            {
+            // A unit being replaced, restarted, or still inside its startup
+            // readiness gate is expected to be briefly unavailable; probing it
+            // would report a failure that is really just a start in progress.
+            if Self::exempt_from_health_sweep(ctx, &name) {
                 continue;
             }
+
+            let Some(target) = Self::registered_generation(ctx, &name) else {
+                continue;
+            };
 
             let timeout = health_check
                 .attempt_timeout
@@ -9282,10 +9650,20 @@ impl Daemon {
             };
             let passing = Self::perform_health_check(&client, url).unwrap_or(false);
 
+            if Self::exempt_from_health_sweep(ctx, &name)
+                || Self::registered_generation(ctx, &name) != Some(target)
+            {
+                debug!(
+                    "Discarding the health sweep verdict for '{name}': it was probed against a process the unit no longer runs"
+                );
+                continue;
+            }
+
             let key = ctx.config.state_key(&name);
             if let Ok(mut guard) = ctx.lock_state_file()
-                && let Err(err) = guard.set_health(
+                && let Err(err) = guard.set_health_for_pid(
                     &key,
+                    target.pid,
                     if passing {
                         HealthProbe::Passing
                     } else {
@@ -9301,7 +9679,7 @@ impl Daemon {
                     "Service '{name}' is running but failed its health check; stopping it so \
                      restart_policy decides what happens next"
                 );
-                if let Err(err) = Self::stop_service_with_handles(
+                let stopped = match Self::stop_service_with_handles(
                     &name,
                     &ctx.processes,
                     &ctx.pid_file,
@@ -9311,9 +9689,14 @@ impl Daemon {
                         .read()
                         .map(|guard| guard.stop_verify_timeout())
                         .unwrap_or(SERVICE_START_TIMEOUT),
+                    Some(target),
                 ) {
-                    warn!("Failed to stop unhealthy service '{name}': {err}");
-                }
+                    Ok(stopped) => stopped,
+                    Err(err) => {
+                        warn!("Failed to stop unhealthy service '{name}': {err}");
+                        true
+                    }
+                };
 
                 // A crash reaches `stop_dependents` through the monitor's exit
                 // scan, but this stop removes the child handle and reaps it
@@ -9322,8 +9705,12 @@ impl Daemon {
                 // dependency that had already been declared unhealthy — a
                 // browser still pointed at a display that failed its probe.
                 // Cascade even when the stop reported an error: the verdict is
-                // the probe's, not the teardown's.
-                Self::stop_dependents(&name, &reverse, ctx);
+                // the probe's, not the teardown's. A stop that declined because
+                // the unit moved on is different: it condemned nothing, so it
+                // fells nothing.
+                if stopped {
+                    Self::stop_dependents(&name, &reverse, ctx);
+                }
             }
         }
     }
@@ -9512,6 +9899,14 @@ impl Daemon {
                 .map(|guard| guard.contains(name))
                 .unwrap_or(true);
             if in_flight {
+                continue;
+            }
+
+            let starting = ctx
+                .lock_starting()
+                .map(|guard| guard.contains_key(name))
+                .unwrap_or(true);
+            if starting {
                 continue;
             }
 

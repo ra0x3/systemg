@@ -17,6 +17,11 @@
 #     the unit's current generation. The superseded probe abandons itself
 #     instead of reporting on a process it never started. Zero passes would mean
 #     readiness itself broke, so the count must be exactly one.
+#
+# The health check is made to pass once the SECOND probe has opened, not after a
+# fixed delay. The unit lives 12s per generation and the restart backoff grows
+# with the attempt count, so a fixed delay lands inside a live generation or
+# just after one died depending on how many respawns happened to run first.
 set -u
 . /usecase/lib.sh
 
@@ -30,9 +35,20 @@ section "restart with a failing health check, then let the unit exit under it"
 rm -f /tmp/healthy
 sysg restart -s web >/tmp/restart.log 2>&1 &
 RESTART=$!
-sleep 30
+
+probes_open() {
+  sysg logs --supervisor 2>/dev/null \
+    | sed -n '/Performing immediate restart for service: web/,$p' \
+    | grep -c "Waiting for health check of 'web'"
+}
 
 section "make the health check pass while both probes are in flight"
+WAITED=0
+until [ "$(probes_open)" -ge 2 ] || [ "$WAITED" -ge 90 ]; do
+  sleep 1
+  WAITED=$((WAITED + 1))
+done
+echo "second probe opened after ${WAITED}s"
 touch /tmp/healthy
 sleep 8
 

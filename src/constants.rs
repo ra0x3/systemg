@@ -80,8 +80,12 @@ pub enum DaemonLock {
     StoppedForDependency = 8,
 
     /// Lock for per-service automatic-restart budgets and breaker state.
-    /// Priority: 9 (must be acquired last)
+    /// Priority: 9
     RestartGate = 9,
+
+    /// Lock for units whose startup readiness gate has not concluded yet.
+    /// Priority: 10 (must be acquired last)
+    Starting = 10,
 }
 
 impl DaemonLock {
@@ -103,6 +107,7 @@ impl DaemonLock {
             Self::RestartInFlight => "restart_in_flight",
             Self::StoppedForDependency => "stopped_for_dependency",
             Self::RestartGate => "restart_gate",
+            Self::Starting => "starting",
         }
     }
 
@@ -173,6 +178,16 @@ pub const PROCESS_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 /// Slower than the monitor tick on purpose: a probe is a real request against
 /// the service, not a cheap liveness check.
 pub const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Wire marker for a start that was abandoned because something replaced the
+/// process it launched.
+///
+/// A current supervisor sends that condition as a typed diagnostic. A
+/// supervisor from before SG0305 existed sends this sentence in a plain error
+/// string, and a client reading it renders SG0305 rather than the SG0001
+/// catchall, which described the race as an unexplained command failure.
+pub const SUPERSEDED_MARKER: &str =
+    "a newer generation replaced the process this start launched";
 
 /// Per-attempt timeout for a periodic health probe when the unit does not
 /// declare its own.

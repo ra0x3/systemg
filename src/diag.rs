@@ -150,6 +150,9 @@ pub enum SgCode {
     /// SG0304 — a restart completed without bouncing a single unit, so whatever
     /// the caller wanted reloaded is still running the old process.
     RestartTouchedNothing,
+    /// SG0305 — something replaced the unit's process while a start was still
+    /// bringing it up, so that start reached no verdict and reports none.
+    UnitSuperseded,
     /// SG0401 — a purge was refused because a live supervisor is still managing
     /// processes; stop it (or pass `--force`) before wiping its state.
     PurgeSupervisorActive,
@@ -311,6 +314,7 @@ impl SgCode {
             SgCode::ReconcileIncomplete => "SG0302",
             SgCode::SupervisorRecycleFailed => "SG0303",
             SgCode::RestartTouchedNothing => "SG0304",
+            SgCode::UnitSuperseded => "SG0305",
             SgCode::PurgeSupervisorActive => "SG0401",
             SgCode::PurgeIncomplete => "SG0402",
             SgCode::PurgeProjectNotFound => "SG0403",
@@ -360,7 +364,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 87] = [
+    pub const ALL: [SgCode; 88] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -408,6 +412,7 @@ impl SgCode {
         SgCode::ReconcileIncomplete,
         SgCode::SupervisorRecycleFailed,
         SgCode::RestartTouchedNothing,
+        SgCode::UnitSuperseded,
         SgCode::PurgeSupervisorActive,
         SgCode::PurgeIncomplete,
         SgCode::PurgeProjectNotFound,

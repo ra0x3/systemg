@@ -1,0 +1,17 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        # Nothing answers :8000 for the first 45s, which is what a unit that
+        # compiles before it serves looks like from the outside.
+        command: "sh -c 'sleep 45; exec python3 -m http.server 8000 --bind 127.0.0.1'"
+        restart_policy: always
+        deployment:
+          health_check:
+            url: "http://127.0.0.1:8000/"
+            interval: "2s"
+            total_timeout: "120s"
+            attempt_timeout: "3s"
+            retries: 60

@@ -3279,6 +3279,25 @@ impl Supervisor {
                 "{active_children} dynamic child process(es) are still active"
             ))));
         }
+        // A project boot runs on its own thread and starts its units one after
+        // another, so the daemon's startup claims are empty between units. A
+        // handoff assembled in that gap captures a project that launches its
+        // next unit while the snapshot is being taken, and the claim that would
+        // have protected it does not survive the exec. `settled` is the boot's
+        // own account of whether it is finished, so it is what to ask.
+        let booting = self
+            .boots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(_, boot)| !boot.settled)
+            .map(|(project, _)| project.clone());
+        if let Some(project) = booting {
+            self.upgrading.store(false, Ordering::Release);
+            return Err(Box::new(crate::upgrade::environment_unsafe(format!(
+                "project `{project}` is still booting"
+            ))));
+        }
         drop(cron_gate);
 
         self.quiesce_project_monitors();
