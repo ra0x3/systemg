@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.67.3",
+    "slug": "0.67.3",
+    "title": "v0.67.3",
+    "date": "2026-09-09T01:54:19Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.3",
+    "summary": "fix(health): abandon a readiness probe when its process is replaced (f1b0023)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(health): abandon a readiness probe when its process is replaced (<code>f1b0023</code>)</li>\n<li>fix(restart): scope a -c reload to the manifest it was handed (<code>1c5510c</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.2 (<code>4f3e2b7</code>)</li>\n<li>docs(blog): publish release post for v0.67.2 (<code>b4c256e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.2...v0.67.3\">Full changelog on GitHub</a></p>",
+    "commits": 4
+  },
+  {
     "tag": "v0.67.2",
     "slug": "0.67.2",
     "title": "v0.67.2",
