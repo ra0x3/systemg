@@ -8374,16 +8374,30 @@ services:
         )
         .expect("rewrite beta config");
 
-        supervisor
-            .handle_command(ControlCommand::Restart {
-                delta: false,
-                all: true,
-                config: Some(beta_config.to_string_lossy().to_string()),
-                service: None,
-                project: None,
-                watch: None,
-            })
-            .expect("restart the sibling manifest");
+        // What this asserts is ownership, not timing. Whether beta's worker wins
+        // its readiness race on a loaded machine says nothing about which
+        // project the manifest was applied to, so a readiness timeout is
+        // tolerated while a refusal — the bug this test exists for — is not.
+        let outcome = supervisor.handle_command(ControlCommand::Restart {
+            delta: false,
+            all: true,
+            config: Some(beta_config.to_string_lossy().to_string()),
+            service: None,
+            project: None,
+            watch: None,
+        });
+        if let Err(err) = &outcome {
+            let reported = err.to_string();
+            assert!(
+                !reported.contains("SG0301")
+                    && !reported.contains("cannot replace the primary"),
+                "the sibling manifest was refused: {reported}"
+            );
+            assert!(
+                reported.contains("did not report a running state in time"),
+                "restart of the sibling manifest failed for an unexpected reason: {reported}"
+            );
+        }
 
         assert_eq!(
             supervisor

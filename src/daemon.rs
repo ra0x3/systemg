@@ -7470,6 +7470,13 @@ impl Daemon {
                 .and_then(|budget| budget.checked_sub(elapsed))
                 .filter(|remaining| !remaining.is_zero());
             if !retry_floor_pending && budget_remaining.is_none() {
+                // The budget is spent, but a probe whose process was replaced
+                // has nothing to fail: reporting failure here sends the caller
+                // into a teardown aimed at the unit's CURRENT process, which
+                // belongs to the newer start.
+                if self.probe_abandoned(service_name, target)? {
+                    return Ok(ProbeVerdict::Superseded);
+                }
                 break;
             }
             let delay = if retry_floor_pending {
