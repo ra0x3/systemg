@@ -5297,6 +5297,10 @@ impl Supervisor {
     /// was loaded from and the project was renamed inside it. A manifest that
     /// owns neither is some other project's file, and applying it must leave the
     /// primary running, along with every project it does not source.
+    ///
+    /// The same rule governs retirement: a manifest may only stop the extra
+    /// projects it sources, plus, when it owns the primary, those the primary's
+    /// old file sourced and this one dropped.
     fn apply_restart_manifest(
         &mut self,
         resolved: PathBuf,
@@ -5358,9 +5362,6 @@ impl Supervisor {
             }
         }
 
-        // A manifest may only retire what it sources. The old primary file is
-        // included when this manifest owns the primary, so replacing that file
-        // still removes the extra projects it dropped.
         let owned_extras = self
             .extra_projects
             .iter()

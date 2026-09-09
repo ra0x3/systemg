@@ -263,8 +263,12 @@ pub enum Commands {
     /// Restart the process manager, optionally specifying a new configuration file.
     Restart {
         /// Path to the configuration file (defaults to `systemg.yaml`).
-        #[arg(short, long, default_value = "systemg.yaml")]
-        config: String,
+        ///
+        /// Left unset, a restart that names a project or service resolves the
+        /// manifest that target was registered from, rather than whatever
+        /// `systemg.yaml` the working directory happens to hold.
+        #[arg(short, long)]
+        config: Option<String>,
 
         /// Optionally restart only the named service.
         #[arg(short, long)]

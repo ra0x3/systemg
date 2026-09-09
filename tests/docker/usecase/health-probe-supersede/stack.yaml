@@ -1,0 +1,14 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "sh -c 'sleep 12; exit 1'"
+        restart_policy: always
+        deployment:
+          health_check:
+            command: "test -f /tmp/healthy"
+            interval: "2s"
+            total_timeout: "150s"
+            retries: 75

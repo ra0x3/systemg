@@ -2721,6 +2721,31 @@ enum ServiceProbe {
     Exited(ExitStatus),
 }
 
+/// The exact process a readiness probe was launched for.
+///
+/// A service name outlives its processes: stop a unit, let `restart_policy`
+/// respawn it, and the name points at a different process. A probe that knows
+/// its subject only by name keeps running against that replacement, so two
+/// probes report on one unit and either can mark it ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProbeTarget {
+    /// Process identifier of the generation being probed.
+    pid: u32,
+    /// Kernel start time, which separates this process from a later one that
+    /// reuses its pid.
+    start: u64,
+}
+
+/// What a readiness probe concluded about the process it was launched for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeVerdict {
+    /// The process passed its health check.
+    Passed,
+    /// A newer generation replaced the process this probe was launched for. The
+    /// newer start owns the unit, and this probe reports nothing about it.
+    Superseded,
+}
+
 /// Classifies why a single health check probe failed, so the final failure can
 /// carry the right diagnostic code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4362,6 +4387,23 @@ impl Daemon {
         self.boot_cancelled.load(Ordering::SeqCst)
     }
 
+    /// Builds the lifecycle error returned when a start is abandoned because a
+    /// newer generation took the unit over.
+    ///
+    /// An interruption rather than a failure: this start observed nothing about
+    /// the process that replaced it, so it reports no verdict on the unit. The
+    /// caller must not stop anything on the way out, because what runs now
+    /// belongs to the newer start.
+    fn superseded(service: &str) -> ProcessManagerError {
+        ProcessManagerError::ServiceStartError {
+            service: service.to_string(),
+            source: std::io::Error::new(
+                ErrorKind::Interrupted,
+                "a newer generation replaced the process this start launched",
+            ),
+        }
+    }
+
     /// Builds the lifecycle error returned when project boot is cancelled.
     fn interrupted(service: &str) -> ProcessManagerError {
         ProcessManagerError::ServiceStartError {
@@ -4371,6 +4413,63 @@ impl Daemon {
                 "project start was cancelled",
             ),
         }
+    }
+
+    /// The process `pid` was registered as, or `None` when the service's current
+    /// process is already a different one.
+    fn probe_target_for(
+        &self,
+        service: &str,
+        pid: u32,
+    ) -> Result<Option<ProbeTarget>, ProcessManagerError> {
+        let guard = self.pid_file.lock()?;
+        Ok(match guard.pid_for(service) {
+            Some(current) if current == pid => Some(ProbeTarget {
+                pid,
+                start: guard.start_for(service).unwrap_or_default(),
+            }),
+            _ => None,
+        })
+    }
+
+    /// Whether the service's current process is no longer the one `target`
+    /// names.
+    ///
+    /// An absent pid counts as superseded. The record is written under the pid
+    /// file's own lock, so there is no half-written state to read through: the
+    /// pid is missing because the generation this probe was launched for is
+    /// gone, whether or not its replacement has registered yet.
+    fn probe_superseded(
+        &self,
+        service: &str,
+        target: ProbeTarget,
+    ) -> Result<bool, ProcessManagerError> {
+        let guard = self.pid_file.lock()?;
+        let current = guard.pid_for(service).map(|pid| ProbeTarget {
+            pid,
+            start: guard.start_for(service).unwrap_or_default(),
+        });
+        Ok(current != Some(target))
+    }
+
+    /// Whether a probe launched for `target` should stop, because the unit's
+    /// current process is no longer that one. A probe with no target (the
+    /// blue/green candidate verification) never abandons itself.
+    fn probe_abandoned(
+        &self,
+        service: &str,
+        target: Option<ProbeTarget>,
+    ) -> Result<bool, ProcessManagerError> {
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        if !self.probe_superseded(service, target)? {
+            return Ok(false);
+        }
+        debug!(
+            "Abandoning the readiness probe for '{service}': a newer process replaced the one it was started for"
+        );
+        Ok(true)
     }
 
     /// Claims replacement ownership for a service until the returned guard drops.
@@ -5476,6 +5575,7 @@ impl Daemon {
         service_name: &str,
         service: &ServiceConfig,
         started_at: chrono::DateTime<chrono::Utc>,
+        target: Option<ProbeTarget>,
     ) -> Result<ServiceReadyState, ProcessManagerError> {
         let config = self.cfg();
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
@@ -5509,33 +5609,49 @@ impl Daemon {
                 .and_then(|deployment| deployment.health_check.as_ref())
         {
             info!("Waiting for health check of '{service_name}' before marking it ready");
-            if let Err(err) =
-                self.wait_for_health_check(service_name, health_check, started_at)
-            {
-                if service.cron.is_none()
-                    && matches!(
-                        self.recorded_status(service_name),
-                        Some(ServiceLifecycleStatus::ExitedWithError)
-                    )
-                {
-                    self.run_onerr(service_name, service);
+            match self.wait_for_health_check(
+                service_name,
+                health_check,
+                started_at,
+                target,
+            ) {
+                Ok(ProbeVerdict::Passed) => {}
+                // The process this start launched is gone and a newer one holds
+                // the unit. The stop below would kill that newer process on
+                // behalf of a start that no longer owns anything, and reporting
+                // readiness would credit this start with a verdict it never
+                // reached, so the start is abandoned instead.
+                Ok(ProbeVerdict::Superseded) => {
+                    return Err(Self::superseded(service_name));
                 }
-                // The unit came up as a process but never passed its health
-                // check — it is NOT healthy, and leaving it running would let
-                // status report a live-but-never-healthy process as `healthy`
-                // (e.g. a dev server that drifted to another port). Stop it so it
-                // is not a zombie on the wrong port; the monitor's restart_policy
-                // still retries the whole start, bounded by max_restarts.
-                warn!(
-                    "Service '{service_name}' failed its health check; stopping it (not leaving a never-healthy process)"
-                );
-                if let Err(stop_err) = self.stop_service_with_intent(service_name, false)
-                {
+                Err(err) => {
+                    if service.cron.is_none()
+                        && matches!(
+                            self.recorded_status(service_name),
+                            Some(ServiceLifecycleStatus::ExitedWithError)
+                        )
+                    {
+                        self.run_onerr(service_name, service);
+                    }
+                    // The unit came up as a process but never passed its health
+                    // check — it is NOT healthy, and leaving it running would let
+                    // status report a live-but-never-healthy process as `healthy`
+                    // (e.g. a dev server that drifted to another port). Stop it so
+                    // it is not a zombie on the wrong port; the monitor's
+                    // restart_policy still retries the whole start, bounded by
+                    // max_restarts.
                     warn!(
-                        "Failed to stop '{service_name}' after health-check failure: {stop_err}"
+                        "Service '{service_name}' failed its health check; stopping it (not leaving a never-healthy process)"
                     );
+                    if let Err(stop_err) =
+                        self.stop_service_with_intent(service_name, false)
+                    {
+                        warn!(
+                            "Failed to stop '{service_name}' after health-check failure: {stop_err}"
+                        );
+                    }
+                    return Err(err);
                 }
-                return Err(err);
             }
         }
 
@@ -6810,9 +6926,17 @@ impl Daemon {
                 &active_slot,
                 &candidate_slot,
             );
-            if let Err(err) =
-                self.wait_for_health_check(name, &health_check, candidate_started_at)
-            {
+            // No target: this verification runs between the switch and the
+            // rollback path, which restores the previously detached process. An
+            // abandoned probe here would have to choose between claiming an
+            // unverified cutover and restoring an old process over a newer
+            // generation, so it keeps probing the candidate as before.
+            if let Err(err) = self.wait_for_health_check(
+                name,
+                &health_check,
+                candidate_started_at,
+                None,
+            ) {
                 self.rollback_blue_green_switch(
                     name,
                     switch_command,
@@ -7191,12 +7315,18 @@ impl Daemon {
 
     /// Waits for the configured health check to report success before completing the rolling
     /// restart.
+    /// `target` is the process this probe was launched for. The probe abandons
+    /// itself the moment the service's current process is no longer that one:
+    /// a name is not an identity, and a probe that keeps going against a
+    /// replacement both reports readiness it never verified and fights the
+    /// replacement's own probe for the same progress row.
     fn wait_for_health_check(
         &self,
         service_name: &str,
         health_check: &HealthCheckConfig,
         generation_started_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), ProcessManagerError> {
+        target: Option<ProbeTarget>,
+    ) -> Result<ProbeVerdict, ProcessManagerError> {
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
         let attempt_timeout = if let Some(raw) = &health_check.attempt_timeout {
             Self::parse_duration(raw)?
@@ -7246,6 +7376,9 @@ impl Daemon {
             if self.boot_cancelled() || !self.boot_active(epoch) {
                 return Err(Self::interrupted(service_name));
             }
+            if self.probe_abandoned(service_name, target)? {
+                return Ok(ProbeVerdict::Superseded);
+            }
             let config = self.cfg();
             if let ServiceProbe::Exited(status) = Self::probe_service_state_recording(
                 service_name,
@@ -7289,6 +7422,13 @@ impl Daemon {
                 attempt_timeout,
             ) {
                 Ok(true) => {
+                    // An attempt blocks for as long as its timeout allows, so the
+                    // generation can be replaced while this one is in flight. A
+                    // pass earned against a process that is no longer the unit's
+                    // belongs to nobody.
+                    if self.probe_abandoned(service_name, target)? {
+                        return Ok(ProbeVerdict::Superseded);
+                    }
                     info!(
                         "Health check passed for '{service_name}' on attempt {attempt}"
                     );
@@ -7298,7 +7438,7 @@ impl Daemon {
                         "health check passed",
                         crate::start::StepState::Done,
                     );
-                    return Ok(());
+                    return Ok(ProbeVerdict::Passed);
                 }
                 Ok(false) => {
                     last_outcome = HealthProbeOutcome::Unhealthy;
@@ -7993,7 +8133,16 @@ impl Daemon {
         let pid = Self::launch_and_register(&ctx, name, service, log_settings)?;
         self.mark_running(name, pid)?;
 
-        let state = self.wait_for_service_ready(name, service, started_at)?;
+        // Taken from the launch, not sampled later: between confirming this
+        // process is up and reading the record back, the process can exit and
+        // its replacement can register, and the probe would then adopt a
+        // generation it never started.
+        let Some(target) = self.probe_target_for(name, pid)? else {
+            debug!("Start of '{name}' was superseded before its readiness checks began");
+            return Err(Self::superseded(name));
+        };
+        let state =
+            self.wait_for_service_ready(name, service, started_at, Some(target))?;
 
         if matches!(state, ServiceReadyState::CompletedSuccess) {
             self.update_state(

@@ -1151,6 +1151,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                     .help_docs(),
                 ))));
             }
+            let explicit_config = config.is_some();
+            let config = config.unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
             let config_path =
                 resolve_config_path(&config).unwrap_or_else(|_| config.clone().into());
             let plan = systemg::restart::resolve_plan(
@@ -1177,7 +1179,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     return Err(Box::new(DiagError(diag)));
                 }
                 systemg::restart::Preflight::Ready(plan) => {
-                    dispatch_restart(plan, daemonize, delta, verbose)?;
+                    dispatch_restart(plan, daemonize, delta, verbose, explicit_config)?;
                 }
             }
         }
@@ -3659,7 +3661,7 @@ mod tests {
         assert!(drop_privileges_applies_to_command(&Commands::Restart {
             delta: false,
             all: false,
-            config: "systemg.yaml".to_string(),
+            config: Some("systemg.yaml".to_string()),
             service: None,
             project: None,
             daemonize: false,
@@ -6195,6 +6197,7 @@ fn dispatch_restart(
     daemonize: bool,
     delta: bool,
     verbose: bool,
+    explicit_config: bool,
 ) -> Result<(), Box<dyn Error>> {
     use systemg::restart::RestartPlan;
 
@@ -6223,7 +6226,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
     let command = match plan {
         RestartPlan::Recycle { .. } => unreachable!("handled above"),
         RestartPlan::Everything { config } => ControlCommand::Restart {
-            config: restart_scoped_config(&config, false),
+            config: restart_scoped_config(&config, explicit_config, false),
             service: None,
             project: None,
             delta,
@@ -6231,7 +6234,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             watch: None,
         },
         RestartPlan::Project { config, project } => ControlCommand::Restart {
-            config: restart_scoped_config(&config, true),
+            config: restart_scoped_config(&config, explicit_config, true),
             service: None,
             project: Some(project),
             delta,
@@ -6246,7 +6249,7 @@ Use --daemonize in deployment scripts to ensure daemonized supervision is restor
             // Thread the resolved config through so a scoped `restart -c <file>
             // -s svc` reloads the manifest and applies that service's changed
             // config on the bounce — dropping it here silently ignored -c.
-            config: restart_scoped_config(&config, true),
+            config: restart_scoped_config(&config, explicit_config, true),
             service: Some(service),
             project,
             delta,
@@ -6357,17 +6360,28 @@ fn restart_plan_config(plan: &systemg::restart::RestartPlan) -> PathBuf {
 /// `systemg.yaml` that no one actually passed must not be sent (it may not
 /// exist), so it degrades to `None` and the supervisor uses what it has.
 ///
-/// `targeted` says a `-p`/`-s` selector named the unit. A default-named path is
-/// then dropped whether or not it exists: `restart -p beta` run from a directory
-/// that happens to hold a `systemg.yaml` would otherwise hand the supervisor a
-/// file that never declares beta, and beta reads as a project it does not
-/// manage. With no config the supervisor resolves the target's own registered
-/// manifest, which is the file that project was actually started from.
-fn restart_scoped_config(config: &Path, targeted: bool) -> Option<String> {
+/// A path nobody passed is dropped for a `-p`/`-s` restart (`targeted`), whether
+/// or not it exists: `restart -p beta` run from a directory that happens to hold
+/// a `systemg.yaml` would otherwise hand the supervisor a file that never
+/// declares beta, and beta reads as a project it does not manage. With no config
+/// the supervisor resolves the target's own registered manifest, which is the
+/// file that project was actually started from. An explicit `-c` is always sent,
+/// including one named `systemg.yaml`, so a deliberate manifest swap still works.
+fn restart_scoped_config(
+    config: &Path,
+    explicit: bool,
+    targeted: bool,
+) -> Option<String> {
+    if explicit {
+        return Some(config.to_string_lossy().to_string());
+    }
+    if targeted {
+        return None;
+    }
     let is_default_name = config
         .file_name()
         .is_some_and(|name| name == DEFAULT_CONFIG_PATH);
-    if is_default_name && (targeted || !config.exists()) {
+    if is_default_name && !config.exists() {
         return None;
     }
     Some(config.to_string_lossy().to_string())
