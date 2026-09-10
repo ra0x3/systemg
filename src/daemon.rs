@@ -3166,6 +3166,16 @@ impl Drop for StartupGuard {
     }
 }
 
+/// What launching a cron unit did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CronLaunch {
+    /// The unit's skip flag or condition selected it, so no process ran and the
+    /// run is not recorded.
+    Skipped,
+    /// The unit is up as this pid, whose exit is the run's verdict.
+    Started(u32),
+}
+
 /// What a generation-scoped state write did, and when it declined, why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GenerationWrite {
@@ -8350,6 +8360,76 @@ impl Daemon {
         Ok(())
     }
 
+    /// Launches a cron unit and hands its pid back, without a readiness gate.
+    ///
+    /// A cron run's verdict is its exit status, and the supervisor's completion
+    /// wait is what reads it. A readiness gate in front of that can only
+    /// misreport the run: the probe knows a unit solely by the child handle in
+    /// the process map, and the monitor tick reaps a finished cron child and
+    /// removes that handle on its way to routing the status to the completion
+    /// wait. A unit that finished before the gate's first poll therefore looked
+    /// like a unit that never started, and after
+    /// [`crate::constants::SERVICE_START_TIMEOUT`] the launcher failed a run
+    /// that had already succeeded, firing `onerr` on it. Which verdict a fast
+    /// cron unit got came down to who reaped it first.
+    ///
+    /// Everything before the launch still runs: skip conditions, adoption of a
+    /// run that is somehow still alive, pre-start. Only the waiting is gone.
+    ///
+    /// Returns the pid the launch produced, never a re-read of the record:
+    /// between the launch and a read the unit can be replaced, and the
+    /// completion wait would then judge this run by another generation's exit.
+    /// The adoption branch is the exception, having launched nothing — an
+    /// earlier run is still alive, and the pid it reads was recorded under the
+    /// pid file's lock a moment earlier.
+    ///
+    /// `onstart` fires as soon as the unit is up, because a cron unit has no
+    /// readiness point to wait for: its next event is its exit.
+    pub fn start_cron_unit(
+        &self,
+        name: &str,
+        service: &ServiceConfig,
+    ) -> Result<CronLaunch, ProcessManagerError> {
+        let _starting = self.claim_start(name);
+
+        if let Some(state) = self.start_service_common(name, service)? {
+            if matches!(state, ServiceReadyState::Skipped) {
+                return Ok(CronLaunch::Skipped);
+            }
+            let adopted = self.pid_file.lock()?.pid_for(name);
+            let Some(pid) = adopted else {
+                return Err(ProcessManagerError::ServiceStartError {
+                    service: name.to_string(),
+                    source: std::io::Error::other(
+                        "adopted a running cron unit that holds no pid record",
+                    ),
+                });
+            };
+            return Ok(CronLaunch::Started(pid));
+        }
+
+        let ctx = self.context();
+        let config = self.cfg();
+        let log_settings = service.effective_logs(&config.logs);
+
+        let pid = Self::launch_and_register(&ctx, name, service, log_settings)?;
+        self.mark_running(name, pid)?;
+
+        if let Some(action) = service.hooks.as_ref().and_then(|cfg| cfg.onstart.as_ref())
+        {
+            run_hook(
+                action,
+                &service.env,
+                "onstart",
+                name,
+                &self.project_root,
+                Some((&self.boot_epoch, &self.boot_cancelled)),
+            );
+        }
+
+        Ok(CronLaunch::Started(pid))
+    }
+
     /// Starts a service through the shared startup path, then performs
     /// readiness checks against the generation it just launched.
     ///
@@ -11035,6 +11115,118 @@ mod tests {
         fresh.record_start(start, DEFAULT_RESTART_BUDGET);
         fresh.settle(start + RESTART_STABLE_AFTER + Duration::from_secs(1));
         assert!(fresh.record_start(later, DEFAULT_RESTART_BUDGET).is_none());
+    }
+
+    #[test]
+    /// The mechanism that made a finished cron run look like a failed start:
+    /// the readiness gate knows a unit ONLY by its child handle, so once the
+    /// monitor has taken that handle the gate reports nothing started and fails
+    /// the unit after its whole budget. Correct for a service that never came
+    /// up, fatal for a cron run that had already finished.
+    fn the_readiness_gate_fails_a_unit_whose_handle_it_cannot_see() {
+        with_temp_home(|dir| {
+            let mut services = HashMap::new();
+            services.insert("job".into(), make_service("sh -c 'exit 0'", &[]));
+            let daemon = create_daemon(dir, services);
+            let config = daemon.cfg();
+
+            let started = Instant::now();
+            let err = Daemon::wait_for_ready(
+                "job",
+                &daemon.processes,
+                &daemon.pid_file,
+                (&daemon.state_file, &config),
+                None,
+                Duration::ZERO,
+                chrono::Utc::now(),
+            )
+            .expect_err("a unit with no handle cannot be reported as up");
+
+            assert!(
+                err.to_string()
+                    .contains("did not report a running state in time"),
+                "unexpected error: {err}"
+            );
+            assert!(
+                started.elapsed() >= SERVICE_START_TIMEOUT,
+                "the gate must spend its whole budget before failing"
+            );
+        });
+    }
+
+    #[test]
+    /// A cron launch reports the process it started and nothing else, so the
+    /// run's verdict is left to the exit status the completion wait reads.
+    ///
+    /// Driven rather than raced: a stand-in for the monitor's cron branch takes
+    /// the child handle, reaps it and routes the status, all while a readiness
+    /// gate would still be polling. Which of the two gets there first is a
+    /// scheduling accident in production and a container reproduces it on no
+    /// schedule at all, so the ordering is performed here instead. Under the
+    /// gate this ordering cost the run its verdict and failed a cron job that
+    /// had already succeeded.
+    fn a_cron_launch_survives_the_monitor_reaping_first() {
+        with_temp_home(|dir| {
+            let mut service = make_service("sh -c 'sleep 0.3'", &[]);
+            service.cron = Some(crate::config::CronConfig {
+                expression: "*/5 * * * * *".into(),
+                timezone: None,
+            });
+            let mut services = HashMap::new();
+            services.insert("job".into(), service.clone());
+
+            // Stability wider than the run itself leaves a readiness gate
+            // still waiting when the handle goes away.
+            let daemon = create_daemon(dir, services);
+            daemon.set_timeouts(SupervisorTimeouts {
+                startup_stability_ms: 3_000,
+                ..SupervisorTimeouts::default()
+            });
+
+            let key = daemon.cfg().state_key("job");
+            let processes = Arc::clone(&daemon.processes);
+            let routed_to = key.clone();
+            let monitor = thread::spawn(move || {
+                let mut child = loop {
+                    if let Some(child) = processes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove("job")
+                    {
+                        break child;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                };
+                let pid = child.id();
+                let status = child.wait().expect("reaping the cron child");
+                crate::reaper::publish(pid as i32, &routed_to, status);
+                pid
+            });
+
+            let started = Instant::now();
+            let launch = daemon
+                .start_cron_unit("job", &service)
+                .expect("a cron launch reports the process it started");
+            let elapsed = started.elapsed();
+
+            let CronLaunch::Started(pid) = launch else {
+                panic!("expected a launched cron unit, got {launch:?}");
+            };
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "a cron launch must not wait on readiness (took {elapsed:?})"
+            );
+
+            let reaped = monitor.join().expect("the stand-in monitor finished");
+            assert_eq!(reaped, pid, "the monitor reaped the process that launched");
+
+            let routed = crate::reaper::take_for(pid as i32, &key)
+                .expect("the status is addressed to the key the completion wait uses");
+            assert!(
+                routed.success(),
+                "the run's own exit status survives the monitor reaping it"
+            );
+        });
     }
 
     #[test]

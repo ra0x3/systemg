@@ -29,8 +29,8 @@ use crate::{
     },
     cron::{CronExecutionStatus, CronManager},
     daemon::{
-        Daemon, PersistedSpawnChild, ServiceLifecycleStatus, ServiceReadyState,
-        ServiceStateFile,
+        CronLaunch, Daemon, PersistedSpawnChild, ServiceLifecycleStatus,
+        ServiceReadyState, ServiceStateFile,
     },
     error::{LogsManagerError, ProcessManagerError},
     ipc::{self, ControlCommand, ControlResponse, InspectPayload},
@@ -3723,9 +3723,9 @@ impl Supervisor {
                                 // this run's outcome.
                                 crate::reaper::drop_claims(&service_hash);
                                 match daemon
-                                    .start_service(&job_name_clone, &service_config)
+                                    .start_cron_unit(&job_name_clone, &service_config)
                                 {
-                                    Ok(ServiceReadyState::Skipped) => {
+                                    Ok(CronLaunch::Skipped) => {
                                         info!(
                                             "Cron job '{}' was skipped; recording no execution",
                                             job_name_clone
@@ -3733,239 +3733,124 @@ impl Supervisor {
                                         cron_manager_clone
                                             .withdraw_job_run(&withdraw_claim);
                                     }
-                                    Ok(ServiceReadyState::CompletedSuccess) => {
-                                        cron_manager_clone.annotate_job_run(
-                                            &service_hash,
-                                            run_started_at,
-                                            None,
-                                            user.clone(),
-                                            command.clone(),
-                                        );
-                                        info!(
-                                            "Cron job '{}' completed successfully",
-                                            job_name_clone
-                                        );
+                                    Ok(CronLaunch::Started(pid)) => {
+                                        cron_manager_clone
+                                            .annotate_job_run(
+                                                &service_hash,
+                                                run_started_at,
+                                                Some(pid),
+                                                user.clone(),
+                                                command.clone(),
+                                            );
+                                        let result =
+                                            Self::wait_for_cron_completion(
+                                                pid,
+                                                &job_name_clone,
+                                                &service_hash,
+                                            );
 
-                                        let metrics = cron_run_metrics(
-                                            &metrics_store_clone,
-                                            &service_hash,
-                                            run_started_at,
-                                        );
-                                        persist_cron_state(
-                                            &daemon,
-                                            &service_hash,
-                                            &job_name_clone,
-                                            ServiceLifecycleStatus::ExitedSuccessfully,
-                                            Some(0),
-                                        );
-                                        cron_manager_clone.complete_job_run(
-                                            &service_hash,
-                                            run_started_at,
-                                            CronExecutionStatus::Success,
-                                            Some(0),
-                                            metrics,
-                                        );
-                                    }
-                                    Ok(ServiceReadyState::Running) => {
-                                        let pid = daemon
-                                            .pid_file_handle()
-                                            .lock()
-                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                            .pid_for(&job_name_clone);
-                                        if let Some(pid) = pid {
-                                                    cron_manager_clone
-                                                        .annotate_job_run(
-                                                            &service_hash,
-                                                            run_started_at,
-                                                            Some(pid),
-                                                            user.clone(),
-                                                            command.clone(),
-                                                        );
-                                                    let result =
-                                                        Self::wait_for_cron_completion(
-                                                            pid,
-                                                            &job_name_clone,
-                                                            &service_hash,
-                                                        );
+                                        match result {
+                                            Ok(outcome) => {
+                                                let CronCompletionOutcome {
+                                                    status,
+                                                    exit_code,
+                                                } = outcome;
 
-                                                    match result {
-                                                        Ok(outcome) => {
-                                                            let CronCompletionOutcome {
-                                                                status,
-                                                                exit_code,
-                                                            } = outcome;
+                                                match &status {
+                                                                CronExecutionStatus::Success => info!(
+                                                                    "Cron job '{}' completed successfully",
+                                                                    job_name_clone
+                                                                ),
+                                                                CronExecutionStatus::Failed(reason) => warn!(
+                                                                    "Cron job '{}' failed: {}",
+                                                                    job_name_clone, reason
+                                                                ),
+                                                                CronExecutionStatus::Interrupted(reason) => warn!(
+                                                                    "Cron job '{}' was interrupted: {}",
+                                                                    job_name_clone, reason
+                                                                ),
+                                                                CronExecutionStatus::OverlapError => warn!(
+                                                                    "Cron job '{}' reported overlap state unexpectedly",
+                                                                    job_name_clone
+                                                                ),
+                                                            }
 
-                                                            match &status {
-                                                                            CronExecutionStatus::Success => info!(
-                                                                                "Cron job '{}' completed successfully",
-                                                                                job_name_clone
-                                                                            ),
-                                                                            CronExecutionStatus::Failed(reason) => warn!(
-                                                                                "Cron job '{}' failed: {}",
-                                                                                job_name_clone, reason
-                                                                            ),
-                                                                            CronExecutionStatus::Interrupted(reason) => warn!(
-                                                                                "Cron job '{}' was interrupted: {}",
-                                                                                job_name_clone, reason
-                                                                            ),
-                                                                            CronExecutionStatus::OverlapError => warn!(
-                                                                                "Cron job '{}' reported overlap state unexpectedly",
-                                                                                job_name_clone
-                                                                            ),
-                                                                        }
-
-                                                            let metrics = cron_run_metrics(
-                                                                &metrics_store_clone,
-                                                                &service_hash,
-                                                                run_started_at,
-                                                            );
-                                                            let lifecycle_status = match status {
-                                                                CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
-                                                                CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
-                                                                CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
-                                                            };
-                                                            persist_cron_state(
-                                                                &daemon,
-                                                                &service_hash,
-                                                                &job_name_clone,
-                                                                lifecycle_status,
-                                                                exit_code,
-                                                            );
-                                                            clear_cron_pid(
-                                                                &daemon,
-                                                                &job_name_clone,
-                                                                pid,
-                                                            );
-                                                            notify_cron_failure(
-                                                                &daemon,
-                                                                &job_name_clone,
-                                                                &service_config,
-                                                                &status,
-                                                            );
-                                                            cron_manager_clone.complete_job_run(
-                                                                &service_hash,
-                                                                run_started_at,
-                                                                status,
-                                                                exit_code,
-                                                                metrics,
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            error!(
-                                                                "Error waiting for cron job '{}': {}",
-                                                                job_name_clone, e
-                                                            );
-                                                            let metrics = cron_run_metrics(
-                                                                &metrics_store_clone,
-                                                                &service_hash,
-                                                                run_started_at,
-                                                            );
-                                                            persist_cron_state(
-                                                                &daemon,
-                                                                &service_hash,
-                                                                &job_name_clone,
-                                                                ServiceLifecycleStatus::ExitedWithError,
-                                                                None,
-                                                            );
-                                                            clear_cron_pid(
-                                                                &daemon,
-                                                                &job_name_clone,
-                                                                pid,
-                                                            );
-                                                            let status =
-                                                                CronExecutionStatus::Failed(
-                                                                    e.to_string(),
-                                                                );
-                                                            notify_cron_failure(
-                                                                &daemon,
-                                                                &job_name_clone,
-                                                                &service_config,
-                                                                &status,
-                                                            );
-                                                            cron_manager_clone.complete_job_run(
-                                                                &service_hash,
-                                                                run_started_at,
-                                                                status,
-                                                                None,
-                                                                metrics,
-                                                            );
-                                                        }
-                                                    }
-                                                } else {
-                                                    let already_completed = if let Ok(
-                                                        state_file,
-                                                    ) =
-                                                        ServiceStateFile::load(
-                                                            daemon.store(),
-                                                        )
-                                                        && let Some(entry) =
-                                                            state_file.get(&service_hash)
-                                                    {
-                                                        matches!(entry.status, ServiceLifecycleStatus::ExitedSuccessfully)
-                                                                        || (entry.status == ServiceLifecycleStatus::ExitedWithError && entry.exit_code == Some(0))
-                                                    } else {
-                                                        false
-                                                    };
-
-                                                    if already_completed {
-                                                        debug!(
-                                                            "Cron job '{}' already completed before PID tracking",
-                                                            job_name_clone
-                                                        );
-                                                        cron_manager_clone
-                                                                        .annotate_job_run(
-                                                                            &service_hash,
-                                                                            run_started_at,
-                                                                            None,
-                                                                            user.clone(),
-                                                                            command.clone(),
-                                                                        );
-                                                        let metrics = cron_run_metrics(
-                                                            &metrics_store_clone,
-                                                            &service_hash,
-                                                            run_started_at,
-                                                        );
-
-                                                        cron_manager_clone
-                                                            .complete_job_run(
-                                                            &service_hash,
-                                                            run_started_at,
-                                                            CronExecutionStatus::Success,
-                                                            Some(0),
-                                                            metrics,
-                                                        );
-                                                    } else {
-                                                        error!(
-                                                            "Failed to find PID for cron job '{}' in project '{}' and job has not completed",
-                                                            job_name_clone,
-                                                            project_id_clone
-                                                        );
-                                                        persist_cron_state(
-                                                            &daemon,
-                                                            &service_hash,
-                                                            &job_name_clone,
-                                                            ServiceLifecycleStatus::ExitedWithError,
-                                                            None,
-                                                        );
-                                                        let status =
-                                                            CronExecutionStatus::Failed(
-                                                                "Failed to get PID from PID file"
-                                                                    .to_string(),
-                                                            );
-                                                        notify_cron_failure(
-                                                            &daemon,
-                                                            &job_name_clone,
-                                                            &service_config,
-                                                            &status,
-                                                        );
-                                                        cron_manager_clone.complete_job_run(
-                                                            &service_hash,
-                                                            run_started_at,
-                                                            status,
-                                                            None,
-                                                            vec![],
-                                                        );
-                                                    }
+                                                let metrics = cron_run_metrics(
+                                                    &metrics_store_clone,
+                                                    &service_hash,
+                                                    run_started_at,
+                                                );
+                                                let lifecycle_status = match status {
+                                                    CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
+                                                    CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
+                                                    CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
+                                                };
+                                                persist_cron_state(
+                                                    &daemon,
+                                                    &service_hash,
+                                                    &job_name_clone,
+                                                    lifecycle_status,
+                                                    exit_code,
+                                                );
+                                                clear_cron_pid(
+                                                    &daemon,
+                                                    &job_name_clone,
+                                                    pid,
+                                                );
+                                                notify_cron_failure(
+                                                    &daemon,
+                                                    &job_name_clone,
+                                                    &service_config,
+                                                    &status,
+                                                );
+                                                cron_manager_clone.complete_job_run(
+                                                    &service_hash,
+                                                    run_started_at,
+                                                    status,
+                                                    exit_code,
+                                                    metrics,
+                                                );
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Error waiting for cron job '{}': {}",
+                                                    job_name_clone, e
+                                                );
+                                                let metrics = cron_run_metrics(
+                                                    &metrics_store_clone,
+                                                    &service_hash,
+                                                    run_started_at,
+                                                );
+                                                persist_cron_state(
+                                                    &daemon,
+                                                    &service_hash,
+                                                    &job_name_clone,
+                                                    ServiceLifecycleStatus::ExitedWithError,
+                                                    None,
+                                                );
+                                                clear_cron_pid(
+                                                    &daemon,
+                                                    &job_name_clone,
+                                                    pid,
+                                                );
+                                                let status =
+                                                    CronExecutionStatus::Failed(
+                                                        e.to_string(),
+                                                    );
+                                                notify_cron_failure(
+                                                    &daemon,
+                                                    &job_name_clone,
+                                                    &service_config,
+                                                    &status,
+                                                );
+                                                cron_manager_clone.complete_job_run(
+                                                    &service_hash,
+                                                    run_started_at,
+                                                    status,
+                                                    None,
+                                                    metrics,
+                                                );
+                                            }
                                         }
                                     }
                                     Err(e) => {
