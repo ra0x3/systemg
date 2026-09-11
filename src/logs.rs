@@ -3470,7 +3470,7 @@ impl LogManager {
             cmd.stderr(Stdio::from_raw_fd(stderr_fd));
         }
 
-        let status = cmd.status()?;
+        let status = crate::reaper::wait(&mut cmd.spawn()?)?;
         if !status.success() {
             return Err(LogsManagerError::TailCommandFailed(status.code()));
         }

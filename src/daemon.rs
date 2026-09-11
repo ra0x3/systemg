@@ -3059,11 +3059,12 @@ impl ManagedChild {
                 )
                 .is_ok();
                 if !alive {
-                    return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+                    break;
                 }
                 thread::sleep(Duration::from_millis(20));
             }
-            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+            return crate::reaper::take(self.pid as i32)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ECHILD));
         }
         if let Some(child) = self.child.as_mut() {
             return child.wait();
@@ -6133,7 +6134,12 @@ impl Daemon {
             if self.boot_cancelled() || !self.boot_active(epoch) {
                 return Err(Self::interrupted(service_name));
             }
-            match Self::probe_service_state(dep, &self.processes, &self.pid_file)? {
+            match Self::probe_service_state_recording(
+                dep,
+                &self.processes,
+                &self.pid_file,
+                Some((&self.state_file, &self.cfg())),
+            )? {
                 ServiceProbe::Running => thread::sleep(SERVICE_POLL_INTERVAL),
                 ServiceProbe::Exited(status) => {
                     if status.success() {
@@ -6439,19 +6445,6 @@ impl Daemon {
         Ok(())
     }
 
-    /// Attempts to determine the current state of a tracked service without blocking.
-    ///
-    /// Uses `try_wait` to check the underlying child process and updates the PID file if the
-    /// service has exited. To avoid holding the process map lock longer than necessary, the child
-    /// handle is temporarily removed and inserted back when still running.
-    fn probe_service_state(
-        service_name: &str,
-        processes: &Arc<Mutex<HashMap<String, ManagedChild>>>,
-        pid_file: &Arc<Mutex<PidFile>>,
-    ) -> Result<ServiceProbe, ProcessManagerError> {
-        Self::probe_service_state_recording(service_name, processes, pid_file, None)
-    }
-
     /// Probes a service, optionally RECORDING the exit it observes.
     ///
     /// The probe is the only place that witnesses the exit — it reaps the child
@@ -6462,6 +6455,10 @@ impl Daemon {
     /// `lost` FOREVER with nothing able to correct them: pid.xml was clean,
     /// state.xml was not. Passing the state handle makes the observation and the
     /// record atomic.
+    ///
+    /// A cron unit's live handle is reported as running and left alone. The
+    /// monitor reaps a cron run and its completion thread judges it, so a probe
+    /// that reaped it would take the outcome away from both.
     fn probe_service_state_recording(
         service_name: &str,
         processes: &Arc<Mutex<HashMap<String, ManagedChild>>>,
@@ -6469,6 +6466,16 @@ impl Daemon {
         state: Option<(&Arc<Mutex<ServiceStateFile>>, &Arc<Config>)>,
     ) -> Result<ServiceProbe, ProcessManagerError> {
         let mut processes_guard = processes.lock()?;
+
+        let cron = state.is_some_and(|(_, config)| {
+            config
+                .services
+                .get(service_name)
+                .is_some_and(|service| service.cron.is_some())
+        });
+        if cron && processes_guard.contains_key(service_name) {
+            return Ok(ServiceProbe::Running);
+        }
 
         if let Some(mut child) = processes_guard.remove(service_name) {
             match child.try_wait() {
@@ -9264,6 +9271,64 @@ impl Daemon {
         self.spawn_monitor_thread()
     }
 
+    /// Routes every reaped cron exit to its completion thread before any exit
+    /// is handled.
+    ///
+    /// That thread records the run as interrupted if the status isn't filed
+    /// shortly after its own `waitpid` finds the child gone, so routing can't
+    /// wait behind another unit's hooks or group cleanup. Each cron unit's PID
+    /// record is read first because the completion thread clears the PID as
+    /// soon as it has the status, and a record read after that would disown the
+    /// exit and skip its group cleanup. A routed child also leaves the process
+    /// map here, so its cached exit is never observed and routed again.
+    ///
+    /// Returns, for each cron unit whose record could be read, whether the PID
+    /// file still named the reaped pid and the group it recorded. Every other
+    /// unit reads its record just before it is handled, as before.
+    fn route_cron_exits(
+        ctx: &DaemonContext,
+        exits: &[(String, ExitStatus, u32)],
+    ) -> HashMap<String, (bool, Option<libc::pid_t>)> {
+        let cron: Vec<_> = exits
+            .iter()
+            .filter(|(name, _, _)| {
+                ctx.config
+                    .services
+                    .get(name)
+                    .is_some_and(|service| service.cron.is_some())
+            })
+            .collect();
+        if cron.is_empty() {
+            return HashMap::new();
+        }
+        let records = match ctx.lock_pid_file() {
+            Ok(guard) => cron
+                .iter()
+                .map(|(name, _, pid)| {
+                    (
+                        name.clone(),
+                        (guard.get(name) == Some(*pid), guard.pgid_for(name)),
+                    )
+                })
+                .collect(),
+            Err(err) => {
+                error!("Failed to inspect PID entries for exited cron units: {err}");
+                HashMap::new()
+            }
+        };
+        for (name, status, pid) in &cron {
+            crate::reaper::publish(*pid as i32, &ctx.config.state_key(name), *status);
+        }
+        if let Ok(mut processes) = ctx.lock_processes() {
+            for (name, _, pid) in &cron {
+                if processes.get(name).is_some_and(|child| child.id() == *pid) {
+                    processes.remove(name);
+                }
+            }
+        }
+        records
+    }
+
     /// Monitors all running services and restarts them if they exit unexpectedly.
     fn monitor_loop(ctx: DaemonContext) {
         // Probes are paced independently of the monitor tick: liveness is cheap
@@ -9319,15 +9384,20 @@ impl Daemon {
             }
 
             if !exited_services.is_empty() {
+                let mut cron_records = Self::route_cron_exits(&ctx, &exited_services);
                 for (name, exit_status, exited_pid) in exited_services {
-                    let (owns_record, recorded_pgid) = match ctx.lock_pid_file() {
-                        Ok(guard) => {
-                            (guard.get(&name) == Some(exited_pid), guard.pgid_for(&name))
-                        }
-                        Err(err) => {
-                            error!("Failed to inspect PID entry for '{name}': {err}");
-                            continue;
-                        }
+                    let (owns_record, recorded_pgid) = match cron_records.remove(&name) {
+                        Some(record) => record,
+                        None => match ctx.lock_pid_file() {
+                            Ok(guard) => (
+                                guard.get(&name) == Some(exited_pid),
+                                guard.pgid_for(&name),
+                            ),
+                            Err(err) => {
+                                error!("Failed to inspect PID entry for '{name}': {err}");
+                                continue;
+                            }
+                        },
                     };
                     if !owns_record {
                         if let Ok(mut processes) = ctx.lock_processes()
@@ -9357,31 +9427,20 @@ impl Daemon {
                     #[cfg(not(unix))]
                     let signal = None;
                     // A cron unit's run is owned by its completion thread: the
-                    // monitor only reaped the child first. Route the status to
-                    // that owner and leave everything downstream — the recorded
-                    // outcome, the hook, the next run — to it. Judging the run
-                    // here as well would race the owner: the boundary that
-                    // follows can already be live by the time this branch
-                    // finishes, and a stale exit would overwrite its state and
-                    // clear its PID.
+                    // monitor only reaped the child first, and
+                    // `route_cron_exits` already handed it the status and
+                    // dropped its handle. Leave everything downstream
+                    // — the recorded outcome, the hook, the next run — to it.
+                    // Judging the run here as well would race the owner: the
+                    // boundary that follows can already be live by the time
+                    // this branch finishes, and a stale exit would overwrite its
+                    // state and clear its PID.
                     let is_cron = ctx
                         .config
                         .services
                         .get(&name)
                         .is_some_and(|service| service.cron.is_some());
                     if is_cron {
-                        crate::reaper::publish(
-                            exited_pid as i32,
-                            &ctx.config.state_key(&name),
-                            exit_status,
-                        );
-                        if let Ok(mut processes) = ctx.lock_processes()
-                            && processes
-                                .get(&name)
-                                .is_some_and(|child| child.id() == exited_pid)
-                        {
-                            processes.remove(&name);
-                        }
                         continue;
                     }
                     if !manually_stopped

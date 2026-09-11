@@ -18,8 +18,9 @@
 use std::{
     collections::HashMap,
     os::unix::process::ExitStatusExt,
-    process::ExitStatus,
+    process::{Child, ExitStatus},
     sync::{Mutex, OnceLock},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -30,6 +31,8 @@ use crate::runtime;
 /// How long an unclaimed status stays in the mailbox before it is treated as
 /// an adopted orphan's exit. Covers the spawn-before-registration race.
 const RETENTION: Duration = Duration::from_secs(30);
+/// Interval between checks while [`wait`] polls for a child in init mode.
+const WAIT_POLL: Duration = Duration::from_millis(50);
 
 /// A reaped exit status waiting to be claimed.
 struct Filed {
@@ -48,10 +51,17 @@ fn mailbox() -> &'static Mutex<HashMap<i32, Filed>> {
 
 /// Reaps every currently-waitable child via `waitpid(-1, WNOHANG)` and files
 /// the statuses into the mailbox. No-op outside init mode.
+///
+/// The mailbox stays locked from the first reap until the last status is
+/// filed. A waiter that gets `ECHILD` from its own `waitpid` and then takes
+/// the lock therefore always finds the status this broker reaped.
 pub fn reap_pending() {
     if !runtime::init_mode() {
         return;
     }
+    let mut box_ = mailbox()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     loop {
         let mut status: libc::c_int = 0;
         let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
@@ -59,17 +69,39 @@ pub fn reap_pending() {
             break;
         }
         debug!("init broker reaped pid {pid}");
-        mailbox()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                pid,
-                Filed {
-                    status: ExitStatus::from_raw(status),
-                    filed: Instant::now(),
-                    claimant: None,
-                },
-            );
+        box_.insert(
+            pid,
+            Filed {
+                status: ExitStatus::from_raw(status),
+                filed: Instant::now(),
+                claimant: None,
+            },
+        );
+    }
+}
+
+/// Waits for `child` to exit when the broker may reap it first.
+///
+/// Outside init mode this is `child.wait()`. In init mode a blocking wait can
+/// lose the child to the broker's `waitpid(-1)` and come back with `ECHILD`,
+/// so this polls the mailbox and the handle until one of them has the status.
+pub fn wait(child: &mut Child) -> std::io::Result<ExitStatus> {
+    if !runtime::init_mode() {
+        return child.wait();
+    }
+    let pid = child.id() as i32;
+    loop {
+        if let Some(status) = take(pid) {
+            return Ok(status);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => thread::sleep(WAIT_POLL),
+            Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {
+                return take(pid).ok_or(err);
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 

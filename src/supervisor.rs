@@ -63,6 +63,12 @@ const CRON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// unknown outcome is never a success.
 const CRON_STATUS_LOST_REASON: &str =
     "the run's exit status was consumed by another reaper before it could be read";
+/// How long a cron run keeps checking for its routed exit status after its own
+/// `waitpid` says the child was already reaped. The monitor files the status
+/// right after it reaps, so this only has to outlast that handoff.
+const CRON_ROUTE_GRACE: Duration = Duration::from_secs(2);
+/// Interval between mailbox checks during [`CRON_ROUTE_GRACE`].
+const CRON_ROUTE_POLL: Duration = Duration::from_millis(10);
 /// Delay before retrying a failed control-socket accept.
 const CONTROL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Maximum time allowed for a live-upgrade acceptance response to reach its client.
@@ -5049,7 +5055,7 @@ impl Supervisor {
         let reaped_for_exit = Arc::clone(&reaped);
         if let Err(err) = thread::Builder::new()
             .name(format!("sysg-child-{child_pid}"))
-            .spawn(move || match child.wait() {
+            .spawn(move || match crate::reaper::wait(&mut child) {
                 Ok(status) => {
                     // From here the pid is reaped and may be reused; stand the
                     // TTL timer down before touching any tracking.
@@ -6818,18 +6824,24 @@ running project does not declare; restart the project to apply structural change
             claim_key,
             Duration::from_secs(3600),
             Duration::from_millis(100),
+            CRON_ROUTE_GRACE,
         )
     }
 
     /// Waits for one cron run to finish. `claim_key` is the unit's state key:
     /// the address a routed exit status carries, unique across projects where a
     /// service name is not.
+    ///
+    /// When `waitpid` says the child was already reaped, the monitor got there
+    /// first and may still be filing the status. `route_grace` is how long to
+    /// keep checking for it before the run is recorded as interrupted.
     fn wait_for_cron_completion_with_timeout(
         pid: u32,
         job_name: &str,
         claim_key: &str,
         max_wait_time: Duration,
         poll_interval: Duration,
+        route_grace: Duration,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
         use nix::{
             sys::wait::{WaitPidFlag, WaitStatus, waitpid},
@@ -6901,8 +6913,17 @@ running project does not declare; restart the project to apply structural change
                     thread::sleep(poll_interval);
                 }
                 Err(nix::errno::Errno::ECHILD) => {
-                    if let Some(status) = crate::reaper::take_for(pid as i32, claim_key) {
-                        return Ok(Self::cron_outcome_from_status(job_name, status));
+                    let deadline = std::time::Instant::now() + route_grace;
+                    loop {
+                        if let Some(status) =
+                            crate::reaper::take_for(pid as i32, claim_key)
+                        {
+                            return Ok(Self::cron_outcome_from_status(job_name, status));
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        thread::sleep(CRON_ROUTE_POLL);
                     }
                     warn!(
                         "Cron job '{}' was reaped without routing its exit status; recording the run as interrupted",
@@ -7321,6 +7342,7 @@ mod tests {
             "v2:demo:slow-cron",
             Duration::from_millis(1),
             Duration::from_millis(1),
+            Duration::ZERO,
         )
         .expect("timeout should terminate process tree and return failed outcome");
 
@@ -7360,6 +7382,7 @@ mod tests {
             "v2:demo:routed-cron",
             Duration::from_millis(50),
             Duration::from_millis(1),
+            Duration::ZERO,
         )
         .expect("a routed status resolves the run");
 
@@ -7381,6 +7404,7 @@ mod tests {
             "v2:demo:lost-cron",
             Duration::from_millis(50),
             Duration::from_millis(1),
+            Duration::ZERO,
         )
         .expect("a lost status still resolves the run");
 
