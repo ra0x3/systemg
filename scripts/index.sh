@@ -83,6 +83,89 @@ activate_version() {
   mv -f "$ACTIVE_TMP" "$SYSG_ACTIVE_VERSION_FILE"
 }
 
+if [ "$SYSG_BIN_DIR" = "$LOCAL_BIN_DIR" ]; then
+  PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+else
+  PATH_LINE='export PATH="$HOME/.sysg/bin:$PATH"'
+fi
+PATH_MARKER="# Added by sysg installer"
+
+SHELL_RC=""
+case "${SHELL##*/}" in
+  bash) SHELL_RC="$HOME/.bashrc" ;;
+  zsh) SHELL_RC="$HOME/.zshrc" ;;
+  "")
+    if [ -n "${BASH_VERSION:-}" ]; then
+      SHELL_RC="$HOME/.bashrc"
+    elif [ -n "${ZSH_VERSION:-}" ]; then
+      SHELL_RC="$HOME/.zshrc"
+    fi
+    ;;
+esac
+
+prepend_path_line() {
+  rc="$1"
+  [ -e "$rc" ] || : > "$rc"
+  if [ "$(head -n 2 "$rc")" = "$(printf '%s\n%s' "$PATH_MARKER" "$PATH_LINE")" ]; then
+    return 0
+  fi
+  rc_tmp="$(mktemp 2>/dev/null || mktemp -t sysg-rc)"
+  {
+    printf '%s\n%s\n\n' "$PATH_MARKER" "$PATH_LINE"
+    cat "$rc"
+  } > "$rc_tmp"
+  cat "$rc_tmp" > "$rc"
+  rm -f "$rc_tmp"
+}
+
+setup_path() {
+  case "$SHELL_RC" in
+    */.bashrc)
+      prepend_path_line "$SHELL_RC"
+      ;;
+    */.zshrc)
+      prepend_path_line "$HOME/.zshenv"
+      if ! grep -qxF "$PATH_LINE" "$SHELL_RC" 2>/dev/null; then
+        printf '\n%s\n%s\n' "$PATH_MARKER" "$PATH_LINE" >> "$SHELL_RC"
+      fi
+      ;;
+  esac
+}
+
+finish_setup() {
+  OLD_SYSG="$SYSG_FALLBACK_BIN_DIR/sysg"
+  if [ "$SYSG_BIN_DIR" != "$SYSG_FALLBACK_BIN_DIR" ] && [ -L "$OLD_SYSG" ] \
+    && [ -w "$SYSG_FALLBACK_BIN_DIR" ]; then
+    OLD_LINK_TMP="$SYSG_FALLBACK_BIN_DIR/.sysg-link.$$"
+    rm -f "$OLD_LINK_TMP"
+    ln -s "$SYSG_BIN_DIR/sysg" "$OLD_LINK_TMP"
+    mv -f "$OLD_LINK_TMP" "$OLD_SYSG"
+  fi
+
+  setup_path
+
+  PATH_NEEDS_UPDATE=0
+  case ":$PATH:" in
+    *":$SYSG_BIN_DIR:"*) ;;
+    *) PATH_NEEDS_UPDATE=1 ;;
+  esac
+}
+
+print_path_notes() {
+  if [ $PATH_NEEDS_UPDATE -eq 1 ]; then
+    echo ""
+    echo "⚠ Setup notes:"
+    if [ -n "$SHELL_RC" ]; then
+      echo "  • Path configuration added to $SHELL_RC but not yet loaded. Run:"
+      echo ""
+      echo "    . \"$SHELL_RC\""
+    else
+      echo "  • $SYSG_BIN_DIR is not in your PATH. Add it at the top of your shell's startup file."
+    fi
+    echo ""
+  fi
+}
+
 if [ "$OS" = "linux" ]; then
   if [ "$ARCH" = "x86_64" ]; then
     TARGET="x86_64-unknown-linux-gnu"
@@ -154,11 +237,13 @@ if [ -x "$VERSION_BINARY" ]; then
 
   if [ "$INSTALLED_VERSION" = "$VERSION" ]; then
     activate_version
+    finish_setup
     if [ "$CURRENT_ACTIVE_VERSION" = "$VERSION" ]; then
       echo "✔ sysg $VERSION is already installed and active"
     else
       echo "✔ Switched to sysg $VERSION"
     fi
+    print_path_notes
     echo ""
     echo "  Run: sysg --help to get started"
     echo ""
@@ -233,54 +318,10 @@ if ! activate_version; then
   exit 1
 fi
 
-for check_dir in "$HOME/.sysg/bin" "/usr/local/bin"; do
-  if [ -d "$check_dir" ] && [ "$check_dir" != "$SYSG_BIN_DIR" ]; then
-    OLD_SYSG="$check_dir/sysg"
-    if [ -f "$OLD_SYSG" ] || [ -L "$OLD_SYSG" ]; then
-      if [ -w "$check_dir" ]; then
-        rm -f "$OLD_SYSG"
-        ln -sf "$SYSG_BIN_DIR/sysg" "$OLD_SYSG"
-      fi
-    fi
-  fi
-done
-
 cd "$ORIGINAL_DIR"
 rm -rf "$TEMP_DIR"
 
-# Set up PATH based on installation location
-if [ "$SYSG_BIN_DIR" = "$LOCAL_BIN_DIR" ]; then
-  PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
-  PATH_PATTERN=".local/bin"
-else
-  PATH_LINE='export PATH="$HOME/.sysg/bin:$PATH"'
-  PATH_PATTERN=".sysg/bin"
-fi
-
-SHELL_RC=""
-
-if [ -n "${BASH_VERSION:-}" ]; then
-  SHELL_RC="$HOME/.bashrc"
-elif [ -n "${ZSH_VERSION:-}" ]; then
-  SHELL_RC="$HOME/.zshrc"
-elif echo "${SHELL:-}" | grep -q "bash"; then
-  SHELL_RC="$HOME/.bashrc"
-elif echo "${SHELL:-}" | grep -q "zsh"; then
-  SHELL_RC="$HOME/.zshrc"
-fi
-
-if [ -n "$SHELL_RC" ]; then
-  mkdir -p "$(dirname "$SHELL_RC")"
-  touch "$SHELL_RC"
-  # Check if the path pattern is already in the shell config
-  if ! grep -q "$PATH_PATTERN" "$SHELL_RC"; then
-    {
-      echo ""
-      echo "# Added by sysg installer"
-      echo "$PATH_LINE"
-    } >> "$SHELL_RC"
-  fi
-fi
+finish_setup
 
 export PATH="$SYSG_BIN_DIR:$PATH"
 
@@ -388,26 +429,7 @@ if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$VERSION" ]; then
   p "${C_BORDER_SUB}╰──────────────────────────────────────────────────────────────────────────────╯${RESET}"
 fi
 
-PATH_NEEDS_UPDATE=0
-case ":$PATH:" in
-  *":$SYSG_BIN_DIR:"*) ;;
-  *) PATH_NEEDS_UPDATE=1 ;;
-esac
-
-if [ $PATH_NEEDS_UPDATE -eq 1 ]; then
-  echo ""
-  echo "⚠ Setup notes:"
-  if [ -n "$SHELL_RC" ] && grep -q "$PATH_PATTERN" "$SHELL_RC"; then
-    echo "  • Path configuration added to $SHELL_RC but not yet loaded. Run:"
-    echo ""
-    echo "    . \"$SHELL_RC\""
-  else
-    echo "  • $SYSG_BIN_DIR is not in your PATH. Run:"
-    echo ""
-    echo "    echo '$PATH_LINE' >> ~/.bashrc && . ~/.bashrc"
-  fi
-  echo ""
-fi
+print_path_notes
 
 echo ""
 echo "✔ Installation complete!"

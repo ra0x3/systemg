@@ -109,13 +109,29 @@ https://github.com/ra0x3/systemg/releases
 
 ### PATH Not Updated
 
-If the installer cannot automatically update your PATH, you'll need to manually add:
+The installer picks your shell from `$SHELL`. For bash it puts this line at the
+top of `~/.bashrc`. For zsh it puts it at the top of `~/.zshenv` and adds it to
+`~/.zshrc`:
 
 ```bash
-export PATH="$HOME/.sysg/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-to your shell configuration file (`~/.bashrc`, `~/.zshrc`, etc.)
+The line goes at the top because most `~/.bashrc` files stop early for
+non-interactive shells, and a one-shot `ssh host 'sysg status'` runs one of
+those. Older installers added the line at the bottom. Rerun the installer to fix
+an existing host, even if it's already on the latest version.
+
+If the installer fell back to `~/.sysg/bin`, the line uses that directory
+instead. For any other shell, add the directory to `PATH` yourself using that
+shell's syntax.
+
+### Cron and systemd
+
+Cron and systemd don't read shell startup files, so call sysg by its absolute
+path, such as `/home/ubuntu/.local/bin/sysg` (or `/home/ubuntu/.sysg/bin/sysg`
+if the installer fell back). Debian and Ubuntu cron default to
+`PATH=/usr/bin:/bin`. A systemd user unit can use `%h/.local/bin/sysg`.
 
 ### Switching Versions
 

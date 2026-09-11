@@ -56,6 +56,19 @@ same-major/minor rule; earlier residents do not support live re-execution.
 See [Upgrading `sysg`](/docs/installation/upgrading) for compatibility and
 [`SG0502`](/reference/dialog/codes#sg0502) recovery.
 
+## Non-interactive shells
+
+The installer adds `~/.local/bin` to `PATH` at the top of `~/.bashrc` for bash,
+and in `~/.zshenv` and `~/.zshrc` for zsh, so one-shot commands such as
+`ssh host 'sysg status'` find `sysg`. Hosts set up by an older installer have
+the line at the bottom of `~/.bashrc`, where those commands never reach it.
+Rerun the installer to fix them, even on the same version.
+
+Cron and systemd read neither file, so give them the absolute path, for example
+`/home/ubuntu/.local/bin/sysg` (or `/home/ubuntu/.sysg/bin/sysg` if the
+installer fell back to that directory). Debian and Ubuntu cron default to
+`PATH=/usr/bin:/bin`. A systemd user unit can use `%h/.local/bin/sysg`.
+
 ## Next steps
 
 Create your first [configuration](/docs/quickstart#create-a-configuration) and start running services.
