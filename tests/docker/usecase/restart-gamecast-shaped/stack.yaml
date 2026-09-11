@@ -72,7 +72,7 @@ services:
   vacuum_full:
     command: /bin/true
     cron:
-      expression: "0 */59 * * * *"
+      expression: "0 0 0 1 1 * 2100"
 
   # Client-style one-shots mirroring the prod `psql ...` / `redis-cli ...`
   # units. Their commands carry connect-to ports that must never gate readiness.
