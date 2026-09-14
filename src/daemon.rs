@@ -10003,14 +10003,18 @@ impl Daemon {
                 continue;
             }
 
-            if matches!(
-                Self::recorded_status_in_context(ctx, name),
-                Some(ServiceLifecycleStatus::Skipped)
-            ) {
+            let recorded = Self::recorded_status_in_context(ctx, name);
+            if matches!(recorded, Some(ServiceLifecycleStatus::Skipped)) {
                 continue;
             }
 
             if !service.restarts_after_failure() {
+                continue;
+            }
+
+            if !service.restarts_after_success()
+                && matches!(recorded, Some(ServiceLifecycleStatus::ExitedSuccessfully))
+            {
                 continue;
             }
 
@@ -11512,6 +11516,66 @@ fi
     fn clean_exit_before_stability_still_trips_the_breaker() {
         let tracker = breaker_after_clean_exit(Duration::ZERO);
         assert_eq!(tracker.tripped, Some(RestartTripCause::Flapping));
+    }
+
+    /// Runs one reconcile pass for a unit under `policy` whose process is gone
+    /// and whose last recorded status is `status`, returning what it restarts.
+    fn reconcile_after(policy: &str, status: ServiceLifecycleStatus) -> Vec<String> {
+        let mut restarted = Vec::new();
+        with_temp_home(|dir| {
+            let mut service = make_service("sleep 1", &[]);
+            service.restart_policy = Some(policy.into());
+            let mut services = HashMap::new();
+            services.insert("svc".into(), service);
+
+            let daemon = create_daemon(dir, services);
+            let ctx = daemon.context();
+            let exit_code =
+                (status == ServiceLifecycleStatus::ExitedSuccessfully).then_some(0);
+            Daemon::persist_service_state(
+                &ctx.config,
+                &ctx.state_file,
+                "svc",
+                status,
+                None,
+                exit_code,
+                None,
+            )
+            .unwrap();
+            restarted = Daemon::reconcile_lost_services(&ctx)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+        });
+        restarted
+    }
+
+    #[test]
+    /// A clean exit is final under `on-failure`, so reconcile leaves it alone.
+    fn reconcile_leaves_a_clean_on_failure_exit_alone() {
+        assert!(
+            reconcile_after("on-failure", ServiceLifecycleStatus::ExitedSuccessfully)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    /// `always` relaunches after every exit, clean ones included.
+    fn reconcile_restarts_a_clean_always_exit() {
+        assert_eq!(
+            reconcile_after("always", ServiceLifecycleStatus::ExitedSuccessfully),
+            ["svc"]
+        );
+    }
+
+    #[test]
+    /// An `on-failure` unit whose process vanished without a recorded exit is
+    /// still restarted.
+    fn reconcile_restarts_a_vanished_on_failure_unit() {
+        assert_eq!(
+            reconcile_after("on-failure", ServiceLifecycleStatus::Running),
+            ["svc"]
+        );
     }
 
     #[cfg(target_os = "linux")]

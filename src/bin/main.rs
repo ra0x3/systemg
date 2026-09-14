@@ -1558,7 +1558,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             };
 
             if matches!(logs_plan, systemg::logs_cmd::LogsPlan::Supervisor) {
-                LogManager::new().show_supervisor_log(lines)?;
+                let filter = LogFilter::from_parts(
+                    since.as_deref(),
+                    until.as_deref(),
+                    grep.as_deref(),
+                    all,
+                    chrono::Utc::now(),
+                )?;
+                LogManager::new().show_supervisor_log(lines, &filter)?;
                 return Ok(());
             }
             if prune {

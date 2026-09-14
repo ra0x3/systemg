@@ -525,13 +525,14 @@ services:
 ```
 
 **Policies:**
-- `always` - Restart on non-zero exit codes
+- `always` - Restart after every exit, clean or not
 - `on-failure` - Restart on non-zero exit codes
 - `never` - Don't restart
 
-A clean (zero) exit is treated as intentional and never triggers a restart,
-regardless of policy. Restarts respect `backoff` between attempts and stop
-after `max_restarts` (unlimited when unset).
+Under `on-failure`, a clean (zero) exit is treated as intentional and never
+triggers a restart. Restarts respect `backoff` between attempts. The restart
+budget is 8 automatic start attempts by default, or `max_restarts` when set.
+[`SG0110`](/reference/dialog/codes#sg0110) explains when the breaker opens.
 
 ### `hooks`
 

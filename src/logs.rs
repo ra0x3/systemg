@@ -484,29 +484,40 @@ impl LogFilter {
 
     /// Returns whether a single captured log line passes the filter.
     fn matches(&self, line: &[u8]) -> bool {
-        if let Some(ts) = captured_line_timestamp(line) {
-            if let Some(since) = self.since
-                && ts < since
-            {
-                return false;
+        self.in_bounds(line) && self.grep_hits(line)
+    }
+
+    /// Returns whether a line's capture timestamp sits inside the time bounds.
+    /// A line without one only passes when no bound is set.
+    fn in_bounds(&self, line: &[u8]) -> bool {
+        match captured_line_timestamp(line) {
+            Some(ts) => {
+                self.since.is_none_or(|since| ts >= since)
+                    && self.until.is_none_or(|until| ts <= until)
             }
-            if let Some(until) = self.until
-                && ts > until
-            {
-                return false;
-            }
-        } else if self.since.is_some() || self.until.is_some() {
+            None => self.since.is_none() && self.until.is_none(),
+        }
+    }
+
+    /// Returns whether a line matches the `--grep` pattern, if one is set.
+    fn grep_hits(&self, line: &[u8]) -> bool {
+        self.grep
+            .as_ref()
+            .is_none_or(|pattern| pattern.is_match(&String::from_utf8_lossy(line)))
+    }
+
+    /// Returns whether a multi-line event passes the filter: its first line
+    /// must sit inside the time bounds, and any of its lines may satisfy
+    /// `--grep`.
+    fn keeps_event(&self, event: &[u8]) -> bool {
+        let mut lines = event
+            .split_inclusive(|byte| *byte == b'\n')
+            .map(<[u8]>::trim_ascii_end);
+        let Some(head) = lines.next() else {
             return false;
-        }
-
-        if let Some(pattern) = &self.grep {
-            let text = String::from_utf8_lossy(line);
-            if !pattern.is_match(&text) {
-                return false;
-            }
-        }
-
-        true
+        };
+        self.in_bounds(head)
+            && (self.grep_hits(head) || lines.any(|line| self.grep_hits(line)))
     }
 
     /// Retains only the newline-delimited lines that pass the content filter.
@@ -520,6 +531,19 @@ impl LogFilter {
             .flat_map(|line| line.iter().copied())
             .collect()
     }
+
+    /// Retains whole events that pass the content filter, for logs where one
+    /// event can span several lines.
+    pub fn apply_events(&self, bytes: &[u8]) -> Vec<u8> {
+        if !self.has_content_filter() {
+            return bytes.to_vec();
+        }
+        split_events(bytes)
+            .into_iter()
+            .filter(|event| self.keeps_event(event))
+            .collect::<Vec<_>>()
+            .concat()
+    }
 }
 
 /// Parses the leading systemg capture timestamp from a persisted log line.
@@ -529,6 +553,57 @@ fn captured_line_timestamp(line: &[u8]) -> Option<chrono::DateTime<chrono::Utc>>
     chrono::DateTime::parse_from_rfc3339(first)
         .ok()
         .map(|parsed| parsed.with_timezone(&chrono::Utc))
+}
+
+/// Splits captured bytes into events. A line that starts with a capture
+/// timestamp opens a new event, and unstamped lines continue the one before.
+fn split_events(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut events = Vec::new();
+    let mut start = 0;
+    let mut offset = 0;
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if offset > start && captured_line_timestamp(line.trim_ascii_end()).is_some() {
+            events.push(&bytes[start..offset]);
+            start = offset;
+        }
+        offset += line.len();
+    }
+    if offset > start {
+        events.push(&bytes[start..offset]);
+    }
+    events
+}
+
+/// Keeps the last `lines` lines, reaching back to the start of the event the
+/// cut would otherwise land inside so no event is split.
+fn tail_events(bytes: &[u8], lines: usize) -> Vec<u8> {
+    let events = split_events(bytes);
+    let mut start = events.len();
+    let mut kept = 0usize;
+    while start > 0 && kept < lines {
+        start -= 1;
+        kept = kept
+            .saturating_add(events[start].split_inclusive(|byte| *byte == b'\n').count());
+    }
+    events[start..].concat()
+}
+
+/// Reads the supervisor log the way service logs are read. `--all` returns
+/// the full rotated history and ignores `lines`, a content filter scans the
+/// whole active file before tailing, and filtered output keeps whole events.
+fn supervisor_log_bytes(
+    path: &Path,
+    lines: usize,
+    filter: &LogFilter,
+) -> Result<Vec<u8>, LogsManagerError> {
+    if filter.all {
+        return Ok(filter.apply_events(&read_full_history(path)?));
+    }
+    if !filter.has_content_filter() {
+        return tail_log_file(path, lines);
+    }
+    let kept = filter.apply_events(&tail_log_file(path, usize::MAX)?);
+    Ok(tail_events(&kept, lines))
 }
 
 /// Returns a service's active log path followed by its rotated backups,
@@ -3636,7 +3711,11 @@ impl LogManager {
     }
 
     /// Shows the supervisor logs
-    pub fn show_supervisor_log(&self, lines: usize) -> Result<(), LogsManagerError> {
+    pub fn show_supervisor_log(
+        &self,
+        lines: usize,
+        filter: &LogFilter,
+    ) -> Result<(), LogsManagerError> {
         let supervisor_log = runtime::log_dir().join("supervisor.log");
 
         if !supervisor_log.exists() {
@@ -3650,9 +3729,9 @@ impl LogManager {
             "-", "Supervisor", "-"
         );
 
-        let tail = tail_log_file(&supervisor_log, lines)?;
+        let bytes = supervisor_log_bytes(&supervisor_log, lines, filter)?;
         let mut stdout = std::io::stdout().lock();
-        stdout.write_all(&tail)?;
+        stdout.write_all(&bytes)?;
         stdout.flush()?;
         Ok(())
     }
@@ -3729,6 +3808,106 @@ mod tests {
                 "accepted traversal name {name:?}"
             );
         }
+    }
+
+    const SUPERVISOR_EVENTS: &str = "\
+2026-09-14T10:00:00.000000Z  INFO systemg::daemon: early event
+2026-09-14T11:33:02.000000Z ERROR systemg::daemon: error[SG0110]: automatic restarts stopped for `chromium`
+
+  crossed 8 consecutive starts that never stayed up for 60s (default restart budget)
+2026-09-14T11:34:00.000000Z  INFO systemg::daemon: later event
+";
+
+    fn supervisor_read(lines: usize, filter: LogFilter) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.log");
+        fs::write(&path, SUPERVISOR_EVENTS).unwrap();
+        String::from_utf8(supervisor_log_bytes(&path, lines, &filter).unwrap()).unwrap()
+    }
+
+    fn supervisor_filter(
+        since: Option<&str>,
+        until: Option<&str>,
+        grep: Option<&str>,
+    ) -> LogFilter {
+        LogFilter::from_parts(since, until, grep, false, chrono::Utc::now()).unwrap()
+    }
+
+    #[test]
+    /// A time bound judges a multi-line supervisor event by its first line and
+    /// keeps it whole.
+    fn supervisor_time_bounds_keep_multi_line_events_whole() {
+        let out = supervisor_read(
+            usize::MAX,
+            supervisor_filter(
+                Some("2026-09-14T11:00:00Z"),
+                Some("2026-09-14T11:33:30Z"),
+                None,
+            ),
+        );
+        assert!(out.contains("error[SG0110]"));
+        assert!(out.contains("crossed 8 consecutive starts"));
+        assert!(!out.contains("early event"));
+        assert!(!out.contains("later event"));
+    }
+
+    #[test]
+    /// `--grep` matching only a continuation line keeps the whole event.
+    fn supervisor_grep_keeps_the_event_a_continuation_line_matches() {
+        let out = supervisor_read(
+            usize::MAX,
+            supervisor_filter(None, None, Some("consecutive")),
+        );
+        assert!(out.starts_with("2026-09-14T11:33:02.000000Z ERROR"));
+        assert!(out.contains("crossed 8 consecutive starts"));
+        assert!(!out.contains("early event"));
+        assert!(!out.contains("later event"));
+    }
+
+    #[test]
+    /// Tailing filtered supervisor output reaches back to the start of an
+    /// event instead of cutting it.
+    fn supervisor_tail_never_splits_an_event() {
+        let out = supervisor_read(
+            2,
+            supervisor_filter(Some("2026-09-14T11:00:00Z"), None, None),
+        );
+        assert!(out.starts_with("2026-09-14T11:33:02.000000Z ERROR"));
+        assert!(out.ends_with("later event\n"));
+    }
+
+    #[test]
+    /// Without a filter the supervisor log is tailed by plain lines as before.
+    fn supervisor_without_a_filter_tails_plain_lines() {
+        let out = supervisor_read(1, LogFilter::default());
+        assert_eq!(
+            out,
+            "2026-09-14T11:34:00.000000Z  INFO systemg::daemon: later event\n"
+        );
+    }
+
+    #[test]
+    /// `--all` reads the rotated supervisor logs and ignores `--lines`.
+    fn supervisor_all_reads_rotated_history_and_ignores_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("supervisor.log");
+        fs::write(
+            dir.path().join("supervisor.log.1"),
+            "2026-09-13T09:00:00.000000Z  INFO systemg::daemon: rotated event\n",
+        )
+        .unwrap();
+        fs::write(&path, SUPERVISOR_EVENTS).unwrap();
+        let filter = LogFilter {
+            all: true,
+            ..LogFilter::default()
+        };
+        let out =
+            String::from_utf8(supervisor_log_bytes(&path, 1, &filter).unwrap()).unwrap();
+        assert!(out.starts_with(
+            "2026-09-13T09:00:00.000000Z  INFO systemg::daemon: rotated event\n"
+        ));
+        assert!(out.contains("early event"));
+        assert!(out.ends_with("later event\n"));
     }
 
     #[test]

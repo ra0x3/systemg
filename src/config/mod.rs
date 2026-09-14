@@ -1140,6 +1140,11 @@ impl ServiceConfig {
         )
     }
 
+    /// Returns whether this service should restart after a successful exit.
+    pub(crate) fn restarts_after_success(&self) -> bool {
+        self.restart_policy.as_deref() == Some(RESTART_ALWAYS)
+    }
+
     /// Returns whether this service explicitly disables automatic restarts.
     pub(crate) fn restart_is_disabled(&self) -> bool {
         self.restart_policy.as_deref() == Some(RESTART_NEVER)

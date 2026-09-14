@@ -171,7 +171,12 @@ $ sysg logs --service api --kind stderr
 
 ```sh
 $ sysg logs --supervisor
+$ sysg logs --supervisor --since 2h --grep SG0110
 ```
+
+`--since`, `--until`, `--grep` and `--all` work on the supervisor log too. There
+they keep whole log events, so a multi-line error stays together when any of its
+lines matches `--grep`.
 
 ### Show more history
 
@@ -186,7 +191,8 @@ $ sysg logs --service api --grep ERROR
 ```
 
 `--grep` takes a regular expression and keeps only matching lines. It composes
-with `--kind`, the time bounds, and `--all`.
+with `--kind`, the time bounds, and `--all`. With `--supervisor` it keeps whole
+events instead, as described above.
 
 ### Filter by time window
 
