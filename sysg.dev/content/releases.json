@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.67.8",
+    "slug": "0.67.8",
+    "title": "v0.67.8",
+    "date": "2026-09-14T15:45:01Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.8",
+    "summary": "fix: honor --since/--until/--grep/--all on logs --supervisor and stop restarting on-failure units after a clean exit (6cd33d9)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: honor --since/--until/--grep/--all on logs --supervisor and stop restarting on-failure units after a clean exit (<code>6cd33d9</code>)</li>\n<li>fix(daemon): settle the restart breaker on clean exits so long runs stop tripping SG0110 (<code>0d6b1ef</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.7 (<code>524db9e</code>)</li>\n<li>docs(blog): publish release post for v0.67.7 (<code>c83d494</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.7...v0.67.8\">Full changelog on GitHub</a></p>",
+    "commits": 4
+  },
+  {
     "tag": "v0.67.7",
     "slug": "0.67.7",
     "title": "v0.67.7",
@@ -7,8 +19,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.7",
-    "summary": "test(usecase): give restart-gamecast-shaped a cron schedule that never fires during CI (7c5dc06)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(usecase): give restart-gamecast-shaped a cron schedule that never fires during CI (<code>7c5dc06</code>)</li>\n<li>fix(reaper): route cron exits first and stop losing exit statuses to the init broker (<code>ab98dfd</code>)</li>\n<li>fix(installer): make sysg reachable from one-shot ssh and stop relinking /usr/local/bin (<code>04da5d8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.5 (<code>617693a</code>)</li>\n<li>docs(blog): publish release post for v0.67.5 (<code>cef8cb4</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.5...v0.67.7\">Full changelog on GitHub</a></p>",
+    "summary": "test(usecase): give restart-gamecast-shaped a cron schedule that never fires during CI (c023133)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(usecase): give restart-gamecast-shaped a cron schedule that never fires during CI (<code>c023133</code>)</li>\n<li>fix(reaper): route cron exits first and stop losing exit statuses to the init broker (<code>6c1bfb1</code>)</li>\n<li>fix(installer): make sysg reachable from one-shot ssh and stop relinking /usr/local/bin (<code>c5c1285</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.5 (<code>730d0b7</code>)</li>\n<li>docs(blog): publish release post for v0.67.5 (<code>fe4ed38</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.5...v0.67.7\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -19,8 +31,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.5",
-    "summary": "fix(cron): judge a run by its exit status, not by a readiness gate (6926a84)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(cron): judge a run by its exit status, not by a readiness gate (<code>6926a84</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.4 (<code>e4fb1ce</code>)</li>\n<li>docs(blog): publish release post for v0.67.4 (<code>53a3c75</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.4...v0.67.5\">Full changelog on GitHub</a></p>",
+    "summary": "fix(cron): judge a run by its exit status, not by a readiness gate (177e436)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(cron): judge a run by its exit status, not by a readiness gate (<code>177e436</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.4 (<code>78cfd46</code>)</li>\n<li>docs(blog): publish release post for v0.67.4 (<code>d597b2a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.4...v0.67.5\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -31,8 +43,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.4",
-    "summary": "fix(health): leave a unit inside its startup readiness gate alone (5d1a03a)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(health): leave a unit inside its startup readiness gate alone (<code>5d1a03a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.3 (<code>0b60f32</code>)</li>\n<li>docs(blog): publish release post for v0.67.3 (<code>5efaec4</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.3...v0.67.4\">Full changelog on GitHub</a></p>",
+    "summary": "fix(health): leave a unit inside its startup readiness gate alone (3e79c8b)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(health): leave a unit inside its startup readiness gate alone (<code>3e79c8b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.3 (<code>0729c64</code>)</li>\n<li>docs(blog): publish release post for v0.67.3 (<code>a977bca</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.3...v0.67.4\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -43,8 +55,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.3",
-    "summary": "fix(health): abandon a readiness probe when its process is replaced (f1b0023)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(health): abandon a readiness probe when its process is replaced (<code>f1b0023</code>)</li>\n<li>fix(restart): scope a -c reload to the manifest it was handed (<code>1c5510c</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.2 (<code>4f3e2b7</code>)</li>\n<li>docs(blog): publish release post for v0.67.2 (<code>b4c256e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.2...v0.67.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(health): abandon a readiness probe when its process is replaced (e8e79d1)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(health): abandon a readiness probe when its process is replaced (<code>e8e79d1</code>)</li>\n<li>fix(restart): scope a -c reload to the manifest it was handed (<code>2e0080f</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.2 (<code>c4058b9</code>)</li>\n<li>docs(blog): publish release post for v0.67.2 (<code>93c6e72</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.2...v0.67.3\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -55,8 +67,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.2",
-    "summary": "ci(audit): install cargo-audit locked and pinned instead of resolving it fresh (14b3835)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci(audit): install cargo-audit locked and pinned instead of resolving it fresh (<code>14b3835</code>)</li>\n<li>fix(restart): bounce every declared unit, and never let a removal excuse a no-op (<code>775d757</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.1 (<code>4034272</code>)</li>\n<li>docs(blog): publish release post for v0.67.1 (<code>5301c87</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.1...v0.67.2\">Full changelog on GitHub</a></p>",
+    "summary": "ci(audit): install cargo-audit locked and pinned instead of resolving it fresh (04faa21)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci(audit): install cargo-audit locked and pinned instead of resolving it fresh (<code>04faa21</code>)</li>\n<li>fix(restart): bounce every declared unit, and never let a removal excuse a no-op (<code>307298b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.1 (<code>259e83b</code>)</li>\n<li>docs(blog): publish release post for v0.67.1 (<code>d1586b4</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.1...v0.67.2\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -67,8 +79,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.1",
-    "summary": "fix(boot): refuse install-boot where neither systemd nor launchd runs (4df7798)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(boot): refuse install-boot where neither systemd nor launchd runs (<code>4df7798</code>)</li>\n<li>fix(ci): generate search index before typecheck (<code>9dc781b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.0 (<code>d703992</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.0...v0.67.1\">Full changelog on GitHub</a></p>",
+    "summary": "fix(boot): refuse install-boot where neither systemd nor launchd runs (bd03efd)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(boot): refuse install-boot where neither systemd nor launchd runs (<code>bd03efd</code>)</li>\n<li>fix(ci): generate search index before typecheck (<code>966d0ea</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.0 (<code>8f17ee2</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.0...v0.67.1\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -79,8 +91,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.0",
-    "summary": "feat(boot): run under a service manager with start --attached and install-boot (ff71c92)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(boot): run under a service manager with start --attached and install-boot (<code>ff71c92</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.9 (<code>8db67bf</code>)</li>\n<li>docs(blog): publish release post for v0.66.9 (<code>64e6f28</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.9...v0.67.0\">Full changelog on GitHub</a></p>",
+    "summary": "feat(boot): run under a service manager with start --attached and install-boot (8ab6fe8)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(boot): run under a service manager with start --attached and install-boot (<code>8ab6fe8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.9 (<code>c6fb8a1</code>)</li>\n<li>docs(blog): publish release post for v0.66.9 (<code>e729f18</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.9...v0.67.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -91,8 +103,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.9",
-    "summary": "fix(restart): fail a restart that bounced nothing and bound each use-case run (479edf3)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): fail a restart that bounced nothing and bound each use-case run (<code>479edf3</code>)</li>\n<li>fix(restart): bounce every unit by default and fail a restart that touched nothing (<code>b13b047</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.7 (<code>f55a993</code>)</li>\n<li>docs(blog): publish release post for v0.66.7 (<code>0143280</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.7...v0.66.9\">Full changelog on GitHub</a></p>",
+    "summary": "fix(restart): fail a restart that bounced nothing and bound each use-case run (098caf5)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): fail a restart that bounced nothing and bound each use-case run (<code>098caf5</code>)</li>\n<li>fix(restart): bounce every unit by default and fail a restart that touched nothing (<code>2a8071f</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.7 (<code>ec3afc0</code>)</li>\n<li>docs(blog): publish release post for v0.66.7 (<code>7d40a2e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.7...v0.66.9\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -103,8 +115,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.7",
-    "summary": "docs: link the SG code range in the Docker integration page (9ea46cf)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>docs: link the SG code range in the Docker integration page (<code>9ea46cf</code>)</li>\n<li>fix: attach cgroups before fork and gate ceiling failures on schema version (<code>1832db4</code>)</li>\n<li>fix: enforce declared config and close spawn, teardown, cascade and purge gaps (<code>c42a215</code>)</li>\n<li>docs: update readme + comparison blog (<code>af3eaf1</code>)</li>\n<li>fix(web): order the blog index by date across releases and articles (<code>f808c60</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.6 (<code>a5c6266</code>)</li>\n<li>docs(blog): publish release post for v0.66.6 (<code>919f827</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.6...v0.66.7\">Full changelog on GitHub</a></p>",
+    "summary": "docs: link the SG code range in the Docker integration page (490fc4e)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>docs: link the SG code range in the Docker integration page (<code>490fc4e</code>)</li>\n<li>fix: attach cgroups before fork and gate ceiling failures on schema version (<code>1adeb9a</code>)</li>\n<li>fix: enforce declared config and close spawn, teardown, cascade and purge gaps (<code>54e3462</code>)</li>\n<li>docs: update readme + comparison blog (<code>a9fd48c</code>)</li>\n<li>fix(web): order the blog index by date across releases and articles (<code>b09b0ea</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.6 (<code>cef0941</code>)</li>\n<li>docs(blog): publish release post for v0.66.6 (<code>f4a16b8</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.6...v0.66.7\">Full changelog on GitHub</a></p>",
     "commits": 7
   },
   {
@@ -115,8 +127,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.6",
-    "summary": "fix(ci): declare the ci environment on the homebrew publish job (81a10c1)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): declare the ci environment on the homebrew publish job (<code>81a10c1</code>)</li>\n<li>feat(web): load the Google Ads gtag on every sysg.dev page (<code>92aff07</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.5 (<code>6a23ac3</code>)</li>\n<li>docs(blog): publish release post for v0.66.5 (<code>25cf76d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.5...v0.66.6\">Full changelog on GitHub</a></p>",
+    "summary": "fix(ci): declare the ci environment on the homebrew publish job (e839030)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): declare the ci environment on the homebrew publish job (<code>e839030</code>)</li>\n<li>feat(web): load the Google Ads gtag on every sysg.dev page (<code>12ffffb</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.5 (<code>b65faf4</code>)</li>\n<li>docs(blog): publish release post for v0.66.5 (<code>0032138</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.5...v0.66.6\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -127,8 +139,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.5",
-    "summary": "fix(web): correct the teardown tie, the Blocks legend, and an SVG title hydration mismatch (0ab6a55)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(web): correct the teardown tie, the Blocks legend, and an SVG title hydration mismatch (<code>0ab6a55</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.4 (<code>487ea77</code>)</li>\n<li>docs(blog): publish release post for v0.66.4 (<code>922c6ca</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.4...v0.66.5\">Full changelog on GitHub</a></p>",
+    "summary": "fix(web): correct the teardown tie, the Blocks legend, and an SVG title hydration mismatch (96c63fd)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(web): correct the teardown tie, the Blocks legend, and an SVG title hydration mismatch (<code>96c63fd</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.4 (<code>d33f005</code>)</li>\n<li>docs(blog): publish release post for v0.66.4 (<code>b4445a3</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.4...v0.66.5\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -139,8 +151,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.4",
-    "summary": "test(cron): sample the cron failure case while no run is in flight (b20fe5f)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(cron): sample the cron failure case while no run is in flight (<code>b20fe5f</code>)</li>\n<li>docs(github): add issue and pull request templates (<code>b871795</code>)</li>\n<li>ci: make the commit-message scope optiona (<code>aba9cd3</code>)</li>\n<li>ci: drop the mintlify docs check and canonicalize SG code links (<code>e49fc09</code>)</li>\n<li>fix(docs): prefix internal doc links with /docs and pin the mintlify link check (<code>681e509</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.3 (<code>0b2da7b</code>)</li>\n<li>docs(blog): publish release post for v0.66.3 (<code>a95efcd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.3...v0.66.4\">Full changelog on GitHub</a></p>",
+    "summary": "test(cron): sample the cron failure case while no run is in flight (453daa8)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(cron): sample the cron failure case while no run is in flight (<code>453daa8</code>)</li>\n<li>docs(github): add issue and pull request templates (<code>03f2239</code>)</li>\n<li>ci: make the commit-message scope optiona (<code>f209ffc</code>)</li>\n<li>ci: drop the mintlify docs check and canonicalize SG code links (<code>edaf33b</code>)</li>\n<li>fix(docs): prefix internal doc links with /docs and pin the mintlify link check (<code>4fd10b0</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.3 (<code>b6becb7</code>)</li>\n<li>docs(blog): publish release post for v0.66.3 (<code>08bae3a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.3...v0.66.4\">Full changelog on GitHub</a></p>",
     "commits": 7
   },
   {
@@ -151,8 +163,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.3",
-    "summary": "fix(ci): run mintlify against the real docs root and update the README logos (869aa4c)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): run mintlify against the real docs root and update the README logos (<code>869aa4c</code>)</li>\n<li>feat(brew): install sysg from a homebrew tap and publish it on release (<code>2c91a13</code>)</li>\n<li>docs(bench): rewrite the comparative harness README for readability (<code>7fa558e</code>)</li>\n<li>feat(web): publish release posts from CI and fix every broken sysg.dev link (<code>46287e6</code>)</li>\n<li>fix(cron): address routed statuses by state key and let the owner judge the run (<code>718b468</code>)</li>\n<li>fix(cron): route cron exit status to its owner and refuse unknown config keys (<code>6933c61</code>)</li>\n<li>enhancement(blog): ensure posts are mobile friendly (<code>eaf20d0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.1...v0.66.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(ci): run mintlify against the real docs root and update the README logos (8ac04b2)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): run mintlify against the real docs root and update the README logos (<code>8ac04b2</code>)</li>\n<li>feat(brew): install sysg from a homebrew tap and publish it on release (<code>5d34a74</code>)</li>\n<li>docs(bench): rewrite the comparative harness README for readability (<code>9c89c73</code>)</li>\n<li>feat(web): publish release posts from CI and fix every broken sysg.dev link (<code>3881c99</code>)</li>\n<li>fix(cron): address routed statuses by state key and let the owner judge the run (<code>85401b6</code>)</li>\n<li>fix(cron): route cron exit status to its owner and refuse unknown config keys (<code>93e1afa</code>)</li>\n<li>enhancement(blog): ensure posts are mobile friendly (<code>0660571</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.1...v0.66.3\">Full changelog on GitHub</a></p>",
     "commits": 7
   },
   {
@@ -163,8 +175,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.1",
-    "summary": "chore: retagline systemg as a general-purpose program orchestrator (1d8835f)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>chore: retagline systemg as a general-purpose program orchestrator (<code>1d8835f</code>)</li>\n<li>enhancement(blog): add sysg intro blog post (<code>4ebe315</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.0 (<code>9fde2ca</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.0...v0.66.1\">Full changelog on GitHub</a></p>",
+    "summary": "chore: retagline systemg as a general-purpose program orchestrator (075b028)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>chore: retagline systemg as a general-purpose program orchestrator (<code>075b028</code>)</li>\n<li>enhancement(blog): add sysg intro blog post (<code>7c6be4c</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.66.0 (<code>a09021d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.66.0...v0.66.1\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -175,8 +187,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.66.0",
-    "summary": "perf(supervisor): bound live-log and metrics memory, add argv exec form (ffcfabd)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>perf(supervisor): bound live-log and metrics memory, add argv exec form (<code>ffcfabd</code>)</li>\n<li>fix(sysg.dev): sanitize release HTML before rendering it (<code>4e09e26</code>)</li>\n<li>feat(sysg.dev): rebuild sysg.dev on the systemg design system (<code>ed52a83</code>)</li>\n<li>feat(cli): color the --help doc links (<code>5234511</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.65.0 (<code>ec7c877</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.65.0...v0.66.0\">Full changelog on GitHub</a></p>",
+    "summary": "perf(supervisor): bound live-log and metrics memory, add argv exec form (d96728e)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>perf(supervisor): bound live-log and metrics memory, add argv exec form (<code>d96728e</code>)</li>\n<li>fix(sysg.dev): sanitize release HTML before rendering it (<code>6dec6b0</code>)</li>\n<li>feat(sysg.dev): rebuild sysg.dev on the systemg design system (<code>d78a284</code>)</li>\n<li>feat(cli): color the --help doc links (<code>5b35d93</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.65.0 (<code>fc84d48</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.65.0...v0.66.0\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -187,8 +199,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.65.0",
-    "summary": "feat(start): run every dependency-ready service concurrently (1c6dc42)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(start): run every dependency-ready service concurrently (<code>1c6dc42</code>)</li>\n<li>fix(config): parse durations at load time and type them SG0210 (<code>5ed8da2</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.5 (<code>672952a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.5...v0.65.0\">Full changelog on GitHub</a></p>",
+    "summary": "feat(start): run every dependency-ready service concurrently (aa1e205)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(start): run every dependency-ready service concurrently (<code>aa1e205</code>)</li>\n<li>fix(config): parse durations at load time and type them SG0210 (<code>b97e93d</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.5 (<code>1b81707</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.5...v0.65.0\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -199,8 +211,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.5",
-    "summary": "fix(kernel): type child-side refusals as SG0721-SG0748 and drop RFC 0001 (6af8d4c)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(kernel): type child-side refusals as SG0721-SG0748 and drop RFC 0001 (<code>6af8d4c</code>)</li>\n<li>docs(kernel): replace stale roadmap copy with shipped behavior (<code>228ce57</code>)</li>\n<li>chore(docs): add GTM container GTM-TZ59MZS2 for LinkedIn Insight Tag (<code>9cc44b6</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.4 (<code>e1b95f0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.4...v0.64.5\">Full changelog on GitHub</a></p>",
+    "summary": "fix(kernel): type child-side refusals as SG0721-SG0748 and drop RFC 0001 (215383c)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(kernel): type child-side refusals as SG0721-SG0748 and drop RFC 0001 (<code>215383c</code>)</li>\n<li>docs(kernel): replace stale roadmap copy with shipped behavior (<code>dd23afc</code>)</li>\n<li>chore(docs): add GTM container GTM-TZ59MZS2 for LinkedIn Insight Tag (<code>190fc13</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.4 (<code>119907c</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.4...v0.64.5\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -211,8 +223,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.4",
-    "summary": "fix(daemon): stop reconciliation clobbering a completed cron run (7c84dd7)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(daemon): stop reconciliation clobbering a completed cron run (<code>7c84dd7</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.3 (<code>7de4890</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.3...v0.64.4\">Full changelog on GitHub</a></p>",
+    "summary": "fix(daemon): stop reconciliation clobbering a completed cron run (5b167fb)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(daemon): stop reconciliation clobbering a completed cron run (<code>5b167fb</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.3 (<code>477cce4</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.3...v0.64.4\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -223,8 +235,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.3",
-    "summary": "fix(ci): patch RUSTSEC-2026-0258 and let the audit job write checks (21770d8)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): patch RUSTSEC-2026-0258 and let the audit job write checks (<code>21770d8</code>)</li>\n<li>fix(daemon): delete the per-launch lifetime thread and surface the resident supervisor version (<code>65ddfc4</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.1 (<code>e8549af</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.1...v0.64.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(ci): patch RUSTSEC-2026-0258 and let the audit job write checks (839dc93)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): patch RUSTSEC-2026-0258 and let the audit job write checks (<code>839dc93</code>)</li>\n<li>fix(daemon): delete the per-launch lifetime thread and surface the resident supervisor version (<code>045646e</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.64.1 (<code>4355b1e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.64.1...v0.64.3\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -235,8 +247,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.64.1",
-    "summary": "fix(state): keep a skipped record when the monitor reaps the process (03dfa03)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(state): keep a skipped record when the monitor reaps the process (<code>03dfa03</code>)</li>\n<li>feat(config): move the command wait budget into supervisor.xml (<code>6e4f077</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.3 (<code>1e5ccfd</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.3...v0.64.1\">Full changelog on GitHub</a></p>",
+    "summary": "fix(state): keep a skipped record when the monitor reaps the process (a3330b5)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(state): keep a skipped record when the monitor reaps the process (<code>a3330b5</code>)</li>\n<li>feat(config): move the command wait budget into supervisor.xml (<code>7deb907</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.3 (<code>2e9548e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.3...v0.64.1\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -247,8 +259,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.3",
-    "summary": "fix(ipc): wait on supervisor liveness, not a 120s clock (0a99e1a)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ipc): wait on supervisor liveness, not a 120s clock (<code>0a99e1a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.2 (<code>70c97ee</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.2...v0.63.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(ipc): wait on supervisor liveness, not a 120s clock (0fdde7b)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ipc): wait on supervisor liveness, not a 120s clock (<code>0fdde7b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.2 (<code>7f53eb0</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.2...v0.63.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -259,8 +271,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.2",
-    "summary": "fix(daemon): trip a restart breaker when a unit never stays up (1a3794d)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(daemon): trip a restart breaker when a unit never stays up (<code>1a3794d</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.1 (<code>7117f12</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.1...v0.63.2\">Full changelog on GitHub</a></p>",
+    "summary": "fix(daemon): trip a restart breaker when a unit never stays up (91efbfa)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(daemon): trip a restart breaker when a unit never stays up (<code>91efbfa</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.1 (<code>22ce37b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.1...v0.63.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -271,8 +283,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.1",
-    "summary": "fix(ci): drop conflicting musl-tools from musl cross Dockerfiles (base image already ships musl toolchain) (1d3df97)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): drop conflicting musl-tools from musl cross Dockerfiles (base image already ships musl toolchain) (<code>1d3df97</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.0...v0.63.1\">Full changelog on GitHub</a></p>",
+    "summary": "fix(ci): drop conflicting musl-tools from musl cross Dockerfiles (base image already ships musl toolchain) (b0fb55c)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(ci): drop conflicting musl-tools from musl cross Dockerfiles (base image already ships musl toolchain) (<code>b0fb55c</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.63.0...v0.63.1\">Full changelog on GitHub</a></p>",
     "commits": 1
   },
   {
@@ -283,8 +295,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.63.0",
-    "summary": "ci(release): publish claude plugin only after crate is published to crates.io (cb2bcff)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci(release): publish claude plugin only after crate is published to crates.io (<code>cb2bcff</code>)</li>\n<li>fix(supply-chain): treat systemg root crate as first-party in cargo-vet (audit-as-crates-io = false) (<code>8897dcf</code>)</li>\n<li>ci(commit-check): run cancel-previous before the commit-message check (<code>6548c69</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.0 (<code>890feea</code>)</li>\n<li>fix(ci, test): deflake auto-restart test; replace broken virtme kernel-matrix with native-kernel Landlock lane (<code>05a8974</code>)</li>\n<li>ci(commit-check): enforce type(scope) commit format, gate audit/deny/vet on it (<code>4b1a322</code>)</li>\n<li>fix(ci): v2 test manifests, re-disable legacy uat suites, update purge/sys-root tests for SG0405/SG0704; sandbox lane seccomp+landlock flags (<code>fa87ba2</code>)</li>\n<li>test(model): model-based sequence harness — random lifecycle ops, oracle+model checked every step; CI matrix (<code>68b581b</code>)</li>\n<li>feat(doctor): pid-reuse + empty-teardown invariants; wire teardown oracle into parity (<code>f39076c</code>)</li>\n<li>feat(doctor): invariant oracle check_world() + sysg doctor; wire into parity UAT (<code>82e8c4d</code>)</li>\n<li>fix(ci): clippy clean on linux both arches — io::Error::other, arch-conditional mut/return; SG links out of SVG text (<code>47b2976</code>)</li>\n<li>docs(kernel-mode): add per-platform kernel-interaction diagram (userspace↔kernel boundary) (<code>c145655</code>)</li>\n<li>docs(kernel-mode): resolve Phase 4 — pidfd ships, eBPF evaluated and declined; all four phases complete (<code>472aec5</code>)</li>\n<li>feat(sandbox): seccomp baseline-v1 enforcement (SG0722), parent-compiled BpfProgram + child raw-syscall apply (<code>574b3e9</code>)</li>\n<li>feat(sandbox): schema v3 fail-closed + Landlock/no_new_privs enforcement (SG0724), sandbox UAT + CI (<code>6d4f4cc</code>)</li>\n<li>feat(sandbox): manifest schema v3 fail-closed — refuse unenforceable security keys in parent before spawn (<code>0b63c5b</code>)</li>\n<li>feat(macos): system mode on /Library paths + launchd installer; native smoke-test lane; docs (<code>93fa3ab</code>)</li>\n<li>feat(init): container-init teardown — fix init-mode wait() hang, broker orphan reaping, reverse-order shutdown, pid1 UAT suite (<code>d9a061f</code>)</li>\n<li>feat(init): reverse-dependency-order teardown + SG0713 survivor verdict on init exit (<code>be56831</code>)</li>\n<li>feat(init): PID1 wait broker with routed mailbox, ECHILD-safe waits, TERM/INT shutdown bridge (<code>d2e37f1</code>)</li>\n<li>feat(init): sysg init subcommand with PID1/prereq preflights, SG0711-0714, upgrade refusal in init mode (<code>7de5a6e</code>)</li>\n<li>feat(validate): mode-aware enforceability pass — SG0705, startable field, rootless --sys validate, docs callout (<code>6777b09</code>)</li>\n<li>feat(monitor): pidfd-based instant exit detection with polling fallback; sandbox keys warn of fail-closed deprecation (<code>3fa6869</code>)</li>\n<li>docs(kernel-mode): record reduced-v1 scope decision in RFC and docs callouts (<code>f1fba1c</code>)</li>\n<li>fix(purge): stale pidfile no longer bypasses live-socket supervisor shutdown; SG0405 covers scoped purge (<code>90e9d9d</code>)</li>\n<li>feat(kernel-mode): docs/kernel-mode section, purge ghost-supervisor fix (SG0405), weekly fuzz CI, release gates on deny+vet (<code>828f4d8</code>)</li>\n<li>feat(kernel-mode): alpine/musl parity lane + setrlimit musl fix, non-root user lane, exec-drop regression case, cargo-vet (<code>3753517</code>)</li>\n<li>feat(kernel-mode): phase 0+1a — audits program, cargo-deny, ipc fuzzing, SG0701-0704, --sys exec-drop fix, parity UAT lanes, musl+UAT CI (<code>9b70fcb</code>)</li>\n<li>rfc: embed red-team objections as callouts in kernel-mode design (<code>50fa7df</code>)</li>\n<li>rfc: kernel mode design (system/init/sandbox/ebpf) with SG07xx and test matrix (<code>3945948</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.3 (<code>9a34f26</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.3...v0.63.0\">Full changelog on GitHub</a></p>",
+    "summary": "ci(release): publish claude plugin only after crate is published to crates.io (a153eab)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>ci(release): publish claude plugin only after crate is published to crates.io (<code>a153eab</code>)</li>\n<li>fix(supply-chain): treat systemg root crate as first-party in cargo-vet (audit-as-crates-io = false) (<code>941268b</code>)</li>\n<li>ci(commit-check): run cancel-previous before the commit-message check (<code>53eb977</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.63.0 (<code>b1d4dba</code>)</li>\n<li>fix(ci, test): deflake auto-restart test; replace broken virtme kernel-matrix with native-kernel Landlock lane (<code>fedbb27</code>)</li>\n<li>ci(commit-check): enforce type(scope) commit format, gate audit/deny/vet on it (<code>a2253f2</code>)</li>\n<li>fix(ci): v2 test manifests, re-disable legacy uat suites, update purge/sys-root tests for SG0405/SG0704; sandbox lane seccomp+landlock flags (<code>81e62b4</code>)</li>\n<li>test(model): model-based sequence harness — random lifecycle ops, oracle+model checked every step; CI matrix (<code>c463b91</code>)</li>\n<li>feat(doctor): pid-reuse + empty-teardown invariants; wire teardown oracle into parity (<code>992ceb2</code>)</li>\n<li>feat(doctor): invariant oracle check_world() + sysg doctor; wire into parity UAT (<code>bf749cc</code>)</li>\n<li>fix(ci): clippy clean on linux both arches — io::Error::other, arch-conditional mut/return; SG links out of SVG text (<code>a1c3151</code>)</li>\n<li>docs(kernel-mode): add per-platform kernel-interaction diagram (userspace↔kernel boundary) (<code>5587c1b</code>)</li>\n<li>docs(kernel-mode): resolve Phase 4 — pidfd ships, eBPF evaluated and declined; all four phases complete (<code>2308df0</code>)</li>\n<li>feat(sandbox): seccomp baseline-v1 enforcement (SG0722), parent-compiled BpfProgram + child raw-syscall apply (<code>921bb5b</code>)</li>\n<li>feat(sandbox): schema v3 fail-closed + Landlock/no_new_privs enforcement (SG0724), sandbox UAT + CI (<code>91e1074</code>)</li>\n<li>feat(sandbox): manifest schema v3 fail-closed — refuse unenforceable security keys in parent before spawn (<code>516f35b</code>)</li>\n<li>feat(macos): system mode on /Library paths + launchd installer; native smoke-test lane; docs (<code>4f09a1f</code>)</li>\n<li>feat(init): container-init teardown — fix init-mode wait() hang, broker orphan reaping, reverse-order shutdown, pid1 UAT suite (<code>3b19089</code>)</li>\n<li>feat(init): reverse-dependency-order teardown + SG0713 survivor verdict on init exit (<code>4b32339</code>)</li>\n<li>feat(init): PID1 wait broker with routed mailbox, ECHILD-safe waits, TERM/INT shutdown bridge (<code>3671989</code>)</li>\n<li>feat(init): sysg init subcommand with PID1/prereq preflights, SG0711-0714, upgrade refusal in init mode (<code>b74c822</code>)</li>\n<li>feat(validate): mode-aware enforceability pass — SG0705, startable field, rootless --sys validate, docs callout (<code>9ff593e</code>)</li>\n<li>feat(monitor): pidfd-based instant exit detection with polling fallback; sandbox keys warn of fail-closed deprecation (<code>a0564f4</code>)</li>\n<li>docs(kernel-mode): record reduced-v1 scope decision in RFC and docs callouts (<code>b49a8f6</code>)</li>\n<li>fix(purge): stale pidfile no longer bypasses live-socket supervisor shutdown; SG0405 covers scoped purge (<code>24aa57f</code>)</li>\n<li>feat(kernel-mode): docs/kernel-mode section, purge ghost-supervisor fix (SG0405), weekly fuzz CI, release gates on deny+vet (<code>de95c7e</code>)</li>\n<li>feat(kernel-mode): alpine/musl parity lane + setrlimit musl fix, non-root user lane, exec-drop regression case, cargo-vet (<code>855e4bc</code>)</li>\n<li>feat(kernel-mode): phase 0+1a — audits program, cargo-deny, ipc fuzzing, SG0701-0704, --sys exec-drop fix, parity UAT lanes, musl+UAT CI (<code>a2e269f</code>)</li>\n<li>rfc: embed red-team objections as callouts in kernel-mode design (<code>acb33b4</code>)</li>\n<li>rfc: kernel mode design (system/init/sandbox/ebpf) with SG07xx and test matrix (<code>bff2ed5</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.3 (<code>058b5a4</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.3...v0.63.0\">Full changelog on GitHub</a></p>",
     "commits": 31
   },
   {
@@ -295,8 +307,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.62.3",
-    "summary": "fix(diag): include SG0404 and SG0601-0605 in SgCode::ALL (d9d5b0d)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(diag): include SG0404 and SG0601-0605 in SgCode::ALL (<code>d9d5b0d</code>)</li>\n<li>docs(lib): match crate-root tagline to README (<code>f2f6789</code>)</li>\n<li>test(usecase): dump state files and supervisor log on a RED run (<code>c3753f8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.2 (<code>03474a9</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.2...v0.62.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(diag): include SG0404 and SG0601-0605 in SgCode::ALL (d32ba40)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(diag): include SG0404 and SG0601-0605 in SgCode::ALL (<code>d32ba40</code>)</li>\n<li>docs(lib): match crate-root tagline to README (<code>896807e</code>)</li>\n<li>test(usecase): dump state files and supervisor log on a RED run (<code>47715d1</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.2 (<code>611fd64</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.2...v0.62.3\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -307,8 +319,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.62.2",
-    "summary": "fix(restart): scope restart -s to its target and seal queued op journals (fc2fed1)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): scope restart -s to its target and seal queued op journals (<code>fc2fed1</code>)</li>\n<li>docs(restart): clarify --daemonize is a no-op against a running supervisor (<code>01670d8</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.1 (<code>2d7c78d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.1...v0.62.2\">Full changelog on GitHub</a></p>",
+    "summary": "fix(restart): scope restart -s to its target and seal queued op journals (c2079b7)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): scope restart -s to its target and seal queued op journals (<code>c2079b7</code>)</li>\n<li>docs(restart): clarify --daemonize is a no-op against a running supervisor (<code>1227c5a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.1 (<code>5f89e6a</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.62.1...v0.62.2\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -319,8 +331,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.62.1",
-    "summary": "test(daemon): ignore the flaky automatic-restart test pending a wider deadline (c06d369)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(daemon): ignore the flaky automatic-restart test pending a wider deadline (<code>c06d369</code>)</li>\n<li>fix(restart): keep the fixed-port rolling→immediate transition after the reconcile deletion (<code>5ec2c40</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.0 (<code>6859b3b</code>)</li>\n<li>feat(status): probe declared health on a timer and stop reporting live pids as healthy (<code>33fbe67</code>)</li>\n<li>feat(daemon): reap orphaned generations by provenance and drop port-based ghost detection (<code>508eba3</code>)</li>\n<li>fix(daemon): terminate and verify service teardown by session, not just group (<code>8722bcb</code>)</li>\n<li>feat(daemon): retain retired process generations so orphans stay attributable (<code>c1a38f5</code>)</li>\n<li>docs: swap the installation gif for the rebuilt sysg lifecycle recording (<code>15fa304</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.4 (<code>ef38c6d</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.4...v0.62.1\">Full changelog on GitHub</a></p>",
+    "summary": "test(daemon): ignore the flaky automatic-restart test pending a wider deadline (d0daa71)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>test(daemon): ignore the flaky automatic-restart test pending a wider deadline (<code>d0daa71</code>)</li>\n<li>fix(restart): keep the fixed-port rolling→immediate transition after the reconcile deletion (<code>5970fbf</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.62.0 (<code>a23c01f</code>)</li>\n<li>feat(status): probe declared health on a timer and stop reporting live pids as healthy (<code>09f7f52</code>)</li>\n<li>feat(daemon): reap orphaned generations by provenance and drop port-based ghost detection (<code>604785f</code>)</li>\n<li>fix(daemon): terminate and verify service teardown by session, not just group (<code>d23b3b7</code>)</li>\n<li>feat(daemon): retain retired process generations so orphans stay attributable (<code>b219134</code>)</li>\n<li>docs: swap the installation gif for the rebuilt sysg lifecycle recording (<code>58e76fd</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.4 (<code>5d96c0f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.4...v0.62.1\">Full changelog on GitHub</a></p>",
     "commits": 9
   },
   {
@@ -331,8 +343,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.61.4",
-    "summary": "fix(status): report a unit's recorded exit instead of inferring it should still be running (c562fd1)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(status): report a unit's recorded exit instead of inferring it should still be running (<code>c562fd1</code>)</li>\n<li>fix(start): settle a boot verdict for the primary project and stop blaming transiently Lost units (<code>316ee8c</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.3 (<code>6f64789</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.3...v0.61.4\">Full changelog on GitHub</a></p>",
+    "summary": "fix(status): report a unit's recorded exit instead of inferring it should still be running (2dd4d6e)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(status): report a unit's recorded exit instead of inferring it should still be running (<code>2dd4d6e</code>)</li>\n<li>fix(start): settle a boot verdict for the primary project and stop blaming transiently Lost units (<code>fafbcb5</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.3 (<code>0a26107</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.3...v0.61.4\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -343,8 +355,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.61.3",
-    "summary": "fix(restart): emit unit frames on the single-service cascade and stop paths (67e0135)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): emit unit frames on the single-service cascade and stop paths (<code>67e0135</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.2 (<code>305ce15</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.2...v0.61.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(restart): emit unit frames on the single-service cascade and stop paths (02dfe39)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(restart): emit unit frames on the single-service cascade and stop paths (<code>02dfe39</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.61.2 (<code>bbce36f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.61.2...v0.61.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -355,8 +367,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.61.2",
-    "summary": "feat(start): render the progress tree for queued project boots too (9136fe5)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(start): render the progress tree for queued project boots too (<code>9136fe5</code>)</li>\n<li>fix(start): key progress-tree journals on a client nonce, not the command target (<code>ad90a81</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.60.0...v0.61.2\">Full changelog on GitHub</a></p>",
+    "summary": "feat(start): render the progress tree for queued project boots too (bff0f7e)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat(start): render the progress tree for queued project boots too (<code>bff0f7e</code>)</li>\n<li>fix(start): key progress-tree journals on a client nonce, not the command target (<code>2a27aa6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.60.0...v0.61.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -367,8 +379,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.60.0",
-    "summary": "fix(tests): assert the absent-supervisor condition by code, not by prose (8e8c809)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(tests): assert the absent-supervisor condition by code, not by prose (<code>8e8c809</code>)</li>\n<li>fix(ci): key release detection on the published tag, not the previous commit (<code>999323e</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.60.0 (<code>4cd6f41</code>)</li>\n<li>fix(status): type the no-supervisor failure as SG0206 instead of the catch-all (<code>9655b50</code>)</li>\n<li>fix(skip): make skip mean skipped for cron units and dependents (<code>ce6c1eb</code>)</li>\n<li>fix(status): publish boot snapshot before announcing start complete (<code>06d0614</code>)</li>\n<li>feat(config): (bang)include manifest fragments with chain-attributed errors and lifecycle-safe handling (<code>ca8c7ca</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.3 (<code>b363b82</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.3...v0.60.0\">Full changelog on GitHub</a></p>",
+    "summary": "fix(tests): assert the absent-supervisor condition by code, not by prose (8960b44)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(tests): assert the absent-supervisor condition by code, not by prose (<code>8960b44</code>)</li>\n<li>fix(ci): key release detection on the published tag, not the previous commit (<code>ec885ab</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.60.0 (<code>7472f21</code>)</li>\n<li>fix(status): type the no-supervisor failure as SG0206 instead of the catch-all (<code>a910c8a</code>)</li>\n<li>fix(skip): make skip mean skipped for cron units and dependents (<code>e2b50d8</code>)</li>\n<li>fix(status): publish boot snapshot before announcing start complete (<code>e227474</code>)</li>\n<li>feat(config): (bang)include manifest fragments with chain-attributed errors and lifecycle-safe handling (<code>75924b5</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.3 (<code>d63be0c</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.3...v0.60.0\">Full changelog on GitHub</a></p>",
     "commits": 8
   },
   {
@@ -379,8 +391,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.59.3",
-    "summary": "fix(upgrade): resume pre-0.59 loose handoffs under their derived identity (1321553)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(upgrade): resume pre-0.59 loose handoffs under their derived identity (<code>1321553</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.2 (<code>3a40c21</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.2...v0.59.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(upgrade): resume pre-0.59 loose handoffs under their derived identity (9cb2bd2)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(upgrade): resume pre-0.59 loose handoffs under their derived identity (<code>9cb2bd2</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.59.2 (<code>f8f387f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.59.2...v0.59.3\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -391,8 +403,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.59.2",
-    "summary": "fix(tests): read loose logs from the derived project, not loose (1affbdd)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(tests): read loose logs from the derived project, not <strong>loose</strong> (<code>1affbdd</code>)</li>\n<li>chore: update version-bump (<code>f762e4e</code>)</li>\n<li>fix(loose): give every project-less config its own project (<code>c8a5ff5</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.3 (<code>65cfa63</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.3...v0.59.2\">Full changelog on GitHub</a></p>",
+    "summary": "fix(tests): read loose logs from the derived project, not loose (6392fd2)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(tests): read loose logs from the derived project, not <strong>loose</strong> (<code>6392fd2</code>)</li>\n<li>chore: update version-bump (<code>93202d9</code>)</li>\n<li>fix(loose): give every project-less config its own project (<code>f6e7279</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.3 (<code>e42eb66</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.3...v0.59.2\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -403,8 +415,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.58.3",
-    "summary": "fix(opslot): match progress details by project id, not label substring (33b4449)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(opslot): match progress details by project id, not label substring (<code>33b4449</code>)</li>\n<li>feat(cli): nest restart progress into indented rows (<code>72111af</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.2 (<code>d19685f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.2...v0.58.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(opslot): match progress details by project id, not label substring (91a03de)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(opslot): match progress details by project id, not label substring (<code>91a03de</code>)</li>\n<li>feat(cli): nest restart progress into indented rows (<code>a75ca37</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.2 (<code>20d390f</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.2...v0.58.3\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -415,8 +427,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.58.2",
-    "summary": "fix: stop inferring listening ports from command text (9494b5a)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: stop inferring listening ports from command text (<code>9494b5a</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.1 (<code>5e993cf</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.1...v0.58.2\">Full changelog on GitHub</a></p>",
+    "summary": "fix: stop inferring listening ports from command text (3552268)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: stop inferring listening ports from command text (<code>3552268</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.58.1 (<code>4e3c092</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.58.1...v0.58.2\">Full changelog on GitHub</a></p>",
     "commits": 2
   },
   {
@@ -427,8 +439,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.58.1",
-    "summary": "fix: avoid false port conflicts during restart (144983c)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: avoid false port conflicts during restart (<code>144983c</code>)</li>\n<li>docs: recommend zero-backlog log streaming (<code>b8fc7fd</code>)</li>\n<li>fix(logs): hide single-service headers (<code>d6de34c</code>)</li>\n<li>feat(hooks): simplify service hook events (<code>087ecb7</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.4 (<code>a8162c6</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.4...v0.58.1\">Full changelog on GitHub</a></p>",
+    "summary": "fix: avoid false port conflicts during restart (68d99ec)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix: avoid false port conflicts during restart (<code>68d99ec</code>)</li>\n<li>docs: recommend zero-backlog log streaming (<code>42cd423</code>)</li>\n<li>fix(logs): hide single-service headers (<code>aa790c9</code>)</li>\n<li>feat(hooks): simplify service hook events (<code>bc23c79</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.4 (<code>4f02669</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.4...v0.58.1\">Full changelog on GitHub</a></p>",
     "commits": 5
   },
   {
@@ -439,8 +451,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.4",
-    "summary": "fix(logs): restore fresh bounded and aligned output (3b202f4)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(logs): restore fresh bounded and aligned output (<code>3b202f4</code>)</li>\n<li>fix(start): verify inferred port ownership before readiness (<code>28ef00c</code>)</li>\n<li>fix(reconcile): restore inactive projects and completed dependencies (<code>a490a6e</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.3 (<code>a33529b</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.3...v0.57.4\">Full changelog on GitHub</a></p>",
+    "summary": "fix(logs): restore fresh bounded and aligned output (ef58356)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(logs): restore fresh bounded and aligned output (<code>ef58356</code>)</li>\n<li>fix(start): verify inferred port ownership before readiness (<code>f1e53cf</code>)</li>\n<li>fix(reconcile): restore inactive projects and completed dependencies (<code>764687b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.3 (<code>dd5671e</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.3...v0.57.4\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -451,8 +463,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.3",
-    "summary": "fix(supervisor): eliminate shutdown verification flake (339a184)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(supervisor): eliminate shutdown verification flake (<code>339a184</code>)</li>\n<li>fix(units): correct staged unit startup and settling (<code>e2c6098</code>)</li>\n<li>feat(inspect): separate unit config path from command details (<code>23963b4</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.1 (<code>b814afe</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.1...v0.57.3\">Full changelog on GitHub</a></p>",
+    "summary": "fix(supervisor): eliminate shutdown verification flake (f5ea138)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(supervisor): eliminate shutdown verification flake (<code>f5ea138</code>)</li>\n<li>fix(units): correct staged unit startup and settling (<code>14988b1</code>)</li>\n<li>feat(inspect): separate unit config path from command details (<code>7a50a23</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.1 (<code>f2dbfba</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.1...v0.57.3\">Full changelog on GitHub</a></p>",
     "commits": 4
   },
   {
@@ -463,8 +475,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.1",
-    "summary": "fix(usecase): remove contention races from upgrade and port diagnostics (331b2be)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(usecase): remove contention races from upgrade and port diagnostics (<code>331b2be</code>)</li>\n<li>fix(upgrade): negotiate compatibility by handoff contract (<code>f7db9f3</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.0 (<code>2ca06c9</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.0...v0.57.1\">Full changelog on GitHub</a></p>",
+    "summary": "fix(usecase): remove contention races from upgrade and port diagnostics (bec920e)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(usecase): remove contention races from upgrade and port diagnostics (<code>bec920e</code>)</li>\n<li>fix(upgrade): negotiate compatibility by handoff contract (<code>5e4e422</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.57.0 (<code>e005fd5</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.57.0...v0.57.1\">Full changelog on GitHub</a></p>",
     "commits": 3
   },
   {
@@ -475,8 +487,8 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.57.0",
-    "summary": "docs: explain the staged unit lifecycle (0ddb8c9)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>docs: explain the staged unit lifecycle (<code>0ddb8c9</code>)</li>\n<li>fix(start): recover when supervisor exits during queued boot (<code>69caa7e</code>)</li>\n<li>test(usecase): align manifest and race cases with current lifecycle (<code>ed5adc5</code>)</li>\n<li>docs: link every diagnostic code reference (<code>a2df394</code>)</li>\n<li>feat(restart): automatically adopt registered manifest changes (<code>b4daccb</code>)</li>\n<li>fix(deploy): make replacement transitions generation-safe (<code>05093d8</code>)</li>\n<li>test: remove log finalization race from supervisor config use case (<code>26ec95b</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.56.3 (<code>5d6a252</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.56.3...v0.57.0\">Full changelog on GitHub</a></p>",
+    "summary": "docs: explain the staged unit lifecycle (2555ea7)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>docs: explain the staged unit lifecycle (<code>2555ea7</code>)</li>\n<li>fix(start): recover when supervisor exits during queued boot (<code>7ed7191</code>)</li>\n<li>test(usecase): align manifest and race cases with current lifecycle (<code>faadd58</code>)</li>\n<li>docs: link every diagnostic code reference (<code>b93686d</code>)</li>\n<li>feat(restart): automatically adopt registered manifest changes (<code>56af1e3</code>)</li>\n<li>fix(deploy): make replacement transitions generation-safe (<code>e69da05</code>)</li>\n<li>test: remove log finalization race from supervisor config use case (<code>b8df8dd</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.56.3 (<code>20742d1</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.56.3...v0.57.0\">Full changelog on GitHub</a></p>",
     "commits": 8
   },
   {
@@ -487,9 +499,9 @@
     "prerelease": false,
     "author": "github-actions[bot]",
     "url": "https://github.com/ra0x3/systemg/releases/tag/v0.56.3",
-    "summary": "feat/v0.55.0 (#46) (e401f77)",
-    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>feat/v0.55.0 (#46) (<code>e401f77</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.2 (<code>cdb3672</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.2...v0.56.3\">Full changelog on GitHub</a></p>",
-    "commits": 2
+    "summary": "fix(logs): maintain project-scoped logs and repair lifecycle tests (a3fa6b9)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(logs): maintain project-scoped logs and repair lifecycle tests (<code>a3fa6b9</code>)</li>\n<li>ci: clippy + rustdoc (<code>0ceaa81</code>)</li>\n<li>fix(restart): accept delayed successful one-shot completion   feat(supervisor): expose lifecycle policy and normalize XML state   docs: document supervisor policy and 0.56.1 behavior   release: v0.56.1 (<code>f87a4b4</code>)</li>\n<li>chore: add cargo sort to commit-check.sh (<code>e7a4026</code>)</li>\n<li>docs: align public guidance with v0.56.0 (<code>3154cb9</code>)</li>\n<li>fix(lifecycle): preserve workloads and readiness budgets (<code>61e1eff</code>)</li>\n<li>test(upgrade): cover live installer reexec (<code>6821613</code>)</li>\n<li>docs(install): document live supervisor upgrades (<code>27b1cd9</code>)</li>\n<li>fix(install): reject mislabeled release archives (<code>f77ea71</code>)</li>\n<li>feat(install): activate versions through live reexec (<code>57c7e37</code>)</li>\n<li>feat(upgrade): preserve workloads across supervisor reexec (<code>5678102</code>)</li>\n<li>feat(upgrade): validate live-reexec compatibility (<code>b5d1622</code>)</li>\n<li>fix(restart): preserve lifecycle gates and cleanly render results (<code>52da090</code>)</li>\n<li>fix(supervisor): restore reliable multi-project supervision (<code>a0507a7</code>)</li>\n<li>fix(logs,foreground): prefix each line with its service and report boot progress instead of a bare spinner (<code>f66aef1</code>)</li>\n<li>fix(logs): follow every running unit concurrently instead of one section at a time (<code>90edd2f</code>)</li>\n<li>fix(logs): never replay offline history into a follow stream (<code>f66a2b0</code>)</li>\n<li>fix(daemon): record observed exits and correct running-with-dead-pid state (<code>f974c1d</code>)</li>\n<li>fix(pidfile): clear the process-group entry when clearing a pid (<code>0e1e4cc</code>)</li>\n<li>fix(daemon): sweep orphaned process-group entries alongside stale pids (<code>c67c47c</code>)</li>\n<li>fix(daemon): sweep stale pid entries regardless of the processes map (<code>891a095</code>)</li>\n<li>fix(daemon): clear stale pid entries so a completed one-shot cannot sit at lost (<code>662ccf2</code>)</li>\n<li>fix(restart,stop): accept a completed one-shot as reconciled and stop the circular no-supervisor error (<code>98f71e8</code>)</li>\n<li>fix(diag,stop): report supervisor-busy as SG0107, unknown project as SG0202, and reap every project on shutdown (<code>dc27b32</code>)</li>\n<li>fix(start): return as soon as an attached project is up and stop blaming services still retrying (<code>c715388</code>)</li>\n<li>fix(start): wait for the boot to begin before judging an attached project (<code>f13ec16</code>)</li>\n<li>fix(start): report SG0106 when an attached project has services that never came up (<code>06063c6</code>)</li>\n<li>fix(tui): always restore cooked terminal mode so output stops stair-stepping (<code>464e02a</code>)</li>\n<li>chore(scripts): warn that live-matrix nuke kills host processes (<code>af2e220</code>)</li>\n<li>chore(tests): mark usecase runners executable (<code>af5dbd8</code>)</li>\n<li>feat(diag): add SG0105 for a port already in use (<code>6fd9e4c</code>)</li>\n<li>fix(spinner): keep the progress line within the terminal width so it updates in place (<code>05c3e61</code>)</li>\n<li>test(foreground): boot-grace usecase and real-tty Ctrl-C harness (<code>d7b5048</code>)</li>\n<li>fix(opslot,stop): scope operation detail to its project and resync cron on primary stop (<code>7591c03</code>)</li>\n<li>fix(restart,stop): keep completed one-shots done and verify processes actually died (<code>13409e9</code>)</li>\n<li>fix(status,logs,foreground): valid empty JSON, post-mortem logs, boot-window survival, in-place spinner (<code>5ffdf75</code>)</li>\n<li>fix(supervisor): batch of dogfooding fixes — health-check proxy hang, pre-start freeze, foreground streaming, diagnostics, supervisor.xml (<code>b4397c3</code>)</li>\n<li>fix(logs,foreground): defensive follow-streaming, clean Esc/Ctrl-C, docs corrections (<code>1e93628</code>)</li>\n<li>fix(foreground,logs): correct mode reporting, stream 2nd fg project, honor loaded -p, detach on project stop (<code>e8a1918</code>)</li>\n<li>fix(restart,start): multi-project restart isolation, skip-override, test hardening (<code>4ca7aee</code>)</li>\n<li>feat(supervisor): self-heal dependents after a crashed dependency recovers (<code>430f964</code>)</li>\n<li>fix(restart): select the right project's config for a multi-project file (<code>29a14ac</code>)</li>\n<li>fix(restart): no-config targeted restart falls back to cached manifest (<code>c513b16</code>)</li>\n<li>feat(restart): cascade restart -s to transitive dependents; fix multi-project selector (<code>221ccf3</code>)</li>\n<li>fix(supervisor): reap the orphaned process group on the crash path before respawn (<code>25f29ab</code>)</li>\n<li>fix(logs): show full captured output by default; -l N to limit (<code>b107d1a</code>)</li>\n<li>fix(start): foreground detaches when the supervisor dies; coexistence usecases (<code>7a32465</code>)</li>\n<li>fix(logs): key captured logs + live buffer by project, not service alone (<code>c3c3bad</code>)</li>\n<li>fix(status): RSS reported 1024x too large (66MB shown as 63GB) (<code>a35cc0a</code>)</li>\n<li>feat(inspect): InspectPlan + typed diagnostics; fix -s/-p selector bugs (<code>34c2284</code>)</li>\n<li>feat(logs): LogsPlan + typed diagnostics; fix purge leaving reader stale (<code>6b955a5</code>)</li>\n<li>test(start): lock down foreground console streaming; docs: colored diagnostic (<code>ecc4f20</code>)</li>\n<li>feat(purge): rebuild purge with PurgePlan, preflight guard, and selectors (<code>6db0f87</code>)</li>\n<li>fix(restart): make version-upgrade handoff actually transfer supervision (<code>88fee3f</code>)</li>\n<li>feat(start,stop): supervisor-health preflight, fix BUG-4 dying-daemon hang (<code>5861087</code>)</li>\n<li>feat(restart): type SG0303 recycle + SG0202 target guard, adversarial suite (<code>bb46b64</code>)</li>\n<li>feat(restart): diff-aware surgical reconcile with config-swap (<code>2ac9fdc</code>)</li>\n<li>feat(restart): validate-before-teardown (SG0301) + restart -p isolation (<code>fac1609</code>)</li>\n<li>feat(restart): RestartPlan + preflight, shared selector, SG0301/2/3 (<code>a968ecb</code>)</li>\n<li>test(usecase): RED-first restart suite (10 cases) (<code>5d1e0b6</code>)</li>\n<li>feat(stop): StopPlan resolver, typed diagnostics, SG0202/0203/0204 (<code>416509d</code>)</li>\n<li>fix(stop): isolate service teardown; stop -p no longer kills siblings (<code>628ca59</code>)</li>\n<li>fix(state): key state + cron files by {version}:{project}:{service} (<code>16a7877</code>)</li>\n<li>feat(config): manifest schema v2, reject v1 (<code>2f1cb66</code>)</li>\n<li>feat(config): project-less manifests resolve to the <strong>loose</strong> bundle (<code>0647c56</code>)</li>\n<li>refactor(start): one selector resolver, exhaustive StartPlan (<code>e686028</code>)</li>\n<li>feat(start): parent blocks on real boot outcomes; SG codes + --verbose (<code>d47d0cf</code>)</li>\n<li>feat(start): wire boot-progress journal + fix extra-project pid leak (<code>86063f5</code>)</li>\n<li>feat(start): boot journal + outcome converter for progress streaming (<code>0db9e24</code>)</li>\n<li>feat(start): typed Outcome ladder for the start rebuild (<code>0676cbf</code>)</li>\n<li>test(usecase): add separate-config start cases (3 projects, 3 files) (<code>4ad36ef</code>)</li>\n<li>refactor(diag): type the error taxonomy with SgCode enum (<code>8e3f051</code>)</li>\n<li>test: delete 27 façade integration tests (<code>d780314</code>)</li>\n<li>docs: per-project state layout, projects: schema, and migrate command (<code>ceae41a</code>)</li>\n<li>test(docker): state-isolation usecase + parallel run_all.sh (<code>7930a47</code>)</li>\n<li>feat(cron): per-project cron state directories (<code>a4ef427</code>)</li>\n<li>refactor(state): per-project state directories via StateStore (<code>9bba483</code>)</li>\n<li>refactor(state): introduce per-project directory layout for state files (<code>762423c</code>)</li>\n<li>feat(supervisor): harden the control plane and reclaim orphaned ports (<code>9f5b928</code>)</li>\n<li>feat(supervisor): unwedge the control plane with an acceptor/owner split (<code>b78e8ae</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.54.2 (<code>cdb3672</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.54.2...v0.56.3\">Full changelog on GitHub</a></p>",
+    "commits": 81
   },
   {
     "tag": "v0.54.2",
