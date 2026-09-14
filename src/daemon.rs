@@ -9443,6 +9443,11 @@ impl Daemon {
                     if is_cron {
                         continue;
                     }
+                    if let Ok(mut gate) = ctx.lock_restart_gate()
+                        && let Some(tracker) = gate.get_mut(&name)
+                    {
+                        tracker.settle(Instant::now());
+                    }
                     if !manually_stopped
                         && !exit_success
                         && let Some(service) = ctx.config.services.get(&name)
@@ -9503,11 +9508,6 @@ impl Daemon {
                     } else if !exit_success {
                         failed_services.push(name.clone());
                         Self::log_port_conflict_if_evident(&ctx.config, &name);
-                        // Settle the generation that just died: it clears the
-                        // budget only if it stayed up long enough to count.
-                        if let Ok(mut gate) = ctx.lock_restart_gate() {
-                            gate.entry(name.clone()).or_default().settle(Instant::now());
-                        }
                         let should_restart = ctx
                             .config
                             .services
@@ -9814,11 +9814,12 @@ impl Daemon {
             }
 
             if !passing {
+                let verdict_at = Instant::now();
                 warn!(
                     "Service '{name}' is running but failed its health check; stopping it so \
                      restart_policy decides what happens next"
                 );
-                let stopped = match Self::stop_service_with_handles(
+                let stop = Self::stop_service_with_handles(
                     &name,
                     &ctx.processes,
                     &ctx.pid_file,
@@ -9829,13 +9830,16 @@ impl Daemon {
                         .map(|guard| guard.stop_verify_timeout())
                         .unwrap_or(SERVICE_START_TIMEOUT),
                     Some(target),
-                ) {
-                    Ok(stopped) => stopped,
-                    Err(err) => {
-                        warn!("Failed to stop unhealthy service '{name}': {err}");
-                        true
-                    }
-                };
+                );
+                if let Err(err) = &stop {
+                    warn!("Failed to stop unhealthy service '{name}': {err}");
+                }
+                if matches!(stop, Ok(true))
+                    && let Ok(mut gate) = ctx.lock_restart_gate()
+                    && let Some(tracker) = gate.get_mut(&name)
+                {
+                    tracker.settle(verdict_at);
+                }
 
                 // A crash reaches `stop_dependents` through the monitor's exit
                 // scan, but this stop removes the child handle and reaps it
@@ -9847,7 +9851,7 @@ impl Daemon {
                 // the probe's, not the teardown's. A stop that declined because
                 // the unit moved on is different: it condemned nothing, so it
                 // fells nothing.
-                if stopped {
+                if !matches!(stop, Ok(false)) {
                     Self::stop_dependents(&name, &reverse, ctx);
                 }
             }
@@ -11432,6 +11436,82 @@ fi
             "pidfd exit readiness took {elapsed:?}"
         );
         let _ = child.wait();
+    }
+
+    /// Runs an `always` unit that exits 0 with its breaker one start from
+    /// tripping and its current run marked ready `ran_for` ago, then returns
+    /// the breaker once the monitor has acted on that exit.
+    fn breaker_after_clean_exit(ran_for: Duration) -> RestartTracker {
+        let mut tracker = None;
+        with_temp_home(|dir| {
+            fs::write(dir.join("clean_exit.sh"), "sleep 1\n").unwrap();
+
+            let mut service = make_service("sh clean_exit.sh", &[]);
+            service.restart_policy = Some("always".into());
+            service.backoff = Some("10s".into());
+            let mut services = HashMap::new();
+            services.insert("svc".into(), service);
+
+            let daemon = create_daemon(dir, services);
+            let config = daemon.config();
+            let svc = config.services.get("svc").unwrap();
+            assert!(matches!(
+                daemon.start_service("svc", svc).unwrap(),
+                ServiceReadyState::Running
+            ));
+
+            let ready_at = Instant::now()
+                .checked_sub(ran_for)
+                .expect("monotonic clock predates the seeded run");
+            daemon.restart_gate.lock().unwrap().insert(
+                "svc".into(),
+                RestartTracker {
+                    unstable: DEFAULT_RESTART_BUDGET - 1,
+                    ready_at: Some(ready_at),
+                    ..RestartTracker::default()
+                },
+            );
+            daemon.ensure_monitoring().unwrap();
+
+            let deadline = Instant::now() + Duration::from_secs(15);
+            tracker = loop {
+                let seen = daemon.restart_gate.lock().unwrap().get("svc").cloned();
+                if let Some(seen) = seen
+                    && (seen.is_open() || seen.unstable == 1)
+                {
+                    break Some(seen);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "monitor never acted on the clean exit"
+                );
+                thread::sleep(Duration::from_millis(20));
+            };
+            daemon.shutdown_monitor();
+        });
+        tracker.expect("breaker state captured")
+    }
+
+    #[test]
+    /// The arbstream chromium regression: runs killed after about 15 minutes
+    /// exited 0, the clean-exit path never settled them, and the 8th kill
+    /// tripped SG0110 as starts that "never stayed up for 60s".
+    fn clean_exit_after_a_stable_run_clears_the_breaker() {
+        let tracker =
+            breaker_after_clean_exit(RESTART_STABLE_AFTER + Duration::from_secs(1));
+        assert!(
+            !tracker.is_open(),
+            "a stable run that exited 0 tripped the breaker"
+        );
+        assert_eq!(tracker.unstable, 1);
+    }
+
+    #[test]
+    /// A run that exits 0 before reaching stability still counts toward the
+    /// breaker.
+    fn clean_exit_before_stability_still_trips_the_breaker() {
+        let tracker = breaker_after_clean_exit(Duration::ZERO);
+        assert_eq!(tracker.tripped, Some(RestartTripCause::Flapping));
     }
 
     #[cfg(target_os = "linux")]
