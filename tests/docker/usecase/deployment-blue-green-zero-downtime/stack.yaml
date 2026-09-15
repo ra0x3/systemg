@@ -1,0 +1,51 @@
+version: "2"
+projects:
+  demo:
+    name: Demo
+    services:
+      web:
+        command: "exec python3 /usecase/app.py"
+        restart_policy: always
+        env:
+          vars:
+            PORT: "18082"
+        deployment:
+          strategy: rolling
+          pre_start: "sleep 2"
+          health_check:
+            url: "http://127.0.0.1:18090/health"
+            interval: "1s"
+            attempt_timeout: "2s"
+            total_timeout: "30s"
+            retries: 5
+          grace_period: "3s"
+          blue_green:
+            env_var: PORT
+            slots: ["18082", "18083"]
+            switch_command: "sh /usecase/switch.sh {candidate_slot}"
+            candidate_health_check:
+              url: "http://127.0.0.1:{slot}/health"
+              interval: "1s"
+              attempt_timeout: "2s"
+              total_timeout: "30s"
+              retries: 5
+            switch_verify:
+              command: "sh /usecase/verify.sh {candidate_slot}"
+              interval: "1s"
+              attempt_timeout: "5s"
+              total_timeout: "20s"
+              retries: 5
+      control:
+        command: "exec python3 /usecase/app.py"
+        restart_policy: always
+        env:
+          vars:
+            PORT: "18084"
+        deployment:
+          strategy: rolling
+          health_check:
+            url: "http://127.0.0.1:18084/health"
+            interval: "1s"
+            attempt_timeout: "2s"
+            total_timeout: "30s"
+            retries: 5
