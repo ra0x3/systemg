@@ -442,20 +442,31 @@ fn persist_cron_state(
 /// A cron run is judged in exactly one place — the completion path — so it is
 /// announced from exactly one place too. The monitor skips its own hook for
 /// these units; firing from both would alert twice for a single failure.
+///
+/// The hook's event comes from `status`, so a caller can't name the wrong one:
+/// a failed run is `cron_exit` with its exit code, and a skipped boundary is
+/// `cron_overlap` with the start of the run that was still going.
 fn notify_cron_failure(
     daemon: &Daemon,
     service_name: &str,
     service_config: &crate::config::ServiceConfig,
     status: &CronExecutionStatus,
+    exit_code: Option<i32>,
+    scheduled_at: SystemTime,
+    running_since: Option<SystemTime>,
 ) {
-    match status {
-        CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => {
-            daemon.run_onerr(service_name, service_config);
+    let context = match status {
+        CronExecutionStatus::Failed(_) => {
+            crate::daemon::HookContext::cron_exit(exit_code, scheduled_at)
+        }
+        CronExecutionStatus::OverlapError => {
+            crate::daemon::HookContext::cron_overlap(scheduled_at, running_since)
         }
         // An interrupted run reports a lost outcome, not a failed one: the
         // command may well have succeeded, and alerting on it would cry wolf.
-        CronExecutionStatus::Success | CronExecutionStatus::Interrupted(_) => {}
-    }
+        CronExecutionStatus::Success | CronExecutionStatus::Interrupted(_) => return,
+    };
+    daemon.run_onerr(service_name, service_config, &context);
 }
 
 /// Clears the PID owned by a completed cron execution without removing a newer run.
@@ -3655,6 +3666,9 @@ impl Supervisor {
                                 &overlap.service_name,
                                 service_config,
                                 &CronExecutionStatus::OverlapError,
+                                None,
+                                overlap.scheduled_at,
+                                overlap.running_since,
                             );
                         }
                     }
@@ -3714,6 +3728,7 @@ impl Supervisor {
                             let metrics_store_clone = metrics_store.clone();
                             let service_hash = due_job.service_hash.clone();
                             let run_started_at = due_job.started_at;
+                            let run_scheduled_at = due_job.scheduled_at;
                             let withdraw_claim = due_job.clone();
 
                             let failed_manager = cron_manager_clone.clone();
@@ -3808,6 +3823,9 @@ impl Supervisor {
                                                     &job_name_clone,
                                                     &service_config,
                                                     &status,
+                                                    exit_code,
+                                                    run_scheduled_at,
+                                                    None,
                                                 );
                                                 cron_manager_clone.complete_job_run(
                                                     &service_hash,
@@ -3848,6 +3866,9 @@ impl Supervisor {
                                                     &job_name_clone,
                                                     &service_config,
                                                     &status,
+                                                    None,
+                                                    run_scheduled_at,
+                                                    None,
                                                 );
                                                 cron_manager_clone.complete_job_run(
                                                     &service_hash,
@@ -3879,6 +3900,9 @@ impl Supervisor {
                                             &job_name_clone,
                                             &service_config,
                                             &status,
+                                            None,
+                                            run_scheduled_at,
+                                            None,
                                         );
                                         cron_manager_clone.complete_job_run(
                                             &service_hash,
@@ -3903,6 +3927,9 @@ impl Supervisor {
                                         &due_job.service_name,
                                         service_config,
                                         &status,
+                                        None,
+                                        run_scheduled_at,
+                                        None,
                                     );
                                 }
                                 failed_manager.complete_job_run(

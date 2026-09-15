@@ -474,6 +474,8 @@ pub struct CronDueJob {
     pub service_hash: String,
     /// Start identity for the execution record created by the scheduler.
     pub started_at: SystemTime,
+    /// The schedule boundary this run was claimed for.
+    pub scheduled_at: SystemTime,
     /// `last_execution` as it stood before this claim overwrote it.
     ///
     /// Withdrawing a claim has to put this back: the claim is staked before the
@@ -643,6 +645,10 @@ pub struct CronOverlap {
     pub service_name: String,
     /// Stable state key of that unit.
     pub service_hash: String,
+    /// The schedule boundary that was skipped.
+    pub scheduled_at: SystemTime,
+    /// When the run still holding the unit started, if sysg knows.
+    pub running_since: Option<SystemTime>,
 }
 
 impl Default for CronManager {
@@ -877,13 +883,16 @@ impl CronManager {
                 // every resync, which cannot see a claim whose unit has not
                 // launched yet. The in-process claim can, and it is what makes
                 // the overlap guard hold across a resync.
-                let claimed_here =
-                    lock_recover(&self.in_flight).contains_key(job.service_hash.as_str());
-                if job.currently_running || claimed_here {
+                let claimed_since = lock_recover(&self.in_flight)
+                    .get(job.service_hash.as_str())
+                    .copied();
+                if job.currently_running || claimed_since.is_some() {
                     warn!(
                         "Cron job '{}' is scheduled to run but previous execution is still running",
                         job.service_name
                     );
+                    let running_since = claimed_since
+                        .or_else(|| job.active_record().map(|record| record.started_at));
                     let record = CronExecutionRecord {
                         started_at: now,
                         completed_at: Some(now),
@@ -901,6 +910,8 @@ impl CronManager {
                     lock_recover(&self.overlaps).push(CronOverlap {
                         service_name: job.service_name.clone(),
                         service_hash: job.service_hash.clone(),
+                        scheduled_at: next_exec,
+                        running_since,
                     });
                     continue;
                 }
@@ -910,6 +921,7 @@ impl CronManager {
                         service_name: job.service_name.clone(),
                         service_hash: job.service_hash.clone(),
                         started_at: now,
+                        scheduled_at: next_exec,
                         previous_last_execution: job.last_execution,
                     });
                     lock_recover(&self.in_flight).insert(job.service_hash.clone(), now);
@@ -1793,6 +1805,7 @@ mod tests {
             service_name: "raced_service".to_string(),
             service_hash: "raced-hash".to_string(),
             started_at: claimed_at,
+            scheduled_at: claimed_at,
             previous_last_execution: None,
         });
 
@@ -2007,6 +2020,7 @@ mod tests {
             service_name: "raced_service".to_string(),
             service_hash: "raced-hash".to_string(),
             started_at: old_claim,
+            scheduled_at: old_claim,
             previous_last_execution: None,
         });
 

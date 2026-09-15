@@ -4,15 +4,15 @@ title: Hooks
 
 # Hooks
 
-Run any shell command after a successful service start or unsuccessful service
-exit.
+Run any shell command after a successful service start, an unsuccessful service
+exit, or a cron boundary skipped because the previous run was still going.
 
 ## Events
 
 | Hook | When |
 |------|------|
 | `onstart` | Service reaches readiness or a one-shot completes successfully |
-| `onerr` | Service exits unsuccessfully before or after readiness |
+| `onerr` | Service exits unsuccessfully before or after readiness, or a cron boundary is skipped because the previous run is still going |
 
 ## Configuration
 
@@ -28,7 +28,16 @@ services:
         command: "/usr/local/bin/report-crash postgres"
 ```
 
-Hooks inherit service environment variables.
+Hooks inherit service environment variables, plus these, which say why the
+hook ran. A variable that doesn't apply to the event is unset, never empty, and
+a service's own env can't set any of them.
+
+| Variable | Set for | Value |
+|----------|---------|-------|
+| `SYSG_HOOK_EVENT` | every hook | `onstart`, `service_exit`, `cron_exit` or `cron_overlap` |
+| `SYSG_EXIT_CODE` | `service_exit`, `cron_exit` | The exit code, unset when there was none (killed by a signal, or never started) |
+| `SYSG_SCHEDULED_AT` | `cron_exit`, `cron_overlap` | The schedule boundary the run was for, RFC 3339 UTC |
+| `SYSG_RUNNING_SINCE` | `cron_overlap` | When the run that is still going started, RFC 3339 UTC |
 
 ## Execution
 
@@ -47,6 +56,7 @@ Hooks inherit service environment variables.
 | Clean exit | None |
 | Manual stop | None |
 | Unsuccessful exit before or after readiness | `onerr` |
+| Cron boundary skipped while the previous run is still going | `onerr` |
 | Successful automatic restart | `onstart` |
 
 ## Tips

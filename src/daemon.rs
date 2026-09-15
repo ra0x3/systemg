@@ -2522,7 +2522,93 @@ impl ServiceStateFile {
     }
 }
 
-/// Run a hook command with the provided environment variables.
+/// Why a hook ran, handed to its command as `SYSG_*` variables.
+///
+/// Each constructor fills only what its event knows, and whatever it leaves
+/// out is unset in the hook's environment rather than empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HookContext {
+    event: &'static str,
+    exit_code: Option<i32>,
+    scheduled_at: Option<SystemTime>,
+    running_since: Option<SystemTime>,
+}
+
+impl HookContext {
+    /// Every variable sysg owns; a service's own env cannot set them.
+    const VARS: [&'static str; 4] = [
+        "SYSG_HOOK_EVENT",
+        "SYSG_EXIT_CODE",
+        "SYSG_SCHEDULED_AT",
+        "SYSG_RUNNING_SINCE",
+    ];
+
+    /// A service reached readiness, or a one-shot or cron run was launched.
+    pub(crate) fn onstart() -> Self {
+        Self {
+            event: "onstart",
+            exit_code: None,
+            scheduled_at: None,
+            running_since: None,
+        }
+    }
+
+    /// A service exited unsuccessfully, with its exit code when it had one.
+    pub(crate) fn service_exit(exit_code: Option<i32>) -> Self {
+        Self {
+            event: "service_exit",
+            exit_code,
+            ..Self::onstart()
+        }
+    }
+
+    /// The cron run scheduled for `scheduled_at` failed, with its exit code
+    /// when it had one.
+    pub(crate) fn cron_exit(exit_code: Option<i32>, scheduled_at: SystemTime) -> Self {
+        Self {
+            event: "cron_exit",
+            exit_code,
+            scheduled_at: Some(scheduled_at),
+            running_since: None,
+        }
+    }
+
+    /// The cron boundary at `scheduled_at` was skipped because the run started
+    /// at `running_since` was still going.
+    pub(crate) fn cron_overlap(
+        scheduled_at: SystemTime,
+        running_since: Option<SystemTime>,
+    ) -> Self {
+        Self {
+            event: "cron_overlap",
+            exit_code: None,
+            scheduled_at: Some(scheduled_at),
+            running_since,
+        }
+    }
+
+    /// The variables this context sets, with times as RFC 3339 UTC.
+    fn vars(&self) -> Vec<(&'static str, String)> {
+        let stamp = |time: SystemTime| {
+            chrono::DateTime::<chrono::Utc>::from(time)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let mut vars = vec![("SYSG_HOOK_EVENT", self.event.to_string())];
+        if let Some(code) = self.exit_code {
+            vars.push(("SYSG_EXIT_CODE", code.to_string()));
+        }
+        if let Some(at) = self.scheduled_at {
+            vars.push(("SYSG_SCHEDULED_AT", stamp(at)));
+        }
+        if let Some(at) = self.running_since {
+            vars.push(("SYSG_RUNNING_SINCE", stamp(at)));
+        }
+        vars
+    }
+}
+
+/// Run a hook command with the provided environment variables and the
+/// context of why it ran.
 fn run_hook(
     action: &HookAction,
     env: &Option<EnvConfig>,
@@ -2530,6 +2616,7 @@ fn run_hook(
     service_name: &str,
     project_root: &Path,
     cancel: Option<(&AtomicU64, &AtomicBool)>,
+    context: &HookContext,
 ) {
     debug!(
         "Running {} hook for '{}': `{}`",
@@ -2541,6 +2628,12 @@ fn run_hook(
     cmd.current_dir(project_root);
 
     for (key, value) in collect_service_env(env, project_root, service_name) {
+        cmd.env(key, value);
+    }
+    for key in HookContext::VARS {
+        cmd.env_remove(key);
+    }
+    for (key, value) in context.vars() {
         cmd.env(key, value);
     }
 
@@ -5823,12 +5916,13 @@ impl Daemon {
             Ok(state) => state,
             Err(err) => {
                 if service.cron.is_none()
-                    && matches!(
-                        self.recorded_status(service_name),
-                        Some(ServiceLifecycleStatus::ExitedWithError)
-                    )
+                    && let Some(failure) = self.recorded_failure(service_name)
                 {
-                    self.run_onerr(service_name, service);
+                    self.run_onerr(
+                        service_name,
+                        service,
+                        &HookContext::service_exit(failure.exit_code),
+                    );
                 }
                 return Err(err);
             }
@@ -5858,12 +5952,13 @@ impl Daemon {
                 }
                 Err(err) => {
                     if service.cron.is_none()
-                        && matches!(
-                            self.recorded_status(service_name),
-                            Some(ServiceLifecycleStatus::ExitedWithError)
-                        )
+                        && let Some(failure) = self.recorded_failure(service_name)
                     {
-                        self.run_onerr(service_name, service);
+                        self.run_onerr(
+                            service_name,
+                            service,
+                            &HookContext::service_exit(failure.exit_code),
+                        );
                     }
                     // The unit came up as a process but never passed its health
                     // check — it is NOT healthy, and leaving it running would let
@@ -5890,7 +5985,12 @@ impl Daemon {
         Ok(state)
     }
 
-    pub(crate) fn run_onerr(&self, service_name: &str, service: &ServiceConfig) {
+    pub(crate) fn run_onerr(
+        &self,
+        service_name: &str,
+        service: &ServiceConfig,
+        context: &HookContext,
+    ) {
         if let Some(action) = service
             .hooks
             .as_ref()
@@ -5903,8 +6003,30 @@ impl Daemon {
                 service_name,
                 &self.project_root,
                 Some((&self.boot_epoch, &self.boot_cancelled)),
+                context,
             );
         }
+    }
+
+    /// The service's recorded state when its last outcome was an unsuccessful
+    /// exit, read once so the verdict and its exit code come from the same
+    /// generation.
+    pub(crate) fn recorded_failure(
+        &self,
+        service_name: &str,
+    ) -> Option<ServiceStateEntry> {
+        let config = self.cfg();
+        if !config.services.contains_key(service_name) {
+            return None;
+        }
+        let key = config.state_key(service_name);
+        let guard = self.state_file.lock().ok()?;
+        guard
+            .get(&key)
+            .filter(|entry| {
+                matches!(entry.status, ServiceLifecycleStatus::ExitedWithError)
+            })
+            .cloned()
     }
 
     /// Logs SG0105 when a crashed service's own output shows it could not bind
@@ -8431,6 +8553,7 @@ impl Daemon {
                 name,
                 &self.project_root,
                 Some((&self.boot_epoch, &self.boot_cancelled)),
+                &HookContext::onstart(),
             );
         }
 
@@ -8492,6 +8615,7 @@ impl Daemon {
                 name,
                 &self.project_root,
                 Some((&self.boot_epoch, &self.boot_cancelled)),
+                &HookContext::onstart(),
             );
         }
 
@@ -9463,6 +9587,7 @@ impl Daemon {
                                 &name,
                                 &ctx.project_root,
                                 None,
+                                &HookContext::service_exit(exit_code),
                             );
                         }
                     }
