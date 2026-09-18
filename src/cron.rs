@@ -38,12 +38,17 @@ const CRON_STATUS_INTERRUPTED: &str = "Interrupted";
 const CRON_STATUS_INTERRUPTED_PREFIX: &str = "Interrupted:";
 /// Serialized label for a cron execution skipped because an earlier run overlapped.
 const CRON_STATUS_OVERLAP: &str = "OverlapError";
+/// Serialized label for a cron execution killed at its configured timeout.
+const CRON_STATUS_TIMED_OUT: &str = "TimedOut";
+/// Serialized prefix for a timed-out execution carrying the limit it hit.
+const CRON_STATUS_TIMED_OUT_PREFIX: &str = "TimedOut:";
 /// Variants accepted by the cron execution status compatibility decoder.
 const CRON_STATUS_VARIANTS: &[&str] = &[
     CRON_STATUS_SUCCESS,
     CRON_STATUS_FAILED,
     CRON_STATUS_INTERRUPTED,
     CRON_STATUS_OVERLAP,
+    CRON_STATUS_TIMED_OUT,
 ];
 /// Reason restored when an older state file discarded a failure detail.
 const LEGACY_CRON_FAILURE_REASON: &str = "failure reason unavailable from legacy state";
@@ -180,6 +185,9 @@ pub enum CronExecutionStatus {
     Interrupted(String),
     /// Cron job was scheduled to run but previous execution was still running.
     OverlapError,
+    /// Cron job ran past its configured timeout and was killed. Carries the
+    /// limit as the manifest wrote it (e.g., "90m").
+    TimedOut(String),
 }
 
 impl CronExecutionStatus {
@@ -192,6 +200,7 @@ impl CronExecutionStatus {
                 status_with_reason(CRON_STATUS_INTERRUPTED, reason)
             }
             Self::OverlapError => CRON_STATUS_OVERLAP.to_string(),
+            Self::TimedOut(limit) => status_with_reason(CRON_STATUS_TIMED_OUT, limit),
         }
     }
 
@@ -206,6 +215,9 @@ impl CronExecutionStatus {
         if let Some(reason) = value.strip_prefix(CRON_STATUS_INTERRUPTED_PREFIX) {
             return Ok(Self::Interrupted(reason.trim().to_string()));
         }
+        if let Some(limit) = value.strip_prefix(CRON_STATUS_TIMED_OUT_PREFIX) {
+            return Ok(Self::TimedOut(limit.trim().to_string()));
+        }
         match value {
             CRON_STATUS_SUCCESS => Ok(Self::Success),
             CRON_STATUS_FAILED => {
@@ -215,6 +227,7 @@ impl CronExecutionStatus {
                 UNKNOWN_CRON_INTERRUPTION_REASON.to_string(),
             )),
             CRON_STATUS_OVERLAP => Ok(Self::OverlapError),
+            CRON_STATUS_TIMED_OUT => Ok(Self::TimedOut(String::new())),
             other => Err(E::unknown_variant(other, CRON_STATUS_VARIANTS)),
         }
     }
@@ -316,6 +329,10 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                         reason.trim().to_string(),
                     ));
                 }
+                if let Some(limit) = variant.strip_prefix(CRON_STATUS_TIMED_OUT_PREFIX) {
+                    access.unit_variant()?;
+                    return Ok(CronExecutionStatus::TimedOut(limit.trim().to_string()));
+                }
                 match variant.as_str() {
                     CRON_STATUS_SUCCESS => {
                         access.unit_variant()?;
@@ -332,6 +349,10 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                     CRON_STATUS_INTERRUPTED => {
                         let reason = access.newtype_variant::<StatusReasonValue>()?;
                         Ok(CronExecutionStatus::Interrupted(reason.into_reason()))
+                    }
+                    CRON_STATUS_TIMED_OUT => {
+                        let limit = access.newtype_variant::<StatusReasonValue>()?;
+                        Ok(CronExecutionStatus::TimedOut(limit.into_reason()))
                     }
                     other => Err(serde::de::Error::unknown_variant(
                         other,
@@ -372,6 +393,11 @@ impl<'de> Deserialize<'de> for CronExecutionStatus {
                             tagged_variant = Some(CronExecutionStatus::Interrupted(
                                 value.into_reason(),
                             ));
+                        }
+                        CRON_STATUS_TIMED_OUT => {
+                            let value = map.next_value::<StatusReasonValue>()?;
+                            tagged_variant =
+                                Some(CronExecutionStatus::TimedOut(value.into_reason()));
                         }
                         _ => {
                             let _: IgnoredAny = map.next_value()?;
@@ -1589,6 +1615,7 @@ mod tests {
         let cron_config = CronConfig {
             expression: "0 * * * * *".to_string(),
             timezone: Some("UTC".into()),
+            timeout: None,
         };
         let service_hash = compute_test_hash(&cron_config);
 
@@ -1610,6 +1637,7 @@ mod tests {
         let cron_config = CronConfig {
             expression: "invalid cron".to_string(),
             timezone: None,
+            timeout: None,
         };
         let service_hash = compute_test_hash(&cron_config);
 
@@ -1626,6 +1654,7 @@ mod tests {
         let cron_config = CronConfig {
             expression: "* * * * *".to_string(),
             timezone: None,
+            timeout: None,
         };
         let service_hash = compute_test_hash(&cron_config);
 
@@ -2134,6 +2163,7 @@ mod tests {
         let cron_config = CronConfig {
             expression: "* * * * * *".to_string(),
             timezone: Some("UTC".into()),
+            timeout: None,
         };
         let service_hash = compute_test_hash(&cron_config);
 
@@ -2208,6 +2238,7 @@ mod tests {
             cron: Some(CronConfig {
                 expression: expr.to_string(),
                 timezone: None,
+                timeout: None,
             }),
             skip: None,
             spawn: None,

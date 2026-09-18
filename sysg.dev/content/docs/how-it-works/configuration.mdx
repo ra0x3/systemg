@@ -612,7 +612,7 @@ Primary keys available on each service definition.
 | `backoff` | string | Time between restart attempts |
 | `max_restarts` | number | Maximum restart attempts |
 | `hooks` | object | Lifecycle event handlers |
-| `cron` | object | Cron schedule (`expression`, optional `timezone`) |
+| `cron` | object | [Cron schedule](/docs/how-it-works/cron) (`expression`, optional `timezone` and `timeout`) |
 | `deployment` | object | Update strategy configuration |
 | `logs` | object | Service stdout/stderr capture and rotation settings |
 | `skip` | bool or string | Skip this service, or a command whose success skips it |
@@ -785,8 +785,9 @@ a slow-starting service's budget. A check fails only after both `retries` and
 
 ### Durations
 
-Every duration-valued field — `backoff`, `grace_period`, hook `timeout`, and the
-health-check windows — is a whole number with an optional unit:
+Every duration-valued field (`backoff`, `grace_period`, hook `timeout`,
+`cron.timeout`, and the health-check windows) is a whole number with an
+optional unit:
 
 | Unit | Meaning | Example |
 |------|---------|---------|
@@ -796,7 +797,8 @@ health-check windows — is a whole number with an optional unit:
 | `h` | hours | `total_timeout: "1h"` |
 
 A bare number is seconds, so `15` and `15s` are the same value. Fractions
-(`0.5s`) are not accepted — write them in a smaller unit (`500ms`).
+(`0.5s`) are not accepted — write them in a smaller unit (`500ms`). A
+health-check `interval` and `cron.timeout` must be greater than zero.
 
 Durations are checked when the manifest is loaded, so `sysg validate` refuses
 exactly what `sysg start` refuses, naming the offending field's path

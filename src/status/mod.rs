@@ -1494,6 +1494,7 @@ fn derive_unit_state(
                 }
                 CronExecutionStatus::Interrupted(_) => UnitState::Queued,
                 CronExecutionStatus::OverlapError => UnitState::Overlap,
+                CronExecutionStatus::TimedOut(_) => UnitState::Failed,
             };
         }
 
@@ -1616,6 +1617,7 @@ fn derive_unit_health(
                 }
                 CronExecutionStatus::Interrupted(_) => UnitHealth::Idle,
                 CronExecutionStatus::OverlapError => UnitHealth::Warn,
+                CronExecutionStatus::TimedOut(_) => UnitHealth::Failing,
             };
         }
 
@@ -1864,6 +1866,22 @@ piling up against each other."
                     recommended_fix: format!(
                         "Either widen the schedule interval or make the job faster. \
 Inspect how long runs take:\n\n    {logs}"
+                    ),
+                },
+                CronExecutionStatus::TimedOut(limit) => HealthReport {
+                    health: UnitHealth::Failing,
+                    severity: 7,
+                    title: format!("'{name}' last cron run timed out"),
+                    tldr: "The most recent scheduled run was killed at its timeout."
+                        .to_string(),
+                    description: format!(
+                        "The last run of '{name}' was still going when its {limit} \
+cron.timeout ran out, so systemg killed it. The unit will still fire on its next \
+schedule, but the killed run did not finish its work."
+                    ),
+                    recommended_fix: format!(
+                        "Raise cron.timeout if the job legitimately needs longer, or \
+find out why it stalled:\n\n    {logs}"
                     ),
                 },
             };
@@ -2481,7 +2499,8 @@ impl StatusManager {
                 match last_execution.status.as_ref() {
                     Some(CronExecutionStatus::Success) => return GREEN_BOLD,
                     Some(CronExecutionStatus::Failed(_))
-                    | Some(CronExecutionStatus::OverlapError) => {
+                    | Some(CronExecutionStatus::OverlapError)
+                    | Some(CronExecutionStatus::TimedOut(_)) => {
                         return RED_BOLD;
                     }
                     Some(CronExecutionStatus::Interrupted(_)) => return "",
@@ -2769,6 +2788,12 @@ impl StatusManager {
             }
             Some(CronExecutionStatus::OverlapError) => {
                 format!("{RED_BOLD}overlap detected{RESET}")
+            }
+            Some(CronExecutionStatus::TimedOut(limit)) if limit.trim().is_empty() => {
+                format!("{RED_BOLD}timed out{RESET}")
+            }
+            Some(CronExecutionStatus::TimedOut(limit)) => {
+                format!("{RED_BOLD}timed out after {limit}{RESET}")
             }
             None => format!("{MAGENTA_BOLD}in progress{RESET}"),
         }
@@ -3344,6 +3369,7 @@ services:
             cron: Some(crate::config::CronConfig {
                 expression: "* * * * *".into(),
                 timezone: None,
+                timeout: None,
             }),
             ..crate::config::ServiceConfig::default()
         };
@@ -3416,6 +3442,7 @@ services:
             cron: Some(crate::config::CronConfig {
                 expression: "* * * * *".into(),
                 timezone: Some("UTC".into()),
+                timeout: None,
             }),
             ..crate::config::ServiceConfig::default()
         };

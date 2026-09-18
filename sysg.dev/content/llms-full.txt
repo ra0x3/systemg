@@ -389,7 +389,9 @@ Manifest reference (see `docs/how-it-works/configuration.mdx` for details):
   `inherit_env`, `clear_session_vars`, `strip`), `restart_policy`
   (`always|on-failure|never`; clean exits never restart), `backoff`,
   `max_restarts`, `hooks` (`onstart` after successful starts and `onerr` after
-  unsuccessful exits), `cron` (`expression`, `timezone`),
+  unsuccessful exits), `cron` (`expression`, `timezone`, `timeout`; runs are
+  unbounded unless `timeout` is set, and a run past it is killed and recorded
+  as timed out),
   `deployment` (`strategy: rolling|immediate`, `pre_start`, `health_check`,
   `grace_period`, `blue_green`), `logs`, `skip`, `spawn` (`mode`, `limits`).
 - Privileged mode only: `user`, `group`, `supplementary_groups`,

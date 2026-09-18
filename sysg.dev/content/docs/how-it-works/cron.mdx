@@ -15,7 +15,30 @@ services:
     cron:
       expression: "0 0 * * * *"  # Every hour
       timezone: "America/New_York"  # Optional
+      timeout: "45m"  # Optional
 ```
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `expression` | yes | When to run, in the 6-field format below |
+| `timezone` | no | IANA timezone the expression is read in. Defaults to the system timezone |
+| `timeout` | no | Longest one run may take, as a duration (`500ms`, `30s`, `45m`, `2h`). Must be greater than zero |
+
+## Timeouts
+
+A run has no time limit unless you set `timeout`. A job that takes three hours
+gets three hours.
+
+When a run goes past its `timeout`, systemg sends SIGTERM to the run's whole
+process tree, waits briefly, then sends SIGKILL to anything left. The run is
+recorded as `timed out after <timeout>` in `sysg inspect -s <unit>`, and the
+unit's `onerr` hook fires with `SYSG_HOOK_EVENT=cron_timeout`. A timeout counts
+as a failed run for status and health, but it's recorded separately from a
+non-zero exit, so you can tell the two apart.
+
+Without a timeout, a run that hangs keeps running. Each schedule boundary it
+blocks is recorded as an overlap, so it shows up in status, but nothing kills
+it. Set `timeout` when a stuck run holding memory or CPU matters to you.
 
 ## Format
 
@@ -33,7 +56,8 @@ services:
 
 - Cron jobs are short-lived (run and exit)
 - `restart_policy` is ignored for cron units; each run is scheduled, not supervised
-- Overlap detection prevents duplicate runs
+- Overlap detection prevents duplicate runs. If a run is still going at the
+  next boundary, that boundary is skipped and recorded as an overlap
 - Cron units are scheduled by the supervisor, not run as persistent services.
   Unlike services, they cannot be started or restarted directly with
   `sysg start -s <unit>` or `sysg restart -s <unit>` — both return

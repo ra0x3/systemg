@@ -2573,6 +2573,17 @@ impl HookContext {
         }
     }
 
+    /// The cron run scheduled for `scheduled_at` ran past its timeout and was
+    /// killed.
+    pub(crate) fn cron_timeout(scheduled_at: SystemTime) -> Self {
+        Self {
+            event: "cron_timeout",
+            exit_code: None,
+            scheduled_at: Some(scheduled_at),
+            running_since: None,
+        }
+    }
+
     /// The cron boundary at `scheduled_at` was skipped because the run started
     /// at `running_since` was still going.
     pub(crate) fn cron_overlap(
@@ -11363,6 +11374,7 @@ mod tests {
             service.cron = Some(crate::config::CronConfig {
                 expression: "*/5 * * * * *".into(),
                 timezone: None,
+                timeout: None,
             });
             let mut services = HashMap::new();
             services.insert("job".into(), service.clone());

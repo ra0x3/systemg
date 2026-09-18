@@ -93,8 +93,9 @@ services:
 - `hooks` — `onstart` runs after a successful start and `onerr` after an
   unsuccessful exit; each holds `{command, timeout}` and runs independently of
   `deployment.pre_start`, which blocks the start
-- `cron` — `expression` (6-field, seconds first), optional `timezone`; makes
-  the unit scheduled instead of supervised
+- `cron` — `expression` (6-field, seconds first), optional `timezone`, optional
+  `timeout` (a run past it is killed and recorded as timed out; unset means no
+  limit); makes the unit scheduled instead of supervised
 - `logs` — per-service `sink`, `max_bytes`, `max_files`
 - `skip` — bool, or a command whose success skips the service
 - Privileged mode only: `user`, `group`, `capabilities`, `limits`, `isolation`

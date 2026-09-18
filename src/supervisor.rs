@@ -444,8 +444,9 @@ fn persist_cron_state(
 /// these units; firing from both would alert twice for a single failure.
 ///
 /// The hook's event comes from `status`, so a caller can't name the wrong one:
-/// a failed run is `cron_exit` with its exit code, and a skipped boundary is
-/// `cron_overlap` with the start of the run that was still going.
+/// a failed run is `cron_exit` with its exit code, a run killed at its timeout
+/// is `cron_timeout`, and a skipped boundary is `cron_overlap` with the start
+/// of the run that was still going.
 fn notify_cron_failure(
     daemon: &Daemon,
     service_name: &str,
@@ -458,6 +459,9 @@ fn notify_cron_failure(
     let context = match status {
         CronExecutionStatus::Failed(_) => {
             crate::daemon::HookContext::cron_exit(exit_code, scheduled_at)
+        }
+        CronExecutionStatus::TimedOut(_) => {
+            crate::daemon::HookContext::cron_timeout(scheduled_at)
         }
         CronExecutionStatus::OverlapError => {
             crate::daemon::HookContext::cron_overlap(scheduled_at, running_since)
@@ -3768,6 +3772,12 @@ impl Supervisor {
                                                 pid,
                                                 &job_name_clone,
                                                 &service_hash,
+                                                service_config
+                                                    .cron
+                                                    .as_ref()
+                                                    .and_then(|cron| {
+                                                        cron.timeout.as_deref()
+                                                    }),
                                             );
 
                                         match result {
@@ -3794,6 +3804,10 @@ impl Supervisor {
                                                                     "Cron job '{}' reported overlap state unexpectedly",
                                                                     job_name_clone
                                                                 ),
+                                                                CronExecutionStatus::TimedOut(limit) => warn!(
+                                                                    "Cron job '{}' timed out after {}",
+                                                                    job_name_clone, limit
+                                                                ),
                                                             }
 
                                                 let metrics = cron_run_metrics(
@@ -3803,7 +3817,7 @@ impl Supervisor {
                                                 );
                                                 let lifecycle_status = match status {
                                                     CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
-                                                    CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError => ServiceLifecycleStatus::ExitedWithError,
+                                                    CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError | CronExecutionStatus::TimedOut(_) => ServiceLifecycleStatus::ExitedWithError,
                                                     CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
                                                 };
                                                 persist_cron_state(
@@ -6844,12 +6858,13 @@ running project does not declare; restart the project to apply structural change
         pid: u32,
         job_name: &str,
         claim_key: &str,
+        timeout: Option<&str>,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
         Self::wait_for_cron_completion_with_timeout(
             pid,
             job_name,
             claim_key,
-            Duration::from_secs(3600),
+            timeout,
             Duration::from_millis(100),
             CRON_ROUTE_GRACE,
         )
@@ -6859,6 +6874,10 @@ running project does not declare; restart the project to apply structural change
     /// the address a routed exit status carries, unique across projects where a
     /// service name is not.
     ///
+    /// `timeout` is the manifest's `cron.timeout` as written. A run past it is
+    /// killed and recorded as timed out; with none, the run is waited on until
+    /// it exits.
+    ///
     /// When `waitpid` says the child was already reaped, the monitor got there
     /// first and may still be filing the status. `route_grace` is how long to
     /// keep checking for it before the run is recorded as interrupted.
@@ -6866,7 +6885,7 @@ running project does not declare; restart the project to apply structural change
         pid: u32,
         job_name: &str,
         claim_key: &str,
-        max_wait_time: Duration,
+        timeout: Option<&str>,
         poll_interval: Duration,
         route_grace: Duration,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
@@ -6877,6 +6896,11 @@ running project does not declare; restart the project to apply structural change
 
         let wait_pid = Pid::from_raw(pid as i32);
         let start = std::time::Instant::now();
+        let limit = timeout.and_then(|raw| {
+            crate::config::duration::parse_positive(raw)
+                .ok()
+                .map(|max| (max, raw.trim()))
+        });
 
         loop {
             // The monitor reaps managed children too, and on Linux a pidfd
@@ -6887,18 +6911,16 @@ running project does not declare; restart the project to apply structural change
             }
             match waitpid(wait_pid, Some(WaitPidFlag::WNOHANG)) {
                 Ok(WaitStatus::StillAlive) => {
-                    if start.elapsed() > max_wait_time {
+                    if let Some((max, raw)) = limit
+                        && start.elapsed() > max
+                    {
                         warn!(
-                            "Cron job '{}' exceeded maximum wait time of {} seconds; terminating process tree",
-                            job_name,
-                            max_wait_time.as_secs()
+                            "Cron job '{}' ran past its {} timeout; terminating process tree",
+                            job_name, raw
                         );
                         Daemon::terminate_process_tree(job_name, pid, None)?;
                         return Ok(CronCompletionOutcome {
-                            status: CronExecutionStatus::Failed(format!(
-                                "Cron job exceeded maximum wait time of {} seconds",
-                                max_wait_time.as_secs()
-                            )),
+                            status: CronExecutionStatus::TimedOut(raw.to_string()),
                             exit_code: None,
                         });
                     }
@@ -7066,6 +7088,7 @@ mod tests {
                             cron: is_cron.then(|| crate::config::CronConfig {
                                 expression: "0 3 * * *".into(),
                                 timezone: None,
+                                timeout: None,
                             }),
                             ..ServiceConfig::default()
                         },
@@ -7367,17 +7390,16 @@ mod tests {
             pid,
             "slow-cron",
             "v2:demo:slow-cron",
-            Duration::from_millis(1),
+            Some("1ms"),
             Duration::from_millis(1),
             Duration::ZERO,
         )
-        .expect("timeout should terminate process tree and return failed outcome");
+        .expect("timeout should terminate process tree and return timed-out outcome");
 
-        assert!(matches!(
+        assert_eq!(
             outcome.status,
-            CronExecutionStatus::Failed(ref reason)
-                if reason.contains("exceeded maximum wait time")
-        ));
+            CronExecutionStatus::TimedOut("1ms".to_string())
+        );
         assert_eq!(outcome.exit_code, None);
         match child.try_wait() {
             Ok(Some(_)) => {}
@@ -7407,7 +7429,7 @@ mod tests {
             pid,
             "routed-cron",
             "v2:demo:routed-cron",
-            Duration::from_millis(50),
+            None,
             Duration::from_millis(1),
             Duration::ZERO,
         )
@@ -7429,7 +7451,7 @@ mod tests {
             pid,
             "lost-cron",
             "v2:demo:lost-cron",
-            Duration::from_millis(50),
+            None,
             Duration::from_millis(1),
             Duration::ZERO,
         )

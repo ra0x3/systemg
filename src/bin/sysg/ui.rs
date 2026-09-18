@@ -2019,6 +2019,13 @@ fn format_last_exit(
                     format!("ovlp {}", time_str)
                 }
             }
+            Some(CronExecutionStatus::TimedOut(_)) => {
+                if time_str.is_empty() {
+                    "timeout".to_string()
+                } else {
+                    format!("tmo {time_str}")
+                }
+            }
             None => "running".to_string(),
         };
     }
@@ -2053,7 +2060,8 @@ fn last_exit_color(
                 }
             }
             Some(CronExecutionStatus::Interrupted(_)) => Some(YELLOW),
-            Some(CronExecutionStatus::OverlapError) => Some(RED_BOLD),
+            Some(CronExecutionStatus::OverlapError)
+            | Some(CronExecutionStatus::TimedOut(_)) => Some(RED_BOLD),
             None => None,
         };
     }
@@ -2618,6 +2626,7 @@ fn unit_row_tint_family(unit: &UnitStatus) -> RowTintFamily {
                     }
                     CronExecutionStatus::Interrupted(_) => RowTintFamily::Neutral,
                     CronExecutionStatus::OverlapError => RowTintFamily::Warning,
+                    CronExecutionStatus::TimedOut(_) => RowTintFamily::Failing,
                 };
             }
 
@@ -4176,6 +4185,12 @@ fn format_inspect_cron_status(
         }
         Some(CronExecutionStatus::OverlapError) => {
             colorize("overlap", YELLOW, no_color)
+        }
+        Some(CronExecutionStatus::TimedOut(limit)) if limit.trim().is_empty() => {
+            colorize("timed out", RED_BOLD, no_color)
+        }
+        Some(CronExecutionStatus::TimedOut(limit)) => {
+            colorize(&format!("timed out after {limit}"), RED_BOLD, no_color)
         }
         None => colorize("running", LIGHT_BLUE, no_color),
     }

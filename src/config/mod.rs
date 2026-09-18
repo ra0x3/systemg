@@ -1609,6 +1609,10 @@ pub struct CronConfig {
     pub expression: String,
     /// Optional timezone for cron scheduling (defaults to system timezone).
     pub timezone: Option<String>,
+    /// Optional cap on how long one run may take (e.g., "90m"). A run past it
+    /// is killed and recorded as timed out. Unset, a run is never killed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
 }
 
 /// Project segment used for a config that has not been finalized yet, and so
@@ -1756,6 +1760,20 @@ impl Config {
                 _ => format!("services.{name}"),
             };
             check_duration(&format!("{base}.backoff"), service.backoff.as_deref())?;
+
+            if let Some(raw) = service
+                .cron
+                .as_ref()
+                .and_then(|cron| cron.timeout.as_deref())
+            {
+                duration::parse_positive(raw).map_err(|reason| {
+                    ProcessManagerError::ManifestFieldInvalid {
+                        path: format!("{base}.cron.timeout"),
+                        value: raw.to_string(),
+                        reason: reason.to_string(),
+                    }
+                })?;
+            }
 
             if let Some(hooks) = &service.hooks {
                 for (hook, action) in [
@@ -3955,6 +3973,7 @@ services:
             cron: Some(CronConfig {
                 expression: "0 * * * * *".to_string(),
                 timezone: Some("UTC".to_string()),
+                timeout: None,
             }),
             skip: None,
             spawn: None,
@@ -3982,6 +4001,7 @@ services:
             cron: Some(CronConfig {
                 expression: "0 * * * * *".to_string(),
                 timezone: Some("UTC".to_string()),
+                timeout: None,
             }),
             skip: None,
             spawn: None,
@@ -4034,6 +4054,7 @@ services:
             cron: Some(CronConfig {
                 expression: "*/5 * * * * *".to_string(),
                 timezone: None,
+                timeout: None,
             }),
             ..base_config.clone()
         };
@@ -4087,6 +4108,7 @@ services:
             cron: Some(CronConfig {
                 expression: "0 * * * * *".to_string(),
                 timezone: Some("UTC".to_string()),
+                timeout: None,
             }),
             skip: None,
             spawn: None,
