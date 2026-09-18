@@ -636,7 +636,7 @@ version = "1.1.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.41"
+version = "0.23.45"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-pki-types]]
@@ -644,7 +644,7 @@ version = "1.15.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
-version = "0.103.13"
+version = "0.103.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustversion]]
