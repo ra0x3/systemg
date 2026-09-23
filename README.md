@@ -47,10 +47,9 @@ An agent-friendly general-purpose program orchestrator for busy people.
 1. [Read the Docs](https://sysg.dev)
 2. [Getting Started](#getting-started)
    - 2.1 [Installation](#installation)
-   - 2.2 [Usage](#usage)
 3. [Why systemg](#why-systemg)
    - 3.1 [Features](#features)
-4. [How systemg Compares](#how-systemg-compares)
+4. [How `systemg` compares](#how-systemg-compares)
 
 ## Getting Started
 
@@ -76,50 +75,6 @@ Nothing supervises the supervisor, so a reboot leaves the machine bare until a s
 $ sysg install-boot --config /opts/app/sysg.prod.yaml --write --enable
 ```
 
-### Usage
-
-Describe your system in a `systemg.yaml`:
-
-```yaml
-version: "2"
-services:
-  postgres:
-    command: "postgres -D ./data"
-    restart_policy: "always"
-
-  api:
-    command: "gunicorn app:application --bind 0.0.0.0:8000"
-    depends_on:
-      - postgres
-    restart_policy: "on-failure"
-    max_restarts: 5
-    backoff: "5s"
-    deployment:
-      health_check:
-        command: "curl --fail http://localhost:8000/health"
-
-  backup:
-    command: "sh backup.sh"
-    cron:
-      expression: "0 0 2 * * *"
-```
-
-Then run it:
-
-```sh
-sysg start --daemonize      # start everything, in dependency order
-sysg status                 # see what's running
-sysg logs --service api --lines 0 --follow  # stream only new service logs
-sysg restart --service api  # bounce one service, not the world
-```
-
-That's the whole workflow. Log rotation, output sinks, and status-snapshot tuning are covered in the [configuration docs](docs/how-it-works/configuration.mdx).
-
-Run `sysg start` without `--daemonize` for a foreground attachment: systemg
-streams each service as `service | line`, updates slow boot progress in place,
-and stops only that project on Ctrl-C. The resident supervisor stays warm for
-other projects. Run `sysg stop --supervisor` when you intend to stop everything.
-
 ## Why systemg
 
 You declare your processes, their dependencies, and their health checks in one file. systemg starts them in topological order, restarts them according to policy, and won't call a rolling deploy done until the new process passes its health check.
@@ -142,7 +97,7 @@ It sits in the gap between systemd and Docker Compose. systemd wants to own the 
 - [Privileged mode](docs/how-it-works/privileged-mode.mdx): per-service user/group, capabilities, rlimits, namespaces
 - Uses systemd/cgroups when present; needs neither
 
-## How systemg Compares
+## How `systemg` compares
 
 | | systemg | systemd | Supervisor | Docker Compose |
 |---------|---------|---------|------------|----------------|
