@@ -935,6 +935,25 @@ pub struct ServiceConfig {
     /// stays out of the service hash.
     #[serde(skip)]
     pub templates: HashMap<CommandField, String>,
+    /// The `(name, value)` pairs `${VAR}` expansion substituted into the
+    /// service command, captured at load. Lets the supervisor put `${NAME}`
+    /// back into a live command line read from the process table. Never
+    /// serialized, so it stays inside the process that loaded the config.
+    #[serde(skip)]
+    pub expansions: Expansions,
+}
+
+/// `(name, value)` pairs substituted into a service command. `Debug` prints
+/// only the names, so logging a `ServiceConfig` never prints the values.
+#[derive(Clone, Default)]
+pub struct Expansions(pub Vec<(String, String)>);
+
+impl fmt::Debug for Expansions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(name, _)| name))
+            .finish()
+    }
 }
 
 /// A service field that holds a command or URL worth hiding secrets in.
@@ -1035,6 +1054,48 @@ impl ServiceConfig {
     /// Returns the service command as it should be shown to anyone.
     pub fn display_command(&self) -> String {
         self.shown(CommandField::Command, &self.command)
+    }
+
+    /// Returns a live command line of this service as it should be shown:
+    /// every value `${VAR}` expansion put into the command is swapped back
+    /// for `${NAME}`, then URL credentials are masked.
+    ///
+    /// Values are matched in one leftmost-longest pass so a short value never
+    /// splits a longer one (`PORT=123` inside `TOKEN=abc123`).
+    pub fn shown_runtime(&self, text: &str) -> String {
+        let mut pairs: Vec<&(String, String)> = self
+            .expansions
+            .0
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .collect();
+        pairs.sort_by(|a, b| {
+            b.1.len()
+                .cmp(&a.1.len())
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        pairs.dedup_by(|a, b| a.1 == b.1);
+        if pairs.is_empty() {
+            return crate::redact::redact_command(text);
+        }
+
+        let pattern = pairs
+            .iter()
+            .map(|(_, value)| regex::escape(value))
+            .collect::<Vec<_>>()
+            .join("|");
+        let Ok(values) = Regex::new(&pattern) else {
+            return self.display_command();
+        };
+        let names: HashMap<&str, &str> = pairs
+            .iter()
+            .map(|(name, value)| (value.as_str(), name.as_str()))
+            .collect();
+        let restored = values.replace_all(text, |caps: &regex::Captures| {
+            format!("${{{}}}", names.get(&caps[0]).copied().unwrap_or_default())
+        });
+        crate::redact::redact_command(&restored)
     }
 }
 
@@ -2588,6 +2649,22 @@ fn raw_command_templates(
     templates
 }
 
+/// Returns the `(name, value)` of every variable `template` references, read
+/// from the environment the loader just expanded it against.
+fn referenced_env_values(template: &str) -> Vec<(String, String)> {
+    let re = Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
+    let mut pairs: Vec<(String, String)> = re
+        .captures_iter(template)
+        .filter_map(|caps| {
+            let name = caps[1].to_string();
+            env::var(&name).ok().map(|value| (name, value))
+        })
+        .collect();
+    pairs.sort();
+    pairs.dedup();
+    pairs
+}
+
 /// Stamps each service with its command-bearing fields as written.
 fn attach_raw_commands(
     config: &mut Config,
@@ -2596,6 +2673,11 @@ fn attach_raw_commands(
     for (name, service) in config.services.iter_mut() {
         let key = (service.project_scope.clone(), name.clone());
         service.templates = templates.get(&key).cloned().unwrap_or_default();
+        service.expansions = service
+            .templates
+            .get(&CommandField::Command)
+            .map(|template| Expansions(referenced_env_values(template)))
+            .unwrap_or_default();
         let fields = &service.templates;
         if let Some(hooks) = service.hooks.as_mut() {
             if let Some(action) = hooks.onstart.as_mut() {
@@ -2955,6 +3037,30 @@ projects:
         unsafe {
             env::remove_var("SYSTEMG_TEST_PROXY_PASS");
         }
+    }
+
+    #[test]
+    fn shown_runtime_restores_longest_value_first() {
+        let service = ServiceConfig {
+            expansions: Expansions(vec![
+                ("EMPTY".into(), String::new()),
+                ("PORT".into(), "123".into()),
+                ("TOKEN".into(), "abc123".into()),
+                ("ALIAS".into(), "abc123".into()),
+                ("PASS".into(), "hunter2".into()),
+            ]),
+            ..ServiceConfig::default()
+        };
+        assert_eq!(
+            service.shown_runtime(
+                "run --port 123 --token abc123 --proxy http://u:hunter2@gate --key hunter2"
+            ),
+            "run --port ${PORT} --token ${ALIAS} --proxy http://***@gate --key ${PASS}"
+        );
+        assert_eq!(
+            ServiceConfig::default().shown_runtime("run http://u:p@h"),
+            "run http://***@h"
+        );
     }
 
     #[test]
@@ -3386,6 +3492,7 @@ services:
             logs: None,
             project_scope: None,
             templates: HashMap::new(),
+            expansions: Default::default(),
         }
     }
 
@@ -4372,6 +4479,7 @@ services:
             logs: None,
             project_scope: None,
             templates: HashMap::new(),
+            expansions: Default::default(),
         };
 
         let config2 = ServiceConfig {
@@ -4401,6 +4509,7 @@ services:
             logs: None,
             project_scope: None,
             templates: HashMap::new(),
+            expansions: Default::default(),
         };
 
         let hash1 = config1.compute_hash();
@@ -4438,6 +4547,7 @@ services:
             logs: None,
             project_scope: None,
             templates: HashMap::new(),
+            expansions: Default::default(),
         };
 
         let modified_command = ServiceConfig {
@@ -4510,6 +4620,7 @@ services:
             logs: None,
             project_scope: None,
             templates: HashMap::new(),
+            expansions: Default::default(),
         };
         let hash = config.compute_hash();
         assert_eq!(hash.len(), 16);

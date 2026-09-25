@@ -10913,6 +10913,7 @@ mod tests {
             logs: None,
             project_scope: None,
             templates: Default::default(),
+            expansions: Default::default(),
         }
     }
 

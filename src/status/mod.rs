@@ -297,6 +297,44 @@ fn read_proc_task_children(pid: u32) -> Option<Vec<u32>> {
     Some(child_pids)
 }
 
+/// Swaps the service's expanded env values back to `${NAME}` in every
+/// process command under it, so descendants never show what the service
+/// command itself hides.
+fn restore_spawn_tree_commands(
+    nodes: &mut [SpawnedProcessNode],
+    service: &ServiceConfig,
+) {
+    for node in nodes {
+        node.child.command = service.shown_runtime(&node.child.command);
+        if matches!(node.child.kind, SpawnedChildKind::Peripheral) {
+            node.child.name = peripheral_name(&node.child.command, node.child.pid);
+        }
+        restore_spawn_tree_commands(&mut node.children, service);
+    }
+}
+
+/// Blanks every process command under a unit with no loaded config: without
+/// its expansions there is no way to tell which argv values are secrets.
+fn hide_spawn_tree_commands(nodes: &mut [SpawnedProcessNode]) {
+    for node in nodes {
+        node.child.command.clear();
+        if matches!(node.child.kind, SpawnedChildKind::Peripheral) {
+            node.child.name = peripheral_name("", node.child.pid);
+        }
+        hide_spawn_tree_commands(&mut node.children);
+    }
+}
+
+/// Names a process sysg found in the process table rather than one a
+/// service spawned by name: the first word of its shown command.
+fn peripheral_name(command: &str, pid: u32) -> String {
+    command
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("pid-{pid}"))
+}
+
 /// Builds spawn tree.
 fn build_spawn_tree(
     manager: &DynamicSpawnManager,
@@ -1225,8 +1263,10 @@ fn build_snapshot(
         let runtime_command = if matches!(mode, StatusSnapshotMode::Detailed) {
             process_runtime
                 .as_ref()
-                .map(|runtime| {
-                    redact_command(&StatusManager::get_process_cmdline(runtime.pid))
+                .zip(service_config)
+                .map(|(runtime, service_config)| {
+                    service_config
+                        .shown_runtime(&StatusManager::get_process_cmdline(runtime.pid))
                 })
                 .filter(|cmd| !cmd.is_empty())
         } else {
@@ -1286,6 +1326,12 @@ fn build_snapshot(
                 }
             }
 
+            match service_config {
+                Some(service_config) => {
+                    restore_spawn_tree_commands(&mut nodes, service_config)
+                }
+                None => hide_spawn_tree_commands(&mut nodes),
+            }
             nodes
         } else {
             Vec::new()
@@ -1373,6 +1419,8 @@ fn build_snapshot(
             );
         }
 
+        hide_spawn_tree_commands(&mut spawned_children);
+
         units.push(UnitStatus {
             name: service_name.clone(),
             hash: service_name.clone(),
@@ -1388,14 +1436,7 @@ fn build_snapshot(
             cron: None,
             metrics: metrics_summary,
             command: None,
-            runtime_command: if matches!(mode, StatusSnapshotMode::Detailed) {
-                Some(redact_command(&StatusManager::get_process_cmdline(
-                    pid_value,
-                )))
-                .filter(|cmd| !cmd.is_empty())
-            } else {
-                None
-            },
+            runtime_command: None,
             spawned_children,
         });
     }

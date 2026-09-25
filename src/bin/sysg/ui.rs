@@ -4212,6 +4212,27 @@ struct InspectProcessContext<'a> {
     users: &'a Users,
     children_by_parent: &'a HashMap<u32, Vec<u32>>,
     total_memory: f64,
+    commands: HashMap<u32, String>,
+}
+
+/// Maps each pid the supervisor reported for `unit` to the command line it
+/// cleaned, so the process table never shows argv the supervisor hid.
+fn supervisor_commands(unit: &UnitStatus) -> HashMap<u32, String> {
+    fn walk(nodes: &[SpawnedProcessNode], out: &mut HashMap<u32, String>) {
+        for node in nodes {
+            out.insert(node.child.pid, node.child.command.clone());
+            walk(&node.children, out);
+        }
+    }
+
+    let mut commands = HashMap::new();
+    if let Some(process) = &unit.process
+        && let Some(command) = unit.runtime_command.as_ref().or(unit.command.as_ref())
+    {
+        commands.insert(process.pid, command.clone());
+    }
+    walk(&unit.spawned_children, &mut commands);
+    commands
 }
 
 const INSPECT_PROCESS_COLUMN_COUNT: usize = 14;
@@ -4548,6 +4569,7 @@ fn compute_inspect_process_table_width(unit: &UnitStatus) -> usize {
         users: &users,
         children_by_parent: &children_by_parent,
         total_memory,
+        commands: supervisor_commands(unit),
     };
 
     let mut rows = Vec::new();
@@ -4750,7 +4772,7 @@ fn collect_inspect_process_table_lines(
 
 /// Collects inspect process table lines from root.
 fn collect_inspect_process_table_lines_from_root(
-    _unit: &UnitStatus,
+    unit: &UnitStatus,
     no_color: bool,
     table_width: usize,
     system: &System,
@@ -4779,6 +4801,7 @@ fn collect_inspect_process_table_lines_from_root(
         users: &users,
         children_by_parent: &children_by_parent,
         total_memory,
+        commands: supervisor_commands(unit),
     };
 
     let mut rows = Vec::new();
@@ -4955,7 +4978,12 @@ fn append_inspect_process_rows(
         .cpu_ticks
         .map(format_cpu_time_from_ticks)
         .unwrap_or_else(|| format_inspect_elapsed(process.run_time()));
-    let command = process_command_line(process);
+    let command = context
+        .commands
+        .get(&pid)
+        .filter(|command| !command.is_empty())
+        .cloned()
+        .unwrap_or_else(|| name.clone());
 
     rows.push(InspectProcessRow {
         tree_label,
@@ -5043,21 +5071,6 @@ fn sanitize_table_cell(value: &str) -> String {
 /// Returns a display-friendly process name from sysinfo process metadata.
 fn process_display_name(process: &sysinfo::Process) -> String {
     process.name().to_string_lossy().into_owned()
-}
-
-/// Returns the full command line when available, otherwise falls back to process display name.
-fn process_command_line(process: &sysinfo::Process) -> String {
-    if process.cmd().is_empty() {
-        process_display_name(process)
-    } else {
-        let command = process
-            .cmd()
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ");
-        systemg::redact::redact_command(&command)
-    }
 }
 
 /// Converts sysinfo's status enum into a compact single-letter process state marker.
