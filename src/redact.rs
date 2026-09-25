@@ -18,6 +18,17 @@ pub fn redact_command(command: &str) -> String {
     URL_USERINFO.replace_all(command, "${1}***@").into_owned()
 }
 
+/// Masks URL credentials in `text` in place, returning whether anything
+/// changed. Used to clean command text already persisted in state files.
+pub fn redact_in_place(text: &mut String) -> bool {
+    let redacted = redact_command(text);
+    if redacted == *text {
+        return false;
+    }
+    *text = redacted;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::redact_command;

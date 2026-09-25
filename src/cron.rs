@@ -1435,7 +1435,11 @@ impl CronStateFile {
             )
         })?;
         state.store = store;
-        Ok((state, compact))
+        let mut scrubbed = false;
+        for job in state.jobs.values_mut() {
+            scrubbed |= job.scrub();
+        }
+        Ok((state, compact || scrubbed))
     }
 
     /// Updates one cron unit while preserving concurrent scheduler writes.
@@ -1447,6 +1451,8 @@ impl CronStateFile {
         let lock = Self::lock(&store)?;
         FileExt::lock_exclusive(&lock)?;
         let (mut state, _) = Self::read(store)?;
+        let mut job = job;
+        job.scrub();
         state.jobs.insert(hash.to_string(), job);
         state.write()
     }
@@ -1455,6 +1461,28 @@ impl CronStateFile {
     /// Keys are service configuration hashes (not service names).
     pub fn jobs(&self) -> &std::collections::BTreeMap<String, PersistedCronJobState> {
         &self.jobs
+    }
+}
+
+impl PersistedCronJobState {
+    /// Masks URL credentials in recorded commands and failure reasons,
+    /// returning whether anything changed.
+    fn scrub(&mut self) -> bool {
+        use crate::redact::redact_in_place;
+        let mut changed = false;
+        for record in self.execution_history.iter_mut() {
+            if let Some(command) = record.command.as_mut() {
+                changed |= redact_in_place(command);
+            }
+            if let Some(
+                CronExecutionStatus::Failed(reason)
+                | CronExecutionStatus::Interrupted(reason),
+            ) = record.status.as_mut()
+            {
+                changed |= redact_in_place(reason);
+            }
+        }
+        changed
     }
 }
 
@@ -1605,7 +1633,7 @@ mod tests {
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: Default::default(),
         };
         service_config.compute_hash()
     }
@@ -2245,7 +2273,7 @@ mod tests {
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: Default::default(),
         }
     }
 
@@ -2418,5 +2446,39 @@ mod tests {
         assert!(record.status.is_none());
         assert_eq!(record.exit_code, None);
         assert_eq!(record.pid, Some(1234));
+    }
+
+    #[test]
+    fn scrub_masks_persisted_commands_and_reasons() {
+        let record = |status| CronExecutionRecord {
+            started_at: SystemTime::now(),
+            completed_at: None,
+            status: Some(status),
+            exit_code: None,
+            pid: None,
+            process_start: None,
+            user: None,
+            command: Some("fetch http://u:hunter2@proxy:7000".to_string()),
+            metrics: Vec::new(),
+        };
+        let mut job = PersistedCronJobState {
+            service_name: None,
+            last_execution: None,
+            execution_history: VecDeque::from([
+                record(CronExecutionStatus::Failed(
+                    "`fetch http://u:hunter2@proxy:7000` exited".to_string(),
+                )),
+                record(CronExecutionStatus::Interrupted(
+                    "lost http://u:hunter2@proxy:7000".to_string(),
+                )),
+            ]),
+            timezone_label: String::new(),
+            timezone: None,
+        };
+
+        assert!(job.scrub());
+        let serialized = format!("{job:?}");
+        assert!(!serialized.contains("hunter2"), "{serialized}");
+        assert!(!job.scrub());
     }
 }

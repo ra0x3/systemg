@@ -928,21 +928,113 @@ pub struct ServiceConfig {
     /// their existing state-file keys stay byte-for-byte unchanged (no migration).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_scope: Option<String>,
-    /// The command as written, before `${VAR}` expansion. Status and inspect
-    /// show this so values pulled from the environment (proxy passwords, API
-    /// tokens) never reach their output. Never serialized, so it stays out of
-    /// the service hash.
+    /// Command-bearing fields as written, before `${VAR}` expansion. Anything
+    /// that shows one of these fields (status, inspect, logs, diagnostics)
+    /// reads it from here so values pulled from the environment (proxy
+    /// passwords, API tokens) never reach the output. Never serialized, so it
+    /// stays out of the service hash.
     #[serde(skip)]
-    pub raw_command: Option<String>,
+    pub templates: HashMap<CommandField, String>,
+}
+
+/// A service field that holds a command or URL worth hiding secrets in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommandField {
+    /// `command`, or `exec` rendered as a shell line.
+    Command,
+    /// `deployment.pre_start`.
+    PreStart,
+    /// `deployment.health_check.command`.
+    HealthCommand,
+    /// `deployment.health_check.url`.
+    HealthUrl,
+    /// `deployment.blue_green.switch_command`.
+    SwitchCommand,
+    /// `deployment.blue_green.candidate_health_check.command`.
+    CandidateCommand,
+    /// `deployment.blue_green.candidate_health_check.url`.
+    CandidateUrl,
+    /// `deployment.blue_green.switch_verify.command`.
+    VerifyCommand,
+    /// `deployment.blue_green.switch_verify.url`.
+    VerifyUrl,
+    /// `hooks.onstart.command`.
+    OnStart,
+    /// `hooks.onerr.command`.
+    OnErr,
+    /// `skip` in its command form.
+    Skip,
+}
+
+impl CommandField {
+    /// Every field, for collecting templates.
+    pub const ALL: [CommandField; 12] = [
+        CommandField::Command,
+        CommandField::PreStart,
+        CommandField::HealthCommand,
+        CommandField::HealthUrl,
+        CommandField::SwitchCommand,
+        CommandField::CandidateCommand,
+        CommandField::CandidateUrl,
+        CommandField::VerifyCommand,
+        CommandField::VerifyUrl,
+        CommandField::OnStart,
+        CommandField::OnErr,
+        CommandField::Skip,
+    ];
+
+    /// Reads this field's text from a service, rendering `exec` for `Command`.
+    fn read(self, service: &ServiceConfig) -> Option<String> {
+        let deployment = service.deployment.as_ref();
+        let blue_green = deployment.and_then(|d| d.blue_green.as_ref());
+        let health = deployment.and_then(|d| d.health_check.as_ref());
+        let candidate = blue_green.and_then(|b| b.candidate_health_check.as_ref());
+        let verify = blue_green.and_then(|b| b.switch_verify.as_ref());
+        let hooks = service.hooks.as_ref();
+        match self {
+            CommandField::Command => Some(match service.exec.as_deref() {
+                Some(argv) => render_argv(argv),
+                None => service.command.clone(),
+            }),
+            CommandField::PreStart => deployment.and_then(|d| d.pre_start.clone()),
+            CommandField::HealthCommand => health.and_then(|h| h.command.clone()),
+            CommandField::HealthUrl => health.and_then(|h| h.url.clone()),
+            CommandField::SwitchCommand => {
+                blue_green.and_then(|b| b.switch_command.clone())
+            }
+            CommandField::CandidateCommand => candidate.and_then(|h| h.command.clone()),
+            CommandField::CandidateUrl => candidate.and_then(|h| h.url.clone()),
+            CommandField::VerifyCommand => verify.and_then(|h| h.command.clone()),
+            CommandField::VerifyUrl => verify.and_then(|h| h.url.clone()),
+            CommandField::OnStart => hooks
+                .and_then(|h| h.onstart.as_ref())
+                .map(|a| a.command.clone()),
+            CommandField::OnErr => hooks
+                .and_then(|h| h.onerr.as_ref())
+                .map(|a| a.command.clone()),
+            CommandField::Skip => match &service.skip {
+                Some(SkipConfig::Command(command)) => Some(command.clone()),
+                _ => None,
+            },
+        }
+    }
 }
 
 impl ServiceConfig {
-    /// Returns the command to show a caller: the unexpanded template when
-    /// known, with any URL credentials masked.
-    pub fn display_command(&self) -> String {
+    /// Returns `field` as it should be shown to anyone: the text as written
+    /// when known, otherwise `fallback`, with URL credentials masked.
+    pub fn shown(&self, field: CommandField, fallback: &str) -> String {
         crate::redact::redact_command(
-            self.raw_command.as_deref().unwrap_or(&self.command),
+            self.templates
+                .get(&field)
+                .map(String::as_str)
+                .unwrap_or(fallback),
         )
+    }
+
+    /// Returns the service command as it should be shown to anyone.
+    pub fn display_command(&self) -> String {
+        self.shown(CommandField::Command, &self.command)
     }
 }
 
@@ -1413,6 +1505,58 @@ pub struct HealthCheckConfig {
     pub total_timeout: Option<String>,
     /// Number of retries before giving up.
     pub retries: Option<u32>,
+    /// `url` as written, before `${VAR}` expansion. Never serialized.
+    #[serde(skip)]
+    pub url_template: Option<String>,
+    /// `command` as written, before `${VAR}` expansion. Never serialized.
+    #[serde(skip)]
+    pub command_template: Option<String>,
+}
+
+impl HealthCheckConfig {
+    /// Returns what this check probes, as it should be shown in logs and
+    /// diagnostics: the command or URL as written, with URL credentials
+    /// masked. Command wins when both are set, matching how the check runs.
+    pub fn shown_target(&self) -> String {
+        let target = self
+            .command
+            .as_ref()
+            .map(|command| self.command_template.as_ref().unwrap_or(command))
+            .or_else(|| {
+                self.url
+                    .as_ref()
+                    .map(|url| self.url_template.as_ref().unwrap_or(url))
+            })
+            .map(String::as_str)
+            .unwrap_or("<unconfigured>");
+        crate::redact::redact_command(target)
+    }
+
+    /// Returns the check's command as it should be shown.
+    pub fn shown_command(&self) -> String {
+        crate::redact::redact_command(
+            self.command_template
+                .as_deref()
+                .or(self.command.as_deref())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Returns the check's URL as it should be shown.
+    pub fn shown_url(&self) -> String {
+        crate::redact::redact_command(
+            self.url_template
+                .as_deref()
+                .or(self.url.as_deref())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Stamps the as-written URL and command onto this check.
+    fn attach_templates(&mut self, url: Option<&String>, command: Option<&String>) {
+        self.url_template = url.cloned();
+        self.command_template = command.cloned();
+    }
 }
 
 /// Deserializes the YAML shape accepted for generic health checks before validation.
@@ -1447,6 +1591,8 @@ impl<'de> Deserialize<'de> for HealthCheckConfig {
             attempt_timeout: raw.attempt_timeout,
             total_timeout: raw.total_timeout,
             retries: raw.retries,
+            url_template: None,
+            command_template: None,
         })
     }
 }
@@ -1605,6 +1751,18 @@ pub struct HookAction {
     pub command: String,
     /// Optional timeout for the hook command (e.g., "5s", "1m").
     pub timeout: Option<String>,
+    /// `command` as written, before `${VAR}` expansion. Never serialized.
+    #[serde(skip)]
+    pub command_template: Option<String>,
+}
+
+impl HookAction {
+    /// Returns the hook command as it should be shown in logs.
+    pub fn shown(&self) -> String {
+        crate::redact::redact_command(
+            self.command_template.as_deref().unwrap_or(&self.command),
+        )
+    }
 }
 
 /// Hooks that run after a successful start or unsuccessful exit.
@@ -2400,12 +2558,15 @@ fn load_projects_from_content(
 /// unique across every project a manifest declares.
 type ServiceKey = (Option<String>, String);
 
-/// Collects every service's command as written, before `${VAR}` expansion.
+/// Collects every service's command-bearing fields as written, before
+/// `${VAR}` expansion.
 ///
 /// Keyed by the expanded project scope and service name, so a project id or
-/// service name that itself uses `${VAR}` still finds its template after the
+/// service name that itself uses `${VAR}` still finds its templates after the
 /// expanded parse re-sorts projects by their final ids.
-fn raw_command_templates(raw_configs: &[Config]) -> HashMap<ServiceKey, String> {
+fn raw_command_templates(
+    raw_configs: &[Config],
+) -> HashMap<ServiceKey, HashMap<CommandField, String>> {
     let mut templates = HashMap::new();
     for config in raw_configs {
         for (name, service) in &config.services {
@@ -2417,21 +2578,57 @@ fn raw_command_templates(raw_configs: &[Config]) -> HashMap<ServiceKey, String> 
                 Some(Err(_)) => continue,
                 None => None,
             };
-            let template = match service.exec.as_deref() {
-                Some(argv) => render_argv(argv),
-                None => service.command.clone(),
-            };
-            templates.insert((scope, name), template);
+            let fields = CommandField::ALL
+                .into_iter()
+                .filter_map(|field| field.read(service).map(|text| (field, text)))
+                .collect();
+            templates.insert((scope, name), fields);
         }
     }
     templates
 }
 
-/// Stamps each service with its unexpanded command template.
-fn attach_raw_commands(config: &mut Config, templates: &HashMap<ServiceKey, String>) {
+/// Stamps each service with its command-bearing fields as written.
+fn attach_raw_commands(
+    config: &mut Config,
+    templates: &HashMap<ServiceKey, HashMap<CommandField, String>>,
+) {
     for (name, service) in config.services.iter_mut() {
         let key = (service.project_scope.clone(), name.clone());
-        service.raw_command = templates.get(&key).cloned();
+        service.templates = templates.get(&key).cloned().unwrap_or_default();
+        let fields = &service.templates;
+        if let Some(hooks) = service.hooks.as_mut() {
+            if let Some(action) = hooks.onstart.as_mut() {
+                action.command_template = fields.get(&CommandField::OnStart).cloned();
+            }
+            if let Some(action) = hooks.onerr.as_mut() {
+                action.command_template = fields.get(&CommandField::OnErr).cloned();
+            }
+        }
+        let Some(deployment) = service.deployment.as_mut() else {
+            continue;
+        };
+        if let Some(check) = deployment.health_check.as_mut() {
+            check.attach_templates(
+                fields.get(&CommandField::HealthUrl),
+                fields.get(&CommandField::HealthCommand),
+            );
+        }
+        let Some(blue_green) = deployment.blue_green.as_mut() else {
+            continue;
+        };
+        if let Some(check) = blue_green.candidate_health_check.as_mut() {
+            check.attach_templates(
+                fields.get(&CommandField::CandidateUrl),
+                fields.get(&CommandField::CandidateCommand),
+            );
+        }
+        if let Some(check) = blue_green.switch_verify.as_mut() {
+            check.attach_templates(
+                fields.get(&CommandField::VerifyUrl),
+                fields.get(&CommandField::VerifyCommand),
+            );
+        }
     }
 }
 
@@ -2694,6 +2891,16 @@ projects:
         exec: ["run", "--token", "${SYSTEMG_TEST_PROXY_PASS}"]
       literal:
         command: "run --proxy http://me:plain@gate:7000"
+      deploy:
+        command: "run"
+        skip: "check ${SYSTEMG_TEST_PROXY_PASS}"
+        deployment:
+          pre_start: "migrate --password ${SYSTEMG_TEST_PROXY_PASS}"
+          health_check:
+            url: "http://me:${SYSTEMG_TEST_PROXY_PASS}@localhost:8080/health?key=${SYSTEMG_TEST_PROXY_PASS}"
+        hooks:
+          onstart:
+            command: "notify ${SYSTEMG_TEST_PROXY_PASS}"
 "#,
         )
         .expect("write config");
@@ -2713,6 +2920,37 @@ projects:
                 config.services["literal"].display_command(),
                 "run --proxy http://***@gate:7000"
             );
+
+            let deploy = &config.services["deploy"];
+            let pre_start = deploy
+                .deployment
+                .as_ref()
+                .and_then(|d| d.pre_start.as_deref())
+                .unwrap();
+            assert_eq!(
+                deploy.shown(CommandField::PreStart, pre_start),
+                "migrate --password ${SYSTEMG_TEST_PROXY_PASS}"
+            );
+            assert_eq!(
+                deploy.shown(CommandField::Skip, "fallback"),
+                "check ${SYSTEMG_TEST_PROXY_PASS}"
+            );
+            let health = deploy
+                .deployment
+                .as_ref()
+                .and_then(|d| d.health_check.as_ref())
+                .unwrap();
+            assert!(health.url.as_deref().unwrap().contains("hunter2"));
+            assert_eq!(
+                health.shown_target(),
+                "http://***@localhost:8080/health?key=${SYSTEMG_TEST_PROXY_PASS}"
+            );
+            let onstart = deploy
+                .hooks
+                .as_ref()
+                .and_then(|h| h.onstart.as_ref())
+                .unwrap();
+            assert_eq!(onstart.shown(), "notify ${SYSTEMG_TEST_PROXY_PASS}");
         }
         unsafe {
             env::remove_var("SYSTEMG_TEST_PROXY_PASS");
@@ -3147,7 +3385,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: HashMap::new(),
         }
     }
 
@@ -4133,7 +4371,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: HashMap::new(),
         };
 
         let config2 = ServiceConfig {
@@ -4162,7 +4400,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: HashMap::new(),
         };
 
         let hash1 = config1.compute_hash();
@@ -4199,7 +4437,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: HashMap::new(),
         };
 
         let modified_command = ServiceConfig {
@@ -4271,7 +4509,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: HashMap::new(),
         };
         let hash = config.compute_hash();
         assert_eq!(hash.len(), 16);

@@ -2854,7 +2854,10 @@ impl Supervisor {
                 return;
             }
         };
-        debug!("Supervisor received command: {:?}", command);
+        debug!(
+            "Supervisor received command: {}",
+            crate::redact::redact_command(&format!("{command:?}"))
+        );
         match &command {
             ControlCommand::StopProject { project, .. }
             | ControlCommand::Stop {
@@ -4940,7 +4943,7 @@ impl Supervisor {
             );
         }
 
-        let command_string = params.command.join(" ");
+        let command_string = crate::redact::redact_command(&params.command.join(" "));
         let child_name = params.name.clone();
         let started_at = SystemTime::now();
 

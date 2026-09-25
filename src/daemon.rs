@@ -29,9 +29,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     config::{
-        BlueGreenDeploymentConfig, Config, DependsOnCondition, EffectiveLogsConfig,
-        EnvConfig, HealthCheckConfig, HookAction, LogSink, ServiceConfig, SkipConfig,
-        supervisor::SupervisorTimeouts,
+        BlueGreenDeploymentConfig, CommandField, Config, DependsOnCondition,
+        EffectiveLogsConfig, EnvConfig, HealthCheckConfig, HookAction, LogSink,
+        ServiceConfig, SkipConfig, supervisor::SupervisorTimeouts,
     },
     constants::{
         CRASH_EVIDENCE_WINDOW, DEFAULT_HEALTH_ATTEMPT_TIMEOUT, DEFAULT_HEALTH_INTERVAL,
@@ -44,6 +44,7 @@ use crate::{
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     logs::{resolve_log_path, spawn_managed_service_log_writers},
     opslot::OpSlot,
+    redact::redact_command,
     runtime,
     spawn::SpawnedExit,
     start::{Gate, Resolution, Schedule, Units},
@@ -769,8 +770,19 @@ impl PidFile {
             let store = self.store.clone();
             *self = xml_from_str::<Self>(&contents)?;
             self.store = store;
+            self.scrub_commands();
         }
         Ok(())
+    }
+
+    /// Masks URL credentials in persisted spawn commands, returning whether
+    /// any row changed. Rows written before masking existed carry them raw.
+    fn scrub_commands(&mut self) -> bool {
+        let mut changed = false;
+        for metadata in self.spawn_metadata.values_mut() {
+            changed |= crate::redact::redact_in_place(&mut metadata.command);
+        }
+        changed
     }
 
     /// Writes `self` to `path`, creating the project directory if needed.
@@ -812,7 +824,8 @@ impl PidFile {
         let bound = this.store.clone();
         this = xml_from_str::<Self>(&contents)?;
         this.store = bound;
-        if compact {
+        let scrubbed = this.scrub_commands();
+        if compact || scrubbed {
             this.write_at(&path)?;
         }
         Ok(this)
@@ -2631,7 +2644,9 @@ fn run_hook(
 ) {
     debug!(
         "Running {} hook for '{}': `{}`",
-        hook, service_name, action.command
+        hook,
+        service_name,
+        action.shown()
     );
 
     let mut cmd = Command::new(DEFAULT_SHELL);
@@ -3796,6 +3811,15 @@ impl Daemon {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// Returns one of a service's command fields as it should be shown in
+    /// logs and diagnostics, with `${VAR}` values and URL credentials kept out.
+    fn shown(&self, service_name: &str, field: CommandField, fallback: &str) -> String {
+        match self.cfg().services.get(service_name) {
+            Some(service) => service.shown(field, fallback),
+            None => redact_command(fallback),
+        }
     }
 
     /// Applies one service's resolved environment to a child command.
@@ -5254,7 +5278,10 @@ impl Daemon {
         fail_closed: bool,
     ) -> Result<(u32, Option<libc::pid_t>), ProcessManagerError> {
         let command = &service_config.command;
-        debug!("Launching service: '{service_name}' with command: `{command}`");
+        debug!(
+            "Launching service: '{service_name}' with command: `{}`",
+            service_config.display_command()
+        );
 
         // Argv form execs the program itself, so the pid sysg tracks is the
         // workload. The shell form cannot: `sh` stays resident as the parent
@@ -5290,7 +5317,7 @@ impl Daemon {
         };
         cmd.current_dir(&working_dir);
 
-        debug!("Executing command: {cmd:?}");
+        debug!("Executing '{service_name}' in {}", working_dir.display());
 
         match log_settings.sink {
             LogSink::File => {
@@ -5722,7 +5749,10 @@ impl Daemon {
                     "Skipping pre-start for '{name}': identical to completed dependency '{dep}' which already ran"
                 );
             } else {
-                info!("Running pre-start command for '{name}': {pre_start}");
+                info!(
+                    "Running pre-start command for '{name}': {}",
+                    service.shown(CommandField::PreStart, pre_start)
+                );
                 self.op_slot.detail_for_unit(
                     &self.cfg().project.id.clone(),
                     name,
@@ -5832,7 +5862,10 @@ impl Daemon {
         if self.boot_cancelled() {
             return Err(Self::interrupted(service_name));
         }
-        debug!("Evaluating skip condition for '{service_name}': `{skip_command}`");
+        debug!(
+            "Evaluating skip condition for '{service_name}': `{}`",
+            self.shown(service_name, CommandField::Skip, skip_command)
+        );
 
         let mut cmd = Command::new(DEFAULT_SHELL);
         cmd.arg(SHELL_COMMAND_FLAG).arg(skip_command);
@@ -7411,6 +7444,7 @@ impl Daemon {
             return Err(Self::interrupted(service_name));
         }
         let started = Instant::now();
+        let shown = self.shown(service_name, CommandField::PreStart, command);
 
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
@@ -7454,7 +7488,7 @@ impl Daemon {
                 }
             }
         };
-        write_marker(&format!("\u{25b6} running: {command}"));
+        write_marker(&format!("\u{25b6} running: {shown}"));
 
         let tail: Arc<Mutex<std::collections::VecDeque<String>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -7611,7 +7645,7 @@ impl Daemon {
                     None,
                 )
                 .note(format!(
-                    "`{command}` did not finish within {secs}s and its process tree was terminated"
+                    "`{shown}` did not finish within {secs}s and its process tree was terminated"
                 ))
                 .note("the service was not launched")
                 .evidence("pre_start output", captured)
@@ -7676,7 +7710,7 @@ impl Daemon {
                 None,
                 None,
             )
-            .note(format!("`{command}` exited with {status} after {elapsed}s"))
+            .note(format!("`{shown}` exited with {status} after {elapsed}s"))
             .note("the service was not started because its pre_start command failed")
             .evidence("pre_start output", captured)
             .help_cmd(
@@ -7913,11 +7947,7 @@ impl Daemon {
         use crate::diag::{Diagnostic, SgCode};
 
         let project = self.cfg().project.id.clone();
-        let target = health_check
-            .url
-            .as_deref()
-            .or(health_check.command.as_deref())
-            .unwrap_or("<unconfigured>");
+        let target = health_check.shown_target();
         let attempt_summary = match run.total_timeout {
             Some(budget) => format!(
                 "{} attempts over {}s (configured total readiness budget: {}s)",
@@ -8005,12 +8035,19 @@ impl Daemon {
         timeout: Duration,
     ) -> Result<bool, std::io::Error> {
         if let Some(command) = &health_check.command {
-            self.perform_command_health_check(service_name, command, timeout)
+            let shown = health_check.shown_command();
+            self.perform_command_health_check(service_name, command, &shown, timeout)
         } else if let Some(url) = &health_check.url {
             let client = client.ok_or_else(|| {
                 std::io::Error::other("HTTP health check client was not initialized")
             })?;
             self.perform_http_health_check(service_name, client, url)
+                .map_err(|err| {
+                    std::io::Error::new(
+                        err.kind(),
+                        format!("{err} ({})", health_check.shown_url()),
+                    )
+                })
         } else {
             Err(std::io::Error::other(
                 "health check requires either a command or a url",
@@ -8026,7 +8063,7 @@ impl Daemon {
             } else {
                 ErrorKind::ConnectionRefused
             };
-            std::io::Error::new(kind, err.to_string())
+            std::io::Error::new(kind, err.without_url().to_string())
         })?;
 
         Ok(response.status().is_success())
@@ -8087,6 +8124,7 @@ impl Daemon {
         &self,
         service_name: &str,
         command: &str,
+        shown: &str,
         timeout: Duration,
     ) -> Result<bool, std::io::Error> {
         let mut child = Command::new(DEFAULT_SHELL);
@@ -8119,10 +8157,10 @@ impl Daemon {
                     },
                     if self.boot_active(epoch) {
                         format!(
-                            "health check command timed out after {timeout:?}: {command}"
+                            "health check command timed out after {timeout:?}: {shown}"
                         )
                     } else {
-                        format!("health check command was cancelled: {command}")
+                        format!("health check command was cancelled: {shown}")
                     },
                 ))
             }
@@ -8176,6 +8214,8 @@ impl Daemon {
             attempt_timeout: health_check.attempt_timeout.clone(),
             total_timeout: health_check.total_timeout.clone(),
             retries: health_check.retries,
+            url_template: health_check.url_template.as_deref().map(render),
+            command_template: health_check.command_template.as_deref().map(render),
         }
     }
 
@@ -10872,7 +10912,7 @@ mod tests {
             spawn: None,
             logs: None,
             project_scope: None,
-            raw_command: None,
+            templates: Default::default(),
         }
     }
 
