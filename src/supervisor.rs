@@ -3723,7 +3723,7 @@ impl Supervisor {
                                 "Running cron job '{}' in project '{}'",
                                 due_job.service_name, project.project_id
                             );
-                            let command = Some(service_config.command.clone());
+                            let command = Some(service_config.display_command());
                             let user = fallback_cron_user(&service_config);
                             let cron_manager_clone = cron_manager.clone();
                             let job_name_clone = due_job.service_name.clone();

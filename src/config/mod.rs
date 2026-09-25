@@ -928,6 +928,22 @@ pub struct ServiceConfig {
     /// their existing state-file keys stay byte-for-byte unchanged (no migration).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_scope: Option<String>,
+    /// The command as written, before `${VAR}` expansion. Status and inspect
+    /// show this so values pulled from the environment (proxy passwords, API
+    /// tokens) never reach their output. Never serialized, so it stays out of
+    /// the service hash.
+    #[serde(skip)]
+    pub raw_command: Option<String>,
+}
+
+impl ServiceConfig {
+    /// Returns the command to show a caller: the unexpanded template when
+    /// known, with any URL credentials masked.
+    pub fn display_command(&self) -> String {
+        crate::redact::redact_command(
+            self.raw_command.as_deref().unwrap_or(&self.command),
+        )
+    }
 }
 
 /// Resource limit overrides configured per service.
@@ -2226,11 +2242,12 @@ pub fn load_config_from_file(
     // `${VAR}` expansion below runs over the whole file, so a later project's
     // reference resolves against the env its own block declares rather than
     // against whatever the caller happened to export.
-    for config in
-        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?
-    {
-        apply_env_side_effects(&config, &base_path)?;
+    let raw_configs =
+        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?;
+    for config in &raw_configs {
+        apply_env_side_effects(config, &base_path)?;
     }
+    let templates = raw_command_templates(&raw_configs);
 
     let expanded_content = if assembled {
         expand_env_vars_assembled(&content)?
@@ -2248,6 +2265,7 @@ pub fn load_config_from_file(
     for config in &mut configs {
         config.validate_commands()?;
         config.validate_durations()?;
+        attach_raw_commands(config, &templates);
     }
 
     let mut config = if configs.is_empty() {
@@ -2333,11 +2351,12 @@ fn load_projects_from_content(
 
     // First pass over the raw text applies env-file side effects so ${VAR}
     // expansion below can see them, mirroring load_config_from_file.
-    for config in
-        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?
-    {
-        apply_env_side_effects(&config, &base_path)?;
+    let raw_configs =
+        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?;
+    for config in &raw_configs {
+        apply_env_side_effects(config, &base_path)?;
     }
+    let templates = raw_command_templates(&raw_configs);
 
     let expanded_content = if assembled {
         expand_env_vars_assembled(&content)?
@@ -2371,9 +2390,49 @@ fn load_projects_from_content(
         config.validate_commands()?;
         config.validate_durations()?;
         config.service_start_order()?;
+        attach_raw_commands(&mut config, &templates);
         finalized.push(config);
     }
     Ok(finalized)
+}
+
+/// Service identity as `(project scope, service name)`, the pair that is
+/// unique across every project a manifest declares.
+type ServiceKey = (Option<String>, String);
+
+/// Collects every service's command as written, before `${VAR}` expansion.
+///
+/// Keyed by the expanded project scope and service name, so a project id or
+/// service name that itself uses `${VAR}` still finds its template after the
+/// expanded parse re-sorts projects by their final ids.
+fn raw_command_templates(raw_configs: &[Config]) -> HashMap<ServiceKey, String> {
+    let mut templates = HashMap::new();
+    for config in raw_configs {
+        for (name, service) in &config.services {
+            let Ok(name) = expand_env_vars(name) else {
+                continue;
+            };
+            let scope = match service.project_scope.as_deref().map(expand_env_vars) {
+                Some(Ok(scope)) => Some(scope),
+                Some(Err(_)) => continue,
+                None => None,
+            };
+            let template = match service.exec.as_deref() {
+                Some(argv) => render_argv(argv),
+                None => service.command.clone(),
+            };
+            templates.insert((scope, name), template);
+        }
+    }
+    templates
+}
+
+/// Stamps each service with its unexpanded command template.
+fn attach_raw_commands(config: &mut Config, templates: &HashMap<ServiceKey, String>) {
+    for (name, service) in config.services.iter_mut() {
+        let key = (service.project_scope.clone(), name.clone());
+        service.raw_command = templates.get(&key).cloned();
+    }
 }
 
 /// Applies a config's env-file loads and inline var sets to the process
@@ -2612,6 +2671,100 @@ services:
 
         assert_eq!(config.project.id, "arbitration");
         assert_eq!(config.project.name, "Arbitration");
+    }
+
+    #[test]
+    fn display_command_keeps_env_values_out() {
+        let _guard = crate::test_utils::env_lock();
+        unsafe {
+            env::set_var("SYSTEMG_TEST_PROXY_PASS", "hunter2");
+        }
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        fs::write(
+            &yaml_path,
+            r#"
+version: "2"
+projects:
+  scrape:
+    services:
+      shell:
+        command: "run --proxy http://me:${SYSTEMG_TEST_PROXY_PASS}@gate:7000"
+      argv:
+        exec: ["run", "--token", "${SYSTEMG_TEST_PROXY_PASS}"]
+      literal:
+        command: "run --proxy http://me:plain@gate:7000"
+"#,
+        )
+        .expect("write config");
+
+        for config in [
+            load_config(Some(yaml_path.to_str().unwrap())).unwrap(),
+            load_projects_from_file(fs::File::open(&yaml_path).unwrap(), &yaml_path)
+                .unwrap()
+                .remove(0),
+        ] {
+            let shell = &config.services["shell"];
+            assert!(shell.command.contains("hunter2"));
+            assert_eq!(shell.display_command(), "run --proxy http://***@gate:7000");
+            let argv = config.services["argv"].display_command();
+            assert_eq!(argv, "run --token '${SYSTEMG_TEST_PROXY_PASS}'");
+            assert_eq!(
+                config.services["literal"].display_command(),
+                "run --proxy http://***@gate:7000"
+            );
+        }
+        unsafe {
+            env::remove_var("SYSTEMG_TEST_PROXY_PASS");
+        }
+    }
+
+    #[test]
+    fn display_command_follows_expanded_project_and_service_names() {
+        let _guard = crate::test_utils::env_lock();
+        unsafe {
+            env::set_var("SYSTEMG_TEST_PROJ", "zzzz");
+            env::set_var("SYSTEMG_TEST_SVC", "worker");
+            env::set_var("SYSTEMG_TEST_TOKEN", "hunter2");
+        }
+        let dir = tempdir().expect("tempdir");
+        let yaml_path = dir.path().join("systemg.yaml");
+        fs::write(
+            &yaml_path,
+            r#"
+version: "2"
+projects:
+  zzz:
+    services:
+      worker:
+        command: "run zzz"
+  ${SYSTEMG_TEST_PROJ}:
+    services:
+      ${SYSTEMG_TEST_SVC}:
+        command: "run --token ${SYSTEMG_TEST_TOKEN}"
+"#,
+        )
+        .expect("write config");
+
+        let configs =
+            load_projects_from_file(fs::File::open(&yaml_path).unwrap(), &yaml_path)
+                .unwrap();
+        let shown: HashMap<_, _> = configs
+            .iter()
+            .map(|config| {
+                (
+                    config.project.id.clone(),
+                    config.services["worker"].display_command(),
+                )
+            })
+            .collect();
+        assert_eq!(shown["zzz"], "run zzz");
+        assert_eq!(shown["zzzz"], "run --token ${SYSTEMG_TEST_TOKEN}");
+        unsafe {
+            env::remove_var("SYSTEMG_TEST_PROJ");
+            env::remove_var("SYSTEMG_TEST_SVC");
+            env::remove_var("SYSTEMG_TEST_TOKEN");
+        }
     }
 
     #[test]
@@ -2994,6 +3147,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         }
     }
 
@@ -3979,6 +4133,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         };
 
         let config2 = ServiceConfig {
@@ -4007,6 +4162,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         };
 
         let hash1 = config1.compute_hash();
@@ -4043,6 +4199,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         };
 
         let modified_command = ServiceConfig {
@@ -4114,6 +4271,7 @@ services:
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         };
         let hash = config.compute_hash();
         assert_eq!(hash.len(), 16);

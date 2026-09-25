@@ -74,6 +74,9 @@ pub mod runtime;
 /// PID 1 wait broker for container-init mode.
 pub mod reaper;
 
+/// Credential masking for displayed command lines.
+pub mod redact;
+
 /// Invariant oracle: check_world() and `sysg doctor`.
 pub mod doctor;
 

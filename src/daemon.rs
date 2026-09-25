@@ -10872,6 +10872,7 @@ mod tests {
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         }
     }
 

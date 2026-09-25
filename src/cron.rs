@@ -1605,6 +1605,7 @@ mod tests {
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         };
         service_config.compute_hash()
     }
@@ -2244,6 +2245,7 @@ mod tests {
             spawn: None,
             logs: None,
             project_scope: None,
+            raw_command: None,
         }
     }
 

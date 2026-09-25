@@ -42,6 +42,7 @@ use crate::{
     daemon::{HealthProbe, PidFile, ServiceLifecycleStatus, ServiceStateFile},
     error::{PidFileError, ProcessManagerError, ServiceStateError},
     metrics::{MetricSample, MetricsHandle, MetricsStore, MetricsSummary},
+    redact::redact_command,
     spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind},
     state_store::StateStore,
 };
@@ -309,7 +310,7 @@ fn build_spawn_tree(
             child.user = Some(StatusManager::get_process_user(child.pid));
             let cmdline = StatusManager::get_process_cmdline(child.pid);
             if !cmdline.is_empty() {
-                child.command = cmdline;
+                child.command = redact_command(&cmdline);
             }
             let (cpu_percent, rss_bytes) = sample_process_metrics(system, child.pid);
             if cpu_percent.is_some() || rss_bytes.is_some() {
@@ -433,7 +434,7 @@ fn build_spawn_tree_from_pidfile(
             name: metadata.name.clone(),
             pid: child_pid,
             parent_pid: metadata.parent_pid,
-            command: metadata.command.clone(),
+            command: redact_command(&metadata.command),
             started_at: metadata.started_at,
             ttl: metadata.ttl_secs.map(Duration::from_secs),
             depth: metadata.depth,
@@ -479,7 +480,7 @@ fn build_spawn_tree_from_pidfile(
                 name: metadata.name.clone(),
                 pid: metadata.pid,
                 parent_pid: metadata.parent_pid,
-                command: metadata.command.clone(),
+                command: redact_command(&metadata.command),
                 started_at: metadata.started_at,
                 ttl: metadata.ttl_secs.map(Duration::from_secs),
                 depth: metadata.depth,
@@ -526,7 +527,7 @@ fn build_spawn_tree_from_system(
 
             let (cpu_percent, rss_bytes) =
                 sample_process_metrics(Some(index.system), child_pid);
-            let command = StatusManager::get_process_cmdline(child_pid);
+            let command = redact_command(&StatusManager::get_process_cmdline(child_pid));
             let mut display_name = command
                 .split_whitespace()
                 .next()
@@ -573,7 +574,8 @@ fn build_spawn_tree_from_system(
 
                 let system = process_index.map(|index| index.system);
                 let (cpu_percent, rss_bytes) = sample_process_metrics(system, child_pid);
-                let command = StatusManager::get_process_cmdline(child_pid);
+                let command =
+                    redact_command(&StatusManager::get_process_cmdline(child_pid));
                 let mut display_name = command
                     .split_whitespace()
                     .next()
@@ -1219,11 +1221,13 @@ fn build_snapshot(
             })
             .map(UnitMetricsSummary::from);
 
-        let command = service_config.map(|service_config| service_config.command.clone());
+        let command = service_config.map(ServiceConfig::display_command);
         let runtime_command = if matches!(mode, StatusSnapshotMode::Detailed) {
             process_runtime
                 .as_ref()
-                .map(|runtime| StatusManager::get_process_cmdline(runtime.pid))
+                .map(|runtime| {
+                    redact_command(&StatusManager::get_process_cmdline(runtime.pid))
+                })
                 .filter(|cmd| !cmd.is_empty())
         } else {
             None
@@ -1385,8 +1389,10 @@ fn build_snapshot(
             metrics: metrics_summary,
             command: None,
             runtime_command: if matches!(mode, StatusSnapshotMode::Detailed) {
-                Some(StatusManager::get_process_cmdline(pid_value))
-                    .filter(|cmd| !cmd.is_empty())
+                Some(redact_command(&StatusManager::get_process_cmdline(
+                    pid_value,
+                )))
+                .filter(|cmd| !cmd.is_empty())
             } else {
                 None
             },
@@ -1406,7 +1412,7 @@ fn cron_record_to_summary(record: &CronExecutionRecord) -> CronExecutionSummary 
         exit_code: record.exit_code,
         pid: record.pid,
         user: record.user.clone(),
-        command: record.command.clone(),
+        command: record.command.as_deref().map(redact_command),
         metrics: record.metrics.clone(),
     }
 }

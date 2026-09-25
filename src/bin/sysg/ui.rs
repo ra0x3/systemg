@@ -5050,12 +5050,13 @@ fn process_command_line(process: &sysinfo::Process) -> String {
     if process.cmd().is_empty() {
         process_display_name(process)
     } else {
-        process
+        let command = process
             .cmd()
             .iter()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+        systemg::redact::redact_command(&command)
     }
 }
 
