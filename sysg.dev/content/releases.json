@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.67.11",
+    "slug": "0.67.11",
+    "title": "v0.67.11",
+    "date": "2026-09-26T02:45:20Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.67.11",
+    "summary": "fix(status): hide secrets in live command lines (0627c8b)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>fix(status): hide secrets in live command lines (<code>0627c8b</code>)</li>\n<li>fix(health): show the command target when a check sets both (<code>948f7c2</code>)</li>\n<li>fix(status): mask credentials in displayed commands (<code>021e30d</code>)</li>\n<li>docs(readme): remove usage section (<code>7fbdcee</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.67.10 (<code>9601c4b</code>)</li>\n<li>docs(blog): publish release post for v0.67.10 (<code>79ce7e5</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.67.10...v0.67.11\">Full changelog on GitHub</a></p>",
+    "commits": 6
+  },
+  {
     "tag": "v0.67.10",
     "slug": "0.67.10",
     "title": "v0.67.10",
