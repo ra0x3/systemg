@@ -32,7 +32,14 @@ Under `version: "3"`:
 - **`isolation.landlock: { ro_paths, rw_paths }`** — a Landlock filesystem
   sandbox (Linux 5.13+). Paths not listed become inaccessible.
 - **`isolation.seccomp: "baseline-v1"`** — a frozen, deny-by-default syscall
-  allowlist; unlisted syscalls return `EPERM`. `no_new_privs` is set alongside.
+  allowlist; unlisted syscalls return `EPERM`.
+
+sysg sets `no_new_privs` only when a service has an effective Landlock or
+seccomp policy. It can't be undone and every child inherits it, so setuid
+helpers like `sudo` can't gain privileges under it. For any other service sysg
+leaves the inherited state alone. If the supervisor starts without
+`no_new_privs`, those services can use `sudo -u postgres ...` and similar,
+subject to the helper's own policy.
 
 ```yaml
 version: "3"

@@ -73,7 +73,9 @@ mod imp {
         }
 
         /// Applies the plan in the child, in fixed order: no_new_privs →
-        /// Landlock → seccomp. seccomp goes last because it can forbid the very
+        /// Landlock → seccomp. An empty plan does nothing and leaves the
+        /// inherited no_new_privs state alone, so setuid helpers such as `sudo`
+        /// keep working when the supervisor itself runs without it. seccomp goes last because it can forbid the very
         /// syscalls Landlock setup needs. Must run after the UID/GID switch and
         /// capability trimming, immediately before `exec`.
         ///
@@ -82,6 +84,9 @@ mod imp {
         /// allocates nothing, so a failure can be reported without violating
         /// async-signal-safety.
         pub unsafe fn apply(&self) -> Result<(), ApplyFault> {
+            if self.is_empty() {
+                return Ok(());
+            }
             if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
                 return Err(ApplyFault::last(ChildFault::NoNewPrivs));
             }
@@ -412,6 +417,49 @@ mod imp {
             let allow = baseline_v1_syscalls();
             assert!(!allow.contains(&libc::SYS_fchmodat));
             assert!(allow.contains(&libc::SYS_openat));
+        }
+
+        fn nnp_after_apply(plan: &SandboxPlan) -> i32 {
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                let code = match unsafe { plan.apply() } {
+                    Err(_) => 100,
+                    Ok(()) => match unsafe {
+                        libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
+                    } {
+                        v @ (0 | 1) => v,
+                        _ => 101,
+                    },
+                };
+                unsafe { libc::_exit(code) };
+            }
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+            assert!(libc::WIFEXITED(status), "child did not exit cleanly");
+            libc::WEXITSTATUS(status)
+        }
+
+        fn parent_has_nnp() -> bool {
+            unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1 }
+        }
+
+        #[test]
+        fn empty_plan_leaves_no_new_privs_unset() {
+            if parent_has_nnp() {
+                eprintln!("skipping: test runner already has no_new_privs set");
+                return;
+            }
+            let plan = SandboxPlan::prepare(None, None).expect("empty plan prepares");
+            assert!(plan.is_empty());
+            assert_eq!(nnp_after_apply(&plan), 0);
+        }
+
+        #[test]
+        fn seccomp_plan_sets_no_new_privs() {
+            let plan = SandboxPlan::prepare(None, Some("baseline-v1"))
+                .expect("seccomp-only plan prepares");
+            assert_eq!(nnp_after_apply(&plan), 1);
         }
 
         #[test]
