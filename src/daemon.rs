@@ -1522,6 +1522,95 @@ mod pidfile_tests {
     }
 
     #[test]
+    /// A restart stops the old process and registers its replacement before
+    /// the monitor gets to the old exit. That exit must not erase the
+    /// replacement's pid record, or the restart's readiness probe sees the unit
+    /// vanish and reports SG0305.
+    fn a_stale_exit_does_not_clear_the_replacement_pid() {
+        let temp = tempdir().expect("tempdir");
+        let store = StateStore::at(temp.path().to_path_buf());
+        let mut pids = PidFile::load(store).expect("load pid state");
+        pids.insert("svc", 4_000_001)
+            .expect("register old generation");
+        pids.insert("svc", 4_000_002).expect("register replacement");
+
+        let cleared = pids
+            .clear_pid_if_matches("svc", 4_000_001)
+            .expect("stale clear");
+
+        assert!(!cleared);
+        assert_eq!(pids.pid_for("svc"), Some(4_000_002));
+    }
+
+    #[test]
+    /// The old generation's exit, recorded after its replacement registered,
+    /// must leave the replacement's `Running` record alone.
+    fn a_stale_exit_does_not_overwrite_the_replacement_state() {
+        let temp = tempdir().expect("tempdir");
+        let mut state = state_with(
+            &temp,
+            ServiceLifecycleStatus::Running,
+            Some(4_000_002),
+            None,
+        );
+
+        let crash = state
+            .set_exit_unless_superseded(
+                "v2:test:svc",
+                4_000_001,
+                ServiceLifecycleStatus::ExitedWithError,
+                Some(1),
+                None,
+            )
+            .expect("stale crash write");
+        let stop = state
+            .set_stopped_unless_superseded("v2:test:svc", 4_000_001, Some(143), Some(15))
+            .expect("stale stop write");
+
+        assert_eq!(crash, GenerationWrite::Superseded);
+        assert_eq!(stop, GenerationWrite::Superseded);
+        let entry = state.get("v2:test:svc").expect("entry");
+        assert_eq!(entry.status, ServiceLifecycleStatus::Running);
+        assert_eq!(entry.pid, Some(4_000_002));
+    }
+
+    #[test]
+    /// The exiting generation still owns its own record, and a record that
+    /// names no process is still written, so ordinary exits keep recording.
+    fn an_exit_records_its_own_generation() {
+        let temp = tempdir().expect("tempdir");
+        let mut state = state_with(
+            &temp,
+            ServiceLifecycleStatus::Running,
+            Some(4_000_001),
+            None,
+        );
+
+        let own = state
+            .set_exit_unless_superseded(
+                "v2:test:svc",
+                4_000_001,
+                ServiceLifecycleStatus::ExitedWithError,
+                Some(1),
+                None,
+            )
+            .expect("own crash write");
+        assert_eq!(own, GenerationWrite::Wrote);
+        let entry = state.get("v2:test:svc").expect("entry");
+        assert_eq!(entry.status, ServiceLifecycleStatus::ExitedWithError);
+        assert_eq!(entry.pid, None);
+
+        let unclaimed = state
+            .set_stopped_unless_superseded("v2:test:svc", 4_000_001, Some(143), Some(15))
+            .expect("unclaimed stop write");
+        assert_eq!(unclaimed, GenerationWrite::Wrote);
+        assert_eq!(
+            state.get("v2:test:svc").expect("entry").status,
+            ServiceLifecycleStatus::Stopped
+        );
+    }
+
+    #[test]
     /// The monitor's repair of a `running` record with a dead pid must lose to
     /// the record its owner already wrote. Deciding from a copy read before the
     /// lock is what stamped `Stopped` over a cron run that had just succeeded.
@@ -2350,7 +2439,7 @@ impl ServiceStateFile {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<(), ServiceStateError> {
-        self.write_stopped(service_hash, exit_code, signal, None)
+        self.write_stopped(service_hash, exit_code, signal, StopGate::Open)
             .map(|_| ())
     }
 
@@ -2374,25 +2463,95 @@ impl ServiceStateFile {
         exit_code: Option<i32>,
         signal: Option<i32>,
     ) -> Result<GenerationWrite, ServiceStateError> {
-        self.write_stopped(service_hash, exit_code, signal, Some(expected_pid))
+        self.write_stopped(service_hash, exit_code, signal, StopGate::Pid(expected_pid))
     }
 
-    /// Shared body of the stop writers. `expected_pid` gates the write on the
-    /// record still naming that process.
+    /// Records a stop for the generation `exited_pid` names, unless a
+    /// different process holds the entry by the time the write lands.
+    ///
+    /// The monitor reaps an exit, then records it. A replacement that
+    /// registered in between owns the unit, and a name-keyed write would mark
+    /// that live process stopped. Unlike [`Self::set_stopped_for_pid`], an
+    /// entry that names no process is still written: nothing else claims it,
+    /// and the exit is the newest thing known about the unit.
+    pub fn set_stopped_unless_superseded(
+        &mut self,
+        service_hash: &str,
+        exited_pid: u32,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<GenerationWrite, ServiceStateError> {
+        self.write_stopped(
+            service_hash,
+            exit_code,
+            signal,
+            StopGate::NotOther(exited_pid),
+        )
+    }
+
+    /// Records an exit for the generation `exited_pid` names, unless a
+    /// different process holds the entry by the time the write lands. See
+    /// [`Self::set_stopped_unless_superseded`] for why the check sits under the
+    /// lock.
+    pub fn set_exit_unless_superseded(
+        &mut self,
+        service_hash: &str,
+        exited_pid: u32,
+        status: ServiceLifecycleStatus,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<GenerationWrite, ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
+        if self.held_by_other(service_hash, exited_pid) {
+            return Ok(GenerationWrite::Superseded);
+        }
+        self.services.insert(
+            service_hash.to_string(),
+            ServiceStateEntry {
+                status,
+                pid: None,
+                exit_code,
+                signal,
+                health: None,
+            },
+        );
+        self.save()?;
+        Ok(GenerationWrite::Wrote)
+    }
+
+    /// Whether the entry names a live generation other than `pid`.
+    fn held_by_other(&self, service_hash: &str, pid: u32) -> bool {
+        self.services
+            .get(service_hash)
+            .and_then(|entry| entry.pid)
+            .is_some_and(|recorded| recorded != pid)
+    }
+
+    /// Shared body of the stop writers. `gate` decides which records the
+    /// write may land on.
     fn write_stopped(
         &mut self,
         service_hash: &str,
         exit_code: Option<i32>,
         signal: Option<i32>,
-        expected_pid: Option<u32>,
+        gate: StopGate,
     ) -> Result<GenerationWrite, ServiceStateError> {
         let _lock = self.acquire_lock()?;
         self.reload_locked()?;
-        if let Some(expected) = expected_pid {
-            match self.services.get(service_hash).and_then(|entry| entry.pid) {
-                Some(recorded) if recorded == expected => {}
-                Some(_) => return Ok(GenerationWrite::Superseded),
-                None => return Ok(GenerationWrite::Unclaimed),
+        match gate {
+            StopGate::Open => {}
+            StopGate::Pid(expected) => {
+                match self.services.get(service_hash).and_then(|entry| entry.pid) {
+                    Some(recorded) if recorded == expected => {}
+                    Some(_) => return Ok(GenerationWrite::Superseded),
+                    None => return Ok(GenerationWrite::Unclaimed),
+                }
+            }
+            StopGate::NotOther(exited) => {
+                if self.held_by_other(service_hash, exited) {
+                    return Ok(GenerationWrite::Superseded);
+                }
             }
         }
         let terminal = self.services.get(service_hash).filter(|entry| {
@@ -3294,6 +3453,17 @@ pub enum CronLaunch {
     Skipped,
     /// The unit is up as this pid, whose exit is the run's verdict.
     Started(u32),
+}
+
+/// Which records a stop write may land on.
+#[derive(Debug, Clone, Copy)]
+enum StopGate {
+    /// Any record.
+    Open,
+    /// Only a record that names this pid.
+    Pid(u32),
+    /// Any record except one that names a different pid.
+    NotOther(u32),
 }
 
 /// What a generation-scoped state write did, and when it declined, why.
@@ -6591,24 +6761,62 @@ impl Daemon {
     /// manual-stop or restart-suppress flag was set.
     ///
     /// A restart sets those flags to tear the old instance down, so the flag
-    /// alone does not mean the user stopped the service. Which record survives
+    /// alone does not mean the user stopped the service, and the replacement
+    /// it launches can register before this write lands. Which record survives
     /// is decided inside
-    /// [`ServiceStateFile::set_stopped_preserving_terminal`], under the lock
+    /// [`ServiceStateFile::set_stopped_unless_superseded`], under the lock
     /// that makes the choice honest.
-    fn persist_intentional_stop(
+    fn persist_exit_stop(
         ctx: &DaemonContext,
         name: &str,
+        exited_pid: u32,
         exit_code: Option<i32>,
         signal: Option<i32>,
-    ) -> Result<(), ProcessManagerError> {
+    ) -> Result<GenerationWrite, ProcessManagerError> {
         if !ctx.config.services.contains_key(name) {
-            return Ok(());
+            return Ok(GenerationWrite::Unclaimed);
         }
         let key = ctx.config.state_key(name);
-        ctx.state_file
+        Ok(ctx
+            .state_file
             .lock()?
-            .set_stopped_preserving_terminal(&key, exit_code, signal)?;
-        Ok(())
+            .set_stopped_unless_superseded(&key, exited_pid, exit_code, signal)?)
+    }
+
+    /// Records an exit for the generation `exited_pid` names, leaving the entry
+    /// alone when a newer generation already holds it.
+    fn persist_exit(
+        ctx: &DaemonContext,
+        name: &str,
+        exited_pid: u32,
+        status: ServiceLifecycleStatus,
+        exit_code: Option<i32>,
+        signal: Option<i32>,
+    ) -> Result<GenerationWrite, ProcessManagerError> {
+        if !ctx.config.services.contains_key(name) {
+            return Ok(GenerationWrite::Unclaimed);
+        }
+        let key = ctx.config.state_key(name);
+        Ok(ctx
+            .state_file
+            .lock()?
+            .set_exit_unless_superseded(&key, exited_pid, status, exit_code, signal)?)
+    }
+
+    /// Drops the monitor's handle on an exited process whose unit a newer
+    /// generation took over meanwhile. Nothing else is touched: the unit's
+    /// records, restart budget and dependents belong to the newer generation.
+    fn release_superseded_exit(ctx: &DaemonContext, name: &str, exited_pid: u32) {
+        debug!(
+            "Exit of '{name}' (pid {exited_pid}) was superseded by a newer generation"
+        );
+        if let Ok(mut processes) = ctx.lock_processes()
+            && processes
+                .get(name)
+                .is_some_and(|child| child.id() == exited_pid)
+        {
+            processes.remove(name);
+        }
     }
 
     /// Probes a service, optionally RECORDING the exit it observes.
@@ -9561,12 +9769,15 @@ impl Daemon {
             if !exited_services.is_empty() {
                 let mut cron_records = Self::route_cron_exits(&ctx, &exited_services);
                 for (name, exit_status, exited_pid) in exited_services {
-                    let (owns_record, recorded_pgid) = match cron_records.remove(&name) {
-                        Some(record) => record,
+                    let (owns_record, recorded_pgid, recorded_start) = match cron_records
+                        .remove(&name)
+                    {
+                        Some((owns, pgid)) => (owns, pgid, None),
                         None => match ctx.lock_pid_file() {
                             Ok(guard) => (
                                 guard.get(&name) == Some(exited_pid),
                                 guard.pgid_for(&name),
+                                guard.start_for(&name),
                             ),
                             Err(err) => {
                                 error!("Failed to inspect PID entry for '{name}': {err}");
@@ -9589,7 +9800,7 @@ impl Daemon {
 
                     let manually_stopped = ctx
                         .lock_manual_stop_flags()
-                        .map(|mut guard| guard.remove(&name))
+                        .map(|guard| guard.contains(&name))
                         .unwrap_or(false);
                     let restart_suppressed_for_service = ctx
                         .lock_restart_suppressed()
@@ -9618,47 +9829,43 @@ impl Daemon {
                     if is_cron {
                         continue;
                     }
-                    if let Ok(mut gate) = ctx.lock_restart_gate()
-                        && let Some(tracker) = gate.get_mut(&name)
-                    {
-                        tracker.settle(Instant::now());
-                    }
-                    if !manually_stopped
-                        && !exit_success
-                        && let Some(service) = ctx.config.services.get(&name)
-                    {
-                        let env = service.env.clone();
-                        if let Some(action) =
-                            service.hooks.as_ref().and_then(|cfg| cfg.onerr.as_ref())
-                        {
-                            run_hook(
-                                action,
-                                &env,
-                                "onerr",
-                                &name,
-                                &ctx.project_root,
-                                None,
-                                &HookContext::service_exit(exit_code),
-                            );
-                        }
-                    }
-
                     if manually_stopped {
                         info!("Service '{name}' was manually stopped. Skipping restart.");
-                        if let Ok(mut guard) = ctx.lock_pid_file()
-                            && let Err(err) = guard.remove(&name)
-                            && !matches!(err, PidFileError::ServiceNotFound)
-                        {
-                            warn!(
+                        let removal = match ctx.lock_pid_file() {
+                            Ok(mut guard) => guard
+                                .remove_generation(
+                                    &name,
+                                    Some(exited_pid),
+                                    recorded_pgid,
+                                    recorded_start,
+                                    |_| true,
+                                )
+                                .map_err(ProcessManagerError::from),
+                            Err(err) => Err(err),
+                        };
+                        match removal {
+                            Ok(GenerationRemoval::Superseded) => {
+                                Self::release_superseded_exit(&ctx, &name, exited_pid);
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(err) => warn!(
                                 "Failed to clear PID entry for '{name}' after manual stop: {err}"
-                            );
+                            ),
                         }
-                        if let Err(err) =
-                            Self::persist_intentional_stop(&ctx, &name, None, None)
+                        match Self::persist_exit_stop(&ctx, &name, exited_pid, None, None)
                         {
-                            warn!(
+                            Ok(GenerationWrite::Superseded) => {
+                                Self::release_superseded_exit(&ctx, &name, exited_pid);
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(err) => warn!(
                                 "Failed to persist stopped state for '{name}' after manual stop: {err}"
-                            );
+                            ),
+                        }
+                        if let Ok(mut flags) = ctx.lock_manual_stop_flags() {
+                            flags.remove(&name);
                         }
                         if let Ok(mut counts) = ctx.lock_restart_counts() {
                             counts.remove(&name);
@@ -9671,17 +9878,39 @@ impl Daemon {
                         info!(
                             "Automatic restart suppressed for service '{name}' after exit."
                         );
-                        if let Err(err) =
-                            Self::persist_intentional_stop(&ctx, &name, exit_code, signal)
-                        {
-                            warn!(
+                        match Self::persist_exit_stop(
+                            &ctx, &name, exited_pid, exit_code, signal,
+                        ) {
+                            Ok(GenerationWrite::Superseded) => {
+                                Self::release_superseded_exit(&ctx, &name, exited_pid);
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(err) => warn!(
                                 "Failed to persist suppressed state for '{name}': {err}"
-                            );
+                            ),
                         }
                         if let Ok(mut counts) = ctx.lock_restart_counts() {
                             counts.remove(&name);
                         }
                     } else if !exit_success {
+                        match Self::persist_exit(
+                            &ctx,
+                            &name,
+                            exited_pid,
+                            ServiceLifecycleStatus::ExitedWithError,
+                            exit_code,
+                            signal,
+                        ) {
+                            Ok(GenerationWrite::Superseded) => {
+                                Self::release_superseded_exit(&ctx, &name, exited_pid);
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                warn!("Failed to persist crash state for '{name}': {err}")
+                            }
+                        }
                         failed_services.push(name.clone());
                         Self::log_port_conflict_if_evident(&ctx.config, &name);
                         let should_restart = ctx
@@ -9707,39 +9936,56 @@ impl Daemon {
                                 "Service '{name}' crashed but restart_policy does not allow restart."
                             );
                         }
-                        if let Err(err) = Self::persist_service_state(
-                            &ctx.config,
-                            &ctx.state_file,
-                            &name,
-                            ServiceLifecycleStatus::ExitedWithError,
-                            None,
-                            exit_code,
-                            signal,
-                        ) {
-                            warn!("Failed to persist crash state for '{name}': {err}");
-                        }
                     } else {
                         debug!(
                             "Service '{name}' exited cleanly. Removing from PID file."
                         );
-                        if let Err(err) = Self::persist_service_state(
-                            &ctx.config,
-                            &ctx.state_file,
+                        match Self::persist_exit(
+                            &ctx,
                             &name,
+                            exited_pid,
                             ServiceLifecycleStatus::ExitedSuccessfully,
-                            None,
                             exit_code.or(Some(0)),
                             signal,
                         ) {
-                            warn!(
+                            Ok(GenerationWrite::Superseded) => {
+                                Self::release_superseded_exit(&ctx, &name, exited_pid);
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(err) => warn!(
                                 "Failed to persist clean exit state for '{name}': {err}"
+                            ),
+                        }
+                    }
+
+                    if let Ok(mut gate) = ctx.lock_restart_gate()
+                        && let Some(tracker) = gate.get_mut(&name)
+                    {
+                        tracker.settle(Instant::now());
+                    }
+                    if !manually_stopped
+                        && !exit_success
+                        && let Some(service) = ctx.config.services.get(&name)
+                    {
+                        let env = service.env.clone();
+                        if let Some(action) =
+                            service.hooks.as_ref().and_then(|cfg| cfg.onerr.as_ref())
+                        {
+                            run_hook(
+                                action,
+                                &env,
+                                "onerr",
+                                &name,
+                                &ctx.project_root,
+                                None,
+                                &HookContext::service_exit(exit_code),
                             );
                         }
                     }
 
                     if let Ok(mut guard) = ctx.lock_pid_file()
-                        && let Err(err) = guard.clear_pid(&name)
-                        && !matches!(err, PidFileError::ServiceNotFound)
+                        && let Err(err) = guard.clear_pid_if_matches(&name, exited_pid)
                     {
                         warn!("Failed to clear PID entry for '{name}': {err}");
                     }

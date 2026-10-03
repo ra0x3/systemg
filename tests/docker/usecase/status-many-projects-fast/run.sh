@@ -57,7 +57,7 @@ check "$?" "configs generated"
 section "boot all 4 configs into one supervisor"
 ci=0
 while [ "$ci" -lt "$CONFIGS" ]; do
-  sysg start --config "/usecase/gen/stack_$ci.yaml" --daemonize >/dev/null 2>&1
+  sysg start --config "/usecase/gen/stack_$ci.yaml" --daemonize 2>&1 | tail -20; test "${PIPESTATUS[0]}" = 0
   check "$?" "start config $ci exits 0"
   ci=$((ci+1))
 done
