@@ -114,6 +114,7 @@ services:
         .arg("status")
         .arg("-c")
         .arg(config_path.to_str().unwrap())
+        .args(["--format", "json"])
         .output()
         .expect("status after purge to execute");
     assert!(
@@ -122,13 +123,20 @@ services:
     );
     let stderr_after = String::from_utf8_lossy(&status_after.stderr);
     assert!(stderr_after.contains(SgCode::SupervisorOffline.as_str()));
-    let stdout_after = String::from_utf8_lossy(&status_after.stdout);
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&status_after.stdout).expect("status json");
+    let sample = snapshot["units"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|unit| unit["name"] == "sample");
     assert!(
-        stdout_after.contains("sample"),
+        sample.is_some(),
         "Expected configured service to remain visible after purge"
     );
-    assert!(
-        stdout_after.contains("Unknown"),
+    assert_eq!(
+        sample.map(|unit| unit["state"].clone()),
+        Some(serde_json::json!("unknown")),
         "Purge wipes the lifecycle record, so a configured service has no \
          observed state left; status must say Unknown rather than assert Stopped"
     );

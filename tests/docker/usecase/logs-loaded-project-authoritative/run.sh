@@ -23,7 +23,7 @@ check "$?" "start one.yaml exits 0 (boots supervisor)"
 sysg start -c /usecase/two.yaml --daemonize
 check "$?" "start two.yaml exits 0 (registers 'two' into the supervisor)"
 sleep 4
-sysg status 2>/dev/null | grep -qiE 'Project: One' && sysg status 2>/dev/null | grep -qiE 'Project: Two'
+sysg status --format json 2>/dev/null | grep -qiE '"id": "One"' && sysg status --format json 2>/dev/null | grep -qiE '"id": "Two"'
 check "$?" "both projects are loaded in the supervisor"
 
 section "logs -p two -s twosvc (loaded non-primary, NO -c) must NOT SG0201"

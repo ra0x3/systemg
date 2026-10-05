@@ -59,17 +59,22 @@ fn start(home: &Path, config: &Path) {
 }
 
 fn projects(home: &Path) -> Vec<String> {
-    let out = sysg(home).arg("status").output().unwrap();
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| line.strip_prefix("Project: "))
-        .map(|line| {
-            line.split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string()
-        })
-        .collect()
+    let out = sysg(home)
+        .args(["status", "--format", "json"])
+        .output()
+        .unwrap();
+    let Ok(snapshot) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for unit in snapshot["units"].as_array().into_iter().flatten() {
+        if let Some(id) = unit["project"]["id"].as_str()
+            && !ids.iter().any(|seen| seen == id)
+        {
+            ids.push(id.to_string());
+        }
+    }
+    ids
 }
 
 fn wait_for_projects(home: &Path, count: usize) -> Vec<String> {

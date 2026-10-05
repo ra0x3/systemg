@@ -28,7 +28,7 @@ section "term2: foreground start bb (attaches)"
 python3 /usecase/fgctl.py /usecase/bb.yaml 40 "$B_OUT" "$B_PID" "$B_MARK" &
 sleep 6
 
-sysg status 2>/dev/null | grep -qiE 'Project: AA' && sysg status 2>/dev/null | grep -qiE 'Project: BB'
+sysg status --format json 2>/dev/null | grep -qiE '"id": "AA"' && sysg status --format json 2>/dev/null | grep -qiE '"id": "BB"'
 check "$?" "both aa and bb are loaded and streaming"
 A_TICKS_1="$(grep -c AA_TICK "$A_OUT" 2>/dev/null || echo 0)"
 B_TICKS_1="$(grep -c BB_TICK "$B_OUT" 2>/dev/null || echo 0)"
@@ -43,7 +43,7 @@ sleep 8
 section "A terminated completely"
 [ -f "$A_MARK" ]
 check "$?" "A's foreground process EXITED (yielded the terminal)"
-! sysg status 2>/dev/null | grep -qiE 'Project: AA'
+! sysg status --format json 2>/dev/null | grep -qiE '"id": "AA"'
 check "$?" "aa's project is no longer loaded (torn down)"
 A_TICKS_2="$(grep -c AA_TICK "$A_OUT" 2>/dev/null || echo 0)"
 sleep 3
@@ -55,7 +55,7 @@ check "$?" "A's console stream stopped (no new AA_TICK after Ctrl-C)"
 section "B is completely untouched"
 [ ! -f "$B_MARK" ]
 check "$?" "B's foreground process is still running (did NOT exit)"
-sysg status 2>/dev/null | grep -qiE 'Project: BB'
+sysg status --format json 2>/dev/null | grep -qiE '"id": "BB"'
 check "$?" "bb's project is still loaded"
 B_TICKS_2="$(grep -c BB_TICK "$B_OUT" 2>/dev/null || echo 0)"
 echo "bb ticks: $B_TICKS_1 -> $B_TICKS_2 (should keep growing)"

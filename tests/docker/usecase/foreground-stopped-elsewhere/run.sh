@@ -27,7 +27,7 @@ section "term2: foreground start alpha (attaches to the supervisor)"
 python3 /usecase/fgwait.py /usecase/alpha.yaml 30 "$ALPHA_MARK" &
 sleep 5
 
-sysg status 2>/dev/null | grep -qiE 'Project: Alpha' && sysg status 2>/dev/null | grep -qiE 'Project: Beta'
+sysg status --format json 2>/dev/null | grep -qiE '"id": "Alpha"' && sysg status --format json 2>/dev/null | grep -qiE '"id": "Beta"'
 check "$?" "both alpha and beta are loaded"
 
 section "stop -p alpha from another shell — alpha's foreground must detach"

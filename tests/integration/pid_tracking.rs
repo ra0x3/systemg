@@ -74,6 +74,7 @@ services:
         .arg(config_path.to_str().unwrap())
         .arg("-s")
         .arg("steady")
+        .args(["--format", "json"])
         .env("HOME", &home)
         .output()
         .expect("run sysg status");
@@ -89,10 +90,18 @@ services:
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Running"),
-        "Expected status output to treat the alive process as running, got: {stdout}"
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("status json");
+    let state = snapshot["units"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|unit| unit["name"] == "steady")
+        .map(|unit| unit["state"].clone());
+    assert_eq!(
+        state,
+        Some(serde_json::json!("running")),
+        "Expected status output to treat the alive process as running, got: {snapshot}"
     );
 
     let refreshed_state =
