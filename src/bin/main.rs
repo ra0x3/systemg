@@ -3090,6 +3090,22 @@ mod tests {
     }
 
     #[test]
+    fn meter_gradient_runs_green_to_yellow_to_red() {
+        assert_eq!(gradient_at(0.0), (80, 200, 80));
+        assert_eq!(gradient_at(0.5), (230, 200, 40));
+        assert_eq!(gradient_at(1.0), (230, 60, 60));
+        assert_eq!(gradient_code((230, 60, 60), true), "\x1b[38;2;230;60;60m");
+        assert_eq!(gradient_code((230, 60, 60), false), "\x1b[38;5;203m");
+
+        let low = meter_bar("0", 20.0, "20.0%", 40, false);
+        let high = meter_bar("0", 100.0, "100%", 40, false);
+        assert!(!low.contains("38;5;203") && !low.contains("38;2;230;60;60"));
+        assert!(high.contains("38;5;203") || high.contains("38;2;230;60;60"));
+        assert_eq!(strip_ansi(&high).chars().count(), 40);
+        assert_eq!(strip_ansi(&low).chars().count(), 40);
+    }
+
+    #[test]
     fn meter_lines_fill_exact_width() {
         let meters = HostMeters {
             cpus: vec![12.5, 99.0, 0.0, 50.0, 3.3],

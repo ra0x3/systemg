@@ -193,26 +193,59 @@ fn cpu_meter_lines(cpus: &[f32], width: usize, no_color: bool) -> Vec<String> {
 /// Draws `label[|||||    text]` in exactly `width` columns, text over the bar like htop.
 fn meter_bar(label: &str, percent: f64, text: &str, width: usize, no_color: bool) -> String {
     let inner = width.saturating_sub(4 + 2);
-    let filled = ((percent.clamp(0.0, 100.0) / 100.0) * inner as f64).round() as usize;
     let text: String = text.chars().take(inner).collect();
-    let text_at = inner - text.len();
-    let bars = filled.min(text_at);
+    let track = inner - text.len();
+    let bars = ((percent.clamp(0.0, 100.0) / 100.0) * track as f64).round() as usize;
 
-    let color = if no_color {
-        ""
-    } else if percent > 90.0 {
-        RED
-    } else if percent > 70.0 {
-        YELLOW
+    let mut bar = String::new();
+    if no_color {
+        bar.push_str(&"|".repeat(bars));
     } else {
-        GREEN
-    };
-    let reset = if no_color { "" } else { RESET };
+        let truecolor = std::env::var("COLORTERM")
+            .is_ok_and(|value| matches!(value.as_str(), "truecolor" | "24bit"));
+        let mut last = String::new();
+        for i in 0..bars {
+            let code = gradient_code(gradient_at(i as f64 / track.saturating_sub(1).max(1) as f64), truecolor);
+            if code != last {
+                bar.push_str(&code);
+                last = code;
+            }
+            bar.push('|');
+        }
+        if bars > 0 {
+            bar.push_str(RESET);
+        }
+    }
     format!(
-        "{label:>4}[{color}{}{reset}{}{}]",
-        "|".repeat(bars),
-        " ".repeat(text_at - bars),
-        text
+        "{label:>4}[{bar}{}{text}]",
+        " ".repeat(track - bars)
+    )
+}
+
+/// Green at the empty end of a bar, yellow halfway, red at the full end.
+fn gradient_at(t: f64) -> (u8, u8, u8) {
+    const GREEN: (f64, f64, f64) = (80.0, 200.0, 80.0);
+    const YELLOW: (f64, f64, f64) = (230.0, 200.0, 40.0);
+    const RED: (f64, f64, f64) = (230.0, 60.0, 60.0);
+    let t = t.clamp(0.0, 1.0);
+    let (from, to, k) = if t < 0.5 {
+        (GREEN, YELLOW, t * 2.0)
+    } else {
+        (YELLOW, RED, (t - 0.5) * 2.0)
+    };
+    let mix = |a: f64, b: f64| (a + (b - a) * k).round() as u8;
+    (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+}
+
+/// Foreground escape for a color, falling back to the nearest xterm-256 cube entry.
+fn gradient_code((r, g, b): (u8, u8, u8), truecolor: bool) -> String {
+    if truecolor {
+        return format!("\x1b[38;2;{r};{g};{b}m");
+    }
+    let level = |c: u8| (u16::from(c) * 5 + 127) / 255;
+    format!(
+        "\x1b[38;5;{}m",
+        16 + 36 * level(r) + 6 * level(g) + level(b)
     )
 }
 
