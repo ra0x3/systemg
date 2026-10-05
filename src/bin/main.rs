@@ -1218,7 +1218,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                 service_filter: service.as_deref(),
                 project_filter: target_project.as_deref(),
                 offline: false,
+                meters: None,
             };
+            let mut sampler =
+                (format.is_none() && !agent_mode()).then(MeterSampler::prime);
 
             if let Some(stream_interval) = stream {
                 let stream_seconds = match parse_stream_duration(&stream_interval) {
@@ -1239,6 +1242,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                             print_presence_banner(reading.presence);
                             render_opts.offline =
                                 reading.presence != SupervisorPresence::Live;
+                            render_opts.meters =
+                                sampler.as_mut().map(MeterSampler::sample);
                             if let Err(e) = render_status(
                                 &reading.snapshot,
                                 &render_opts,
@@ -1263,8 +1268,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                     thread::sleep(sleep_interval);
                 }
             } else {
-                let reading = with_progress_spinner("Computing", || {
-                    fetch_status_reading(config.as_deref(), live)
+                let (reading, meters) = with_progress_spinner("Computing", || {
+                    let reading = fetch_status_reading(config.as_deref(), live)?;
+                    Ok((reading, sampler.as_mut().map(MeterSampler::sample)))
                 })?;
 
                 if let Some(diag) = status_ambiguous_service(
@@ -1278,6 +1284,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
                 print_presence_banner(reading.presence);
                 render_opts.offline = reading.presence != SupervisorPresence::Live;
+                render_opts.meters = meters;
                 let health =
                     render_status(&reading.snapshot, &render_opts, false, render_config)?;
 
@@ -2955,7 +2962,7 @@ mod tests {
     }
 
     #[test]
-    fn status_overview_uses_rail_layout_and_large_bullets() {
+    fn status_frame_is_one_container() {
         let columns = vec![
             Column {
                 title: "UNIT",
@@ -3052,26 +3059,68 @@ mod tests {
             },
         ];
 
+        let mut opts = StatusRenderOptions {
+            format: None,
+            no_color: true,
+            full_cmd: false,
+            include_orphans: false,
+            service_filter: None,
+            project_filter: None,
+            offline: false,
+            meters: None,
+        };
         let lines =
-            status_overview_lines(&columns, &units, OverallHealth::Warn, true, false);
+            status_frame_lines(&columns, &units, &opts, OverallHealth::Warn, None);
         let rendered = lines.join("\n");
 
         assert!(rendered.contains("Status: WARN"));
-        assert!(rendered.contains("╟───────────────┬"));
-        assert!(rendered.contains("Health"));
-        assert!(rendered.contains("Healthy 1"));
-        assert!(rendered.contains("•"));
-        assert!(rendered.contains("State"));
-        assert!(rendered.contains("Running 1"));
-        assert!(rendered.contains("Lost 1"));
-        assert!(rendered.contains("Intent"));
-        assert!(rendered.contains("Serve 2"));
+        assert!(rendered.starts_with('╔'));
+        assert!(rendered.ends_with('╝'));
+        assert_eq!(rendered.matches('╔').count(), 1);
+        assert!(rendered.contains("║ api"));
+        assert!(rendered.contains("║ worker"));
+        assert!(!rendered.contains('▸'));
 
+        opts.offline = true;
         let offline =
-            status_overview_lines(&columns, &units, OverallHealth::Warn, true, true)
+            status_frame_lines(&columns, &units, &opts, OverallHealth::Warn, None)
                 .join("\n");
         assert!(offline.contains("Status: OFFLINE"));
         assert!(!offline.contains("Status: WARN"));
+    }
+
+    #[test]
+    fn meter_lines_fill_exact_width() {
+        let meters = HostMeters {
+            cpus: vec![12.5, 99.0, 0.0, 50.0, 3.3],
+            mem_used: 25 * 1024 * 1024 * 1024,
+            mem_total: 32 * 1024 * 1024 * 1024,
+            swap_used: 0,
+            swap_total: 0,
+            tasks: TaskCounts {
+                procs: 1139,
+                threads: Some(5547),
+                kthreads: Some(0),
+                running: Some(1),
+            },
+            load: [3.63, 2.21, 2.13],
+            uptime_secs: 7 * 86_400 + 4494,
+        };
+        for width in [40, 86, 130] {
+            let lines = meter_lines(&meters, width, true);
+            for line in &lines {
+                assert_eq!(line.chars().count(), width, "{line:?}");
+            }
+        }
+        assert_eq!(meter_lines(&meters, 130, true).len(), 2 + 3);
+        assert_eq!(meter_lines(&meters, 40, true).len(), 3 + 3);
+        let rendered = meter_lines(&meters, 130, true).join("\n");
+        assert!(rendered.contains("   0["));
+        assert!(rendered.contains("25.0G/32.0G"));
+        assert!(rendered.contains("Tasks: 1139, 5547 thr, 0 kthr; 1 running"));
+        assert!(rendered.contains("Load average: 3.63 2.21 2.13"));
+        assert!(rendered.contains("Uptime: 7 days, 01:14:54"));
+        assert!(meter_lines(&meters, 20, true).is_empty());
     }
 
     #[test]
@@ -4388,6 +4437,7 @@ mod tests {
     }
 }
 
+include!("sysg/meters.rs");
 include!("sysg/ui.rs");
 
 /// Migrates legacy `__loose__` state into per-manifest project directories.

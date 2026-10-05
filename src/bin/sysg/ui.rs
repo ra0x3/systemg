@@ -47,6 +47,8 @@ struct StatusRenderOptions<'a> {
     /// When set, the overview reads `OFFLINE` instead of a health label — no
     /// supervisor stands behind the data, so a HEALTHY headline would lie.
     offline: bool,
+    /// Host meters for the header, or `None` to leave them out.
+    meters: Option<HostMeters>,
 }
 
 /// Represents inspect render options.
@@ -781,13 +783,8 @@ fn compute_status_preferred_widths(
     no_color: bool,
 ) -> [usize; STATUS_COLUMN_COUNT] {
     let mut widths = STATUS_COLUMN_TITLES.map(visible_length);
-    let render_project_indent =
-        should_render_project_groups(&status_project_groups(units, no_color));
-
     for unit in units {
-        let unit_name_width =
-            visible_length(&unit.name) + usize::from(render_project_indent) * 2;
-        widths[STATUS_COL_UNIT] = widths[STATUS_COL_UNIT].max(unit_name_width);
+        widths[STATUS_COL_UNIT] = widths[STATUS_COL_UNIT].max(visible_length(&unit.name));
         widths[STATUS_COL_KIND] = widths[STATUS_COL_KIND].max(4);
         widths[STATUS_COL_STATE] = widths[STATUS_COL_STATE]
             .max(visible_length(&unit_state_label(unit, no_color)));
@@ -1511,53 +1508,14 @@ fn render_status_table_with_focus(
         },
     ];
 
-    let columns = &columns_array;
-    for line in status_overview_lines(columns, units, health, opts.no_color, opts.offline)
-    {
+    for line in status_frame_lines(
+        &columns_array,
+        units,
+        opts,
+        health,
+        Some((selected_row, selected_col)),
+    ) {
         println!("{line}");
-    }
-    println!();
-
-    let groups = status_project_groups(units, opts.no_color);
-    let render_groups = should_render_project_groups(&groups);
-    for (group_index, (label, group_units)) in groups.iter().enumerate() {
-        if render_groups {
-            if group_index > 0 {
-                println!();
-            }
-            println!("Project: {label}");
-        }
-
-        println!("{}", make_top_border(columns));
-        println!("{}", format_header_row(columns));
-        println!("{}", make_separator_border(columns));
-
-        for (index, unit) in group_units {
-            if *index == selected_row {
-                let row_content = format_unit_row_with_project_indent_focus(
-                    unit,
-                    columns,
-                    opts.no_color,
-                    render_groups,
-                    Some(selected_col),
-                );
-                println!("{}", row_content);
-            } else {
-                let row_content = format_unit_row_with_project_indent(
-                    unit,
-                    columns,
-                    opts.no_color,
-                    render_groups,
-                );
-                println!("{}", row_content);
-            }
-
-            if !unit.spawned_children.is_empty() {
-                render_spawn_rows(unit, columns, opts.no_color);
-            }
-        }
-
-        println!("{}", make_bottom_border(columns));
     }
 
     println!(
@@ -1691,44 +1649,8 @@ fn render_status_non_interactive(
         },
     ];
 
-    let columns = &columns_array;
-    for line in
-        status_overview_lines(columns, &units, health, opts.no_color, opts.offline)
-    {
+    for line in status_frame_lines(&columns_array, &units, opts, health, None) {
         println!("{line}");
-    }
-    println!();
-
-    let groups = status_project_groups(&units, opts.no_color);
-    let render_groups = should_render_project_groups(&groups);
-    for (group_index, (label, group_units)) in groups.iter().enumerate() {
-        if render_groups {
-            if group_index > 0 {
-                println!();
-            }
-            println!("Project: {label}");
-        }
-
-        println!("{}", make_top_border(columns));
-        println!("{}", format_header_row(columns));
-        println!("{}", make_separator_border(columns));
-
-        for (_, unit) in group_units {
-            println!(
-                "{}",
-                format_unit_row_with_project_indent(
-                    unit,
-                    columns,
-                    opts.no_color,
-                    render_groups
-                )
-            );
-            if !unit.spawned_children.is_empty() {
-                render_spawn_rows(unit, columns, opts.no_color);
-            }
-        }
-
-        println!("{}", make_bottom_border(columns));
     }
 
     let _ = io::stdout().flush();
@@ -2119,42 +2041,11 @@ fn make_overview_top_border(columns: &[Column]) -> String {
     format!("╔{}╗", "═".repeat(inner_width))
 }
 
-fn make_overview_split_border(inner_width: usize, rail_width: usize) -> String {
-    let value_width = inner_width.saturating_sub(rail_width + 1);
-    format!(
-        "╟{}┬{}╢",
-        "─".repeat(rail_width),
-        "─".repeat(value_width)
-    )
-}
-
 /// Formats overview line.
 fn format_overview_line(text: &str, columns: &[Column]) -> String {
     let inner_width = total_inner_width(columns);
     let content_width = inner_width.saturating_sub(2);
     format!("║ {} ║", ansi_pad(text, content_width, Alignment::Left))
-}
-
-fn format_overview_split_line(
-    label: &str,
-    value: &str,
-    rail_width: usize,
-    value_width: usize,
-) -> String {
-    format!(
-        "║{}│{}║",
-        ansi_pad(label, rail_width, Alignment::Left),
-        ansi_pad(&format!(" {value}"), value_width, Alignment::Left)
-    )
-}
-
-fn make_overview_bottom_border(inner_width: usize, rail_width: usize) -> String {
-    let value_width = inner_width.saturating_sub(rail_width + 1);
-    format!(
-        "╚{}╧{}╝",
-        "═".repeat(rail_width),
-        "═".repeat(value_width)
-    )
 }
 
 /// Builds bottom border.
@@ -2273,27 +2164,19 @@ fn status_unit_matches_selector(
             .unwrap_or(true)
 }
 
-#[derive(Clone, Copy)]
-enum OverviewMetric {
-    Health(UnitHealth),
-    State(UnitState),
-    Intent(UnitIntent),
-}
-
-fn status_overview_lines(
+/// Builds the whole `sysg status` view as one framed container.
+///
+/// Status line, host meters, column header, then each project's label row and
+/// unit rows. A single project skips its label row.
+fn status_frame_lines(
     columns: &[Column],
     units: &[UnitStatus],
+    opts: &StatusRenderOptions,
     health: OverallHealth,
-    no_color: bool,
-    offline: bool,
+    focus: Option<(usize, usize)>,
 ) -> Vec<String> {
     let inner_width = total_inner_width(columns);
-    let rail_width = 15usize.min(inner_width.saturating_sub(8));
-    let value_width = inner_width.saturating_sub(rail_width + 1);
-    let summary_rows = status_summary_rows(units, no_color);
-    let mut lines = Vec::new();
-
-    let (label, color) = if offline {
+    let (label, color) = if opts.offline {
         ("OFFLINE".to_string(), YELLOW_BOLD)
     } else {
         (
@@ -2302,159 +2185,80 @@ fn status_overview_lines(
         )
     };
 
-    lines.push(make_overview_top_border(columns));
-    lines.push(format_overview_line(
-        &format!(" Status: {}", colorize(&label, color, no_color)),
-        columns,
-    ));
-    lines.push(make_overview_split_border(inner_width, rail_width));
-    lines.push(format_overview_split_line(
-        "  Units",
-        &units.len().to_string(),
-        rail_width,
-        value_width,
-    ));
-    for (label, value) in summary_rows {
-        lines.push(format_overview_split_line(
-            &format!("  {label}"),
-            &value,
-            rail_width,
-            value_width,
-        ));
+    let mut lines = vec![
+        make_overview_top_border(columns),
+        format_overview_line(
+            &format!("Status: {}", colorize(&label, color, opts.no_color)),
+            columns,
+        ),
+    ];
+
+    if let Some(meters) = &opts.meters {
+        lines.push(format!("╟{}╢", "─".repeat(inner_width)));
+        for line in meter_lines(meters, inner_width.saturating_sub(2), opts.no_color) {
+            lines.push(format_overview_line(&line, columns));
+        }
     }
-    lines.push(make_overview_bottom_border(inner_width, rail_width));
+
+    lines.push(status_rule(columns, '╟', '┬', '╢', '─'));
+    lines.push(frame_row(&format_header_row(columns)));
+
+    let groups = status_project_groups(units, opts.no_color);
+    let labeled = groups.len() > 1;
+    if !labeled {
+        lines.push(status_rule(columns, '╟', '┼', '╢', '─'));
+    }
+
+    for (label, group_units) in &groups {
+        if labeled {
+            lines.push(status_rule(columns, '╟', '┴', '╢', '─'));
+            lines.push(format_overview_line(&format!("▸ {label}"), columns));
+            lines.push(status_rule(columns, '╟', '┬', '╢', '─'));
+        }
+        for (index, unit) in group_units {
+            let focused_col = focus
+                .filter(|(row, _)| row == index)
+                .map(|(_, col)| col);
+            lines.push(frame_row(&format_unit_row_focus(
+                unit,
+                columns,
+                opts.no_color,
+                focused_col,
+            )));
+            for row in spawn_row_lines(unit, columns, opts.no_color) {
+                lines.push(frame_row(&row));
+            }
+        }
+    }
+
+    lines.push(status_rule(columns, '╚', '╧', '╝', '═'));
     lines
 }
 
-fn status_summary_rows(units: &[UnitStatus], no_color: bool) -> Vec<(&'static str, String)> {
-    let health_order = [
-        OverviewMetric::Health(UnitHealth::Healthy),
-        OverviewMetric::Health(UnitHealth::Idle),
-        OverviewMetric::Health(UnitHealth::Warn),
-        OverviewMetric::Health(UnitHealth::Failing),
-    ];
-    let state_order = [
-        OverviewMetric::State(UnitState::Running),
-        OverviewMetric::State(UnitState::Done),
-        OverviewMetric::State(UnitState::Stopped),
-        OverviewMetric::State(UnitState::Lost),
-        OverviewMetric::State(UnitState::Failed),
-        OverviewMetric::State(UnitState::Zombie),
-        OverviewMetric::State(UnitState::Queued),
-        OverviewMetric::State(UnitState::Overlap),
-        OverviewMetric::State(UnitState::Skipped),
-        OverviewMetric::State(UnitState::Unknown),
-    ];
-    let intent_order = [
-        OverviewMetric::Intent(UnitIntent::Serve),
-        OverviewMetric::Intent(UnitIntent::Once),
-        OverviewMetric::Intent(UnitIntent::Manual),
-        OverviewMetric::Intent(UnitIntent::Cron),
-        OverviewMetric::Intent(UnitIntent::Skip),
-        OverviewMetric::Intent(UnitIntent::Orphan),
-    ];
-
-    let health_items = overview_items(units, &health_order, true, no_color);
-    let state_items = overview_items(units, &state_order, false, no_color);
-    let intent_items = overview_items(units, &intent_order, false, no_color);
-    let column_widths = overview_item_column_widths([&health_items, &state_items, &intent_items]);
-
-    vec![
-        (
-            "Health",
-            format_overview_items(&health_items, &column_widths, no_color),
-        ),
-        (
-            "State",
-            format_overview_items(&state_items, &column_widths, no_color),
-        ),
-        (
-            "Intent",
-            format_overview_items(&intent_items, &column_widths, no_color),
-        ),
-    ]
-}
-
-fn overview_items(
-    units: &[UnitStatus],
-    order: &[OverviewMetric],
-    include_zero: bool,
-    no_color: bool,
-) -> Vec<String> {
-    order
+/// Draws a horizontal rule with joints at each column boundary.
+fn status_rule(columns: &[Column], left: char, joint: char, right: char, fill: char) -> String {
+    let segments: Vec<String> = columns
         .iter()
-        .filter_map(|metric| {
-            let count = units
-                .iter()
-                .filter(|unit| overview_metric_matches(unit, *metric))
-                .count();
-            if count == 0 && !include_zero {
-                return None;
-            }
-            Some(colorize(
-                &format!("{} {}", overview_metric_label(*metric), count),
-                overview_metric_color(*metric),
-                no_color,
-            ))
-        })
-        .collect()
+        .map(|column| fill.to_string().repeat(column.width + 2))
+        .collect();
+    format!("{left}{}{right}", segments.join(&joint.to_string()))
 }
 
-fn overview_metric_matches(unit: &UnitStatus, metric: OverviewMetric) -> bool {
-    match metric {
-        OverviewMetric::Health(health) => unit.health == health,
-        OverviewMetric::State(state) => unit.state == state,
-        OverviewMetric::Intent(intent) => unit.intent == intent,
+/// Swaps a table row's outer `│` edges for the container's `║`.
+fn frame_row(row: &str) -> String {
+    let (Some(first), Some(last)) = (row.find('│'), row.rfind('│')) else {
+        return row.to_string();
+    };
+    if first == last {
+        return row.to_string();
     }
-}
-
-fn overview_metric_label(metric: OverviewMetric) -> &'static str {
-    match metric {
-        OverviewMetric::Health(health) => unit_health_label(health),
-        OverviewMetric::State(state) => unit_state_plain_label(state),
-        OverviewMetric::Intent(intent) => match intent {
-            UnitIntent::Serve => "Serve",
-            UnitIntent::Once => "Once",
-            UnitIntent::Cron => "Cron",
-            UnitIntent::Manual => "Manual",
-            UnitIntent::Skip => "Skip",
-            UnitIntent::Orphan => "Orphan",
-            UnitIntent::Unspecified => "Unspecified",
-        },
-    }
-}
-
-fn overview_metric_color(metric: OverviewMetric) -> &'static str {
-    match metric {
-        OverviewMetric::Health(health) => unit_health_color(health),
-        OverviewMetric::State(state) => unit_state_color(state),
-        OverviewMetric::Intent(intent) => unit_intent_color(intent),
-    }
-}
-
-fn overview_item_column_widths(rows: [&[String]; 3]) -> Vec<usize> {
-    let max_items = rows.iter().map(|row| row.len()).max().unwrap_or(0);
-    (0..max_items)
-        .map(|index| {
-            rows.iter()
-                .filter_map(|row| row.get(index))
-                .map(|item| visible_length(item))
-                .max()
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
-fn format_overview_items(items: &[String], widths: &[usize], no_color: bool) -> String {
-    let bullet = colorize("•", MID_GRAY, no_color);
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            pad_ansi_str(item, widths.get(index).copied().unwrap_or_default())
-        })
-        .collect::<Vec<_>>()
-        .join(&format!("  {bullet}  "))
+    let edge = '│'.len_utf8();
+    format!(
+        "{}║{}║{}",
+        &row[..first],
+        &row[first + edge..last],
+        &row[last + edge..]
+    )
 }
 
 /// Formats header row.
@@ -2467,33 +2271,6 @@ fn format_header_row(columns: &[Column]) -> String {
         row.push('│');
     }
     row
-}
-
-/// Formats a unit row, optionally indenting the unit name beneath a project heading.
-fn format_unit_row_with_project_indent(
-    unit: &UnitStatus,
-    columns: &[Column],
-    no_color: bool,
-    indent: bool,
-) -> String {
-    format_unit_row_with_project_indent_focus(unit, columns, no_color, indent, None)
-}
-
-/// Formats a unit row with optional project indent and a focused cell.
-fn format_unit_row_with_project_indent_focus(
-    unit: &UnitStatus,
-    columns: &[Column],
-    no_color: bool,
-    indent: bool,
-    focused_col: Option<usize>,
-) -> String {
-    if !indent {
-        return format_unit_row_focus(unit, columns, no_color, focused_col);
-    }
-
-    let mut indented = unit.clone();
-    indented.name = format!("  {}", unit.name);
-    format_unit_row_focus(&indented, columns, no_color, focused_col)
 }
 
 /// Formats a unit row, optionally marking one cell as focused.
@@ -2692,14 +2469,19 @@ fn tint_value_for_depth(value: String, depth: usize, no_color: bool) -> String {
 }
 
 /// Renders spawn rows.
-fn render_spawn_rows(unit: &UnitStatus, columns: &[Column], no_color: bool) {
+fn spawn_row_lines(unit: &UnitStatus, columns: &[Column], no_color: bool) -> Vec<String> {
     let tint_family = unit_row_tint_family(unit);
+    let mut rows = Vec::new();
     visit_spawn_tree(&unit.spawned_children, "", &mut |child, prefix, _| {
-        println!(
-            "{}",
-            format_spawned_child_row(child, columns, no_color, prefix, tint_family)
-        );
+        rows.push(format_spawned_child_row(
+            child,
+            columns,
+            no_color,
+            prefix,
+            tint_family,
+        ));
     });
+    rows
 }
 
 #[allow(dead_code)]
