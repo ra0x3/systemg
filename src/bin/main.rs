@@ -239,6 +239,39 @@ fn wait_for_inspect_stream_action(
     }
 }
 
+fn wait_for_status_stream_exit(sleep_interval: Duration) -> Result<bool, Box<dyn Error>> {
+    let deadline = Instant::now() + sleep_interval;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+
+        let poll_timeout = remaining.min(SERVICE_POLL_INTERVAL);
+        if event::poll(poll_timeout)?
+            && let Event::Key(key_event) = event::read()?
+            && stream_exit_key_event(&key_event)
+        {
+            return Ok(true);
+        }
+    }
+}
+
+fn status_stream_pause(
+    sleep_interval: Duration,
+    is_tty: bool,
+) -> Result<bool, Box<dyn Error>> {
+    if !is_tty {
+        thread::sleep(sleep_interval);
+        return Ok(false);
+    }
+    terminal::enable_raw_mode()?;
+    let result = wait_for_status_stream_exit(sleep_interval);
+    terminal::disable_raw_mode()?;
+    result
+}
+
 fn wait_for_logs_stream_action(
     sleep_interval: Duration,
 ) -> Result<LogsStreamAction, Box<dyn Error>> {
@@ -1235,6 +1268,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }
                 };
                 let sleep_interval = Duration::from_secs(stream_seconds);
+                let is_tty = unsafe {
+                    libc::isatty(libc::STDIN_FILENO) == 1
+                        && libc::isatty(libc::STDOUT_FILENO) == 1
+                };
                 loop {
                     match fetch_status_reading(config.as_deref(), live) {
                         Ok(reading) => {
@@ -1251,7 +1288,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 render_config,
                             ) {
                                 eprintln!("Error rendering status: {}", e);
-                                thread::sleep(sleep_interval);
+                                if status_stream_pause(sleep_interval, is_tty)? {
+                                    clear_terminal_output()?;
+                                    return Ok(());
+                                }
                                 continue;
                             }
                         }
@@ -1262,10 +1302,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 YELLOW, RESET
                             );
                             println!("\nWaiting for supervisor to restart...");
-                            println!("Press Ctrl+C to exit stream mode.");
+                            println!("Press Esc or Ctrl+C to exit stream mode.");
                         }
                     }
-                    thread::sleep(sleep_interval);
+                    let _ = io::stdout().flush();
+                    if status_stream_pause(sleep_interval, is_tty)? {
+                        clear_terminal_output()?;
+                        return Ok(());
+                    }
                 }
             } else {
                 let (reading, meters) = with_progress_spinner("Computing", || {
