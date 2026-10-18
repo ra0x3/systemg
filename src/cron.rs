@@ -1417,23 +1417,40 @@ impl CronStateFile {
             ..Self::default()
         };
         let path = store.cron_path();
-        if !path.exists() {
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((empty(), false));
+            }
+            Err(err) => return Err(err),
+        };
+
+        if raw.trim() == "<CronStateFile/>" {
             return Ok((empty(), false));
         }
 
-        let raw = fs::read_to_string(&path)?;
-
-        if raw.trim().is_empty() || raw.trim() == "<CronStateFile/>" {
-            return Ok((empty(), false));
-        }
-
+        let parsed = if raw.trim().is_empty() {
+            Err("file is empty".to_string())
+        } else {
+            quick_xml::de::from_str::<Self>(&raw).map_err(|err| err.to_string())
+        };
+        let mut state = match parsed {
+            Ok(state) => state,
+            Err(reason) => {
+                let copied = crate::runtime::quarantine_corrupt(&path)?;
+                if let Err(err) = empty().write() {
+                    let _ = fs::remove_file(&copied);
+                    return Err(err);
+                }
+                warn!(
+                    "Cron state file {} was unreadable ({reason}); copied it to {} and started a fresh run history",
+                    path.display(),
+                    copied.display()
+                );
+                return Ok((empty(), false));
+            }
+        };
         let compact = crate::xml::is_compact_nested(&raw);
-        let mut state = quick_xml::de::from_str::<Self>(&raw).map_err(|err| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("failed to deserialize {}: {err}", path.display()),
-            )
-        })?;
         state.store = store;
         let mut scrubbed = false;
         for job in state.jobs.values_mut() {
@@ -1465,6 +1482,35 @@ impl CronStateFile {
 }
 
 impl PersistedCronJobState {
+    /// The lifecycle row the newest finished run implies, used to rebuild a
+    /// lost service state file. Runs still in flight and overlaps (runs that
+    /// never started) are passed over, since neither says how the last real
+    /// run ended. The mapping matches what the completion path persists.
+    pub(crate) fn recovered_state_entry(&self) -> Option<crate::daemon::ServiceStateEntry> {
+        let (record, status) = self.execution_history.iter().rev().find_map(|record| {
+            let status = match record.status.as_ref()? {
+                CronExecutionStatus::Success => {
+                    crate::daemon::ServiceLifecycleStatus::ExitedSuccessfully
+                }
+                CronExecutionStatus::Failed(_) | CronExecutionStatus::TimedOut(_) => {
+                    crate::daemon::ServiceLifecycleStatus::ExitedWithError
+                }
+                CronExecutionStatus::Interrupted(_) => {
+                    crate::daemon::ServiceLifecycleStatus::Stopped
+                }
+                CronExecutionStatus::OverlapError => return None,
+            };
+            Some((record, status))
+        })?;
+        Some(crate::daemon::ServiceStateEntry {
+            status,
+            pid: None,
+            exit_code: record.exit_code,
+            signal: None,
+            health: None,
+        })
+    }
+
     /// Masks URL credentials in recorded commands and failure reasons,
     /// returning whether anything changed.
     fn scrub(&mut self) -> bool {

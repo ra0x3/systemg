@@ -79,6 +79,9 @@ pub enum SgCode {
     HealthCheckUnreachable,
     /// SG0023 — no health check probe completed within the per-attempt budget.
     HealthCheckTimeout,
+    /// SG0024 — a persisted state file is empty or unparseable, so its records
+    /// cannot be trusted.
+    StateFileCorrupt,
     /// SG0101 — a direct lifecycle command targeted a schedule-driven cron unit.
     CronDirectControl,
     /// SG0102 — a service exited immediately at start, before it came up.
@@ -289,6 +292,7 @@ impl SgCode {
             SgCode::LooseServiceNotFound => "SG0021",
             SgCode::HealthCheckUnreachable => "SG0022",
             SgCode::HealthCheckTimeout => "SG0023",
+            SgCode::StateFileCorrupt => "SG0024",
             SgCode::CronDirectControl => "SG0101",
             SgCode::UnitImmediateExit => "SG0102",
             SgCode::PreStartFailed => "SG0103",
@@ -364,7 +368,7 @@ impl SgCode {
     }
 
     /// Every code, so callers can enumerate or round-trip the taxonomy.
-    pub const ALL: [SgCode; 88] = [
+    pub const ALL: [SgCode; 89] = [
         SgCode::Catchall,
         SgCode::CronStateRecoveryFailed,
         SgCode::CronRegistrationConflict,
@@ -387,6 +391,7 @@ impl SgCode {
         SgCode::LooseServiceNotFound,
         SgCode::HealthCheckUnreachable,
         SgCode::HealthCheckTimeout,
+        SgCode::StateFileCorrupt,
         SgCode::CronDirectControl,
         SgCode::UnitImmediateExit,
         SgCode::PreStartFailed,

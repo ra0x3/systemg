@@ -912,6 +912,25 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
         .help_docs();
     }
 
+    if let Some((_, rest)) = message.split_once(systemg::constants::CORRUPT_STATE_MARKER) {
+        let path = rest
+            .trim_start()
+            .split_once(": ")
+            .map_or(rest.trim(), |(path, _)| path);
+        return systemg::diag::Diagnostic::error(
+            systemg::diag::SgCode::StateFileCorrupt,
+            "a sysg state file is unreadable",
+        )
+        .note(message.to_string())
+        .note(
+            "sysg will not guess which services are still running, because a wrong \
+             guess starts a second copy of each one",
+        )
+        .help_cmd("look for leftover service processes", "sysg doctor")
+        .help_cmd("move the damaged file aside", format!("mv {path} {path}.bad"))
+        .help_docs();
+    }
+
     if message.contains(systemg::constants::SUPERSEDED_MARKER) {
         let unit = message
             .split_once("Failed to start service '")
@@ -5601,6 +5620,7 @@ fn start_foreground(
 ) -> Result<(), Box<dyn Error>> {
     let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
     let project_id = config.project.id.clone();
+    refuse_corrupt_pid_file(&project_id)?;
     let attach_config = config_path.clone();
     let attach_service = service.clone();
 
@@ -7546,6 +7566,18 @@ fn plan_service_name(plan: &systemg::start::StartPlan) -> Option<String> {
     }
 }
 
+/// Stops a cold start before it forks when the project's PID file is
+/// unreadable, so the user gets SG0024 here instead of a supervisor that dies
+/// during boot with the reason buried in its log.
+fn refuse_corrupt_pid_file(project_id: &str) -> Result<(), Box<dyn Error>> {
+    match systemg::daemon::PidFile::load(StateStore::for_project(project_id)) {
+        Err(err @ systemg::error::PidFileError::Corrupt { .. }) => Err(Box::new(
+            DiagError(Box::new(catchall_diag(&err.to_string()))),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Starts supervisor daemon.
 fn start_supervisor_daemon(
     config_path: PathBuf,
@@ -7553,7 +7585,8 @@ fn start_supervisor_daemon(
     pipe_stderr: bool,
     verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
-    load_config(Some(config_path.to_string_lossy().as_ref()))?;
+    let config = load_config(Some(config_path.to_string_lossy().as_ref()))?;
+    refuse_corrupt_pid_file(&config.project.id)?;
 
     let child_pid = unsafe { libc::fork() };
     if child_pid < 0 {

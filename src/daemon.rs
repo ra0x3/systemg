@@ -389,6 +389,40 @@ struct MetadataEntry {
     metadata: PersistedSpawnChild,
 }
 
+/// What a persisted state file held when it was read.
+pub(crate) enum DiskRead<T> {
+    /// There is no file.
+    Missing,
+    /// The file parsed, alongside its raw contents.
+    Parsed(T, String),
+    /// The file exists but is empty or does not parse.
+    Corrupt(String),
+}
+
+/// Reads and parses one XML state file. An empty file is corrupt, because
+/// sysg never writes one: it is what a write cut off by a full disk left.
+pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+) -> std::io::Result<DiskRead<T>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DiskRead::Missing);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+            return Ok(DiskRead::Corrupt(err.to_string()));
+        }
+        Err(err) => return Err(err),
+    };
+    if contents.trim().is_empty() {
+        return Ok(DiskRead::Corrupt("file is empty".into()));
+    }
+    match xml_from_str::<T>(&contents) {
+        Ok(parsed) => Ok(DiskRead::Parsed(parsed, contents)),
+        Err(err) => Ok(DiskRead::Corrupt(err.to_string())),
+    }
+}
+
 /// PID tracking file.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct PidFile {
@@ -764,13 +798,52 @@ impl PidFile {
     /// Deserialize cannot know which project this file belongs to, so the
     /// store is re-attached after every reload — this is the single invariant
     /// that keeps a project's handle pinned to its own directory.
+    ///
+    /// An unreadable file is quarantined and rewritten from memory. The holder
+    /// of a long-lived handle (the supervisor) still knows every process it
+    /// recorded, so its copy is the best one left.
     fn reload_into(&mut self, path: &std::path::Path) -> Result<(), PidFileError> {
-        if path.exists() {
-            let contents = fs::read_to_string(path)?;
-            let store = self.store.clone();
-            *self = xml_from_str::<Self>(&contents)?;
-            self.store = store;
-            self.scrub_commands();
+        match read_state_file::<Self>(path)? {
+            DiskRead::Missing => {}
+            DiskRead::Parsed(disk, _) => {
+                let store = self.store.clone();
+                *self = disk;
+                self.store = store;
+                self.scrub_commands();
+            }
+            DiskRead::Corrupt(reason) => self.rewrite_corrupt(path, &reason)?,
+        }
+        Ok(())
+    }
+
+    /// Quarantines the unreadable file at `path` and writes this handle's
+    /// state in its place.
+    fn rewrite_corrupt(
+        &self,
+        path: &std::path::Path,
+        reason: &str,
+    ) -> Result<(), PidFileError> {
+        let copied = runtime::quarantine_corrupt(path)?;
+        if let Err(err) = self.write_at(path) {
+            let _ = fs::remove_file(&copied);
+            return Err(err);
+        }
+        warn!(
+            "PID file {} was unreadable ({reason}); copied it to {} and rewrote it from the supervisor's records",
+            path.display(),
+            copied.display()
+        );
+        Ok(())
+    }
+
+    /// Repairs an unreadable PID file from this handle's records, leaving a
+    /// readable one alone. The supervisor calls this every monitor tick so a
+    /// damaged file is fixed even when nothing spawns.
+    pub(crate) fn heal(&self) -> Result<(), PidFileError> {
+        let _lock = self.acquire_lock()?;
+        let path = self.path();
+        if let DiskRead::Corrupt(reason) = read_state_file::<Self>(&path)? {
+            self.rewrite_corrupt(&path, &reason)?;
         }
         Ok(())
     }
@@ -808,6 +881,10 @@ impl PidFile {
     }
 
     /// Loads with file locking.
+    ///
+    /// An unreadable file is an error here, never empty state. A fresh handle
+    /// has no records of its own, and treating lost records as "nothing is
+    /// running" would start a second copy of every live service.
     pub fn load(store: StateStore) -> Result<Self, PidFileError> {
         let mut this = Self {
             store,
@@ -816,13 +893,16 @@ impl PidFile {
         let _lock = this.acquire_lock()?;
 
         let path = this.path();
-        if !path.exists() {
-            return Ok(this);
-        }
-        let contents = fs::read_to_string(&path)?;
+        let (disk, contents) = match read_state_file::<Self>(&path)? {
+            DiskRead::Missing => return Ok(this),
+            DiskRead::Parsed(disk, contents) => (disk, contents),
+            DiskRead::Corrupt(reason) => {
+                return Err(PidFileError::Corrupt { path, reason });
+            }
+        };
         let compact = xml::is_compact_nested(&contents);
         let bound = this.store.clone();
-        this = xml_from_str::<Self>(&contents)?;
+        this = disk;
         this.store = bound;
         let scrubbed = this.scrub_commands();
         if compact || scrubbed {
@@ -2202,6 +2282,19 @@ pub struct ServiceStateEntry {
     pub health: Option<HealthProbe>,
 }
 
+impl ServiceStateEntry {
+    /// A row for a live process whose health has not been observed yet.
+    pub(crate) fn running(pid: u32) -> Self {
+        Self {
+            status: ServiceLifecycleStatus::Running,
+            pid: Some(pid),
+            exit_code: None,
+            signal: None,
+            health: None,
+        }
+    }
+}
+
 /// Outcome of the most recent health probe for a unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HealthProbe {
@@ -2222,10 +2315,18 @@ struct StateEntry {
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct ServiceStateFile {
     #[serde(
+        default,
         serialize_with = "serialize_state_entries",
         deserialize_with = "deserialize_state_entries"
     )]
     services: HashMap<String, ServiceStateEntry>,
+    /// Set when a fresh load found the file unreadable and started over.
+    ///
+    /// Until the supervisor has a row for every configured unit, a unit with
+    /// no row is unknown: it may have been skipped or finished before the
+    /// records were lost, so nothing restarts it automatically.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    recovered: bool,
     /// The project state directory this file is bound to. Never serialized;
     /// re-attached after every load.
     #[serde(skip)]
@@ -2276,19 +2377,112 @@ impl ServiceStateFile {
         };
         let _lock = state.acquire_lock()?;
         let path = state.path();
-        if !path.exists() {
-            return Ok(state);
-        }
-
-        let contents = fs::read_to_string(&path)?;
+        let (disk, contents) = match read_state_file::<Self>(&path)? {
+            DiskRead::Missing => return Ok(state),
+            DiskRead::Parsed(disk, contents) => (disk, contents),
+            DiskRead::Corrupt(reason) => {
+                let copied = runtime::quarantine_corrupt(&path)?;
+                state.recovered = true;
+                if let Err(err) = state.save() {
+                    let _ = fs::remove_file(&copied);
+                    return Err(err);
+                }
+                warn!(
+                    "Service state file {} was unreadable ({reason}); copied it to {} and started over. \
+                     Units without a record will not be restarted automatically until they are started again",
+                    path.display(),
+                    copied.display()
+                );
+                return Ok(state);
+            }
+        };
         let compact = xml::is_compact_nested(&contents);
         let store = state.store.clone();
-        state = xml_from_str::<Self>(&contents)?;
+        state = disk;
         state.store = store;
         if compact {
             state.save()?;
         }
         Ok(state)
+    }
+
+    /// Whether this file was rebuilt after its records were lost and some
+    /// configured unit still has no row.
+    pub fn is_recovering(&self) -> bool {
+        self.recovered
+    }
+
+    /// Whether `service_hash` is a unit whose record was lost: the file is
+    /// recovering and has no row for it.
+    pub fn is_unknown(&self, service_hash: &str) -> bool {
+        self.recovered && !self.services.contains_key(service_hash)
+    }
+
+    /// Fills rows rebuilt from other evidence, never overwriting a row that
+    /// already exists, and ends recovery once every key in `configured` has a
+    /// row. Returns the keys still unknown.
+    pub(crate) fn apply_recovery(
+        &mut self,
+        rebuilt: Vec<(String, ServiceStateEntry)>,
+        configured: &[String],
+    ) -> Result<Vec<String>, ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        self.reload_locked()?;
+        if !self.recovered {
+            return Ok(Vec::new());
+        }
+        let mut changed = false;
+        for (key, entry) in rebuilt {
+            if !self.services.contains_key(&key) {
+                self.services.insert(key, entry);
+                changed = true;
+            }
+        }
+        let unknown: Vec<String> = configured
+            .iter()
+            .filter(|key| !self.services.contains_key(*key))
+            .cloned()
+            .collect();
+        if unknown.is_empty() {
+            self.recovered = false;
+            changed = true;
+            info!("Service state recovery complete; every configured unit has a record");
+        }
+        if changed {
+            self.save()?;
+        }
+        Ok(unknown)
+    }
+
+    /// Repairs an unreadable state file from this handle's records, leaving a
+    /// readable one alone.
+    pub(crate) fn heal(&self) -> Result<(), ServiceStateError> {
+        let _lock = self.acquire_lock()?;
+        let path = self.path();
+        if let DiskRead::Corrupt(reason) = read_state_file::<Self>(&path)? {
+            self.rewrite_corrupt(&path, &reason)?;
+        }
+        Ok(())
+    }
+
+    /// Quarantines the unreadable file at `path` and writes this handle's
+    /// records in its place.
+    fn rewrite_corrupt(
+        &self,
+        path: &std::path::Path,
+        reason: &str,
+    ) -> Result<(), ServiceStateError> {
+        let copied = runtime::quarantine_corrupt(path)?;
+        if let Err(err) = self.save() {
+            let _ = fs::remove_file(&copied);
+            return Err(err);
+        }
+        warn!(
+            "Service state file {} was unreadable ({reason}); copied it to {} and rewrote it from the supervisor's records",
+            path.display(),
+            copied.display()
+        );
+        Ok(())
     }
 
     /// The project store this file is bound to.
@@ -2340,15 +2534,20 @@ impl ServiceStateFile {
     /// Re-reads the on-disk file into `self`, preserving the bound store.
     /// A missing file is treated as empty. Keeps concurrent writers from
     /// clobbering each other's entries: a write always merges onto current disk.
+    ///
+    /// An unreadable file is quarantined and rewritten from memory, which in
+    /// the supervisor's long-lived handle still holds every record.
     fn reload_locked(&mut self) -> Result<(), ServiceStateError> {
         let path = self.path();
-        if !path.exists() {
-            return Ok(());
+        match read_state_file::<Self>(&path)? {
+            DiskRead::Missing => {}
+            DiskRead::Parsed(disk, _) => {
+                let store = self.store.clone();
+                *self = disk;
+                self.store = store;
+            }
+            DiskRead::Corrupt(reason) => self.rewrite_corrupt(&path, &reason)?,
         }
-        let contents = fs::read_to_string(&path)?;
-        let store = self.store.clone();
-        *self = xml_from_str::<Self>(&contents)?;
-        self.store = store;
         Ok(())
     }
 
@@ -5014,6 +5213,7 @@ impl Daemon {
         let store = StateStore::for_project(&config.project.id);
         let pid_file = Arc::new(Mutex::new(PidFile::load(store.clone())?));
         let state_file = Arc::new(Mutex::new(ServiceStateFile::load(store)?));
+        Self::recover_state_rows(&config, &pid_file, &state_file)?;
         Ok(Self::new(config, pid_file, state_file, detach_children))
     }
 
@@ -5025,6 +5225,69 @@ impl Daemon {
     /// Returns a reference to the configuration.
     pub fn config(&self) -> Arc<Config> {
         self.cfg()
+    }
+
+    /// Rebuilds service state rows lost to an unreadable state file.
+    ///
+    /// A unit whose recorded process is still alive as the same process is
+    /// Running. A cron unit takes its last completed run from cron history.
+    /// Anything else stays unknown until it is started again. Each lock is
+    /// taken and dropped in turn (pid, then cron, then state), so this never
+    /// nests the cron lock inside the state lock.
+    fn recover_state_rows(
+        config: &Config,
+        pid_file: &Mutex<PidFile>,
+        state_file: &Mutex<ServiceStateFile>,
+    ) -> Result<(), ProcessManagerError> {
+        let (recovering, store) = match state_file.lock() {
+            Ok(state) => (state.is_recovering(), state.store()),
+            Err(_) => return Ok(()),
+        };
+        if !recovering {
+            return Ok(());
+        }
+        let keys = config.state_keys();
+        let mut rebuilt: Vec<(String, ServiceStateEntry)> = Vec::new();
+        if let Ok(pids) = pid_file.lock() {
+            for (name, key) in &keys {
+                let Some(pid) = pids.get(name) else { continue };
+                let same_process = pids.start_for(name).is_some_and(|started| {
+                    Self::pid_is_alive(pid) && process_start_time(pid) == Some(started)
+                });
+                if same_process {
+                    rebuilt.push((key.clone(), ServiceStateEntry::running(pid)));
+                }
+            }
+        }
+        let cron = crate::cron::CronStateFile::load(store)?;
+        for (name, key) in &keys {
+            let is_cron = config
+                .services
+                .get(name)
+                .is_some_and(|service| service.cron.is_some());
+            if !is_cron || rebuilt.iter().any(|(rebuilt, _)| rebuilt == key) {
+                continue;
+            }
+            if let Some(entry) = cron
+                .jobs()
+                .get(key)
+                .and_then(|job| job.recovered_state_entry())
+            {
+                rebuilt.push((key.clone(), entry));
+            }
+        }
+        let configured: Vec<String> = keys.into_values().collect();
+        let Ok(mut state) = state_file.lock() else {
+            return Ok(());
+        };
+        let unknown = state.apply_recovery(rebuilt, &configured)?;
+        if !unknown.is_empty() {
+            debug!(
+                "Service state still recovering; no record yet for {}",
+                unknown.join(", ")
+            );
+        }
+        Ok(())
     }
 
     /// Returns whether any configured non-cron service still needs to start.
@@ -10011,6 +10274,8 @@ impl Daemon {
                 debug!("No active services detected in monitor loop.");
             }
 
+            Self::heal_state_files(&ctx);
+
             Self::revive_ready_dependents(&ctx);
 
             let mut reconciled = Self::reconcile_lost_services(&ctx);
@@ -10381,6 +10646,26 @@ impl Daemon {
         }
     }
 
+    /// Repairs an unreadable pid or state file from the supervisor's records,
+    /// then rebuilds any rows a recovered state file still lacks.
+    fn heal_state_files(ctx: &DaemonContext) {
+        if let Ok(pids) = ctx.lock_pid_file()
+            && let Err(err) = pids.heal()
+        {
+            warn!("Could not repair the PID file: {err}");
+        }
+        if let Ok(state) = ctx.lock_state_file()
+            && let Err(err) = state.heal()
+        {
+            warn!("Could not repair the service state file: {err}");
+        }
+        if let Err(err) =
+            Self::recover_state_rows(&ctx.config, &ctx.pid_file, &ctx.state_file)
+        {
+            warn!("Could not rebuild lost service state rows: {err}");
+        }
+    }
+
     /// Restarts services whose recorded process has vanished, through the normal
     /// path when their policy allows. A non-empty `restart_counts` entry acts as
     /// the in-flight guard so a restart is only triggered once per failure.
@@ -10427,6 +10712,12 @@ impl Daemon {
 
             let recorded = Self::recorded_status_in_context(ctx, name);
             if matches!(recorded, Some(ServiceLifecycleStatus::Skipped)) {
+                continue;
+            }
+            let unknown = ctx.lock_state_file().ok().is_some_and(|state| {
+                state.is_unknown(&ctx.config.state_key(name))
+            });
+            if unknown {
                 continue;
             }
 

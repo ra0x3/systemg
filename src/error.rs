@@ -176,6 +176,16 @@ pub enum PidFileError {
     /// Error writing to a PID file.
     #[error("Service not found in PID file")]
     ServiceNotFound,
+
+    /// The PID file exists but is empty or unparseable, so the processes it
+    /// recorded can no longer be attributed.
+    #[error("{marker} {path}: {reason}", marker = crate::constants::CORRUPT_STATE_MARKER, path = path.display())]
+    Corrupt {
+        /// The unreadable file.
+        path: std::path::PathBuf,
+        /// Why it could not be read.
+        reason: String,
+    },
 }
 
 /// Error type for persistent service state file operations.

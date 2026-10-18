@@ -206,20 +206,122 @@ pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Writes `contents` to `path`, restricting the file to the owner (mode `0600` on Unix).
+///
+/// The bytes land in a sibling temp file that is synced and then renamed over
+/// `path`, so a reader sees either the old file or the new one in full. A full
+/// disk fails the write and leaves the old file untouched instead of
+/// truncating it. A symlink at `path` is refused because the rename would
+/// replace the link rather than write through it.
 pub fn write_private_file(
     path: &std::path::Path,
     contents: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
-    std::fs::write(path, contents)?;
+    use std::io::Write;
+
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("refusing to replace symlink {}", path.display()),
+        ));
+    }
+    let temp = sibling_temp_path(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            path,
-            std::fs::Permissions::from_mode(crate::constants::PRIVATE_FILE_MODE),
-        )?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(crate::constants::PRIVATE_FILE_MODE);
     }
+    let written = options.open(&temp).and_then(|mut file| {
+        file.write_all(contents.as_ref())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(
+                crate::constants::PRIVATE_FILE_MODE,
+            ))?;
+        }
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    });
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err);
+    }
+    sync_parent_dir(path);
     Ok(())
+}
+
+/// Flushes the directory entry for `path` so a rename that just landed it
+/// survives a power loss. Best effort: some filesystems refuse to sync a
+/// directory, and the data itself is already on disk.
+pub fn sync_parent_dir(path: &std::path::Path) {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+}
+
+/// A writer-private temp path beside `path`, so the rename stays on one
+/// filesystem and concurrent writers never share a temp.
+fn sibling_temp_path(path: &std::path::Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    path.with_file_name(format!(".{name}.{}.{nanos}.tmp", std::process::id()))
+}
+
+/// Copies an unreadable state file to `<name>.corrupt-<unix secs>[-n]` so an
+/// operator can see what was lost, and returns where the copy went.
+///
+/// The original stays in place. The caller's atomic rewrite replaces it, so a
+/// rewrite that fails (on a full disk, say) leaves the damaged file where the
+/// next attempt will find it again, and the caller then drops the copy so
+/// retries don't pile up copies on a disk that is already full. The copy
+/// never overwrites an earlier one.
+pub fn quarantine_corrupt(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let bytes = std::fs::read(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(crate::constants::PRIVATE_FILE_MODE);
+    }
+    for attempt in 0u32.. {
+        let target = match attempt {
+            0 => path.with_file_name(format!("{name}.corrupt-{secs}")),
+            n => path.with_file_name(format!("{name}.corrupt-{secs}-{n}")),
+        };
+        match options.open(&target) {
+            Ok(mut file) => {
+                use std::io::Write;
+                let copied = file.write_all(&bytes).and_then(|()| file.sync_all());
+                if let Err(err) = copied {
+                    let _ = std::fs::remove_file(&target);
+                    return Err(err);
+                }
+                return Ok(target);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("quarantine name space exhausted")
 }
 
 /// Validates that an open config file is not attacker-controlled.

@@ -189,6 +189,12 @@ pub const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 pub const SUPERSEDED_MARKER: &str =
     "a newer generation replaced the process this start launched";
 
+/// Stable prefix of the error a fresh load returns for an unreadable PID file.
+///
+/// The typed error is matched wherever it is still held. Over IPC it arrives
+/// as a plain string, and the client keys SG0024 on this prefix.
+pub const CORRUPT_STATE_MARKER: &str = "sysg state file is corrupt:";
+
 /// Per-attempt timeout for a periodic health probe when the unit does not
 /// declare its own.
 pub const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);

@@ -344,7 +344,10 @@ pub fn write_rollback_result(reason: &str) -> io::Result<()> {
     ));
     crate::runtime::write_private_file(&temp, contents.as_bytes())?;
     match std::fs::rename(&temp, &path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            crate::runtime::sync_parent_dir(&path);
+            Ok(())
+        }
         Err(err) => {
             let _ = std::fs::remove_file(&temp);
             Err(err)

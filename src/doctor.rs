@@ -16,7 +16,10 @@ use std::{fmt, fs};
 use serde::Serialize;
 
 use crate::{
-    daemon::{PidFile, ServiceLifecycleStatus, ServiceStateFile, process_start_time},
+    daemon::{
+        DiskRead, PidFile, ServiceLifecycleStatus, ServiceStateFile, process_start_time,
+        read_state_file,
+    },
     runtime::{self, RuntimeMode},
     state_store::{PROJECTS_DIR, StateStore},
 };
@@ -200,10 +203,91 @@ pub fn check_world() -> WorldReport {
     }
 }
 
+/// Reads one state file without repairing it. A missing file is empty state;
+/// an unreadable one becomes an `Error` finding under `rule`.
+fn read_or_report<T: serde::de::DeserializeOwned + Default>(
+    project: &str,
+    path: &std::path::Path,
+    rule: &str,
+    findings: &mut Vec<Finding>,
+) -> Option<T> {
+    let reason = match read_state_file::<T>(path) {
+        Ok(DiskRead::Missing) => return Some(T::default()),
+        Ok(DiskRead::Parsed(parsed, _)) => return Some(parsed),
+        Ok(DiskRead::Corrupt(reason)) => reason,
+        Err(err) => err.to_string(),
+    };
+    findings.push(Finding {
+        severity: Severity::Error,
+        rule: rule.into(),
+        project: Some(project.to_string()),
+        service: None,
+        detail: format!("{} is unreadable: {reason}", path.display()),
+    });
+    None
+}
+
+/// Reports state files that recovery moved aside, so an operator knows
+/// records were lost and where the damaged copies are.
+fn report_quarantined(project: &str, store: &StateStore, findings: &mut Vec<Finding>) {
+    let Ok(entries) = fs::read_dir(store.dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.contains(".corrupt-") {
+            findings.push(Finding {
+                severity: Severity::Warn,
+                rule: "state-file-quarantined".into(),
+                project: Some(project.to_string()),
+                service: None,
+                detail: format!(
+                    "{} is a copy of a state file that was unreadable; delete it once reviewed",
+                    entry.path().display()
+                ),
+            });
+        }
+    }
+}
+
 /// Checks one project's persisted state against the invariants.
 fn check_project(project: &str, store: StateStore, findings: &mut Vec<Finding>) {
-    let pid_file = PidFile::load(store.clone()).ok();
-    let state_file = ServiceStateFile::load(store).ok();
+    let pid_file = read_or_report::<PidFile>(
+        project,
+        &store.pid_path(),
+        "pid-file-corrupt",
+        findings,
+    );
+    let state_file = read_or_report::<ServiceStateFile>(
+        project,
+        &store.state_path(),
+        "state-file-corrupt",
+        findings,
+    );
+    let cron_path = store.cron_path();
+    let cron_is_placeholder = fs::read_to_string(&cron_path)
+        .is_ok_and(|raw| raw.trim() == "<CronStateFile/>");
+    if !cron_is_placeholder {
+        read_or_report::<crate::cron::CronStateFile>(
+            project,
+            &cron_path,
+            "cron-state-corrupt",
+            findings,
+        );
+    }
+    if state_file.as_ref().is_some_and(ServiceStateFile::is_recovering) {
+        findings.push(Finding {
+            severity: Severity::Warn,
+            rule: "state-recovering".into(),
+            project: Some(project.to_string()),
+            service: None,
+            detail: "the service state file was rebuilt after it became unreadable; \
+                     units without a record are not restarted automatically until \
+                     they are started again"
+                .into(),
+        });
+    }
+    report_quarantined(project, &store, findings);
 
     let push = |findings: &mut Vec<Finding>,
                 severity: Severity,

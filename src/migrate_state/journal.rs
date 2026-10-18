@@ -187,7 +187,10 @@ impl MigrationJournal {
         ));
         runtime::write_private_file(&temp, &bytes)?;
         match std::fs::rename(&temp, path) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                runtime::sync_parent_dir(path);
+                Ok(())
+            }
             Err(err) => {
                 let _ = std::fs::remove_file(&temp);
                 Err(err)

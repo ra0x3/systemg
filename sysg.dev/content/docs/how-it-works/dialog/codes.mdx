@@ -141,6 +141,17 @@ A service's health check timed out — a probe did not complete within its
 within the per-attempt budget before its retries and total readiness window were
 exhausted.
 
+### [SG0024](/reference/dialog/codes#sg0024)
+
+A state file sysg keeps for a project (its PID file) exists but is empty or
+can't be parsed, usually because a write was cut off when the disk filled. A
+running supervisor repairs this on its own from the records it holds in
+memory. You only see SG0024 when sysg has to load the file fresh and has
+nothing better to rebuild it from. sysg stops here instead of assuming nothing
+is running, because that would start a second copy of every live service.
+Check for leftover service processes and stop them, move the named file aside,
+and start the project again.
+
 ### [SG0104](/reference/dialog/codes#sg0104)
 
 A service's health check ran and reported the service is not healthy (an HTTP
