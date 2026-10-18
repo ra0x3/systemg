@@ -1486,22 +1486,25 @@ impl PersistedCronJobState {
     /// lost service state file. Runs still in flight and overlaps (runs that
     /// never started) are passed over, since neither says how the last real
     /// run ended. The mapping matches what the completion path persists.
-    pub(crate) fn recovered_state_entry(&self) -> Option<crate::daemon::ServiceStateEntry> {
-        let (record, status) = self.execution_history.iter().rev().find_map(|record| {
-            let status = match record.status.as_ref()? {
-                CronExecutionStatus::Success => {
-                    crate::daemon::ServiceLifecycleStatus::ExitedSuccessfully
-                }
-                CronExecutionStatus::Failed(_) | CronExecutionStatus::TimedOut(_) => {
-                    crate::daemon::ServiceLifecycleStatus::ExitedWithError
-                }
-                CronExecutionStatus::Interrupted(_) => {
-                    crate::daemon::ServiceLifecycleStatus::Stopped
-                }
-                CronExecutionStatus::OverlapError => return None,
-            };
-            Some((record, status))
-        })?;
+    pub(crate) fn recovered_state_entry(
+        &self,
+    ) -> Option<crate::daemon::ServiceStateEntry> {
+        let (record, status) =
+            self.execution_history.iter().rev().find_map(|record| {
+                let status = match record.status.as_ref()? {
+                    CronExecutionStatus::Success => {
+                        crate::daemon::ServiceLifecycleStatus::ExitedSuccessfully
+                    }
+                    CronExecutionStatus::Failed(_) | CronExecutionStatus::TimedOut(_) => {
+                        crate::daemon::ServiceLifecycleStatus::ExitedWithError
+                    }
+                    CronExecutionStatus::Interrupted(_) => {
+                        crate::daemon::ServiceLifecycleStatus::Stopped
+                    }
+                    CronExecutionStatus::OverlapError => return None,
+                };
+                Some((record, status))
+            })?;
         Some(crate::daemon::ServiceStateEntry {
             status,
             pid: None,

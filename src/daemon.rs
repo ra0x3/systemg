@@ -2433,8 +2433,10 @@ impl ServiceStateFile {
         }
         let mut changed = false;
         for (key, entry) in rebuilt {
-            if !self.services.contains_key(&key) {
-                self.services.insert(key, entry);
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                self.services.entry(key)
+            {
+                slot.insert(entry);
                 changed = true;
             }
         }
@@ -10714,9 +10716,10 @@ impl Daemon {
             if matches!(recorded, Some(ServiceLifecycleStatus::Skipped)) {
                 continue;
             }
-            let unknown = ctx.lock_state_file().ok().is_some_and(|state| {
-                state.is_unknown(&ctx.config.state_key(name))
-            });
+            let unknown = ctx
+                .lock_state_file()
+                .ok()
+                .is_some_and(|state| state.is_unknown(&ctx.config.state_key(name)));
             if unknown {
                 continue;
             }

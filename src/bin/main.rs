@@ -912,7 +912,8 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
         .help_docs();
     }
 
-    if let Some((_, rest)) = message.split_once(systemg::constants::CORRUPT_STATE_MARKER) {
+    if let Some((_, rest)) = message.split_once(systemg::constants::CORRUPT_STATE_MARKER)
+    {
         let path = rest
             .trim_start()
             .split_once(": ")
@@ -927,7 +928,10 @@ fn catchall_diag(message: &str) -> systemg::diag::Diagnostic {
              guess starts a second copy of each one",
         )
         .help_cmd("look for leftover service processes", "sysg doctor")
-        .help_cmd("move the damaged file aside", format!("mv {path} {path}.bad"))
+        .help_cmd(
+            "move the damaged file aside",
+            format!("mv {path} {path}.bad"),
+        )
         .help_docs();
     }
 

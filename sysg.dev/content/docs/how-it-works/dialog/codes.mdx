@@ -146,7 +146,7 @@ exhausted.
 A state file sysg keeps for a project (its PID file) exists but is empty or
 can't be parsed, usually because a write was cut off when the disk filled. A
 running supervisor repairs this on its own from the records it holds in
-memory. You only see SG0024 when sysg has to load the file fresh and has
+memory. You only see [SG0024](/reference/dialog/codes#sg0024) when sysg has to load the file fresh and has
 nothing better to rebuild it from. sysg stops here instead of assuming nothing
 is running, because that would start a second copy of every live service.
 Check for leftover service processes and stop them, move the named file aside,

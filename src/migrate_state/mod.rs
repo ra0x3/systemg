@@ -191,7 +191,7 @@ fn write_seeded_file(target: &Path, contents: String) -> io::Result<()> {
     crate::runtime::write_private_file(&temp, contents)?;
     match std::fs::rename(&temp, target) {
         Ok(()) => {
-            crate::runtime::sync_parent_dir(&target);
+            crate::runtime::sync_parent_dir(target);
             Ok(())
         }
         Err(err) => {

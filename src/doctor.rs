@@ -265,8 +265,8 @@ fn check_project(project: &str, store: StateStore, findings: &mut Vec<Finding>) 
         findings,
     );
     let cron_path = store.cron_path();
-    let cron_is_placeholder = fs::read_to_string(&cron_path)
-        .is_ok_and(|raw| raw.trim() == "<CronStateFile/>");
+    let cron_is_placeholder =
+        fs::read_to_string(&cron_path).is_ok_and(|raw| raw.trim() == "<CronStateFile/>");
     if !cron_is_placeholder {
         read_or_report::<crate::cron::CronStateFile>(
             project,
@@ -275,7 +275,10 @@ fn check_project(project: &str, store: StateStore, findings: &mut Vec<Finding>) 
             findings,
         );
     }
-    if state_file.as_ref().is_some_and(ServiceStateFile::is_recovering) {
+    if state_file
+        .as_ref()
+        .is_some_and(ServiceStateFile::is_recovering)
+    {
         findings.push(Finding {
             severity: Severity::Warn,
             rule: "state-recovering".into(),
