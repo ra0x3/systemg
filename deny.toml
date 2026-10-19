@@ -11,6 +11,9 @@ targets = [
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml is unmaintained, not vulnerable; only pulled in by serde_yaml_ng 0.10, the latest release, with no maintained drop-in" },
+]
 
 [licenses]
 version = 2
