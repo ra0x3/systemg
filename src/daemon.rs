@@ -802,18 +802,23 @@ impl PidFile {
     /// An unreadable file is quarantined and rewritten from memory. The holder
     /// of a long-lived handle (the supervisor) still knows every process it
     /// recorded, so its copy is the best one left.
-    fn reload_into(&mut self, path: &std::path::Path) -> Result<(), PidFileError> {
+    ///
+    /// Returns whether the disk copy still needs writing back, because the
+    /// file is missing or credential masking changed a row.
+    fn reload_into(&mut self, path: &std::path::Path) -> Result<bool, PidFileError> {
         match read_state_file::<Self>(path)? {
-            DiskRead::Missing => {}
+            DiskRead::Missing => Ok(true),
             DiskRead::Parsed(disk, _) => {
                 let store = self.store.clone();
                 *self = disk;
                 self.store = store;
-                self.scrub_commands();
+                Ok(self.scrub_commands())
             }
-            DiskRead::Corrupt(reason) => self.rewrite_corrupt(path, &reason)?,
+            DiskRead::Corrupt(reason) => {
+                self.rewrite_corrupt(path, &reason)?;
+                Ok(false)
+            }
         }
-        Ok(())
     }
 
     /// Quarantines the unreadable file at `path` and writes this handle's
@@ -1088,8 +1093,9 @@ impl PidFile {
     ) -> Result<Vec<ProcessGeneration>, PidFileError> {
         let _lock = self.acquire_lock()?;
         let path = self.path();
-        self.reload_into(&path)?;
+        let stale = self.reload_into(&path)?;
 
+        let recorded = self.generations.len();
         let mut orphans = Vec::new();
         self.generations.retain(|generation| {
             // A generation is still live if EITHER its recorded root still has
@@ -1110,8 +1116,10 @@ impl PidFile {
             let root_reused = !root_identity_matches && live_start.is_some();
             // An unreadable process table is not an empty session. Keeping the
             // generation costs a retry next sweep; dropping it forgets a
-            // survivor for good.
-            let session_alive = !root_reused
+            // survivor for good. A matching root already proves the generation
+            // live, so the full process-table scan is skipped for it.
+            let session_alive = !root_identity_matches
+                && !root_reused
                 && generation.sid > 0
                 && Daemon::try_collect_session_members(generation.sid)
                     .is_none_or(|live| !live.is_empty());
@@ -1129,7 +1137,9 @@ impl PidFile {
             true
         });
 
-        self.write_at(&path)?;
+        if stale || self.generations.len() != recorded {
+            self.write_at(&path)?;
+        }
         Ok(orphans)
     }
 

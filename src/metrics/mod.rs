@@ -823,11 +823,12 @@ impl MetricsCollector {
                 while !stop_clone.load(Ordering::SeqCst) {
                     let targets =
                         gather_unit_targets(config.as_ref(), &pid_file, &service_state);
+                    refresh_targets(&mut system, &targets);
 
                     let mut collected = Vec::with_capacity(targets.len());
                     for target in targets {
                         let sample = if let Some(pid) = target.pid {
-                            sample_process(&mut system, pid)
+                            sample_process(&system, pid)
                         } else {
                             missing_process_sample()
                         };
@@ -932,17 +933,30 @@ fn gather_unit_targets(
     targets
 }
 
-/// Samples process.
-fn sample_process(system: &mut System, pid: u32) -> MetricSample {
-    let pid_sys = Pid::from_u32(pid);
-    let refresh_kind = ProcessRefreshKind::everything();
-    let processes = [pid_sys];
+/// Refreshes CPU and memory for every target pid in one process-table pass.
+///
+/// sysinfo walks all of `/proc` on each refresh whatever the pid filter, so
+/// one call per tick replaces one call per unit.
+fn refresh_targets(system: &mut System, targets: &[UnitTarget]) {
+    let mut pids: Vec<Pid> = targets
+        .iter()
+        .filter_map(|target| target.pid.map(Pid::from_u32))
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    if pids.is_empty() {
+        return;
+    }
     system.refresh_processes_specifics(
-        ProcessesToUpdate::Some(&processes),
+        ProcessesToUpdate::Some(&pids),
         true,
-        refresh_kind,
+        ProcessRefreshKind::nothing().with_cpu().with_memory(),
     );
+}
 
+/// Reads one process's sample from the last refresh.
+fn sample_process(system: &System, pid: u32) -> MetricSample {
+    let pid_sys = Pid::from_u32(pid);
     if let Some(process) = system.process(pid_sys) {
         MetricSample {
             timestamp: Utc::now(),

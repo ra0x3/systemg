@@ -2350,6 +2350,10 @@ struct LogReaderState {
     paused: AtomicBool,
     /// Unterminated bytes already consumed from the pipe.
     pending: Mutex<Vec<u8>>,
+    /// Read end the reader polls beside its pipe so a pause wakes it.
+    wake_reader: io::PipeReader,
+    /// Write end the handoff uses to wake this reader.
+    wake_writer: io::PipeWriter,
 }
 
 /// Supervisor-owned duplicate of one managed service output pipe.
@@ -2409,7 +2413,7 @@ fn set_close_on_exec(fd: RawFd, enabled: bool) -> io::Result<()> {
     Ok(())
 }
 
-/// Enables nonblocking reads so a log worker can promptly acknowledge pause.
+/// Enables nonblocking I/O so a polled read or wake never blocks a log worker.
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
@@ -2470,7 +2474,7 @@ fn remove_registered_log_pipe(id: u64) {
 fn read_registered_log_stream(
     service_label: &str,
     stream: LogStream,
-    mut reader: impl Read,
+    mut reader: impl Read + AsRawFd,
     sender: mpsc::Sender<ServiceLogMessage>,
     state: &LogReaderState,
 ) -> io::Result<()> {
@@ -2488,6 +2492,11 @@ fn read_registered_log_stream(
             }
             state.paused.store(false, Ordering::Release);
             continue;
+        }
+        match wait_for_log_input(reader.as_raw_fd(), &state.wake_reader) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
         }
         match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -2516,10 +2525,14 @@ fn read_registered_log_stream(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = pending.clone();
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(LOG_HANDOFF_POLL_INTERVAL);
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
             }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err),
         }
     }
@@ -2536,6 +2549,49 @@ fn read_registered_log_stream(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clear();
     Ok(())
+}
+
+/// Blocks until the service pipe is readable or the reader's wake pipe fires.
+///
+/// A wake drains the wake pipe and returns so the caller re-checks the pause
+/// flag. Hangup and error on the service pipe also return, because the next
+/// read reports them.
+fn wait_for_log_input(fd: RawFd, wake: &io::PipeReader) -> io::Result<()> {
+    let mut fds = [
+        libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if fds[1].revents != 0 {
+        let mut drain = [0_u8; 64];
+        let mut wake = wake;
+        while matches!(wake.read(&mut drain), Ok(count) if count > 0) {}
+    }
+    if fds[0].revents & libc::POLLNVAL != 0
+        || fds[1].revents & (libc::POLLERR | libc::POLLNVAL) != 0
+    {
+        return Err(io::Error::from_raw_os_error(libc::EBADF));
+    }
+    Ok(())
+}
+
+/// Wakes every managed log reader so it observes the handoff pause.
+fn wake_log_readers() {
+    if let Ok(registry) = registered_log_pipes().lock() {
+        for entry in registry.iter() {
+            let _ = (&entry.state.wake_writer).write(&[1]);
+        }
+    }
 }
 
 /// Registers and starts one managed service output reader.
@@ -2557,9 +2613,14 @@ where
     set_close_on_exec(reader.as_raw_fd(), true)?;
     let owner = duplicate_for_handoff(reader.as_raw_fd())?;
     let id = next_log_handoff_id();
+    let (wake_reader, wake_writer) = io::pipe()?;
+    set_nonblocking(wake_reader.as_raw_fd())?;
+    set_nonblocking(wake_writer.as_raw_fd())?;
     let state = Arc::new(LogReaderState {
         paused: AtomicBool::new(false),
         pending: Mutex::new(pending),
+        wake_reader,
+        wake_writer,
     });
     registered_log_pipes()
         .lock()
@@ -2664,6 +2725,7 @@ pub fn service_log_handoff_ready(project: &str, service: &str) -> bool {
 /// descriptors inheritable by the replacement supervisor.
 pub fn prepare_log_pipe_handoff() -> io::Result<Vec<HandoffLogPipe>> {
     log_handoff_paused().store(true, Ordering::Release);
+    wake_log_readers();
     let deadline = std::time::Instant::now() + LOG_HANDOFF_TIMEOUT;
     loop {
         let all_paused = registered_log_pipes()
