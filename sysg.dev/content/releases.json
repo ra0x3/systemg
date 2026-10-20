@@ -1,5 +1,17 @@
 [
   {
+    "tag": "v0.68.7",
+    "slug": "0.68.7",
+    "title": "v0.68.7",
+    "date": "2026-10-20T03:29:19Z",
+    "prerelease": false,
+    "author": "github-actions[bot]",
+    "url": "https://github.com/ra0x3/systemg/releases/tag/v0.68.7",
+    "summary": "perf: stop idle polling in log pumps, generation sweep, and metrics sampling (81d2e49)",
+    "html": "<h2 id=\"user-content-changes\">Changes</h2>\n<ul>\n<li>perf: stop idle polling in log pumps, generation sweep, and metrics sampling (<code>81d2e49</code>)</li>\n<li>chore(plugin): sync claude plugin version to v0.68.6 (<code>91e346b</code>)</li>\n<li>docs(blog): publish release post for v0.68.6 (<code>c538170</code>)</li>\n</ul>\n<p><a href=\"https://github.com/ra0x3/systemg/compare/v0.68.6...v0.68.7\">Full changelog on GitHub</a></p>",
+    "commits": 3
+  },
+  {
     "tag": "v0.68.6",
     "slug": "0.68.6",
     "title": "v0.68.6",
