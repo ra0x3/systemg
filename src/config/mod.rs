@@ -1720,6 +1720,30 @@ impl<'de> Deserialize<'de> for EnvConfig {
 }
 
 impl EnvConfig {
+    /// Reads and validates explicit child environment assignments without
+    /// changing the supervisor environment.
+    pub fn resolve(&self, base: &Path) -> std::io::Result<HashMap<String, String>> {
+        let mut values = match self.path(base) {
+            Some(path) => load_env_file(&path)?,
+            None => HashMap::new(),
+        };
+        if let Some(vars) = &self.vars {
+            for (key, value) in vars {
+                validate_env_pair(key, value)?;
+                values.insert(key.clone(), value.clone());
+            }
+        }
+        if self.strip.as_ref().is_some_and(|keys| {
+            keys.iter().any(|key| validate_env_pair(key, "").is_err())
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid environment variable name in env.strip",
+            ));
+        }
+        Ok(values)
+    }
+
     /// Resolves the full path to the env file based on a base directory.
     pub fn path(&self, base: &Path) -> Option<PathBuf> {
         self.file.as_ref().map(|f| {
@@ -2181,14 +2205,17 @@ impl Config {
 }
 
 /// Expands environment variables within a string.
-fn expand_env_vars(input: &str) -> Result<String, ProcessManagerError> {
+fn expand_env_vars(
+    input: &str,
+    values: &HashMap<String, String>,
+) -> Result<String, ProcessManagerError> {
     let re = Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
     let mut missing = None;
     let result = re.replace_all(input, |caps: &regex::Captures| {
         let var_name = &caps[1];
-        match env::var(var_name) {
-            Ok(value) => value,
-            Err(_) => {
+        match values.get(var_name) {
+            Some(value) => value.clone(),
+            None => {
                 if missing.is_none() {
                     missing = Some(var_name.to_string());
                 }
@@ -2204,64 +2231,84 @@ fn expand_env_vars(input: &str) -> Result<String, ProcessManagerError> {
     Ok(result.to_string())
 }
 
-/// Expands environment variables inside every string scalar of an assembled
-/// manifest and re-emits it. An assembled document lost its original scalar
-/// styles in re-serialization, so textual expansion could inject unquoted YAML
-/// syntax; expanding on the parsed tree lets the emitter quote the final
-/// values correctly.
-fn expand_env_vars_assembled(content: &str) -> Result<String, ProcessManagerError> {
-    let root: serde_yaml::Value =
-        serde_yaml::from_str(content).map_err(ProcessManagerError::ConfigParseError)?;
-    let expanded = expand_env_vars_value(root)?;
-    serde_yaml::to_string(&expanded).map_err(ProcessManagerError::ConfigParseError)
-}
-
 /// Expands environment variables in every string scalar of a YAML tree.
 fn expand_env_vars_value(
     value: serde_yaml::Value,
+    values: &HashMap<String, String>,
 ) -> Result<serde_yaml::Value, ProcessManagerError> {
     use serde_yaml::Value;
     Ok(match value {
-        Value::String(text) => Value::String(expand_env_vars(&text)?),
+        Value::String(text) => Value::String(expand_env_vars(&text, values)?),
         Value::Mapping(map) => {
             let mut out = serde_yaml::Mapping::with_capacity(map.len());
             for (key, val) in map {
-                out.insert(expand_env_vars_value(key)?, expand_env_vars_value(val)?);
+                let key = expand_env_vars_value(key, values)?;
+                let val = expand_env_vars_value(val, values)?;
+                if out.insert(key, val).is_some() {
+                    return Err(env_config_error(
+                        "duplicate key after environment expansion",
+                    ));
+                }
             }
             Value::Mapping(out)
         }
         Value::Sequence(seq) => Value::Sequence(
             seq.into_iter()
-                .map(expand_env_vars_value)
+                .map(|value| expand_env_vars_value(value, values))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Value::Tagged(mut tagged) => {
-            tagged.value = expand_env_vars_value(tagged.value)?;
+            tagged.value = expand_env_vars_value(tagged.value, values)?;
             Value::Tagged(tagged)
         }
         other => other,
     })
 }
 
-/// Loads an `.env` file and sets environment variables.
-fn load_env_file(path: &str) -> Result<(), ProcessManagerError> {
-    let content =
-        fs::read_to_string(path).map_err(ProcessManagerError::ConfigReadError)?;
-    for line in content.lines() {
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let mut value = value.trim();
-
-            if value.starts_with('"') && value.ends_with('"') {
-                value = &value[1..value.len() - 1];
-            }
-
-            unsafe {
-                env::set_var(key, value);
-            }
-        }
+/// Validates the platform-independent environment assignment contract.
+fn validate_env_pair(key: &str, value: &str) -> std::io::Result<()> {
+    if key.is_empty() || key.contains(['=', '\0']) || value.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid environment variable assignment",
+        ));
     }
     Ok(())
+}
+
+/// Parses an env file atomically into a local map, without exposing its values
+/// in diagnostics or mutating the process environment.
+fn load_env_file(path: &Path) -> std::io::Result<HashMap<String, String>> {
+    let content = fs::read_to_string(path)?;
+    let mut values = HashMap::new();
+    for (index, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let malformed = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "invalid environment assignment at {}:{}",
+                    path.display(),
+                    index + 1
+                ),
+            )
+        };
+        let (key, value) = line.split_once('=').ok_or_else(malformed)?;
+        let key = key.trim();
+        let mut value = value.trim();
+        if value.starts_with('"') {
+            if value.len() < 2 || !value.ends_with('"') {
+                return Err(malformed());
+            }
+            value = &value[1..value.len() - 1];
+        }
+        validate_env_pair(key, value).map_err(|_| malformed())?;
+        values.insert(key.to_string(), value.to_string());
+    }
+    Ok(values)
 }
 
 /// Parses a manifest using its declared schema version and migrates it to the
@@ -2436,70 +2483,22 @@ pub fn load_config(config_path: Option<&str>) -> Result<Config, ProcessManagerEr
 /// validated closes the check-to-use race a stat-then-reopen sequence would
 /// leave: the bytes parsed here are exactly the bytes that passed validation.
 pub fn load_config_from_file(
-    mut file: fs::File,
+    file: fs::File,
     config_path: &Path,
 ) -> Result<Config, ProcessManagerError> {
-    use std::io::Read;
-
-    let mut content = String::new();
-    file.read_to_string(&mut content).map_err(|e| {
-        ProcessManagerError::ConfigReadError(std::io::Error::new(
-            e.kind(),
-            format!("{} ({})", e, config_path.display()),
-        ))
-    })?;
-    let raw = content;
-    let content = resolve_includes(&raw, config_path)?;
-    let assembled = content != raw;
-
-    let base_path = config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-
-    // Env side effects come from EVERY project, matching the fan-out loader.
-    // `${VAR}` expansion below runs over the whole file, so a later project's
-    // reference resolves against the env its own block declares rather than
-    // against whatever the caller happened to export.
-    let raw_configs =
-        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?;
-    for config in &raw_configs {
-        apply_env_side_effects(config, &base_path)?;
+    let mut configs = load_projects_from_file_inner(file, config_path, false)?;
+    if !configs.is_empty() {
+        return Ok(configs.remove(0));
     }
-    let templates = raw_command_templates(&raw_configs);
-
-    let expanded_content = if assembled {
-        expand_env_vars_assembled(&content)?
-    } else {
-        expand_env_vars(&content)?
-    };
-
-    let mut configs = parse_config_projects(&expanded_content)
-        .map_err(ProcessManagerError::ConfigParseError)?;
-
-    // Every project's fields, not only the one this loader hands back: a
-    // single-Config caller gets the FIRST project of a `projects:` file, and an
-    // unchecked sibling would reach the forked supervisor and surface there as
-    // an opaque failed boot rather than as the config error it is.
-    for config in &mut configs {
-        config.validate_commands()?;
-        config.validate_durations()?;
-        attach_raw_commands(config, &templates);
-    }
-
-    let mut config = if configs.is_empty() {
-        Config::default()
-    } else {
-        configs.remove(0)
-    };
-
-    config.project_dir = Some(base_path.to_string_lossy().to_string());
+    let mut config = Config::default();
+    config.project_dir = Some(
+        config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_string_lossy()
+            .to_string(),
+    );
     config.project = resolve_project_config(config.project, config_path)?;
-    for service in config.services.values_mut() {
-        service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
-    }
-
-    config.service_start_order()?;
     Ok(config)
 }
 
@@ -2529,10 +2528,8 @@ fn load_projects_from_file_inner(
             format!("{} ({})", e, config_path.display()),
         ))
     })?;
-    let raw = content;
-    let content = resolve_includes(&raw, config_path)?;
-    let assembled = content != raw;
-    load_projects_from_content(content, config_path, assembled, warn_legacy)
+    let content = resolve_includes(&content, config_path)?;
+    load_projects_from_content(content, config_path, warn_legacy)
 }
 
 /// Loads projects without the deprecated-shape warning, for readers that only
@@ -2552,15 +2549,14 @@ pub fn load_projects_from_snapshot(
     content: &str,
     config_path: &Path,
 ) -> Result<Vec<Config>, ProcessManagerError> {
-    load_projects_from_content(content.to_string(), config_path, true, true)
+    load_projects_from_content(content.to_string(), config_path, true)
 }
 
-/// Shared tail of project loading over include-resolved manifest text: env
-/// side effects, expansion, fan-out, and per-project finalization.
+/// Resolves include-expanded manifests with local env scopes before fan-out
+/// and per-project validation.
 fn load_projects_from_content(
     content: String,
     config_path: &Path,
-    assembled: bool,
     warn_legacy: bool,
 ) -> Result<Vec<Config>, ProcessManagerError> {
     let base_path = config_path
@@ -2568,20 +2564,8 @@ fn load_projects_from_content(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
-    // First pass over the raw text applies env-file side effects so ${VAR}
-    // expansion below can see them, mirroring load_config_from_file.
-    let raw_configs =
-        parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?;
-    for config in &raw_configs {
-        apply_env_side_effects(config, &base_path)?;
-    }
-    let templates = raw_command_templates(&raw_configs);
-
-    let expanded_content = if assembled {
-        expand_env_vars_assembled(&content)?
-    } else {
-        expand_env_vars(&content)?
-    };
+    parse_config_projects(&content).map_err(ProcessManagerError::ConfigParseError)?;
+    let (expanded_content, templates) = expand_manifest_env(&content, &base_path)?;
     let (configs, legacy) = parse_config_projects_with_legacy(&expanded_content)
         .map_err(ProcessManagerError::ConfigParseError)?;
 
@@ -2605,6 +2589,10 @@ fn load_projects_from_content(
         config.project = resolve_project_config(config.project, config_path)?;
         for service in config.services.values_mut() {
             service.env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
+            if let Some(env) = &service.env {
+                env.resolve(&base_path)
+                    .map_err(ProcessManagerError::ConfigReadError)?;
+            }
         }
         config.validate_commands()?;
         config.validate_durations()?;
@@ -2619,45 +2607,171 @@ fn load_projects_from_content(
 /// unique across every project a manifest declares.
 type ServiceKey = (Option<String>, String);
 
-/// Collects every service's command-bearing fields as written, before
-/// `${VAR}` expansion.
-///
-/// Keyed by the expanded project scope and service name, so a project id or
-/// service name that itself uses `${VAR}` still finds its templates after the
-/// expanded parse re-sorts projects by their final ids.
-fn raw_command_templates(
-    raw_configs: &[Config],
-) -> HashMap<ServiceKey, HashMap<CommandField, String>> {
-    let mut templates = HashMap::new();
-    for config in raw_configs {
-        for (name, service) in &config.services {
-            let Ok(name) = expand_env_vars(name) else {
-                continue;
-            };
-            let scope = match service.project_scope.as_deref().map(expand_env_vars) {
-                Some(Ok(scope)) => Some(scope),
-                Some(Err(_)) => continue,
-                None => None,
-            };
-            let fields = CommandField::ALL
-                .into_iter()
-                .filter_map(|field| field.read(service).map(|text| (field, text)))
-                .collect();
-            templates.insert((scope, name), fields);
+/// Command provenance captured using the same local scope as interpolation.
+struct CommandTemplates {
+    fields: HashMap<CommandField, String>,
+    expansions: Expansions,
+}
+
+/// Local environment snapshot and command provenance for one manifest load.
+struct EnvLoader<'a> {
+    base: &'a Path,
+    ambient: HashMap<String, String>,
+    templates: HashMap<ServiceKey, CommandTemplates>,
+}
+
+fn env_config_error(message: &str) -> ProcessManagerError {
+    ProcessManagerError::ConfigParseError(serde_yaml::Error::custom(message))
+}
+
+fn block_env(
+    block: &serde_yaml::Mapping,
+) -> Result<Option<EnvConfig>, ProcessManagerError> {
+    block
+        .get(serde_yaml::Value::String("env".to_string()))
+        .map(|value| serde_yaml::from_value::<Option<EnvConfig>>(value.clone()))
+        .transpose()
+        .map(Option::flatten)
+        .map_err(ProcessManagerError::ConfigParseError)
+}
+
+impl EnvLoader<'_> {
+    fn values(
+        &self,
+        config: Option<&EnvConfig>,
+    ) -> Result<HashMap<String, String>, ProcessManagerError> {
+        let mut values = self.ambient.clone();
+        if let Some(config) = config {
+            values.extend(
+                config
+                    .resolve(self.base)
+                    .map_err(ProcessManagerError::ConfigReadError)?,
+            );
         }
+        Ok(values)
     }
-    templates
+
+    fn block(
+        &mut self,
+        mut block: serde_yaml::Mapping,
+        config: Option<EnvConfig>,
+        scope: Option<String>,
+    ) -> Result<serde_yaml::Mapping, ProcessManagerError> {
+        use serde_yaml::Value;
+        let services_key = Value::String("services".to_string());
+        let services = block.remove(&services_key);
+        let values = self.values(config.as_ref())?;
+        let Value::Mapping(mut expanded) =
+            expand_env_vars_value(Value::Mapping(block), &values)?
+        else {
+            return Err(env_config_error("expected a project mapping"));
+        };
+        if let Some(services) = services {
+            let Value::Mapping(services) = services else {
+                return Err(env_config_error("services must be a mapping"));
+            };
+            let mut entries = serde_yaml::Mapping::new();
+            for (name, value) in services {
+                let service: ServiceConfig = serde_yaml::from_value(value.clone())
+                    .map_err(ProcessManagerError::ConfigParseError)?;
+                let merged = EnvConfig::merge(config.as_ref(), service.env.as_ref());
+                let values = self.values(merged.as_ref())?;
+                let name = name
+                    .as_str()
+                    .ok_or_else(|| env_config_error("service name must be a string"))?;
+                let name = expand_env_vars(name, &values)?;
+                let fields: HashMap<_, _> = CommandField::ALL
+                    .into_iter()
+                    .filter_map(|field| field.read(&service).map(|text| (field, text)))
+                    .collect();
+                let expansions = fields
+                    .get(&CommandField::Command)
+                    .map(|template| Expansions(referenced_env_values(template, &values)))
+                    .unwrap_or_default();
+                let value = expand_env_vars_value(value, &values)?;
+                if entries.insert(Value::String(name.clone()), value).is_some() {
+                    return Err(env_config_error(
+                        "duplicate service after environment expansion",
+                    ));
+                }
+                self.templates.insert(
+                    (scope.clone(), name),
+                    CommandTemplates { fields, expansions },
+                );
+            }
+            expanded.insert(services_key, Value::Mapping(entries));
+        }
+        Ok(expanded)
+    }
+}
+
+/// Expands each project and service in its own scope on the YAML tree, so
+/// values cannot introduce YAML syntax or influence sibling services.
+fn expand_manifest_env(
+    content: &str,
+    base: &Path,
+) -> Result<(String, HashMap<ServiceKey, CommandTemplates>), ProcessManagerError> {
+    use serde_yaml::Value;
+    let Value::Mapping(mut root) =
+        serde_yaml::from_str(content).map_err(ProcessManagerError::ConfigParseError)?
+    else {
+        return Err(env_config_error("manifest must be a mapping"));
+    };
+    let mut loader = EnvLoader {
+        base,
+        ambient: env::vars_os()
+            .filter_map(|(key, value)| {
+                Some((key.into_string().ok()?, value.into_string().ok()?))
+            })
+            .collect(),
+        templates: HashMap::new(),
+    };
+    let root_env = block_env(&root)?;
+    let projects_key = Value::String("projects".to_string());
+    let projects = root.remove(&projects_key).filter(|value| !value.is_null());
+    let scope = projects.as_ref().map(|_| LOOSE_PROJECT_SCOPE.to_string());
+    let mut expanded = loader.block(root, root_env.clone(), scope)?;
+    if let Some(projects) = projects {
+        let Value::Mapping(projects) = projects else {
+            return Err(env_config_error("projects must be a mapping"));
+        };
+        let mut entries = serde_yaml::Mapping::new();
+        for (id, entry) in projects {
+            let Value::Mapping(entry) = entry else {
+                return Err(env_config_error("project must be a mapping"));
+            };
+            let config = block_env(&entry)?.or_else(|| root_env.clone());
+            let values = loader.values(config.as_ref())?;
+            let id = id
+                .as_str()
+                .ok_or_else(|| env_config_error("project id must be a string"))?;
+            let id = expand_env_vars(id, &values)?;
+            let entry = loader.block(entry, config, Some(id.clone()))?;
+            if entries.insert(Value::String(id), Value::Mapping(entry)).is_some() {
+                return Err(env_config_error(
+                    "duplicate project after environment expansion",
+                ));
+            }
+        }
+        expanded.insert(projects_key, Value::Mapping(entries));
+    }
+    let content = serde_yaml::to_string(&Value::Mapping(expanded))
+        .map_err(ProcessManagerError::ConfigParseError)?;
+    Ok((content, loader.templates))
 }
 
 /// Returns the `(name, value)` of every variable `template` references, read
 /// from the environment the loader just expanded it against.
-fn referenced_env_values(template: &str) -> Vec<(String, String)> {
+fn referenced_env_values(
+    template: &str,
+    values: &HashMap<String, String>,
+) -> Vec<(String, String)> {
     let re = Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
     let mut pairs: Vec<(String, String)> = re
         .captures_iter(template)
         .filter_map(|caps| {
             let name = caps[1].to_string();
-            env::var(&name).ok().map(|value| (name, value))
+            values.get(&name).cloned().map(|value| (name, value))
         })
         .collect();
     pairs.sort();
@@ -2668,16 +2782,14 @@ fn referenced_env_values(template: &str) -> Vec<(String, String)> {
 /// Stamps each service with its command-bearing fields as written.
 fn attach_raw_commands(
     config: &mut Config,
-    templates: &HashMap<ServiceKey, HashMap<CommandField, String>>,
+    templates: &HashMap<ServiceKey, CommandTemplates>,
 ) {
     for (name, service) in config.services.iter_mut() {
         let key = (service.project_scope.clone(), name.clone());
-        service.templates = templates.get(&key).cloned().unwrap_or_default();
-        service.expansions = service
-            .templates
-            .get(&CommandField::Command)
-            .map(|template| Expansions(referenced_env_values(template)))
-            .unwrap_or_default();
+        if let Some(template) = templates.get(&key) {
+            service.templates = template.fields.clone();
+            service.expansions = template.expansions.clone();
+        }
         let fields = &service.templates;
         if let Some(hooks) = service.hooks.as_mut() {
             if let Some(action) = hooks.onstart.as_mut() {
@@ -2712,43 +2824,6 @@ fn attach_raw_commands(
             );
         }
     }
-}
-
-/// Applies a config's env-file loads and inline var sets to the process
-/// environment, so subsequent `${VAR}` expansion resolves against them.
-fn apply_env_side_effects(
-    config: &Config,
-    base_path: &Path,
-) -> Result<(), ProcessManagerError> {
-    if let Some(env_config) = &config.env {
-        if let Some(resolved_path) = env_config.path(base_path) {
-            load_env_file(&resolved_path.to_string_lossy())?;
-        }
-        if let Some(vars) = &env_config.vars {
-            for (key, value) in vars {
-                unsafe {
-                    env::set_var(key, value);
-                }
-            }
-        }
-    }
-
-    for service in config.services.values() {
-        let merged_env = EnvConfig::merge(config.env.as_ref(), service.env.as_ref());
-        if let Some(env_config) = &merged_env {
-            if let Some(resolved_path) = env_config.path(base_path) {
-                load_env_file(&resolved_path.to_string_lossy())?;
-            }
-            if let Some(vars) = &env_config.vars {
-                for (key, value) in vars {
-                    unsafe {
-                        env::set_var(key, value);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2889,8 +2964,11 @@ projects:
         unsafe {
             env::remove_var("SYSTEMG_DEFINITELY_UNSET_VAR");
         }
-        let err = expand_env_vars("value: ${SYSTEMG_DEFINITELY_UNSET_VAR}")
-            .expect_err("missing variable should error");
+        let err = expand_env_vars(
+            "value: ${SYSTEMG_DEFINITELY_UNSET_VAR}",
+            &HashMap::new(),
+        )
+        .expect_err("missing variable should error");
         assert!(
             matches!(err, ProcessManagerError::MissingEnvVar(name) if name == "SYSTEMG_DEFINITELY_UNSET_VAR")
         );
@@ -3394,10 +3472,10 @@ services:
         writeln!(file, "TEST_KEY=TEST_VALUE").unwrap();
         writeln!(file, "ANOTHER_KEY=ANOTHER_VALUE").unwrap();
 
-        load_env_file(file_path.to_str().unwrap()).unwrap();
+        let values = load_env_file(&file_path).unwrap();
 
-        assert_eq!(env::var("TEST_KEY").unwrap(), "TEST_VALUE");
-        assert_eq!(env::var("ANOTHER_KEY").unwrap(), "ANOTHER_VALUE");
+        assert_eq!(values["TEST_KEY"], "TEST_VALUE");
+        assert_eq!(values["ANOTHER_KEY"], "ANOTHER_VALUE");
     }
 
     #[test]

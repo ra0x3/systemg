@@ -10,12 +10,12 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
         mpsc::RecvTimeoutError,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
@@ -50,6 +50,10 @@ const MIN_HANDOFF_FD: RawFd = 3;
 const LOG_HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 /// Delay between log-reader pause checks.
 const LOG_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// Maximum queued messages for one canonical writer.
+const LOG_WRITER_CAPACITY: usize = 64;
+/// Shared allocation budget for queued and currently written capture messages.
+const LOG_QUEUE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// High-level bucket for all-services log rendering.
@@ -1639,8 +1643,7 @@ fn truncate_log_payload(line: &[u8]) -> Vec<u8> {
 
 /// Formats a captured stdout/stderr line.
 fn format_captured_log_line(kind: &str, line: &[u8]) -> Vec<u8> {
-    let line = truncate_log_payload(line);
-    let line = String::from_utf8_lossy(&line);
+    let line = String::from_utf8_lossy(line);
     format!("{} {} {}\n", capture_timestamp(), kind, line).into_bytes()
 }
 
@@ -2147,36 +2150,223 @@ fn forward_prefixed_line(service_label: &str, line: &[u8], echo_to_terminal: boo
     }
 }
 
-/// Flushes all complete lines from a buffered byte stream to the configured console/debug sink.
-fn flush_forwarded_lines(
-    pending: &mut Vec<u8>,
-    service_label: &str,
-    echo_to_terminal: bool,
-) {
-    while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
-        let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
-        if matches!(line.last(), Some(b'\n')) {
-            line.pop();
+/// Retains a bounded prefix while scanning each incoming byte only once.
+#[derive(Default)]
+struct LogLineBuffer {
+    /// Prefix retained until a delimiter, EOF, or handoff.
+    bytes: Vec<u8>,
+    /// Bytes discarded after the retained prefix.
+    dropped: u64,
+    /// Whether the latest payload byte was a carriage return.
+    trailing_cr: bool,
+}
+
+impl LogLineBuffer {
+    /// Restores a partial line, also bounding records produced by older binaries.
+    fn restore(bytes: &[u8], dropped: u64, trailing_cr: bool) -> Self {
+        let kept = bytes.len().min(MAX_LOG_LINE_BYTES);
+        Self {
+            bytes: bytes[..kept].to_vec(),
+            dropped: dropped.saturating_add((bytes.len() - kept) as u64),
+            trailing_cr: if dropped == 0 {
+                bytes.last() == Some(&b'\r')
+            } else {
+                trailing_cr
+            },
         }
-        if matches!(line.last(), Some(b'\r')) {
-            line.pop();
+    }
+
+    /// Emits complete capped lines without retaining the rest of an oversized line.
+    fn push(
+        &mut self,
+        chunk: &[u8],
+        mut emit: impl FnMut(Vec<u8>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        for part in chunk.split_inclusive(|byte| *byte == b'\n') {
+            let terminated = part.last() == Some(&b'\n');
+            let payload = if terminated {
+                &part[..part.len() - 1]
+            } else {
+                part
+            };
+            let kept = payload.len().min(MAX_LOG_LINE_BYTES - self.bytes.len());
+            self.bytes.extend_from_slice(&payload[..kept]);
+            self.dropped = self.dropped.saturating_add((payload.len() - kept) as u64);
+            if let Some(last) = payload.last() {
+                self.trailing_cr = *last == b'\r';
+            }
+            if terminated {
+                emit(self.take(true))?;
+            }
         }
-        forward_prefixed_line(service_label, &line, echo_to_terminal);
+        Ok(())
+    }
+
+    /// Returns the capped payload and an explicit count of discarded bytes.
+    fn take(&mut self, terminated: bool) -> Vec<u8> {
+        let mut bytes = std::mem::take(&mut self.bytes);
+        let mut dropped = std::mem::take(&mut self.dropped);
+        if terminated && self.trailing_cr {
+            if dropped > 0 {
+                dropped -= 1;
+            } else {
+                bytes.pop();
+            }
+        }
+        self.trailing_cr = false;
+        if dropped > 0 {
+            if let Err(err) = std::str::from_utf8(&bytes)
+                && err.error_len().is_none()
+            {
+                dropped =
+                    dropped.saturating_add((bytes.len() - err.valid_up_to()) as u64);
+                bytes.truncate(err.valid_up_to());
+            }
+            bytes.extend_from_slice(format!("…[truncated {dropped} bytes]").as_bytes());
+        }
+        bytes
+    }
+
+    /// Emits the final unterminated line, if one was received.
+    fn finish(
+        &mut self,
+        mut emit: impl FnMut(Vec<u8>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        if !self.bytes.is_empty() || self.dropped > 0 {
+            emit(self.take(false))?;
+        }
+        Ok(())
     }
 }
 
-/// Flushes any trailing unterminated line to the configured console/debug sink.
-fn flush_remaining_forwarded_line(
-    pending: &mut Vec<u8>,
-    service_label: &str,
-    echo_to_terminal: bool,
-) {
-    if pending.is_empty() {
-        return;
+/// Reads captured output with the same bounded line policy as managed logs.
+pub(crate) fn read_bounded_log_lines(
+    mut reader: impl Read,
+    mut emit: impl FnMut(Vec<u8>) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; 8192];
+    let mut pending = LogLineBuffer::default();
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return pending.finish(emit),
+            Ok(count) => pending.push(&buffer[..count], &mut emit)?,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Bytes reserved by all canonical writer queues, including message overhead.
+fn queued_log_bytes() -> &'static AtomicUsize {
+    static BYTES: AtomicUsize = AtomicUsize::new(0);
+    &BYTES
+}
+
+/// Releases a queued line's allocation budget on write, error, or receiver drop.
+struct LogBudget(usize);
+
+impl Drop for LogBudget {
+    fn drop(&mut self) {
+        queued_log_bytes().fetch_sub(self.0, Ordering::AcqRel);
+    }
+}
+
+/// A bounded writer channel whose receiver lifetime can interrupt budget waits.
+#[derive(Clone)]
+struct LogSender {
+    tx: mpsc::SyncSender<ServiceLogMessage>,
+    alive: Arc<AtomicBool>,
+}
+
+/// Owns the receiver and notifies senders when the writer stops.
+struct LogReceiver {
+    rx: mpsc::Receiver<ServiceLogMessage>,
+    alive: Arc<AtomicBool>,
+}
+
+impl Drop for LogReceiver {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Release);
+    }
+}
+
+/// Creates a count-bounded channel backed by the shared byte budget.
+fn log_channel() -> (LogSender, LogReceiver) {
+    let (tx, rx) = mpsc::sync_channel(LOG_WRITER_CAPACITY);
+    let alive = Arc::new(AtomicBool::new(true));
+    (
+        LogSender {
+            tx,
+            alive: Arc::clone(&alive),
+        },
+        LogReceiver { rx, alive },
+    )
+}
+
+impl LogSender {
+    /// Backpressures capture before admitting a bounded line to the writer.
+    fn line(&self, stream: LogStream, line: Vec<u8>) -> io::Result<()> {
+        let charge = line.capacity() + std::mem::size_of::<ServiceLogMessage>() + 64;
+        if charge > LOG_QUEUE_BYTES {
+            return Err(io::Error::other(
+                "captured log line exceeds the queue budget",
+            ));
+        }
+        loop {
+            if !self.alive.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "log writer stopped",
+                ));
+            }
+            if queued_log_bytes()
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    (used <= LOG_QUEUE_BYTES - charge).then_some(used + charge)
+                })
+                .is_ok()
+            {
+                break;
+            }
+            thread::sleep(LOG_HANDOFF_POLL_INTERVAL);
+        }
+        self.tx
+            .send(ServiceLogMessage::Line(ServiceLogLine {
+                stream,
+                line,
+                _budget: LogBudget(charge),
+            }))
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "log writer stopped")
+            })
     }
 
-    let line = std::mem::take(pending);
-    forward_prefixed_line(service_label, &line, echo_to_terminal);
+    /// Enqueues the handoff barrier without waiting beyond its existing deadline.
+    fn flush_before(
+        &self,
+        reply: mpsc::SyncSender<io::Result<()>>,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        let mut message = ServiceLogMessage::Flush(reply);
+        loop {
+            match self.tx.try_send(message) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "log writer stopped",
+                    ));
+                }
+                Err(mpsc::TrySendError::Full(pending)) => message = pending,
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "log writer did not accept the handoff barrier",
+                ));
+            }
+            thread::sleep(LOG_HANDOFF_POLL_INTERVAL);
+        }
+    }
 }
 
 /// A completed service output line received by the canonical log writer.
@@ -2185,6 +2375,8 @@ struct ServiceLogLine {
     stream: LogStream,
     /// Line bytes without a trailing newline.
     line: Vec<u8>,
+    /// Shared reservation retained until the writer finishes with this message.
+    _budget: LogBudget,
 }
 
 /// Command delivered to a service's canonical log writer.
@@ -2199,50 +2391,13 @@ enum ServiceLogMessage {
 fn read_service_log_stream(
     service_label: &str,
     stream: LogStream,
-    mut reader: impl Read,
-    sender: mpsc::Sender<ServiceLogMessage>,
+    reader: impl Read,
+    sender: LogSender,
 ) -> std::io::Result<()> {
-    let mut buffer = [0_u8; 8192];
-    let mut pending = Vec::new();
-    let mut forward_pending = Vec::new();
-    // Service log writers write to FILES only; the foreground terminal is fed
-    // exclusively by the project-scoped follow stream. Echoing here (gated only
-    // on "stderr is a TTY", with no project scoping) bled EVERY managed service
-    // of EVERY project into whichever terminal owned the in-process supervisor.
-    let echo_to_terminal = false;
-
-    loop {
-        let bytes_read = reader.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        let chunk = &buffer[..bytes_read];
-        pending.extend_from_slice(chunk);
-        forward_pending.extend_from_slice(chunk);
-        while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
-            if matches!(line.last(), Some(b'\n')) {
-                line.pop();
-            }
-            if matches!(line.last(), Some(b'\r')) {
-                line.pop();
-            }
-
-            let _ = sender.send(ServiceLogMessage::Line(ServiceLogLine { stream, line }));
-        }
-        flush_forwarded_lines(&mut forward_pending, service_label, echo_to_terminal);
-    }
-
-    if !pending.is_empty() {
-        let _ = sender.send(ServiceLogMessage::Line(ServiceLogLine {
-            stream,
-            line: pending.clone(),
-        }));
-    }
-
-    flush_remaining_forwarded_line(&mut forward_pending, service_label, echo_to_terminal);
-    Ok(())
+    read_bounded_log_lines(reader, |line| {
+        forward_prefixed_line(service_label, &line, false);
+        sender.line(stream, line)
+    })
 }
 
 /// Writes all service output streams into one canonical append-only service log.
@@ -2250,12 +2405,12 @@ fn write_service_log(
     project: &str,
     service_label: &str,
     path: PathBuf,
-    receiver: mpsc::Receiver<ServiceLogMessage>,
+    receiver: LogReceiver,
     settings: EffectiveLogsConfig,
 ) -> std::io::Result<()> {
     let mut file = ActiveLogFile::open(path, settings)?;
 
-    for message in receiver {
+    while let Ok(message) = receiver.rx.recv() {
         match message {
             ServiceLogMessage::Line(line) => {
                 let formatted =
@@ -2299,7 +2454,17 @@ fn stream_dynamic_child_log(
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     let mut buffer = [0_u8; 8192];
-    let mut pending = Vec::new();
+    let mut pending = LogLineBuffer::default();
+    let echo = |line: Vec<u8>| {
+        let owner = owner_label.unwrap_or("spawn");
+        writeln!(
+            std::io::stdout(),
+            "[{}:{}] {}",
+            owner,
+            child_label,
+            String::from_utf8_lossy(&line)
+        )
+    };
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;
@@ -2311,34 +2476,12 @@ fn stream_dynamic_child_log(
         file.write_all(chunk)?;
 
         if echo_to_console {
-            pending.extend_from_slice(chunk);
-            while let Some(newline_pos) = pending.iter().position(|byte| *byte == b'\n') {
-                let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
-                if matches!(line.last(), Some(b'\n')) {
-                    line.pop();
-                }
-                if matches!(line.last(), Some(b'\r')) {
-                    line.pop();
-                }
-                let owner = owner_label.unwrap_or("spawn");
-                println!(
-                    "[{}:{}] {}",
-                    owner,
-                    child_label,
-                    String::from_utf8_lossy(&line)
-                );
-            }
+            pending.push(chunk, echo)?;
         }
     }
 
-    if echo_to_console && !pending.is_empty() {
-        let owner = owner_label.unwrap_or("spawn");
-        println!(
-            "[{}:{}] {}",
-            owner,
-            child_label,
-            String::from_utf8_lossy(&pending)
-        );
+    if echo_to_console {
+        pending.finish(echo)?;
     }
 
     file.flush()
@@ -2346,10 +2489,10 @@ fn stream_dynamic_child_log(
 
 /// Pause and partial-line state shared with one managed service log reader.
 struct LogReaderState {
-    /// Whether the reader has acknowledged the global handoff pause.
-    paused: AtomicBool,
+    /// Handoff generation acknowledged while the partial line is retained.
+    paused: AtomicU64,
     /// Unterminated bytes already consumed from the pipe.
-    pending: Mutex<Vec<u8>>,
+    pending: Mutex<LogLineBuffer>,
     /// Read end the reader polls beside its pipe so a pause wakes it.
     wake_reader: io::PipeReader,
     /// Write end the handoff uses to wake this reader.
@@ -2375,7 +2518,7 @@ struct RegisteredLogPipe {
     /// Reader pause and partial-line state.
     state: Arc<LogReaderState>,
     /// Channel used to flush the canonical writer before re-exec.
-    writer: mpsc::Sender<ServiceLogMessage>,
+    writer: LogSender,
 }
 
 /// Returns the process-wide registry of managed service output pipes.
@@ -2384,9 +2527,9 @@ fn registered_log_pipes() -> &'static Mutex<Vec<RegisteredLogPipe>> {
     REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Global pause requested while log descriptors are prepared for re-exec.
-fn log_handoff_paused() -> &'static AtomicBool {
-    static PAUSED: AtomicBool = AtomicBool::new(false);
+/// Nonzero generation requested while log descriptors are prepared for re-exec.
+fn log_handoff_paused() -> &'static AtomicU64 {
+    static PAUSED: AtomicU64 = AtomicU64::new(0);
     &PAUSED
 }
 
@@ -2439,11 +2582,11 @@ fn spawn_canonical_service_writer(
     project: &str,
     service: &str,
     settings: EffectiveLogsConfig,
-) -> io::Result<(u64, mpsc::Sender<ServiceLogMessage>)> {
+) -> io::Result<(u64, LogSender)> {
     let path = get_service_log_path(project, service);
     let project_label = project.to_string();
     let service_label = service.to_string();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = log_channel();
     thread::Builder::new()
         .name(SERVICE_LOG_THREAD.into())
         .spawn(move || {
@@ -2475,22 +2618,44 @@ fn read_registered_log_stream(
     service_label: &str,
     stream: LogStream,
     mut reader: impl Read + AsRawFd,
-    sender: mpsc::Sender<ServiceLogMessage>,
+    sender: LogSender,
     state: &LogReaderState,
 ) -> io::Result<()> {
     let mut buffer = [0_u8; 8192];
-    let mut pending = state
-        .pending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
+    let mut pending = std::mem::take(
+        &mut *state
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    let emit = |line: Vec<u8>| {
+        forward_prefixed_line(service_label, &line, false);
+        sender.line(stream, line)
+    };
     loop {
-        if log_handoff_paused().load(Ordering::Acquire) {
-            state.paused.store(true, Ordering::Release);
-            while log_handoff_paused().load(Ordering::Acquire) {
+        let generation = log_handoff_paused().load(Ordering::Acquire);
+        if generation != 0 {
+            *state
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                std::mem::take(&mut pending);
+            state.paused.store(generation, Ordering::Release);
+            loop {
+                let generation = log_handoff_paused().load(Ordering::Acquire);
+                if generation == 0 {
+                    break;
+                }
+                state.paused.store(generation, Ordering::Release);
                 thread::sleep(LOG_HANDOFF_POLL_INTERVAL);
             }
-            state.paused.store(false, Ordering::Release);
+            state.paused.store(0, Ordering::Release);
+            pending = std::mem::take(
+                &mut *state
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             continue;
         }
         match wait_for_log_input(reader.as_raw_fd(), &state.wake_reader) {
@@ -2501,29 +2666,7 @@ fn read_registered_log_stream(
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(bytes_read) => {
-                pending.extend_from_slice(&buffer[..bytes_read]);
-                while let Some(newline_pos) =
-                    pending.iter().position(|byte| *byte == b'\n')
-                {
-                    let mut line = pending.drain(..=newline_pos).collect::<Vec<_>>();
-                    if matches!(line.last(), Some(b'\n')) {
-                        line.pop();
-                    }
-                    if matches!(line.last(), Some(b'\r')) {
-                        line.pop();
-                    }
-                    forward_prefixed_line(service_label, &line, false);
-                    if sender
-                        .send(ServiceLogMessage::Line(ServiceLogLine { stream, line }))
-                        .is_err()
-                    {
-                        return Ok(());
-                    }
-                }
-                *state
-                    .pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = pending.clone();
+                pending.push(&buffer[..bytes_read], emit)?;
             }
             Err(err)
                 if matches!(
@@ -2536,19 +2679,7 @@ fn read_registered_log_stream(
             Err(err) => return Err(err),
         }
     }
-    if !pending.is_empty() {
-        forward_prefixed_line(service_label, &pending, false);
-        let _ = sender.send(ServiceLogMessage::Line(ServiceLogLine {
-            stream,
-            line: pending,
-        }));
-    }
-    state
-        .pending
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-    Ok(())
+    pending.finish(emit)
 }
 
 /// Blocks until the service pipe is readable or the reader's wake pipe fires.
@@ -2601,10 +2732,10 @@ fn spawn_registered_log_reader<R>(
     service: &str,
     stream: LogStream,
     reader: R,
-    pending: Vec<u8>,
+    pending: LogLineBuffer,
     settings: EffectiveLogsConfig,
     writer_id: u64,
-    writer: mpsc::Sender<ServiceLogMessage>,
+    writer: LogSender,
 ) -> io::Result<()>
 where
     R: Read + AsRawFd + Send + 'static,
@@ -2617,7 +2748,7 @@ where
     set_nonblocking(wake_reader.as_raw_fd())?;
     set_nonblocking(wake_writer.as_raw_fd())?;
     let state = Arc::new(LogReaderState {
-        paused: AtomicBool::new(false),
+        paused: AtomicU64::new(0),
         pending: Mutex::new(pending),
         wake_reader,
         wake_writer,
@@ -2684,7 +2815,7 @@ pub fn spawn_managed_service_log_writers(
             service,
             LogStream::Stdout,
             stdout,
-            Vec::new(),
+            LogLineBuffer::default(),
             settings,
             writer_id,
             writer.clone(),
@@ -2696,7 +2827,7 @@ pub fn spawn_managed_service_log_writers(
             service,
             LogStream::Stderr,
             stderr,
-            Vec::new(),
+            LogLineBuffer::default(),
             settings,
             writer_id,
             writer,
@@ -2724,20 +2855,29 @@ pub fn service_log_handoff_ready(project: &str, service: &str) -> bool {
 /// Pauses log readers, flushes canonical writers, and makes retained pipe
 /// descriptors inheritable by the replacement supervisor.
 pub fn prepare_log_pipe_handoff() -> io::Result<Vec<HandoffLogPipe>> {
-    log_handoff_paused().store(true, Ordering::Release);
+    let generation = next_log_handoff_id();
+    log_handoff_paused().store(generation, Ordering::Release);
     wake_log_readers();
-    let deadline = std::time::Instant::now() + LOG_HANDOFF_TIMEOUT;
+    let result = prepare_paused_log_pipe_handoff(generation);
+    if result.is_err() {
+        cancel_log_pipe_handoff();
+    }
+    result
+}
+
+/// Flushes and snapshots paused capture, leaving all error cleanup to the caller.
+fn prepare_paused_log_pipe_handoff(generation: u64) -> io::Result<Vec<HandoffLogPipe>> {
+    let deadline = Instant::now() + LOG_HANDOFF_TIMEOUT;
     loop {
         let all_paused = registered_log_pipes()
             .lock()
             .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?
             .iter()
-            .all(|entry| entry.state.paused.load(Ordering::Acquire));
+            .all(|entry| entry.state.paused.load(Ordering::Acquire) == generation);
         if all_paused {
             break;
         }
-        if std::time::Instant::now() >= deadline {
-            cancel_log_pipe_handoff();
+        if Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "managed log readers did not pause for supervisor handoff",
@@ -2754,18 +2894,11 @@ pub fn prepare_log_pipe_handoff() -> io::Result<Vec<HandoffLogPipe>> {
         .collect::<HashMap<_, _>>();
     for writer in writers.into_values() {
         let (reply, response) = mpsc::sync_channel(1);
-        if writer.send(ServiceLogMessage::Flush(reply)).is_err() {
-            cancel_log_pipe_handoff();
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "managed service log writer stopped before handoff",
-            ));
-        }
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        writer.flush_before(reply, deadline)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
         match response.recv_timeout(remaining) {
             Ok(result) => result?,
             Err(_) => {
-                cancel_log_pipe_handoff();
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "managed service logs did not flush before handoff",
@@ -2774,29 +2907,25 @@ pub fn prepare_log_pipe_handoff() -> io::Result<Vec<HandoffLogPipe>> {
         }
     }
 
-    let mut registry = registered_log_pipes()
+    let registry = registered_log_pipes()
         .lock()
         .map_err(|_| io::Error::other("managed log pipe registry is poisoned"))?;
     let mut handoff = Vec::with_capacity(registry.len());
-    for entry in registry.iter_mut() {
-        if let Err(err) = set_close_on_exec(entry.owner.as_raw_fd(), false) {
-            for retained in registry.iter() {
-                let _ = set_close_on_exec(retained.owner.as_raw_fd(), true);
-            }
-            log_handoff_paused().store(false, Ordering::Release);
-            return Err(err);
-        }
+    for entry in registry.iter() {
+        set_close_on_exec(entry.owner.as_raw_fd(), false)?;
+        let pending = entry
+            .state
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         handoff.push(HandoffLogPipe {
             project: entry.project.clone(),
             service: entry.service.clone(),
             stream: entry.stream.as_str().to_string(),
             fd: entry.owner.as_raw_fd(),
-            pending: entry
-                .state
-                .pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
+            pending: pending.bytes.clone(),
+            pending_dropped: pending.dropped,
+            pending_trailing_cr: pending.trailing_cr,
             settings: entry.settings,
         });
     }
@@ -2810,7 +2939,7 @@ pub fn cancel_log_pipe_handoff() {
             let _ = set_close_on_exec(entry.owner.as_raw_fd(), true);
         }
     }
-    log_handoff_paused().store(false, Ordering::Release);
+    log_handoff_paused().store(0, Ordering::Release);
 }
 
 /// Validates inherited log metadata and descriptors without consuming them.
@@ -2903,8 +3032,7 @@ pub fn resume_log_pipe_handoff(pipes: &[HandoffLogPipe]) -> io::Result<()> {
             }
         }
     }
-    let mut writers: HashMap<(String, String), (u64, mpsc::Sender<ServiceLogMessage>)> =
-        HashMap::new();
+    let mut writers: HashMap<(String, String), (u64, LogSender)> = HashMap::new();
     for (pipe, stream) in pipes.iter().zip(streams) {
         let key = (pipe.project.clone(), pipe.service.clone());
         let (writer_id, writer) = match writers.get(&key) {
@@ -2925,7 +3053,11 @@ pub fn resume_log_pipe_handoff(pipes: &[HandoffLogPipe]) -> io::Result<()> {
             &pipe.service,
             stream,
             reader,
-            pipe.pending.clone(),
+            LogLineBuffer::restore(
+                &pipe.pending,
+                pipe.pending_dropped,
+                pipe.pending_trailing_cr,
+            ),
             pipe.settings,
             writer_id,
             writer,
@@ -3002,7 +3134,7 @@ pub fn spawn_service_log_writers(
     let path = get_service_log_path(project, service);
     let project_label = project.to_string();
     let service_label = service.to_string();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = log_channel();
 
     {
         let project_label = project_label.clone();

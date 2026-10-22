@@ -23,7 +23,7 @@ These hold with no configuration on your part.
 
 **Owner-only runtime state.** State and log directories are created `0700`; the socket, PID file, and config hint are `0600`. Service topology, PIDs, and config paths are not readable by other local users.
 
-**Race-free config loads.** Configs supplied over the socket (`restart --config`, project add) are opened once with `O_NOFOLLOW` and validated on the open descriptor (`fstat`) — the file that passes the ownership/permission check is the exact file that's parsed and executed. No stat-then-reopen window, no symlink swap. Group/other-writable or foreign-owned configs are refused.
+**Descriptor-validated config loads.** Configs supplied over the socket (`restart --config`, project add) and `!include` fragments are opened once with `O_NOFOLLOW | O_NONBLOCK` and validated on the open descriptor (`fstat`). The file must be regular, owned by the supervisor's effective UID or root, and not group/other-writable. A root supervisor requires root-owned files. The same descriptor is parsed, so no stat-then-reopen window is introduced; a FIFO is rejected without waiting for a writer.
 
 **Correct privilege drop.** Before `exec`, a dropped service goes through: namespace unshare → rlimits → nice/affinity → capability trim → `setgroups`/`setgid`/`setuid` → ambient caps. Supplementary groups are always reset on a UID switch, so a service dropped to `nobody` does not retain root's `docker`/`wheel`/`sudo` membership.
 
@@ -54,7 +54,6 @@ services:
         cpu_max: "100000 50000" # 1 CPU
     isolation:
       network: true             # private netns
-      pid: true                 # private process tree
       mount: true
       user: true
 ```
@@ -63,7 +62,7 @@ services:
 
 **Resource limits** — `nofile`, `nproc`, `memlock`, and cgroup `memory_max` / `cpu_max` cap what a service (or a runaway fork bomb) can consume.
 
-**Namespace isolation** — `network`, `pid`, `mount`, and `user` namespaces separate a service from the host. Namespace creation may need `CAP_SYS_ADMIN`; cgroup writes inside containers may need `limits.cgroup.root` pointed at a writable path.
+**Namespace isolation** — `network`, `mount`, and `user` request separate namespaces. Failed namespace creation refuses the service under either schema version. `pid: true` is unsupported and refused until sysg can place and supervise the service inside its PID namespace. Namespace creation may need `CAP_SYS_ADMIN`; cgroup writes inside containers may need `limits.cgroup.root` pointed at a writable path.
 
 **Environment** — session-scoped variables (`SSH_*`) are stripped from long-lived services by default; add more with `strip`, and use `inherit_env: false` (the default under a privilege drop) to start from a clean slate.
 
@@ -71,7 +70,7 @@ services:
 
 - **Run in user mode unless you need root.** `sysg start` runs unprivileged; reserve `sudo sysg --sys start` for services that genuinely require system-level features.
 - **Drop privileges at the service, not the supervisor.** `user:` drops the child after the supervisor has done any privileged setup (e.g. binding port 80). `--drop-privileges` governs child spawning; it does not change privileges for read-only control commands.
-- **Isolate untrusted workloads** with a non-root `user:`, network and PID namespaces, and a cgroup memory cap.
+- **Isolate untrusted workloads** with a non-root `user:`, network isolation, and a cgroup memory cap. If PID isolation is required, use an external container or other supervisor that supplies it.
 
 ## On the roadmap
 

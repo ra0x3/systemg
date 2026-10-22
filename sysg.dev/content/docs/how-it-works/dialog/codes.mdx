@@ -527,11 +527,13 @@ image instead.
 
 ### [SG0721](/reference/dialog/codes#sg0721)
 
-A security key was accepted by the schema but cannot be enforced, so the
-service runs unprotected. The diagnostic names the exact key:
-`apparmor_profile`, `selinux_context`, `private_devices`, or `private_tmp`. A
-future release refuses these keys instead of warning, behind a manifest schema
-bump.
+A security key was accepted by the schema but cannot be enforced. The
+diagnostic names the exact key. `isolation.pid: true` is refused under both
+schema versions because sysg cannot yet place the service process inside a
+PID namespace. Remove the key only if running without PID isolation is acceptable.
+
+`apparmor_profile`, `selinux_context`, `private_devices`, and `private_tmp`
+are refused under schema version 3; version 2 runs the service with a warning.
 
 ### [SG0722](/reference/dialog/codes#sg0722)
 
@@ -546,9 +548,11 @@ safely. The service is refused.
 ### [SG0724](/reference/dialog/codes#sg0724)
 
 A `landlock` filesystem sandbox was requested (schema v3) but the kernel does
-not support Landlock (needs Linux 5.13+) or could not fully enforce the
-ruleset. systemg refuses the service rather than run it unconfined. Run on a
-Landlock-capable kernel, or remove the `isolation.landlock` block.
+not support Landlock ABI 3 or newer (normally Linux 6.2+) or could not fully
+enforce the ruleset, including truncation protection. systemg refuses the
+service rather than run it with an incomplete filesystem sandbox. Use a
+kernel with Landlock ABI 3 or newer, or remove `isolation.landlock` only if
+running without filesystem confinement is acceptable.
 
 ### [SG0725](/reference/dialog/codes#sg0725)
 
@@ -563,10 +567,11 @@ manifest requesting `isolation.seccomp` is refused rather than run unfiltered.
 
 ### [SG0727](/reference/dialog/codes#sg0727)
 
-A namespace listed under `isolation` could not be unshared. `EPERM` and
-`EINVAL` are tolerated — a nested container often refuses namespaces the
-service runs fine without — so this code means the kernel failed the request
-for some other reason and the service is refused.
+A namespace listed under `isolation` could not be unshared, so the service
+is refused under both schema versions. This includes `EPERM` and `EINVAL`
+from restricted containers. Grant the required kernel permissions or remove
+the isolation request; the service does not run in the original namespace
+as a fallback.
 
 ## Privilege drop
 

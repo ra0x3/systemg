@@ -13,8 +13,6 @@ use libc::{RLIM_INFINITY, RLIMIT_MEMLOCK, c_int, id_t, rlimit};
 #[cfg(target_os = "linux")]
 use nix::errno::Errno;
 use nix::unistd::{Group, Uid, User, getgid, getuid};
-#[cfg(target_os = "linux")]
-use tracing::info;
 use tracing::warn;
 #[cfg(target_os = "linux")]
 use {
@@ -29,7 +27,7 @@ use {
 #[cfg(target_os = "linux")]
 use crate::config::CgroupConfig;
 use crate::{
-    childfault::{ApplyFault, ChildFault},
+    childfault::{ApplyFault, ChildFault, PrepareFault},
     config::{IsolationConfig, LimitValue, LimitsConfig, ServiceConfig},
     runtime,
 };
@@ -223,6 +221,22 @@ impl PrivilegeContext {
         service: &ServiceConfig,
         fail_closed: bool,
     ) -> io::Result<Self> {
+        if service
+            .isolation
+            .as_ref()
+            .is_some_and(|isolation| isolation.pid.unwrap_or(false))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                PrepareFault::new(
+                    ChildFault::KeyUnenforceable,
+                    format!(
+                        "service '{service_name}' declares 'isolation.pid', which this build cannot enforce for the service process (SG0721); remove the key to start the service without PID isolation"
+                    ),
+                ),
+            ));
+        }
+
         if fail_closed && let Some(unenforceable) = unenforceable_security_key(service) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -588,9 +602,16 @@ impl PrivilegeContext {
             return Ok(());
         };
 
+        if isolation.pid.unwrap_or(false) {
+            return Err(ApplyFault {
+                fault: ChildFault::KeyUnenforceable,
+                errno: libc::ENOTSUP,
+            });
+        }
+
         #[cfg(target_os = "linux")]
         {
-            use nix::{errno::Errno, sched::CloneFlags};
+            use nix::sched::CloneFlags;
 
             let mut flags = CloneFlags::empty();
             if isolation.network.unwrap_or(false) {
@@ -599,25 +620,15 @@ impl PrivilegeContext {
             if isolation.mount.unwrap_or(false) {
                 flags |= CloneFlags::CLONE_NEWNS;
             }
-            if isolation.pid.unwrap_or(false) {
-                flags |= CloneFlags::CLONE_NEWPID;
-            }
             if isolation.user.unwrap_or(false) {
                 flags |= CloneFlags::CLONE_NEWUSER;
             }
 
             if !flags.is_empty() {
-                // EPERM and EINVAL are the nested-container cases: the kernel
-                // will not grant the namespace, and refusing here would break
-                // every service that runs fine without it. Anything else is a
-                // real failure. The parent logged the request, so the child
-                // does not warn -- it cannot, without taking the logger lock.
-                match sched::unshare(flags) {
-                    Ok(()) | Err(Errno::EPERM) | Err(Errno::EINVAL) => {}
-                    Err(_) => {
-                        return Err(ApplyFault::last(ChildFault::NamespaceUnshare));
-                    }
-                }
+                sched::unshare(flags).map_err(|errno| ApplyFault {
+                    fault: ChildFault::NamespaceUnshare,
+                    errno: errno as i32,
+                })?;
             }
         }
 
@@ -625,7 +636,6 @@ impl PrivilegeContext {
         {
             let enable = isolation.network.unwrap_or(false)
                 || isolation.mount.unwrap_or(false)
-                || isolation.pid.unwrap_or(false)
                 || isolation.user.unwrap_or(false)
                 || isolation.private_devices.unwrap_or(false)
                 || isolation.private_tmp.unwrap_or(false)
@@ -698,22 +708,7 @@ impl PrivilegeContext {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
-    /// Reports post-spawn facts that need the child's pid.
-    pub fn apply_post_spawn(&self, pid: libc::pid_t) -> io::Result<()> {
-        if let Some(isolation) = &self.isolation
-            && isolation.pid.unwrap_or(false)
-        {
-            info!(
-                "Service spawned inside PID namespace; child PID {} is isolated",
-                pid
-            );
-        }
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    /// No-op on non-Linux targets.
+    /// No post-spawn privilege changes are required.
     pub fn apply_post_spawn(&self, _pid: libc::pid_t) -> io::Result<()> {
         Ok(())
     }
@@ -1065,18 +1060,18 @@ mod linux_tests {
     }
 
     #[test]
-    /// Handles apply isolation returns ok without capabilities.
-    fn apply_isolation_returns_ok_without_capabilities() {
+    /// Refuses PID isolation before attempting any namespace transition.
+    fn pid_isolation_is_refused_before_unshare() {
         let ctx = PrivilegeContext {
             isolation: Some(IsolationConfig {
-                network: Some(true),
-                mount: Some(true),
                 pid: Some(true),
                 ..IsolationConfig::default()
             }),
             ..PrivilegeContext::default()
         };
 
-        assert!(ctx.apply_isolation().is_ok());
+        let fault = ctx.apply_isolation().expect_err("PID isolation is unsupported");
+        assert_eq!(fault.fault, ChildFault::KeyUnenforceable);
+        assert_eq!(fault.errno, libc::ENOTSUP);
     }
 }

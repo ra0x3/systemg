@@ -27,7 +27,7 @@ use crate::{
         Config, LogSink, SkipConfig, SpawnMode, StatusSnapshotMode, TerminationPolicy,
         load_projects_from_file, supervisor::SupervisorTimeouts,
     },
-    cron::{CronExecutionStatus, CronManager},
+    cron::{CronExecutionRecord, CronExecutionStatus, CronManager},
     daemon::{
         CronLaunch, Daemon, PersistedSpawnChild, ServiceLifecycleStatus,
         ServiceReadyState, ServiceStateFile,
@@ -42,7 +42,7 @@ use crate::{
     opslot::{OpParts, OpSlot},
     restart::RestartScope,
     runtime,
-    spawn::{DynamicSpawnManager, SpawnedChild, SpawnedChildKind, SpawnedExit},
+    spawn::{DynamicSpawnManager, SpawnCleanup, SpawnedChild, SpawnedChildKind, SpawnedExit},
     start::{self, BootFrame, BootJournal},
     status::{
         BootStatus, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
@@ -232,6 +232,16 @@ struct CronProjectRuntime {
     config: Arc<Config>,
     mode: ProjectRunMode,
     config_path: PathBuf,
+}
+
+struct CronRun {
+    daemon: Daemon,
+    manager: CronManager,
+    metrics: MetricsHandle,
+    name: String,
+    hash: String,
+    service: crate::config::ServiceConfig,
+    scheduled_at: SystemTime,
 }
 
 /// How far up the process ancestry a spawn request is traced before giving up
@@ -429,9 +439,22 @@ fn persist_cron_state(
     service_name: &str,
     status: ServiceLifecycleStatus,
     exit_code: Option<i32>,
+    pid: u32,
+    process_start: Option<u64>,
 ) {
+    let Some(process_start) = process_start else { return; };
+    let pid_file = daemon.pid_file_handle();
+    let pid_file = pid_file.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if pid_file.start_for(service_name) != Some(process_start)
+        || pid_file.get(service_name).is_some_and(|current| current != pid)
+    {
+        return;
+    }
     if let Ok(mut state_file) = ServiceStateFile::load(daemon.store())
-        && let Err(err) = state_file.set(service_hash, status, None, exit_code, None)
+        && let Err(err) = state_file.set_exit_unless_superseded(
+            service_hash, pid, status, exit_code, None,
+        )
     {
         warn!("Failed to persist cron job '{service_name}' exit state: {err}");
     }
@@ -474,12 +497,18 @@ fn notify_cron_failure(
 }
 
 /// Clears the PID owned by a completed cron execution without removing a newer run.
-fn clear_cron_pid(daemon: &Daemon, service_name: &str, expected_pid: u32) {
+fn clear_cron_pid(
+    daemon: &Daemon,
+    service_name: &str,
+    expected_pid: u32,
+    process_start: Option<u64>,
+) {
+    let Some(process_start) = process_start else { return; };
     let pid_file = daemon.pid_file_handle();
     let mut pid_file = pid_file
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Err(err) = pid_file.clear_pid_if_matches(service_name, expected_pid) {
+    if let Err(err) = pid_file.clear_pid_if_generation(service_name, expected_pid, process_start) {
         debug!("Failed to clear cron job '{service_name}' PID: {err}");
     }
 }
@@ -3635,6 +3664,7 @@ impl Supervisor {
         let metrics_store = self.metrics_store.clone();
         let upgrading = Arc::clone(&self.upgrading);
         let cron_gate = Arc::clone(&self.cron_gate);
+        let cleanup_manager = self.spawn_manager.clone();
 
         thread::Builder::new()
             .name("sysg-cron".to_string())
@@ -3647,9 +3677,19 @@ impl Supervisor {
                     continue;
                 }
 
+                let cleanup = cleanup_manager.claim_cleanup();
+                if !cleanup.is_empty()
+                    && let Err(err) = thread::Builder::new()
+                        .name("sysg-spawn-cleanup".to_string())
+                        .spawn(move || Self::finish_spawn_cleanup(cleanup))
+                {
+                    warn!("Could not retry dynamic cleanup: {err}");
+                }
+
+                let recovered = cron_manager.claim_recovered_runs();
                 let due_jobs = cron_manager.get_due_job_refs();
                 let overlaps = cron_manager.take_overlaps();
-                if !due_jobs.is_empty() || !overlaps.is_empty() {
+                if !recovered.is_empty() || !due_jobs.is_empty() || !overlaps.is_empty() {
                     let projects = match cron_projects.read() {
                         Ok(projects) => projects.clone(),
                         Err(err) => {
@@ -3657,6 +3697,54 @@ impl Supervisor {
                             Vec::new()
                         }
                     };
+
+                    for recovered in recovered {
+                        let Some(project) = projects.iter().find(|project| {
+                            project.project_id == recovered.project_id
+                                && project.config.state_key(&recovered.service_name)
+                                    == recovered.service_hash
+                        }) else {
+                            continue;
+                        };
+                        let Some(service) = project.config.services
+                            .get(&recovered.service_name).cloned()
+                        else { continue; };
+                        let (deadline, label) = if recovered.record.timeout_label.is_none() {
+                            Self::cron_deadline(
+                                recovered.record.started_at,
+                                service.cron.as_ref().and_then(|cron| cron.timeout.as_deref()),
+                            )
+                        } else {
+                            (recovered.record.timeout_deadline_ms, recovered.record.timeout_label.clone())
+                        };
+                        let Some(mut record) = cron_manager.arm_job_run(
+                            &recovered.service_hash, recovered.record.started_at, deadline, label,
+                        ) else { continue; };
+                        if Self::retain_unattributed_cron_pid(
+                            &project.daemon, &recovered.service_name, &mut record,
+                        ) {
+                            let _ = cron_manager.attach_job_run(&recovered.service_hash, &record);
+                        }
+                        let run = CronRun {
+                            daemon: project.daemon.clone(),
+                            manager: cron_manager.clone(),
+                            metrics: metrics_store.clone(),
+                            name: recovered.service_name.clone(),
+                            hash: recovered.service_hash.clone(),
+                            service,
+                            scheduled_at: record.started_at,
+                        };
+                        if let Err(err) = thread::Builder::new()
+                            .name(format!("sysg-cron-recover-{}", run.name))
+                            .spawn(move || {
+                                let _owner = recovered.owner;
+                                let _completion = run.daemon.claim_completion(&run.name);
+                                Self::supervise_cron_run(run, record);
+                            })
+                        {
+                            warn!("Failed to dispatch recovered cron worker: {err}");
+                        }
+                    }
 
                     for overlap in overlaps {
                         let Some(project) = projects.iter().find(|project| {
@@ -3738,224 +3826,127 @@ impl Supervisor {
                             let run_scheduled_at = due_job.scheduled_at;
                             let withdraw_claim = due_job.clone();
 
-                            let failed_manager = cron_manager_clone.clone();
-                            let failed_hash = service_hash.clone();
+                            let owner = cron_manager_clone.owner_for_run(
+                                &service_hash, run_started_at,
+                            );
                             if let Err(err) = thread::Builder::new()
                                 .name(format!("sysg-cron-{job_name_clone}"))
                                 .spawn(move || {
-                                let _completion_claim =
-                                    daemon.claim_completion(&job_name_clone);
-                                // Anything still addressed to this unit belongs
-                                // to a run nobody is waiting on; clearing it
-                                // before the spawn keeps it from being read as
-                                // this run's outcome.
-                                crate::reaper::drop_claims(&service_hash);
-                                match daemon
-                                    .start_cron_unit(&job_name_clone, &service_config)
-                                {
-                                    Ok(CronLaunch::Skipped) => {
-                                        info!(
-                                            "Cron job '{}' was skipped; recording no execution",
-                                            job_name_clone
-                                        );
-                                        cron_manager_clone
-                                            .withdraw_job_run(&withdraw_claim);
-                                    }
-                                    Ok(CronLaunch::Started(pid)) => {
-                                        cron_manager_clone
-                                            .annotate_job_run(
+                                    let _owner = owner;
+                                    let _completion_claim =
+                                        daemon.claim_completion(&job_name_clone);
+                                    // Anything still addressed to this unit belongs
+                                    // to a run nobody is waiting on; clearing it
+                                    // before the spawn keeps it from being read as
+                                    // this run's outcome.
+                                    crate::reaper::drop_claims(&service_hash);
+                                    match daemon
+                                        .start_cron_unit(&job_name_clone, &service_config)
+                                    {
+                                        Ok(CronLaunch::Skipped) => {
+                                            info!(
+                                                "Cron job '{}' was skipped; recording no execution",
+                                                job_name_clone
+                                            );
+                                            cron_manager_clone
+                                                .withdraw_job_run(&withdraw_claim);
+                                        }
+                                        Ok(CronLaunch::Started { pid, process_start }) => {
+                                            let (timeout_deadline_ms, timeout_label) = Self::cron_deadline(
+                                                SystemTime::now(),
+                                                service_config.cron.as_ref()
+                                                    .and_then(|cron| cron.timeout.as_deref()),
+                                            );
+                                            let record = CronExecutionRecord {
+                                                started_at: run_started_at,
+                                                completed_at: None,
+                                                status: None,
+                                                exit_code: None,
+                                                pid: Some(pid),
+                                                process_start,
+                                                timeout_deadline_ms,
+                                                timeout_label,
+                                                user: user.clone(),
+                                                command: command.clone(),
+                                                metrics: vec![],
+                                            };
+                                            let record = cron_manager_clone.attach_job_run(
+                                                &service_hash, &record,
+                                            ).unwrap_or(record);
+                                            Self::supervise_cron_run(CronRun {
+                                                daemon,
+                                                manager: cron_manager_clone,
+                                                metrics: metrics_store_clone,
+                                                name: job_name_clone,
+                                                hash: service_hash,
+                                                service: service_config,
+                                                scheduled_at: run_scheduled_at,
+                                            }, record);
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to start cron job '{}' in project '{}': {}",
+                                                job_name_clone, project_id_clone, e
+                                            );
+                                            let mut unfinished = CronExecutionRecord {
+                                                started_at: run_started_at,
+                                                completed_at: None,
+                                                status: None,
+                                                exit_code: None,
+                                                pid: None,
+                                                process_start: None,
+                                                timeout_deadline_ms: None,
+                                                timeout_label: Some(String::new()),
+                                                user: user.clone(),
+                                                command: command.clone(),
+                                                metrics: vec![],
+                                            };
+                                            if Self::retain_unattributed_cron_pid(
+                                                &daemon, &job_name_clone, &mut unfinished,
+                                            ) {
+                                                let _ = cron_manager_clone.attach_job_run(&service_hash, &unfinished);
+                                                Self::supervise_cron_run(CronRun {
+                                                    daemon,
+                                                    manager: cron_manager_clone,
+                                                    metrics: metrics_store_clone,
+                                                    name: job_name_clone,
+                                                    hash: service_hash,
+                                                    service: service_config,
+                                                    scheduled_at: run_scheduled_at,
+                                                }, unfinished);
+                                                return;
+                                            }
+                                            cron_manager_clone
+                                                .annotate_job_run(
+                                                    &service_hash,
+                                                    run_started_at,
+                                                    None,
+                                                    user.clone(),
+                                                    command.clone(),
+                                                );
+                                            let status =
+                                                CronExecutionStatus::Failed(e.to_string());
+                                            cron_manager_clone.complete_job_run(
                                                 &service_hash,
                                                 run_started_at,
-                                                Some(pid),
-                                                user.clone(),
-                                                command.clone(),
+                                                status.clone(),
+                                                None,
+                                                vec![],
                                             );
-                                        let result =
-                                            Self::wait_for_cron_completion(
-                                                pid,
+                                            notify_cron_failure(
+                                                &daemon,
                                                 &job_name_clone,
-                                                &service_hash,
-                                                service_config
-                                                    .cron
-                                                    .as_ref()
-                                                    .and_then(|cron| {
-                                                        cron.timeout.as_deref()
-                                                    }),
+                                                &service_config,
+                                                &status,
+                                                None,
+                                                run_scheduled_at,
+                                                None,
                                             );
-
-                                        match result {
-                                            Ok(outcome) => {
-                                                let CronCompletionOutcome {
-                                                    status,
-                                                    exit_code,
-                                                } = outcome;
-
-                                                match &status {
-                                                                CronExecutionStatus::Success => info!(
-                                                                    "Cron job '{}' completed successfully",
-                                                                    job_name_clone
-                                                                ),
-                                                                CronExecutionStatus::Failed(reason) => warn!(
-                                                                    "Cron job '{}' failed: {}",
-                                                                    job_name_clone, reason
-                                                                ),
-                                                                CronExecutionStatus::Interrupted(reason) => warn!(
-                                                                    "Cron job '{}' was interrupted: {}",
-                                                                    job_name_clone, reason
-                                                                ),
-                                                                CronExecutionStatus::OverlapError => warn!(
-                                                                    "Cron job '{}' reported overlap state unexpectedly",
-                                                                    job_name_clone
-                                                                ),
-                                                                CronExecutionStatus::TimedOut(limit) => warn!(
-                                                                    "Cron job '{}' timed out after {}",
-                                                                    job_name_clone, limit
-                                                                ),
-                                                            }
-
-                                                let metrics = cron_run_metrics(
-                                                    &metrics_store_clone,
-                                                    &service_hash,
-                                                    run_started_at,
-                                                );
-                                                let lifecycle_status = match status {
-                                                    CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
-                                                    CronExecutionStatus::Failed(_) | CronExecutionStatus::OverlapError | CronExecutionStatus::TimedOut(_) => ServiceLifecycleStatus::ExitedWithError,
-                                                    CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
-                                                };
-                                                persist_cron_state(
-                                                    &daemon,
-                                                    &service_hash,
-                                                    &job_name_clone,
-                                                    lifecycle_status,
-                                                    exit_code,
-                                                );
-                                                clear_cron_pid(
-                                                    &daemon,
-                                                    &job_name_clone,
-                                                    pid,
-                                                );
-                                                notify_cron_failure(
-                                                    &daemon,
-                                                    &job_name_clone,
-                                                    &service_config,
-                                                    &status,
-                                                    exit_code,
-                                                    run_scheduled_at,
-                                                    None,
-                                                );
-                                                cron_manager_clone.complete_job_run(
-                                                    &service_hash,
-                                                    run_started_at,
-                                                    status,
-                                                    exit_code,
-                                                    metrics,
-                                                );
-                                            }
-                                            Err(e) => {
-                                                error!(
-                                                    "Error waiting for cron job '{}': {}",
-                                                    job_name_clone, e
-                                                );
-                                                let metrics = cron_run_metrics(
-                                                    &metrics_store_clone,
-                                                    &service_hash,
-                                                    run_started_at,
-                                                );
-                                                persist_cron_state(
-                                                    &daemon,
-                                                    &service_hash,
-                                                    &job_name_clone,
-                                                    ServiceLifecycleStatus::ExitedWithError,
-                                                    None,
-                                                );
-                                                clear_cron_pid(
-                                                    &daemon,
-                                                    &job_name_clone,
-                                                    pid,
-                                                );
-                                                let status =
-                                                    CronExecutionStatus::Failed(
-                                                        e.to_string(),
-                                                    );
-                                                notify_cron_failure(
-                                                    &daemon,
-                                                    &job_name_clone,
-                                                    &service_config,
-                                                    &status,
-                                                    None,
-                                                    run_scheduled_at,
-                                                    None,
-                                                );
-                                                cron_manager_clone.complete_job_run(
-                                                    &service_hash,
-                                                    run_started_at,
-                                                    status,
-                                                    None,
-                                                    metrics,
-                                                );
-                                            }
                                         }
                                     }
-                                    Err(e) => {
-                                        error!(
-                                            "Failed to start cron job '{}' in project '{}': {}",
-                                            job_name_clone, project_id_clone, e
-                                        );
-                                        cron_manager_clone
-                                            .annotate_job_run(
-                                                &service_hash,
-                                                run_started_at,
-                                                None,
-                                                user.clone(),
-                                                command.clone(),
-                                            );
-                                        let status =
-                                            CronExecutionStatus::Failed(e.to_string());
-                                        notify_cron_failure(
-                                            &daemon,
-                                            &job_name_clone,
-                                            &service_config,
-                                            &status,
-                                            None,
-                                            run_scheduled_at,
-                                            None,
-                                        );
-                                        cron_manager_clone.complete_job_run(
-                                            &service_hash,
-                                            run_started_at,
-                                            status,
-                                            None,
-                                            vec![],
-                                        );
-                                    }
-                                }
                                 })
                             {
                                 error!("Failed to start cron worker: {err}");
-                                let status = CronExecutionStatus::Failed(format!(
-                                    "Failed to start cron worker: {err}"
-                                ));
-                                if let Some(service_config) =
-                                    project.config.services.get(&due_job.service_name)
-                                {
-                                    notify_cron_failure(
-                                        &project.daemon,
-                                        &due_job.service_name,
-                                        service_config,
-                                        &status,
-                                        None,
-                                        run_scheduled_at,
-                                        None,
-                                    );
-                                }
-                                failed_manager.complete_job_run(
-                                    &failed_hash,
-                                    run_started_at,
-                                    status,
-                                    None,
-                                    vec![],
-                                );
                             }
                         }
                     }
@@ -4880,22 +4871,43 @@ impl Supervisor {
             cmd.args(&params.command[1..]);
         }
 
+        let unit_env = auth_unit.as_ref().and_then(|(project, service)| {
+            let config = self.daemon_for_project(project)?.config();
+            let env = config.services.get(service)?.env.clone();
+            let base = PathBuf::from(config.project_dir.as_deref().unwrap_or("."));
+            Some((env, base))
+        });
+        let mut child_env = match &unit_env {
+            Some((Some(env), base)) => env.resolve(base)?,
+            _ => HashMap::new(),
+        };
         let drops_privileges = privilege
             .as_ref()
             .is_some_and(|p| p.user.drops_privileges());
         if drops_privileges {
             cmd.env_clear();
-            cmd.env(
-                "PATH",
-                std::env::var("PATH").unwrap_or_else(|_| {
-                    crate::constants::DEFAULT_SERVICE_PATH.to_string()
-                }),
-            );
-            if let Some(privilege) = &privilege {
-                for (key, value) in privilege.user.env_overrides() {
-                    cmd.env(key, value);
-                }
+            child_env
+                .entry("PATH".to_string())
+                .or_insert_with(|| crate::constants::DEFAULT_SERVICE_PATH.to_string());
+        }
+        if let Some(privilege) = &privilege {
+            for (key, value) in privilege.user.env_overrides() {
+                child_env.insert(key, value);
             }
+        }
+        cmd.envs(child_env);
+        let strip = unit_env
+            .as_ref()
+            .and_then(|(env, _)| env.as_ref())
+            .map(crate::config::EnvConfig::vars_to_strip)
+            .unwrap_or_else(|| {
+                crate::constants::SESSION_SCOPED_ENV_VARS
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect()
+            });
+        for key in strip {
+            cmd.env_remove(key);
         }
 
         cmd.env("SPAWN_DEPTH", depth.to_string());
@@ -4962,12 +4974,30 @@ impl Supervisor {
             kind: SpawnedChildKind::Spawned,
         };
 
-        let root_service = self.spawn_manager.record_spawn(
+        let owning_daemon = auth_unit
+            .as_ref()
+            .and_then(|(project, _)| self.daemon_for_project(project))
+            .unwrap_or(&self.daemon);
+        let pid_file_handle = owning_daemon.pid_file_handle();
+        let root_service = match self.spawn_manager.record_authorized_spawn(
             parent_pid,
-            spawned_child,
-            spawn_auth.root_service.clone(),
-        )?;
+            spawned_child.clone(),
+            &spawn_auth,
+        ) {
+            Ok(root) => root,
+            Err(err) => {
+                self.spawn_manager.record_spawn(parent_pid, spawned_child, spawn_auth.root_service.clone())?;
+                self.spawn_manager.begin_subtree_cleanup_with_child(
+                    child_pid, started_at, Arc::clone(&pid_file_handle), Some(child),
+                );
+                Self::finish_spawn_cleanup(self.spawn_manager.claim_cleanup());
+                return Err(err.into());
+            }
+        };
+        let termination_policy = spawn_auth.termination_policy.clone();
         let effective_root = root_service.or(spawn_auth.root_service);
+        let generation = self.spawn_manager.generation_for(child_pid, started_at)
+            .ok_or_else(|| io::Error::other("Dynamic child lost its registration"))?;
         // The registry key is `{project}:{service}`; log paths and service
         // hashes are addressed by the bare service name, resolved against the
         // project that actually owns the unit.
@@ -5002,17 +5032,13 @@ impl Supervisor {
             Ok(())
         })();
         if let Err(err) = log_result {
-            let _ = Daemon::terminate_process_tree(&child_name, child_pid, None);
-            let _ = child.wait();
-            self.spawn_manager.remove_subtree(child_pid);
+            self.spawn_manager.begin_subtree_cleanup_with_child(
+                child_pid, started_at, Arc::clone(&pid_file_handle), Some(child),
+            );
+            Self::finish_spawn_cleanup(self.spawn_manager.claim_cleanup());
             return Err(err.into());
         }
 
-        let owning_daemon = root_unit
-            .as_ref()
-            .and_then(|(project, _)| self.daemon_for_project(project))
-            .unwrap_or(&self.daemon);
-        let pid_file_handle = owning_daemon.pid_file_handle();
         if let Ok(mut pid_file) = pid_file_handle.lock() {
             let service_hash = root_service_name
                 .as_deref()
@@ -5022,6 +5048,7 @@ impl Supervisor {
                 name: child_name.clone(),
                 command: command_string.clone(),
                 started_at,
+                generation: Some(generation.clone()),
                 ttl_secs: params.ttl,
                 depth,
                 parent_pid: params.parent_pid,
@@ -5033,16 +5060,7 @@ impl Supervisor {
             let _ = pid_file.record_spawn(persisted);
         }
 
-        // `--ttl` was recorded and reported but never acted on, so a child the
-        // docs promised would terminate after its deadline ran forever. The
-        // timer is armed here rather than in a global sweep because the waiter
-        // below still holds the unreaped child: signalling its pid cannot hit a
-        // recycled process. A TTL is an explicit instruction about THIS child,
-        // so it overrides `termination_policy` — that policy governs what
-        // happens when the parent goes away, not a deadline the caller set.
-        // Set once the waiter has reaped the child. After that point its pid may
-        // belong to an unrelated process, so the TTL must never signal it.
-        let reaped = Arc::new(AtomicBool::new(false));
+        let reaped = self.spawn_manager.waiter_state(child_pid, started_at);
         if let Some(ttl) = params.ttl.map(Duration::from_secs).filter(|d| !d.is_zero()) {
             let ttl_manager = self.spawn_manager.clone();
             let ttl_pid_file = Arc::clone(&pid_file_handle);
@@ -5060,33 +5078,8 @@ impl Supervisor {
                         return;
                     }
                     info!("Dynamic child '{ttl_name}' (pid {child_pid}) reached its TTL");
-                    // `remove_subtree` returns the root as well as its
-                    // descendants, so the root must not be listed again.
-                    let removed = ttl_manager.remove_subtree(child_pid);
-                    for target in removed
-                        .iter()
-                        .map(|c| (c.name.clone(), c.pid))
-                        .chain(
-                            removed
-                                .iter()
-                                .all(|c| c.pid != child_pid)
-                                .then(|| (ttl_name.clone(), child_pid)),
-                        )
-                    {
-                        if let Err(err) =
-                            Daemon::terminate_process_tree(&target.0, target.1, None)
-                        {
-                            warn!(
-                                "Failed to terminate '{}' (pid {}) at its TTL: {err}",
-                                target.0, target.1
-                            );
-                        }
-                    }
-                    if let Ok(mut pid_file) = ttl_pid_file.lock()
-                        && let Err(err) = pid_file.remove_spawn_subtree(child_pid)
-                    {
-                        warn!("Failed to clear TTL-expired spawn rows for {child_pid}: {err}");
-                    }
+                    ttl_manager.begin_subtree_cleanup(child_pid, started_at, ttl_pid_file);
+                    Self::finish_spawn_cleanup(ttl_manager.claim_cleanup());
                 })
             {
                 warn!("Could not arm the TTL timer for '{child_name}': {err}");
@@ -5095,78 +5088,69 @@ impl Supervisor {
 
         let spawn_manager_for_exit = self.spawn_manager.clone();
         let pid_file_for_exit = Arc::clone(&pid_file_handle);
-        let child_name_for_exit = child_name.clone();
         let reaped_for_exit = Arc::clone(&reaped);
+        let wait_child = Arc::new(Mutex::new(Some(child)));
+        let wait_child_for_exit = Arc::clone(&wait_child);
         if let Err(err) = thread::Builder::new()
             .name(format!("sysg-child-{child_pid}"))
-            .spawn(move || match crate::reaper::wait(&mut child) {
-                Ok(status) => {
-                    // From here the pid is reaped and may be reused; stand the
-                    // TTL timer down before touching any tracking.
-                    reaped_for_exit.store(true, Ordering::SeqCst);
-                    let exit = SpawnedExit {
-                        exit_code: status.code(),
-                        #[cfg(unix)]
-                        signal: status.signal(),
-                        #[cfg(not(unix))]
-                        signal: None,
-                        finished_at: Some(SystemTime::now()),
-                    };
+            .spawn(move || {
+                let Some(mut child) = wait_child_for_exit.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner).take()
+                else { return; };
+                let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::reaper::wait(&mut child)
+                })).unwrap_or_else(|_| Err(io::Error::other("Dynamic child waiter panicked")));
+                match waited {
+                    Ok(status) => {
+                        // From here the pid is reaped and may be reused; stand the
+                        // TTL timer down before touching any tracking.
+                        reaped_for_exit.store(true, Ordering::SeqCst);
+                        let exit = SpawnedExit {
+                            exit_code: status.code(),
+                            #[cfg(unix)]
+                            signal: status.signal(),
+                            #[cfg(not(unix))]
+                            signal: None,
+                            finished_at: Some(SystemTime::now()),
+                        };
 
-                    spawn_manager_for_exit.record_spawn_exit(child_pid, exit.clone());
-
-                    let termination_policy = spawn_manager_for_exit
-                        .termination_policy_for(child_pid)
-                        .unwrap_or(TerminationPolicy::Cascade);
-
-                    if matches!(termination_policy, TerminationPolicy::Cascade) {
-                        let removed = spawn_manager_for_exit.remove_subtree(child_pid);
-
-                        if let Ok(mut pid_file) = pid_file_for_exit.lock()
-                            && let Err(err) = pid_file.remove_spawn_subtree(child_pid)
-                        {
-                            warn!(
-                                "Failed to remove spawn subtree rooted at {} from pid file: {}",
-                                child_pid, err
+                        if matches!(termination_policy, TerminationPolicy::Cascade) {
+                            spawn_manager_for_exit.begin_subtree_cleanup(
+                                child_pid,
+                                started_at,
+                                Arc::clone(&pid_file_for_exit),
                             );
-                        }
-
-                        // Every dynamic child is forked by the supervisor, so
-                        // depth-2 children are siblings of depth-1 ones in
-                        // process terms — ancestry does not chain and killing
-                        // only the direct children left the rest running.
-                        for descendant in removed.iter().filter(|c| c.pid != child_pid) {
-                            if let Err(err) = Daemon::terminate_process_tree(
-                                &descendant.name,
-                                descendant.pid,
-                                None,
-                            ) {
-                                warn!(
-                                    "Failed to terminate descendant {} (pid {}) of '{}' after cascade: {}",
-                                    descendant.name, descendant.pid, child_name_for_exit, err
-                                );
+                            Self::finish_spawn_cleanup(spawn_manager_for_exit.claim_cleanup());
+                        } else {
+                            let persisted = pid_file_for_exit.lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .record_spawn_exit(child_pid, &generation, exit.clone());
+                            match persisted {
+                                Ok(()) => {
+                                    spawn_manager_for_exit.record_spawn_exit_generation(
+                                        child_pid, started_at, exit,
+                                    );
+                                }
+                                Err(err) => warn!("Failed to record spawn exit for {child_pid}: {err}"),
                             }
                         }
-                    } else if let Ok(mut pid_file) = pid_file_for_exit.lock()
-                        && let Err(err) = pid_file.record_spawn_exit(child_pid, exit.clone())
-                    {
-                        warn!(
-                            "Failed to record spawn exit for {} in pid file: {}",
-                            child_pid, err
-                        );
                     }
-                }
-                Err(err) => {
-                    reaped_for_exit.store(true, Ordering::SeqCst);
-                    error!("Failed to wait for spawned child {child_pid}: {err}");
+                    Err(err) => {
+                        error!("Failed to wait for spawned child {child_pid}: {err}");
+                        spawn_manager_for_exit.begin_subtree_cleanup_with_child(
+                            child_pid, started_at, Arc::clone(&pid_file_for_exit), Some(child),
+                        );
+                        Self::finish_spawn_cleanup(spawn_manager_for_exit.claim_cleanup());
+                    }
                 }
             })
         {
-            let _ = Daemon::terminate_process_tree(&child_name, child_pid, None);
-            let _ = self.spawn_manager.remove_subtree(child_pid);
-            if let Ok(mut pid_file) = pid_file_handle.lock() {
-                let _ = pid_file.remove_spawn_subtree(child_pid);
-            }
+            let child = wait_child.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            self.spawn_manager.begin_subtree_cleanup_with_child(
+                child_pid, started_at, Arc::clone(&pid_file_handle), child,
+            );
+            Self::finish_spawn_cleanup(self.spawn_manager.claim_cleanup());
             return Err(err.into());
         }
 
@@ -6503,7 +6487,7 @@ running project does not declare; restart the project to apply structural change
     /// Scoped to `root_pid` so a rolling restart cannot kill the replacement's
     /// children, and honours the unit's `termination_policy`: `orphan` and
     /// `reparent` mean the children are meant to outlive the parent, so they are
-    /// only dropped from tracking.
+    /// not signalled; their wait and TTL ownership is retained until it settles.
     fn sweep_dynamic_children(
         spawn_manager: &DynamicSpawnManager,
         daemon: &Daemon,
@@ -6511,38 +6495,56 @@ running project does not declare; restart the project to apply structural change
         service: &str,
         root_pid: u32,
     ) {
-        let orphaned = spawn_manager.take_generation_children(project, service, root_pid);
-        if orphaned.is_empty() {
-            return;
-        }
         let policy = spawn_manager.policy_for_unit(project, service);
         let cascade = matches!(policy, TerminationPolicy::Cascade);
+        spawn_manager.begin_generation_cleanup(
+            project, service, root_pid, cascade, daemon.pid_file_handle(),
+        );
+        Self::finish_spawn_cleanup(spawn_manager.claim_cleanup());
+    }
 
-        for child in &orphaned {
-            if cascade
-                && let Err(err) =
-                    Daemon::terminate_process_tree(&child.name, child.pid, None)
+    /// Finishes claimed cleanup without holding the registry across waits or I/O.
+    fn finish_spawn_cleanup(claims: Vec<SpawnCleanup>) {
+        for claim in claims {
+            let child = &claim.child;
+            if !claim.terminate
+                && (!claim.wait_done.load(Ordering::Acquire)
+                    || !Daemon::spawn_generation_is_empty(child.pid, &claim.targets))
             {
-                warn!(
-                    "Failed to terminate dynamic child '{}' (pid {}) of '{service}': {err}",
-                    child.name, child.pid
-                );
                 continue;
             }
-            if let Ok(mut pid_file) = daemon.pid_file_handle().lock()
-                && let Err(err) = pid_file.remove_spawn(child.pid)
+            if claim.terminate
+                && let Err(err) = Daemon::terminate_spawn_generation(
+                    &child.name, child.pid, &claim.targets,
+                )
             {
-                warn!(
-                    "Failed to clear spawn row for pid {} of '{service}': {err}",
-                    child.pid
-                );
+                warn!("Dynamic cleanup retained for '{}' (pid {}): {err}", child.name, child.pid);
+                continue;
             }
-        }
-        if cascade {
-            info!(
-                "Reclaimed {} dynamic child process(es) of '{service}'",
-                orphaned.len()
-            );
+            if claim.terminate && !claim.wait_done.load(Ordering::Acquire) {
+                let mut unwaited = claim.unwaited.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(wait_child) = unwaited.as_mut() else { continue; };
+                match wait_child.try_wait() {
+                    Ok(Some(_)) => {}
+                    Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {}
+                    Ok(None) | Err(_) => continue,
+                }
+                *unwaited = None;
+                claim.wait_done.store(true, Ordering::Release);
+            }
+            let retired = claim.pid_file.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove_spawn_generation(child.pid, &claim.generation);
+            match retired {
+                Ok(removed) => {
+                    if !removed {
+                        debug!("Completed dynamic generation {} without removing an absent, legacy, or superseding row for pid {}", claim.generation, child.pid);
+                    }
+                    claim.finish();
+                }
+                Err(err) => warn!("Dynamic cleanup retained for pid {}: {err}", child.pid),
+            }
         }
     }
 
@@ -6857,33 +6859,87 @@ running project does not declare; restart the project to apply structural change
         }
     }
 
-    fn wait_for_cron_completion(
-        pid: u32,
-        job_name: &str,
-        claim_key: &str,
+    /// Computes a deadline from the moment the run actually starts being waited on.
+    /// An empty label records an intentionally unlimited new run; no label denotes legacy state.
+    fn cron_deadline(
+        started: SystemTime,
         timeout: Option<&str>,
-    ) -> Result<CronCompletionOutcome, SupervisorError> {
-        Self::wait_for_cron_completion_with_timeout(
-            pid,
-            job_name,
-            claim_key,
-            timeout,
-            Duration::from_millis(100),
-            CRON_ROUTE_GRACE,
-        )
+    ) -> (Option<u64>, Option<String>) {
+        let Some((limit, label)) = timeout.and_then(|raw| {
+            crate::config::duration::parse_positive(raw).ok()
+                .map(|limit| (limit, raw.trim().to_string()))
+        }) else {
+            return (None, Some(String::new()));
+        };
+        let deadline = started.checked_add(limit)
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|duration| {
+                let rounded = duration.as_millis()
+                    + if duration.subsec_nanos() % 1_000_000 == 0 { 0 } else { 1 };
+                u64::try_from(rounded).ok()
+            });
+        (deadline, Some(label))
     }
 
-    /// Waits for one cron run to finish. `claim_key` is the unit's state key:
-    /// the address a routed exit status carries, unique across projects where a
-    /// service name is not.
-    ///
-    /// `timeout` is the manifest's `cron.timeout` as written. A run past it is
-    /// killed and recorded as timed out; with none, the run is waited on until
-    /// it exits.
-    ///
-    /// When `waitpid` says the child was already reaped, the monitor got there
-    /// first and may still be filing the status. `route_grace` is how long to
-    /// keep checking for it before the run is recorded as interrupted.
+    /// Keeps a provisional run from overlapping a surviving, unattributed launch.
+    fn retain_unattributed_cron_pid(
+        daemon: &Daemon,
+        name: &str,
+        record: &mut CronExecutionRecord,
+    ) -> bool {
+        if record.pid.is_some() {
+            return false;
+        }
+        let handle = daemon.pid_file_handle();
+        let pids = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pid) = pids.get(name).filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+        else { return false; };
+        let live = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
+            || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if live {
+            record.pid = Some(pid);
+            record.process_start = None;
+        }
+        live
+    }
+
+    /// Recovered and newly launched executions use the same terminal ordering.
+    fn supervise_cron_run(run: CronRun, record: CronExecutionRecord) {
+        let outcome = match Self::wait_for_cron_record(
+            &record, &run.name, &run.hash,
+            Duration::from_millis(100), CRON_ROUTE_GRACE,
+        ) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                warn!("Cron run '{}' remains unfinished for recovery: {err}", run.name);
+                return;
+            }
+        };
+        let CronCompletionOutcome { status, exit_code } = outcome;
+        let lifecycle = match &status {
+            CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
+            CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
+            _ => ServiceLifecycleStatus::ExitedWithError,
+        };
+        if let Some(pid) = record.pid {
+            persist_cron_state(
+                &run.daemon, &run.hash, &run.name, lifecycle,
+                exit_code, pid, record.process_start,
+            );
+            clear_cron_pid(&run.daemon, &run.name, pid, record.process_start);
+        }
+        let metrics = cron_run_metrics(&run.metrics, &run.hash, record.started_at);
+        run.manager.complete_job_run(
+            &run.hash, record.started_at, status.clone(), exit_code, metrics,
+        );
+        notify_cron_failure(
+            &run.daemon, &run.name, &run.service, &status,
+            exit_code, run.scheduled_at, None,
+        );
+    }
+
+    /// Builds a fresh execution record for callers exercising the wait policy.
+    #[cfg(test)]
     fn wait_for_cron_completion_with_timeout(
         pid: u32,
         job_name: &str,
@@ -6892,112 +6948,155 @@ running project does not declare; restart the project to apply structural change
         poll_interval: Duration,
         route_grace: Duration,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
+        let started_at = SystemTime::now();
+        let (timeout_deadline_ms, timeout_label) = Self::cron_deadline(started_at, timeout);
+        let record = CronExecutionRecord {
+            started_at,
+            completed_at: None,
+            status: None,
+            exit_code: None,
+            pid: Some(pid),
+            process_start: crate::daemon::process_start_time(pid),
+            timeout_deadline_ms,
+            timeout_label,
+            user: None,
+            command: None,
+            metrics: Vec::new(),
+        };
+        Self::wait_for_cron_record(&record, job_name, claim_key, poll_interval, route_grace)
+    }
+
+    /// Owns one persisted run until its exact process exits or timeout cleanup settles.
+    /// Missing identity prevents signals; an adopted live process remains owned even
+    /// when it is not waitable by this supervisor. Lost outcomes are never successes.
+    fn wait_for_cron_record(
+        record: &CronExecutionRecord,
+        job_name: &str,
+        claim_key: &str,
+        poll_interval: Duration,
+        route_grace: Duration,
+    ) -> Result<CronCompletionOutcome, SupervisorError> {
         use nix::{
             sys::wait::{WaitPidFlag, WaitStatus, waitpid},
             unistd::Pid,
         };
 
+        let interrupted = || CronCompletionOutcome {
+            status: CronExecutionStatus::Interrupted(CRON_STATUS_LOST_REASON.to_string()),
+            exit_code: None,
+        };
+        let Some(pid) = record.pid.filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+        else {
+            return Ok(interrupted());
+        };
         let wait_pid = Pid::from_raw(pid as i32);
-        let start = std::time::Instant::now();
-        let limit = timeout.and_then(|raw| {
-            crate::config::duration::parse_positive(raw)
-                .ok()
-                .map(|max| (max, raw.trim()))
+        let wall_deadline = record
+            .timeout_deadline_ms
+            .map(|millis| {
+                std::time::UNIX_EPOCH
+                    .checked_add(Duration::from_millis(millis))
+                    .ok_or_else(|| io::Error::other("Cron deadline is outside the clock range"))
+            })
+            .transpose()?;
+        let monotonic_deadline = wall_deadline.and_then(|deadline| {
+            Instant::now().checked_add(
+                deadline.duration_since(SystemTime::now()).unwrap_or_default(),
+            )
         });
+        let targets = Mutex::new(
+            record
+                .process_start
+                .map(|birth| (pid, birth))
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+        );
+        let mut terminating = false;
+        let mut gone_since: Option<Instant> = None;
 
         loop {
-            // The monitor reaps managed children too, and on Linux a pidfd
-            // wakes it the instant one exits. When it gets there first it
-            // routes the status here rather than leaving this thread to guess.
-            if let Some(status) = crate::reaper::take_for(pid as i32, claim_key) {
-                return Ok(Self::cron_outcome_from_status(job_name, status));
-            }
-            match waitpid(wait_pid, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) => {
-                    if let Some((max, raw)) = limit
-                        && start.elapsed() > max
-                    {
-                        warn!(
-                            "Cron job '{}' ran past its {} timeout; terminating process tree",
-                            job_name, raw
-                        );
-                        Daemon::terminate_process_tree(job_name, pid, None)?;
+            if terminating {
+                match Daemon::terminate_spawn_generation(job_name, pid, &targets) {
+                    Ok(()) => {
+                        if record.process_start.is_some()
+                            && crate::daemon::process_start_time(pid) == record.process_start
+                        {
+                            let _ = waitpid(wait_pid, Some(WaitPidFlag::WNOHANG));
+                        }
                         return Ok(CronCompletionOutcome {
-                            status: CronExecutionStatus::TimedOut(raw.to_string()),
+                            status: CronExecutionStatus::TimedOut(
+                                record
+                                    .timeout_label
+                                    .clone()
+                                    .unwrap_or_else(|| "configured deadline".to_string()),
+                            ),
                             exit_code: None,
                         });
                     }
-
-                    thread::sleep(poll_interval);
-                }
-                Ok(WaitStatus::Exited(_, exit_code)) => {
-                    debug!("Cron job '{}' exited with code {}", job_name, exit_code);
-                    let status = if exit_code == 0 {
-                        CronExecutionStatus::Success
-                    } else {
-                        CronExecutionStatus::Failed(format!(
-                            "Process exited with code {exit_code}"
-                        ))
-                    };
-                    return Ok(CronCompletionOutcome {
-                        status,
-                        exit_code: Some(exit_code),
-                    });
-                }
-                Ok(WaitStatus::Signaled(_, signal, _)) => {
-                    warn!(
-                        "Cron job '{}' was terminated by signal {:?}",
-                        job_name, signal
-                    );
-                    return Ok(CronCompletionOutcome {
-                        status: CronExecutionStatus::Failed(format!(
-                            "Terminated by signal {signal}"
-                        )),
-                        exit_code: None,
-                    });
-                }
-                Ok(WaitStatus::Stopped(..)) | Ok(WaitStatus::Continued(_)) => {
-                    thread::sleep(poll_interval);
-                }
-                #[cfg(any(target_os = "linux", target_os = "android"))]
-                Ok(WaitStatus::PtraceEvent(_, _, _))
-                | Ok(WaitStatus::PtraceSyscall(_)) => {
-                    thread::sleep(poll_interval);
-                }
-                Err(nix::errno::Errno::ECHILD) => {
-                    let deadline = std::time::Instant::now() + route_grace;
-                    loop {
-                        if let Some(status) =
-                            crate::reaper::take_for(pid as i32, claim_key)
-                        {
-                            return Ok(Self::cron_outcome_from_status(job_name, status));
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            break;
-                        }
-                        thread::sleep(CRON_ROUTE_POLL);
+                    Err(err) => {
+                        warn!("Cron timeout cleanup for '{job_name}' remains owned: {err}");
                     }
-                    warn!(
-                        "Cron job '{}' was reaped without routing its exit status; recording the run as interrupted",
-                        job_name
-                    );
-                    return Ok(CronCompletionOutcome {
-                        status: CronExecutionStatus::Interrupted(
-                            CRON_STATUS_LOST_REASON.to_string(),
-                        ),
-                        exit_code: None,
-                    });
                 }
-                Err(e) => {
-                    error!("Error waiting for cron job '{}': {}", job_name, e);
-                    return Err(SupervisorError::Process(
-                        ProcessManagerError::ServiceStartError {
-                            service: job_name.to_string(),
-                            source: std::io::Error::from_raw_os_error(e as i32),
-                        },
-                    ));
+                thread::sleep(poll_interval);
+                continue;
+            }
+
+            let expired = wall_deadline.is_some_and(|deadline| SystemTime::now() >= deadline)
+                || monotonic_deadline.is_some_and(|deadline| Instant::now() >= deadline);
+            if expired
+                && record.process_start.is_some()
+                && !Daemon::spawn_generation_is_empty(pid, &targets)
+            {
+                terminating = true;
+                continue;
+            }
+
+            let actual_birth = crate::daemon::process_start_time(pid);
+            if record
+                .process_start
+                .zip(actual_birth)
+                .is_some_and(|(expected, actual)| expected != actual)
+            {
+                return Ok(interrupted());
+            }
+            let live = Daemon::pid_is_alive(pid);
+            let verified = record.process_start.is_some() && actual_birth == record.process_start;
+            if !live || verified {
+                if let Some(status) = crate::reaper::take_for(pid as i32, claim_key) {
+                    return Ok(Self::cron_outcome_from_status(job_name, status));
+                }
+                if verified {
+                    match waitpid(wait_pid, Some(WaitPidFlag::WNOHANG)) {
+                        Ok(WaitStatus::Exited(_, exit_code)) => {
+                            return Ok(Self::cron_outcome_from_status(
+                                job_name,
+                                std::process::ExitStatus::from_raw(exit_code << 8),
+                            ));
+                        }
+                        Ok(WaitStatus::Signaled(_, signal, _)) => {
+                            return Ok(Self::cron_outcome_from_status(
+                                job_name,
+                                std::process::ExitStatus::from_raw(signal as i32),
+                            ));
+                        }
+                        Ok(_) | Err(_) => {}
+                    }
                 }
             }
+
+            if !live {
+                let gone = gone_since.get_or_insert_with(Instant::now);
+                if gone.elapsed() >= route_grace {
+                    return Ok(interrupted());
+                }
+                thread::sleep(poll_interval.min(CRON_ROUTE_POLL));
+                continue;
+            }
+            gone_since = None;
+            if verified && expired {
+                terminating = true;
+                continue;
+            }
+            thread::sleep(poll_interval);
         }
     }
 }

@@ -19,8 +19,8 @@ mod imp {
     use std::{io, path::PathBuf};
 
     use landlock::{
-        ABI, Access, AccessFs, PathBeneath, PathFd, RestrictionStatus, Ruleset,
-        RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+        ABI, Access, AccessFs, CompatLevel, Compatible, PathBeneath, PathFd,
+        RestrictionStatus, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
     };
 
     use crate::{
@@ -135,10 +135,10 @@ mod imp {
                     LANDLOCK_CREATE_RULESET_VERSION,
                 )
             };
-            if abi < 0 {
+            if abi < 3 {
                 return Err(PrepareFault::new(
                     ChildFault::Landlock,
-                    "landlock is not available on this kernel (needs Linux 5.13+); schema v3 refuses the service rather than run it unconfined",
+                    "landlock ABI 3 or newer is required for truncation protection (normally Linux 6.2+); the service is refused rather than run with an incomplete filesystem sandbox",
                 ));
             }
 
@@ -159,11 +159,11 @@ mod imp {
         fn build_ruleset_raw(
             &self,
         ) -> Result<landlock::RulesetCreated, landlock::RulesetError> {
-            let abi = ABI::V1;
-            let ro_access = AccessFs::from_read(abi);
-            let rw_access = AccessFs::from_all(abi);
+            let ro_access = AccessFs::from_read(ABI::V1);
+            let rw_access = AccessFs::from_all(ABI::V1) | AccessFs::Truncate;
             let mut ruleset = Ruleset::default()
-                .handle_access(AccessFs::from_all(abi))?
+                .set_compatibility(CompatLevel::HardRequirement)
+                .handle_access(rw_access)?
                 .create()?;
             for fd in &self.ro {
                 ruleset = ruleset.add_rule(PathBeneath::new(fd, ro_access))?;

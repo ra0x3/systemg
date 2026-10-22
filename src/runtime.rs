@@ -328,7 +328,8 @@ pub fn quarantine_corrupt(path: &std::path::Path) -> std::io::Result<PathBuf> {
 ///
 /// Operates on the metadata of an already-open descriptor (`fstat`) so the check
 /// and the subsequent read cannot straddle a path swap. Rejects files that are
-/// group/other-writable or owned by a different non-root user.
+/// group/other-writable or owned by anyone other than the effective supervisor
+/// user or root. A root supervisor therefore requires root-owned configs.
 #[cfg(unix)]
 fn validate_trusted_metadata(
     metadata: &std::fs::Metadata,
@@ -354,9 +355,9 @@ fn validate_trusted_metadata(
         ));
     }
 
-    let owner = unsafe { libc::getuid() };
+    let owner = unsafe { libc::geteuid() };
     let file_owner = metadata.uid();
-    if file_owner != owner && file_owner != 0 && owner != 0 {
+    if file_owner != owner && file_owner != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
@@ -377,6 +378,8 @@ fn validate_trusted_metadata(
 /// resulting descriptor with `fstat` closes the check-to-use race that a
 /// stat-then-reopen sequence would leave open ([CWE-367]/[CWE-59]): the file
 /// that is validated is exactly the file that is read.
+/// `O_NONBLOCK` prevents a FIFO from blocking the open before the regular-file
+/// check; it does not change reads from accepted regular files.
 ///
 /// [CWE-367]: https://cwe.mitre.org/data/definitions/367.html
 /// [CWE-59]: https://cwe.mitre.org/data/definitions/59.html
@@ -386,7 +389,7 @@ pub fn open_trusted_config(path: &std::path::Path) -> std::io::Result<std::fs::F
 
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     validate_trusted_metadata(&file.metadata()?, path)?;
     Ok(file)

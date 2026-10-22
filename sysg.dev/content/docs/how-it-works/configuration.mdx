@@ -711,7 +711,7 @@ Per-service kernel isolation. Linux only, and requires a root supervisor.
 |-------|----------|-------|
 | `network` | Yes | `CLONE_NEWNET` |
 | `mount` | Yes | `CLONE_NEWNS` |
-| `pid` | Partly | `CLONE_NEWPID` takes effect for processes the service forks **after** it starts, not for the service process itself |
+| `pid` | Refused | `true` is unsupported in both schema versions; sysg cannot yet place the service process inside a PID namespace |
 | `user` | Yes | `CLONE_NEWUSER` |
 | `seccomp` | Yes | Compiled and applied before `exec` |
 | `landlock` | Yes | Filesystem confinement; see [Sandboxing](/docs/kernel-mode/sandboxing) |
@@ -721,7 +721,8 @@ Per-service kernel isolation. Linux only, and requires a root supervisor.
 | `private_tmp` | No | Accepted by the schema, never applied |
 
 <Info>
-  Under schema **version 3**, requesting an unenforceable key **refuses the
+  `pid: true` is refused under both schema versions. For the other
+  unenforceable keys, schema **version 3** **refuses the
   service** rather than running it unprotected — a security control you asked
   for and did not get is a failure, not a warning. Under version 2 the same
   request starts the service and logs a warning. Prefer `version: "3"` for
@@ -729,10 +730,10 @@ Per-service kernel isolation. Linux only, and requires a root supervisor.
 </Info>
 
 <Warning>
-  A namespace the kernel refuses to grant (`EPERM`/`EINVAL`, the usual case
-  inside an unprivileged container) is skipped so the service still starts. Do
-  not assume `isolation` is in force because the service came up — confirm it on
-  the host you actually deploy to.
+  A namespace the kernel refuses to grant refuses the service under both
+  schema versions, including `EPERM`/`EINVAL` inside a restricted container.
+  Grant the required kernel permissions or remove the isolation request;
+  sysg does not fall back to launching in the original namespace.
 </Warning>
 
 ### Environment object
@@ -746,6 +747,21 @@ Environment sources and inline overrides merged into the service process environ
 | `inherit_env` | bool | Let a privilege-dropped service inherit the supervisor's environment instead of starting clean (default `false`) |
 | `clear_session_vars` | bool | Strip session-scoped variables like `SSH_*` and `DISPLAY` (default `true`) |
 | `strip` | array | Additional variable names to remove from the service environment |
+
+Environment resolution is local to each load: project fields use the caller's
+environment plus that project's declarations; each service uses its own merged
+project/service declarations. A service cannot set variables for a sibling or
+change the supervisor's environment, even when validation fails. A service env
+file overrides the project env file; inline variables override file values.
+Interpolation operates on YAML values, so variable contents cannot add YAML keys.
+
+Env files accept `KEY=value`, blank lines, and `#` comments. Double-quoted values
+must have a closing quote. Invalid assignments, empty names, and NUL bytes refuse
+the load or launch; diagnostics do not print variable values. Helpers and service
+launches validate env files again before applying any assignments.
+Dynamic children receive the authorizing unit's explicit environment, not
+assignments from unrelated units. Privilege-dropped dynamic children retain their
+clean-environment policy and use the safe default PATH unless explicitly configured.
 
 ### Hooks object
 

@@ -102,6 +102,12 @@ pub struct HandoffLogPipe {
     /// Unterminated bytes already consumed from the pipe.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending: Vec<u8>,
+    /// Bytes discarded from an oversized unterminated line.
+    #[serde(default)]
+    pub pending_dropped: u64,
+    /// Whether the last consumed payload byte was a carriage return.
+    #[serde(default)]
+    pub pending_trailing_cr: bool,
     /// Rotation and sink policy used by the canonical log writer.
     pub settings: EffectiveLogsConfig,
 }

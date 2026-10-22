@@ -30,7 +30,11 @@ services:
 Under `version: "3"`:
 
 - **`isolation.landlock: { ro_paths, rw_paths }`** — a Landlock filesystem
-  sandbox (Linux 5.13+). Paths not listed become inaccessible.
+  sandbox requiring ABI 3 or newer (normally Linux 6.2+, including supported
+  backports). Truncation is granted only under `rw_paths`; listing a path in
+  `ro_paths` does not grant it. The remaining handled filesystem rights retain their
+  original ABI 1 policy. Landlock does not revoke access through descriptors
+  opened before confinement.
 - **`isolation.seccomp: "baseline-v1"`** — a frozen, deny-by-default syscall
   allowlist; unlisted syscalls return `EPERM`.
 
@@ -60,22 +64,26 @@ stricter policy will ship as `baseline-v2`, never as a silent edit.
 
 ## Keys that do not enforce
 
+`isolation.pid: true` refuses the service under both schema versions. PID
+namespace lifecycle support is not implemented; sysg does not launch the
+service in the host PID namespace while claiming it is isolated.
+
 `isolation.apparmor_profile`, `isolation.selinux_context`,
 `isolation.private_devices`, and `isolation.private_tmp` are accepted by the
-schema but **run the service unenforced**. Treat them as documentation, not
-protection.
+schema but cannot be enforced. Schema version 3 refuses services that request
+them; version 2 runs the service with a warning.
 
 <Warning>
-**Deprecation window.** Each of these keys emits
-[SG0721](/reference/dialog/codes#sg0721) at service start. A future release
-refuses them instead of running unprotected, behind a manifest schema bump.
-Remove the keys or plan for the refusal.
+Each of these keys emits [SG0721](/reference/dialog/codes#sg0721) at service
+start. A version 2 warning is not protection. Remove the keys only if running
+without the requested isolation is acceptable.
 </Warning>
 
 ## Diagnostics
 
 - [SG0721](/reference/dialog/codes#sg0721) — a security key was accepted
-  but cannot be enforced; the service runs unprotected
+  but cannot be enforced; PID isolation is refused under both schema versions,
+  and other unsupported keys are refused under version 3
 - [SG0722](/reference/dialog/codes#sg0722) — seccomp filter could not be
   built, compiled, or applied; service refused
 - [SG0723](/reference/dialog/codes#sg0723) — `no_new_privs` could not be

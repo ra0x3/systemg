@@ -4,7 +4,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::{self, File},
-    io::{BufReader, ErrorKind, Read},
+    io::{self, BufReader, ErrorKind, Read},
     num::NonZeroUsize,
     os::unix::process::{CommandExt, ExitStatusExt},
     path::{Path, PathBuf},
@@ -292,53 +292,17 @@ fn collect_service_env(
     env: &Option<EnvConfig>,
     project_root: &Path,
     service_name: &str,
-) -> HashMap<String, String> {
-    let mut resolved = HashMap::new();
-
-    if let Some(env_config) = env {
-        if let Some(file_path) = env_config.path(project_root) {
-            match fs::read_to_string(&file_path) {
-                Ok(content) => {
-                    for raw_line in content.lines() {
-                        let line = raw_line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-
-                        if let Some((key, value)) = line.split_once('=') {
-                            let key = key.trim().to_string();
-                            let mut value = value.trim().to_string();
-
-                            if value.starts_with('"')
-                                && value.ends_with('"')
-                                && value.len() >= 2
-                            {
-                                value = value[1..value.len() - 1].to_string();
-                            }
-
-                            resolved.entry(key).or_insert(value);
-                        } else {
-                            warn!(
-                                "Ignoring malformed line in env file for '{}': {}",
-                                service_name, line
-                            );
-                        }
-                    }
-                }
-                Err(err) => {
-                    error!("Failed to read env file for '{}': {}", service_name, err);
-                }
-            }
-        }
-
-        if let Some(vars) = &env_config.vars {
-            for (key, value) in vars {
-                resolved.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
-    resolved
+) -> io::Result<HashMap<String, String>> {
+    env.as_ref()
+        .map(|env| env.resolve(project_root))
+        .transpose()
+        .map(Option::unwrap_or_default)
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("invalid environment for service '{service_name}': {err}"),
+            )
+        })
 }
 
 /// Wrapper for service entries to make them XML-safe
@@ -534,6 +498,8 @@ pub(crate) struct PersistedSpawnChild {
     pub(crate) command: String,
     #[serde(with = "systemtime_serde")]
     pub(crate) started_at: SystemTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) generation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) ttl_secs: Option<u64>,
     pub(crate) depth: usize,
@@ -1174,6 +1140,27 @@ impl PidFile {
         Ok(true)
     }
 
+    /// Clears a PID row only when its persisted PID and birth still match this run.
+    /// Group and generation metadata remain available for descendant cleanup.
+    pub(crate) fn clear_pid_if_generation(
+        &mut self,
+        service: &str,
+        pid: u32,
+        expected_start: u64,
+    ) -> Result<bool, PidFileError> {
+        let _lock = self.acquire_lock()?;
+        let path = self.path();
+        self.reload_into(&path)?;
+        if self.services.get(service).copied() != Some(pid)
+            || self.service_starts.get(service).copied() != Some(expected_start)
+        {
+            return Ok(false);
+        }
+        self.services.remove(service);
+        self.write_at(&path)?;
+        Ok(true)
+    }
+
     /// Atomically removes service.
     pub fn remove(&mut self, service: &str) -> Result<(), PidFileError> {
         let _lock = self.acquire_lock()?;
@@ -1291,44 +1278,8 @@ impl PidFile {
         // later sweep can claim.
         self.retire_generations_for(service, None);
 
-        if let Some(root_pid) = removed_pid.or_else(|| {
-            removed_group
-                .filter(|pgid| *pgid > 0)
-                .map(|pgid| pgid as u32)
-        }) {
-            if self.parent_map.contains_key(&root_pid)
-                || self.children_map.contains_key(&root_pid)
-                || self.spawn_metadata.contains_key(&root_pid)
-            {
-                self.remove_spawn_subtree_in_memory(root_pid);
-            }
-
-            if let Some(children) = self.children_map.remove(&root_pid) {
-                for child in children {
-                    self.remove_spawn_subtree_in_memory(child);
-                }
-            }
-
-            let stale_roots: Vec<u32> = self
-                .spawn_metadata
-                .values()
-                .filter(|meta| meta.parent_pid == root_pid)
-                .map(|meta| meta.pid)
-                .collect();
-            for stale_pid in stale_roots {
-                self.remove_spawn_subtree_in_memory(stale_pid);
-            }
-        }
-
         let _ = self.service_groups.remove(service);
         let _ = self.service_starts.remove(service);
-
-        if self.services.is_empty() && self.service_groups.is_empty() {
-            self.parent_map.clear();
-            self.children_map.clear();
-            self.spawn_depth.clear();
-            self.spawn_metadata.clear();
-        }
 
         self.write_at(path)
     }
@@ -1367,6 +1318,7 @@ impl PidFile {
     pub(crate) fn record_spawn_exit(
         &mut self,
         child_pid: u32,
+        generation: &str,
         exit: SpawnedExit,
     ) -> Result<(), PidFileError> {
         let _lock = self.acquire_lock()?;
@@ -1374,7 +1326,9 @@ impl PidFile {
         let path = self.path();
         self.reload_into(&path)?;
 
-        if let Some(metadata) = self.spawn_metadata.get_mut(&child_pid) {
+        if let Some(metadata) = self.spawn_metadata.get_mut(&child_pid)
+            && metadata.generation.as_deref() == Some(generation)
+        {
             metadata.last_exit = Some(exit.clone());
         }
 
@@ -1383,10 +1337,33 @@ impl PidFile {
 
     /// Atomically removes a spawned child process.
     pub fn remove_spawn(&mut self, child_pid: u32) -> Result<(), PidFileError> {
+        self.remove_spawn_matching(child_pid, None).map(|_| ())
+    }
+
+    /// Retires only the durable row belonging to the completed cleanup generation.
+    pub(crate) fn remove_spawn_generation(
+        &mut self,
+        child_pid: u32,
+        generation: &str,
+    ) -> Result<bool, PidFileError> {
+        self.remove_spawn_matching(child_pid, Some(generation))
+    }
+
+    fn remove_spawn_matching(
+        &mut self,
+        child_pid: u32,
+        generation: Option<&str>,
+    ) -> Result<bool, PidFileError> {
         let _lock = self.acquire_lock()?;
 
         let path = self.path();
         self.reload_into(&path)?;
+
+        if let Some(generation) = generation
+            && self.spawn_metadata.get(&child_pid).is_none_or(|row| row.generation.as_deref() != Some(generation))
+        {
+            return Ok(false);
+        }
 
         if let Some(parent_pid) = self.parent_map.remove(&child_pid)
             && let Some(children) = self.children_map.get_mut(&parent_pid)
@@ -1399,7 +1376,8 @@ impl PidFile {
         self.spawn_depth.remove(&child_pid);
         self.spawn_metadata.remove(&child_pid);
 
-        self.write_at(&path)
+        self.write_at(&path)?;
+        Ok(true)
     }
 
     /// Removes spawn subtree.
@@ -2016,6 +1994,7 @@ mod pidfile_tests {
                         name: "child".into(),
                         command: "cmd".into(),
                         started_at: SystemTime::now(),
+                        generation: None,
                         ttl_secs: None,
                         depth: 1,
                         parent_pid: 1,
@@ -2032,6 +2011,7 @@ mod pidfile_tests {
                         name: "grandchild".into(),
                         command: "cmd".into(),
                         started_at: SystemTime::now(),
+                        generation: None,
                         ttl_secs: None,
                         depth: 2,
                         parent_pid: 2,
@@ -2065,8 +2045,8 @@ mod pidfile_tests {
     }
 
     #[test]
-    /// Removes service prunes spawn metadata for service pid.
-    fn remove_service_prunes_spawn_metadata_for_service_pid() {
+    /// Removing a service leaves dynamic ownership for verified cleanup.
+    fn remove_service_retains_spawn_metadata_until_cleanup() {
         let _guard = crate::test_utils::env_lock();
         let temp = tempdir().expect("tempdir");
         let home = temp.path().join("home");
@@ -2097,6 +2077,7 @@ mod pidfile_tests {
                         name: "child".into(),
                         command: "cmd".into(),
                         started_at: SystemTime::now(),
+                        generation: None,
                         ttl_secs: None,
                         depth: 1,
                         parent_pid: 10,
@@ -2113,6 +2094,7 @@ mod pidfile_tests {
                         name: "grandchild".into(),
                         command: "cmd".into(),
                         started_at: SystemTime::now(),
+                        generation: None,
                         ttl_secs: None,
                         depth: 2,
                         parent_pid: 11,
@@ -2131,14 +2113,14 @@ mod pidfile_tests {
         assert!(removed.is_ok());
         assert!(!loaded.services.contains_key("svc"));
         assert!(!loaded.service_groups.contains_key("svc"));
-        assert!(!loaded.parent_map.contains_key(&11));
-        assert!(!loaded.parent_map.contains_key(&12));
-        assert!(!loaded.children_map.contains_key(&10));
-        assert!(!loaded.children_map.contains_key(&11));
-        assert!(!loaded.spawn_depth.contains_key(&11));
-        assert!(!loaded.spawn_depth.contains_key(&12));
-        assert!(!loaded.spawn_metadata.contains_key(&11));
-        assert!(!loaded.spawn_metadata.contains_key(&12));
+        assert!(loaded.parent_map.contains_key(&11));
+        assert!(loaded.parent_map.contains_key(&12));
+        assert!(loaded.children_map.contains_key(&10));
+        assert!(loaded.children_map.contains_key(&11));
+        assert!(loaded.spawn_depth.contains_key(&11));
+        assert!(loaded.spawn_depth.contains_key(&12));
+        assert!(loaded.spawn_metadata.contains_key(&11));
+        assert!(loaded.spawn_metadata.contains_key(&12));
 
         unsafe {
             if let Some(home) = original_home {
@@ -3023,7 +3005,14 @@ fn run_hook(
     cmd.arg(SHELL_COMMAND_FLAG).arg(&action.command);
     cmd.current_dir(project_root);
 
-    for (key, value) in collect_service_env(env, project_root, service_name) {
+    let resolved = match collect_service_env(env, project_root, service_name) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            error!("Refusing {hook} hook for '{service_name}': {err}");
+            return;
+        }
+    };
+    for (key, value) in resolved {
         cmd.env(key, value);
     }
     for key in HookContext::VARS {
@@ -3662,8 +3651,13 @@ pub enum CronLaunch {
     /// The unit's skip flag or condition selected it, so no process ran and the
     /// run is not recorded.
     Skipped,
-    /// The unit is up as this pid, whose exit is the run's verdict.
-    Started(u32),
+    /// The unit is up as this captured process generation.
+    Started {
+        /// PID launched or adopted for this execution.
+        pid: u32,
+        /// Registered birth captured before onstart hooks can outlive the process.
+        process_start: Option<u64>,
+    },
 }
 
 /// Which records a stop write may land on.
@@ -4204,12 +4198,16 @@ impl Daemon {
     }
 
     /// Applies one service's resolved environment to a child command.
-    fn set_service_env(&self, command: &mut Command, service_name: &str) {
+    fn set_service_env(
+        &self,
+        command: &mut Command,
+        service_name: &str,
+    ) -> io::Result<()> {
         let config = self.cfg();
         let service = config.services.get(service_name);
         let env = service.and_then(|service| service.env.as_ref());
         for (key, value) in
-            collect_service_env(&env.cloned(), &self.project_root, service_name)
+            collect_service_env(&env.cloned(), &self.project_root, service_name)?
         {
             command.env(key, value);
         }
@@ -4223,6 +4221,7 @@ impl Daemon {
             command.env_remove(key);
         }
         command.env("SYSG_SERVICE_NAME", service_name);
+        Ok(())
     }
 
     /// Creates context snapshot.
@@ -4821,6 +4820,109 @@ impl Daemon {
                     root_pid, service_name
                 ),
             ),
+        })
+    }
+
+    /// Tears down a dynamic generation without stealing its waiter's exit status.
+    pub(crate) fn terminate_spawn_generation(
+        service_name: &str,
+        root_pid: u32,
+        targets: &Mutex<HashMap<u32, u64>>,
+    ) -> Result<(), ProcessManagerError> {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        let failure = |reason: &str| ProcessManagerError::ServiceStopError {
+            service: service_name.to_string(),
+            source: std::io::Error::other(reason),
+        };
+        for signal in [Signal::SIGTERM, Signal::SIGKILL] {
+            for _ in 0..PROCESS_READY_CHECKS {
+                let known = targets.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                let mut members = Self::try_collect_process_group_members(root_pid as libc::pid_t)
+                    .ok_or_else(|| failure("Cannot verify dynamic process group"))?;
+                members.extend(Self::try_collect_session_members(root_pid as libc::pid_t)
+                    .ok_or_else(|| failure("Cannot verify dynamic process session"))?);
+                let anchors: Vec<_> = known.iter()
+                    .filter(|(pid, birth)| process_start_time(**pid) == Some(**birth))
+                    .map(|(&pid, &birth)| (pid, birth))
+                    .collect();
+                let group_anchor = anchors.iter().find(|(pid, _)| {
+                    Self::process_group_for_pid(*pid) == Some(root_pid as libc::pid_t)
+                        || Self::session_for_pid(*pid) == Some(root_pid as libc::pid_t)
+                });
+                let mut discovered = HashMap::new();
+                for (pid, birth) in &anchors {
+                    let descendants = Self::collect_descendants(*pid);
+                    if process_start_time(*pid) != Some(*birth) {
+                        continue;
+                    }
+                    for descendant in descendants {
+                        if let Some(birth) = process_start_time(descendant) {
+                            discovered.insert(descendant, birth);
+                        }
+                    }
+                }
+                if group_anchor.is_some_and(|(pid, birth)| process_start_time(*pid) == Some(*birth)) {
+                    for pid in &members {
+                        if let Some(birth) = process_start_time(*pid) {
+                            discovered.insert(*pid, birth);
+                        }
+                    }
+                }
+                if anchors.iter().any(|(pid, birth)| process_start_time(*pid) == Some(*birth)) {
+                    let mut retained = targets.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for (pid, birth) in discovered {
+                        retained.entry(pid).or_insert(birth);
+                    }
+                }
+                let known = targets.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                let mut live = Vec::new();
+                let mut uncertain = false;
+                for (&pid, &birth) in &known {
+                    if !Self::pid_is_alive(pid) {
+                        continue;
+                    }
+                    match process_start_time(pid) {
+                        Some(actual) if actual == birth => live.push((pid, birth)),
+                        Some(_) => {}
+                        None => uncertain = true,
+                    }
+                }
+                if live.is_empty() && members.is_empty() && !uncertain {
+                    return Ok(());
+                }
+                for (pid, birth) in live {
+                    if process_start_time(pid) == Some(birth) {
+                        match kill(Pid::from_raw(pid as i32), signal) {
+                            Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                            Err(err) => return Err(failure(&format!("Cannot signal dynamic child: {err}"))),
+                        }
+                    }
+                }
+                thread::sleep(PROCESS_CHECK_INTERVAL);
+            }
+        }
+        Err(failure("Dynamic process generation is still live or cannot be verified"))
+    }
+
+    /// Confirms intentional orphaning has no remaining process ownership to transfer.
+    pub(crate) fn spawn_generation_is_empty(
+        root_pid: u32,
+        targets: &Mutex<HashMap<u32, u64>>,
+    ) -> bool {
+        let empty_group = Self::try_collect_process_group_members(root_pid as libc::pid_t)
+            .is_some_and(|members| members.is_empty());
+        let empty_session = Self::try_collect_session_members(root_pid as libc::pid_t)
+            .is_some_and(|members| members.is_empty());
+        let known = targets.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        empty_group && empty_session && known.iter().all(|(&pid, &birth)| {
+            !Self::pid_is_alive(pid)
+                || process_start_time(pid).is_some_and(|actual| actual != birth)
         })
     }
 
@@ -5779,7 +5881,7 @@ impl Daemon {
         }
 
         let mut merged_env =
-            collect_service_env(&service_config.env, &working_dir, service_name);
+            collect_service_env(&service_config.env, &working_dir, service_name)?;
 
         let mut privilege = crate::privilege::PrivilegeContext::from_service(
             service_name,
@@ -5915,22 +6017,26 @@ impl Daemon {
 
                 let log_result = if pipe_stderr {
                     if let Some(err) = stderr {
-                        use std::io::{self, BufRead, BufReader, Write};
+                        use std::io::{self, Write};
 
                         let service_name_clone = service_name.to_string();
                         thread::Builder::new()
                             .name(SERVICE_STDERR_THREAD.into())
                             .spawn(move || {
-                                let reader = BufReader::new(err);
                                 let mut stdout = io::stdout();
-                                for line in reader.lines().map_while(Result::ok) {
-                                    let _ = writeln!(
-                                        stdout,
-                                        "[{}:stderr] {}",
-                                        service_name_clone, line
-                                    );
-                                    let _ = stdout.flush();
-                                }
+                                let _ = crate::logs::read_bounded_log_lines(
+                                    err,
+                                    |line| {
+                                        let _ = writeln!(
+                                            stdout,
+                                            "[{}:stderr] {}",
+                                            service_name_clone,
+                                            String::from_utf8_lossy(&line)
+                                        );
+                                        let _ = stdout.flush();
+                                        Ok(())
+                                    },
+                                );
                             })
                             .map(|_| ())
                     } else {
@@ -6316,7 +6422,7 @@ impl Daemon {
         cmd.arg(SHELL_COMMAND_FLAG).arg(skip_command);
         cmd.current_dir(&self.project_root);
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        self.set_service_env(&mut cmd, service_name);
+        self.set_service_env(&mut cmd, service_name)?;
 
         let mut child = spawn_session(&mut cmd).map_err(|source| {
             ProcessManagerError::ServiceStartError {
@@ -6985,7 +7091,7 @@ impl Daemon {
     /// `EPERM` counts as alive: refusing the signal is the kernel saying the
     /// process exists and is not ours to touch, and reading that as death lets
     /// every caller treat a live process as reclaimable.
-    fn pid_is_alive(pid: u32) -> bool {
+    pub(crate) fn pid_is_alive(pid: u32) -> bool {
         let target = pid as libc::pid_t;
         if unsafe { libc::kill(target, 0) } != 0
             && std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
@@ -7917,7 +8023,7 @@ impl Daemon {
     ) -> Result<(), ProcessManagerError> {
         use std::{
             fs::OpenOptions,
-            io::{BufRead, BufReader, Write},
+            io::Write,
             process::Stdio,
             sync::{Arc, Mutex},
             thread,
@@ -7935,7 +8041,7 @@ impl Daemon {
             .current_dir(&self.project_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        self.set_service_env(&mut cmd, service_name);
+        self.set_service_env(&mut cmd, service_name)?;
         let mut child = spawn_session(&mut cmd).map_err(|source| {
             ProcessManagerError::ServiceStartError {
                 service: service_name.to_string(),
@@ -7993,8 +8099,8 @@ impl Daemon {
             match thread::Builder::new()
                 .name(OUTPUT_STDOUT_THREAD.into())
                 .spawn(move || {
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines().map_while(Result::ok) {
+                    let _ = crate::logs::read_bounded_log_lines(stdout, |line| {
+                        let line = String::from_utf8_lossy(&line);
                         info!("[{service_label} pre-start] {line}");
                         push_tail(&tail, &line);
                         for sink in [&stdout_sink, &stderr_sink] {
@@ -8004,7 +8110,8 @@ impl Daemon {
                                 let _ = writeln!(file, "[pre_start] {line}");
                             }
                         }
-                    }
+                        Ok(())
+                    });
                 }) {
                 Ok(handle) => Some(handle),
                 Err(source) => {
@@ -8032,8 +8139,8 @@ impl Daemon {
             match thread::Builder::new()
                 .name(OUTPUT_STDERR_THREAD.into())
                 .spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines().map_while(Result::ok) {
+                    let _ = crate::logs::read_bounded_log_lines(stderr, |line| {
+                        let line = String::from_utf8_lossy(&line);
                         warn!("[{service_label} pre-start] {line}");
                         push_tail(&tail, &line);
                         for sink in [&stdout_sink, &stderr_sink] {
@@ -8043,7 +8150,8 @@ impl Daemon {
                                 let _ = writeln!(file, "[pre_start] {line}");
                             }
                         }
-                    }
+                        Ok(())
+                    });
                 }) {
                 Ok(handle) => Some(handle),
                 Err(source) => {
@@ -8613,7 +8721,7 @@ impl Daemon {
         let mut child = Command::new(DEFAULT_SHELL);
         child.arg(SHELL_COMMAND_FLAG).arg(command);
         child.current_dir(&self.project_root);
-        self.set_service_env(&mut child, service_name);
+        self.set_service_env(&mut child, service_name)?;
         child.stdout(Stdio::null());
         child.stderr(Stdio::null());
         let mut child = spawn_session(&mut child)?;
@@ -8822,7 +8930,7 @@ impl Daemon {
         cmd.env("SYSG_ACTIVE_SLOT", active_slot);
         cmd.env("SYSG_CANDIDATE_SLOT", candidate_slot);
         cmd.env("SYSG_SERVICE_NAME", service_name);
-        self.set_service_env(&mut cmd, service_name);
+        self.set_service_env(&mut cmd, service_name)?;
 
         let epoch = self.boot_epoch.load(Ordering::SeqCst);
         let output = output_with_timeout(
@@ -9039,12 +9147,9 @@ impl Daemon {
     /// Everything before the launch still runs: skip conditions, adoption of a
     /// run that is somehow still alive, pre-start. Only the waiting is gone.
     ///
-    /// Returns the pid the launch produced, never a re-read of the record:
-    /// between the launch and a read the unit can be replaced, and the
-    /// completion wait would then judge this run by another generation's exit.
-    /// The adoption branch is the exception, having launched nothing — an
-    /// earlier run is still alive, and the pid it reads was recorded under the
-    /// pid file's lock a moment earlier.
+    /// Returns the launched pid and its registered birth captured before hooks,
+    /// while the startup claim still excludes another launch. Adoption captures
+    /// the recorded PID and birth together under the PID file's lock.
     ///
     /// `onstart` fires as soon as the unit is up, because a cron unit has no
     /// readiness point to wait for: its next event is its exit.
@@ -9059,8 +9164,11 @@ impl Daemon {
             if matches!(state, ServiceReadyState::Skipped) {
                 return Ok(CronLaunch::Skipped);
             }
-            let adopted = self.pid_file.lock()?.pid_for(name);
-            let Some(pid) = adopted else {
+            let adopted = {
+                let pids = self.pid_file.lock()?;
+                pids.pid_for(name).map(|pid| (pid, pids.start_for(name)))
+            };
+            let Some((pid, process_start)) = adopted else {
                 return Err(ProcessManagerError::ServiceStartError {
                     service: name.to_string(),
                     source: std::io::Error::other(
@@ -9068,7 +9176,7 @@ impl Daemon {
                     ),
                 });
             };
-            return Ok(CronLaunch::Started(pid));
+            return Ok(CronLaunch::Started { pid, process_start });
         }
 
         let ctx = self.context();
@@ -9076,6 +9184,14 @@ impl Daemon {
         let log_settings = service.effective_logs(&config.logs);
 
         let pid = Self::launch_and_register(&ctx, name, service, log_settings)?;
+        let process_start = {
+            let pids = self.pid_file.lock()?;
+            if pids.pid_for(name) == Some(pid) {
+                pids.start_for(name)
+            } else {
+                None
+            }
+        };
         self.mark_running(name, pid)?;
 
         if let Some(action) = service.hooks.as_ref().and_then(|cfg| cfg.onstart.as_ref())
@@ -9091,7 +9207,7 @@ impl Daemon {
             );
         }
 
-        Ok(CronLaunch::Started(pid))
+        Ok(CronLaunch::Started { pid, process_start })
     }
 
     /// Starts a service through the shared startup path, then performs
@@ -12005,7 +12121,7 @@ mod tests {
                 .expect("a cron launch reports the process it started");
             let elapsed = started.elapsed();
 
-            let CronLaunch::Started(pid) = launch else {
+            let CronLaunch::Started { pid, .. } = launch else {
                 panic!("expected a launched cron unit, got {launch:?}");
             };
             assert!(

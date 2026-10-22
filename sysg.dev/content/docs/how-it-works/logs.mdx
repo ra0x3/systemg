@@ -29,6 +29,20 @@ threads, then writes both streams through one per-service writer into
 `{service}.log`. `sysg logs` reads that stored file; it does not attach to the
 original process streams.
 
+Capture retains at most 16 KiB of each output line, even before a newline
+arrives. Longer lines receive a truncation marker with the discarded byte count.
+This limit also applies to forwarded stderr, pre-start output, and spawned-child
+console echo; spawned-child raw log files still receive the original byte stream.
+
+Canonical log writers use bounded queues (64 messages per writer and an 8 MiB
+shared queued-line budget, including lines being written). Each reader also has
+separately bounded partial-line, read-chunk, and pending-message buffers; total
+capture memory therefore scales with the number of streams. When writers fall
+behind, capture applies backpressure
+instead of accumulating output in supervisor memory, so a slow log destination
+can slow a service's writes. Live upgrade is declined if capture cannot pause and
+flush within its handoff deadline; capture resumes after that failure.
+
 > **Info:** The default service log is stacked in capture order. Each line gets
 > a systemg UTC capture timestamp plus a stream label, such as `stdout` or
 > `stderr`, so `sysg logs --kind stderr` can filter lines without needing

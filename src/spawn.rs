@@ -2,7 +2,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::AtomicBool,
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -234,11 +237,16 @@ pub struct SpawnAuthorization {
     pub depth: usize,
     /// Key of the spawn tree's root unit, if identifiable. See [`unit_key`].
     pub root_service: Option<String>,
+    /// Parent-exit policy retained even after the active tree is detached.
+    pub termination_policy: TerminationPolicy,
+    parent_start: Option<u64>,
+    parent_registration: Option<u64>,
 }
 
 /// Manages dynamic spawning for all services.
 #[derive(Clone)]
 pub struct DynamicSpawnManager {
+    cleanup: Arc<Mutex<CleanupState>>,
     /// Map from service name to its spawn tree.
     spawn_trees: Arc<Mutex<HashMap<String, SpawnTree>>>,
     /// Map from service PID to service name.
@@ -251,10 +259,65 @@ pub struct DynamicSpawnManager {
     spawn_timestamps: Arc<Mutex<HashMap<u32, Vec<Instant>>>>,
 }
 
+#[derive(Default)]
+struct CleanupState {
+    next: u64,
+    births: HashMap<u32, SpawnBirth>,
+    pending: HashMap<u64, CleanupEntry>,
+}
+
+struct SpawnBirth {
+    started_at: SystemTime,
+    token: u64,
+    process_start: Option<u64>,
+    wait_done: Arc<AtomicBool>,
+    parent_token: Option<u64>,
+}
+
+struct CleanupEntry {
+    child: SpawnedChild,
+    pid_file: Arc<Mutex<crate::daemon::PidFile>>,
+    terminate: bool,
+    claimed: bool,
+    targets: Arc<Mutex<HashMap<u32, u64>>>,
+    wait_done: Arc<AtomicBool>,
+    unwaited: Arc<Mutex<Option<std::process::Child>>>,
+    parent_token: Option<u64>,
+}
+
+/// Exclusive execution claim; dropping it preserves the unfinished cleanup.
+pub(crate) struct SpawnCleanup {
+    state: Arc<Mutex<CleanupState>>,
+    token: u64,
+    pub child: SpawnedChild,
+    pub terminate: bool,
+    pub pid_file: Arc<Mutex<crate::daemon::PidFile>>,
+    pub targets: Arc<Mutex<HashMap<u32, u64>>>,
+    pub wait_done: Arc<AtomicBool>,
+    pub unwaited: Arc<Mutex<Option<std::process::Child>>>,
+    pub generation: String,
+}
+
+impl SpawnCleanup {
+    /// Releases ownership only after the matching durable record is retired.
+    pub fn finish(self) {
+        lock_recover(&self.state).pending.remove(&self.token);
+    }
+}
+
+impl Drop for SpawnCleanup {
+    fn drop(&mut self) {
+        if let Some(entry) = lock_recover(&self.state).pending.get_mut(&self.token) {
+            entry.claimed = false;
+        }
+    }
+}
+
 impl DynamicSpawnManager {
     /// Creates a new spawn manager.
     pub fn new() -> Self {
         Self {
+            cleanup: Arc::new(Mutex::new(CleanupState::default())),
             spawn_trees: Arc::new(Mutex::new(HashMap::new())),
             service_pids: Arc::new(Mutex::new(HashMap::new())),
             children_by_parent: Arc::new(Mutex::new(HashMap::new())),
@@ -263,15 +326,185 @@ impl DynamicSpawnManager {
         }
     }
 
-    /// Returns the number of live dynamic children whose wait/log ownership
+    /// Returns the number of dynamic children whose wait/log or cleanup ownership
     /// cannot yet be transferred by the supervisor handoff protocol.
     pub fn active_child_count(&self) -> usize {
-        lock_recover(&self.children_by_pid)
-            .values()
-            .filter(|child| child.last_exit.is_none() && child_is_running(child.pid))
-            .count()
+        let cleanup = lock_recover(&self.cleanup);
+        cleanup.pending.len()
+            + lock_recover(&self.children_by_pid)
+                .values()
+                .filter(|child| child.last_exit.is_none())
+                .count()
     }
 
+    /// Atomically transfers a subtree into retained cleanup ownership.
+    pub(crate) fn begin_subtree_cleanup(
+        &self,
+        root_pid: u32,
+        started_at: SystemTime,
+        pid_file: Arc<Mutex<crate::daemon::PidFile>>,
+    ) {
+        self.begin_subtree_cleanup_with_child(root_pid, started_at, pid_file, None);
+    }
+
+    /// Also retains the child handle if a waiter could not be installed.
+    pub(crate) fn begin_subtree_cleanup_with_child(
+        &self,
+        root_pid: u32,
+        started_at: SystemTime,
+        pid_file: Arc<Mutex<crate::daemon::PidFile>>,
+        unwaited: Option<std::process::Child>,
+    ) {
+        let mut cleanup = lock_recover(&self.cleanup);
+        if lock_recover(&self.children_by_pid)
+            .get(&root_pid)
+            .is_some_and(|child| child.started_at == started_at)
+        {
+            let removed = self.remove_subtree(root_pid);
+            Self::retain_cleanup(&mut cleanup, removed, pid_file, true);
+        }
+        let mut pending_roots: Vec<_> = cleanup.pending.iter()
+            .filter(|(_, entry)| {
+                entry.child.pid == root_pid && entry.child.started_at == started_at
+            })
+            .map(|(&token, _)| token)
+            .collect();
+        let mut visited = std::collections::HashSet::new();
+        while let Some(token) = pending_roots.pop() {
+            if !visited.insert(token) {
+                continue;
+            }
+            for (&child_token, entry) in cleanup.pending.iter_mut() {
+                if child_token == token {
+                    entry.terminate = true;
+                }
+                if entry.parent_token == Some(token) {
+                    pending_roots.push(child_token);
+                }
+            }
+        }
+        if let Some(child) = unwaited
+            && let Some(entry) = cleanup.pending.values_mut()
+                .find(|entry| {
+                    entry.child.pid == root_pid && entry.child.started_at == started_at
+                })
+        {
+            *lock_recover(&entry.unwaited) = Some(child);
+        }
+    }
+
+    /// Retains cleanup ownership for exactly one service generation.
+    pub(crate) fn begin_generation_cleanup(
+        &self,
+        project: &str,
+        service: &str,
+        root_pid: u32,
+        terminate: bool,
+        pid_file: Arc<Mutex<crate::daemon::PidFile>>,
+    ) {
+        let mut cleanup = lock_recover(&self.cleanup);
+        let removed = self.take_generation_children(project, service, root_pid);
+        Self::retain_cleanup(&mut cleanup, removed, pid_file, terminate);
+    }
+
+    fn retain_cleanup(
+        cleanup: &mut CleanupState,
+        children: Vec<SpawnedChild>,
+        pid_file: Arc<Mutex<crate::daemon::PidFile>>,
+        terminate: bool,
+    ) {
+        for child in children {
+            let (token, process_start, wait_done, parent_token) = match cleanup.births.remove(&child.pid) {
+                Some(birth) if birth.started_at == child.started_at => {
+                    (birth.token, birth.process_start, birth.wait_done, birth.parent_token)
+                }
+                _ => {
+                    cleanup.next = cleanup.next.checked_add(1)
+                        .expect("spawn generation exhausted");
+                    (cleanup.next, None, Arc::new(AtomicBool::new(false)), None)
+                }
+            };
+            let targets = process_start.map(|birth| (child.pid, birth))
+                .into_iter().collect();
+            cleanup.pending.entry(token).or_insert(CleanupEntry {
+                child,
+                pid_file: Arc::clone(&pid_file),
+                terminate,
+                claimed: false,
+                targets: Arc::new(Mutex::new(targets)),
+                wait_done,
+                unwaited: Arc::new(Mutex::new(None)),
+                parent_token,
+            });
+        }
+    }
+
+    /// Claims pending work without holding registry locks during teardown.
+    pub(crate) fn claim_cleanup(&self) -> Vec<SpawnCleanup> {
+        let mut cleanup = lock_recover(&self.cleanup);
+        cleanup.pending.iter_mut()
+            .filter_map(|(&token, entry)| {
+                if entry.claimed {
+                    return None;
+                }
+                entry.claimed = true;
+                Some(SpawnCleanup {
+                    state: Arc::clone(&self.cleanup),
+                    token,
+                    child: entry.child.clone(),
+                    terminate: entry.terminate,
+                    pid_file: Arc::clone(&entry.pid_file),
+                    targets: Arc::clone(&entry.targets),
+                    wait_done: Arc::clone(&entry.wait_done),
+                    unwaited: Arc::clone(&entry.unwaited),
+                    generation: Self::generation_key(entry.child.started_at, token),
+                })
+            })
+            .collect()
+    }
+
+    /// Returns the completion marker belonging to the child's original waiter.
+    pub(crate) fn waiter_state(
+        &self,
+        pid: u32,
+        started_at: SystemTime,
+    ) -> Arc<AtomicBool> {
+        let cleanup = lock_recover(&self.cleanup);
+        if let Some(birth) = cleanup.births.get(&pid)
+            && birth.started_at == started_at
+        {
+            return Arc::clone(&birth.wait_done);
+        }
+        cleanup.pending.values()
+            .find(|entry| entry.child.pid == pid && entry.child.started_at == started_at)
+            .map(|entry| Arc::clone(&entry.wait_done))
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(true)))
+    }
+
+    /// Returns the stable durable identity of one registered generation.
+    pub(crate) fn generation_for(
+        &self,
+        pid: u32,
+        started_at: SystemTime,
+    ) -> Option<String> {
+        let cleanup = lock_recover(&self.cleanup);
+        if let Some(birth) = cleanup.births.get(&pid)
+            && birth.started_at == started_at
+        {
+            return Some(Self::generation_key(started_at, birth.token));
+        }
+        cleanup.pending.iter()
+            .find(|(_, entry)| entry.child.pid == pid && entry.child.started_at == started_at)
+            .map(|(&token, _)| Self::generation_key(started_at, token))
+    }
+
+    fn generation_key(started_at: SystemTime, token: u64) -> String {
+        let stamp = match started_at.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => duration.as_nanos().to_string(),
+            Err(err) => format!("-{}", err.duration().as_nanos()),
+        };
+        format!("{stamp}:{token}")
+    }
     /// Registers a service with dynamic spawn capability.
     ///
     /// Registration is what authorizes spawning at all: a unit with no tree has
@@ -333,6 +566,16 @@ impl DynamicSpawnManager {
         parent_pid: u32,
         _child_name: &str,
     ) -> Result<SpawnAuthorization, ProcessManagerError> {
+        let cleanup = lock_recover(&self.cleanup);
+        if cleanup.pending.values().any(|entry| entry.child.pid == parent_pid) {
+            return Err(ProcessManagerError::SpawnAuthorizationFailed(
+                "Parent generation is terminating".into(),
+            ));
+        }
+        let parent_start = crate::daemon::process_start_time(parent_pid);
+        let parent_registration = cleanup.births.get(&parent_pid)
+            .map(|birth| birth.token);
+        drop(cleanup);
         self.check_rate_limit(parent_pid)?;
 
         // Resolve the tree and gather what a memory sample would need, then
@@ -388,6 +631,7 @@ impl DynamicSpawnManager {
         }
         tree.can_spawn(depth)?;
         let max_children = tree.max_children;
+        let termination_policy = tree.termination_policy.clone();
         drop(trees);
 
         let parent_children = lock_recover(&self.children_by_parent);
@@ -402,7 +646,37 @@ impl DynamicSpawnManager {
         Ok(SpawnAuthorization {
             depth,
             root_service: Some(root_service),
+            termination_policy,
+            parent_start,
+            parent_registration,
         })
+    }
+
+    /// Commits admission only while the parent registration still owns the request.
+    pub(crate) fn record_authorized_spawn(
+        &self,
+        parent_pid: u32,
+        child: SpawnedChild,
+        authorization: &SpawnAuthorization,
+    ) -> Result<Option<String>, ProcessManagerError> {
+        let mut cleanup = lock_recover(&self.cleanup);
+        let registered = match authorization.parent_registration {
+            Some(token) => cleanup.births.get(&parent_pid)
+                .is_some_and(|birth| birth.token == token),
+            None => lock_recover(&self.service_pids).get(&parent_pid)
+                == authorization.root_service.as_ref(),
+        };
+        if !registered
+            || authorization.parent_start.is_none()
+            || crate::daemon::process_start_time(parent_pid) != authorization.parent_start
+        {
+            return Err(ProcessManagerError::SpawnAuthorizationFailed(
+                "Parent generation ended during spawn admission".into(),
+            ));
+        }
+        self.record_spawn_locked(
+            parent_pid, child, authorization.root_service.clone(), &mut cleanup,
+        )
     }
 
     /// Records a successful spawn.
@@ -412,6 +686,28 @@ impl DynamicSpawnManager {
         child: SpawnedChild,
         root_hint: Option<String>,
     ) -> Result<Option<String>, ProcessManagerError> {
+        let mut cleanup = lock_recover(&self.cleanup);
+        self.record_spawn_locked(parent_pid, child, root_hint, &mut cleanup)
+    }
+
+    fn record_spawn_locked(
+        &self,
+        parent_pid: u32,
+        child: SpawnedChild,
+        root_hint: Option<String>,
+        cleanup: &mut CleanupState,
+    ) -> Result<Option<String>, ProcessManagerError> {
+        cleanup.next = cleanup.next.checked_add(1)
+            .expect("spawn generation exhausted");
+        let token = cleanup.next;
+        let parent_token = cleanup.births.get(&parent_pid).map(|birth| birth.token);
+        cleanup.births.insert(child.pid, SpawnBirth {
+            started_at: child.started_at,
+            token,
+            process_start: crate::daemon::process_start_time(child.pid),
+            wait_done: Arc::new(AtomicBool::new(false)),
+            parent_token,
+        });
         {
             let mut children_by_parent = lock_recover(&self.children_by_parent);
             children_by_parent
@@ -462,7 +758,32 @@ impl DynamicSpawnManager {
         child_pid: u32,
         exit: SpawnedExit,
     ) -> Option<SpawnedChild> {
+        self.record_spawn_exit_matching(child_pid, None, exit)
+    }
+
+    /// Records an exit only for the registration that owned the waiter.
+    pub(crate) fn record_spawn_exit_generation(
+        &self,
+        child_pid: u32,
+        started_at: SystemTime,
+        exit: SpawnedExit,
+    ) -> Option<SpawnedChild> {
+        self.record_spawn_exit_matching(child_pid, Some(started_at), exit)
+    }
+
+    fn record_spawn_exit_matching(
+        &self,
+        child_pid: u32,
+        started_at: Option<SystemTime>,
+        exit: SpawnedExit,
+    ) -> Option<SpawnedChild> {
         let mut children_by_pid = lock_recover(&self.children_by_pid);
+        if let Some(started_at) = started_at
+            && children_by_pid.get(&child_pid)
+                .is_none_or(|child| child.started_at != started_at)
+        {
+            return None;
+        }
         let updated = children_by_pid.get_mut(&child_pid).map(|child| {
             child.last_exit = Some(exit.clone());
             child.clone()

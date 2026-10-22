@@ -63,24 +63,6 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Returns whether a process appears to still exist.
-#[cfg(unix)]
-fn process_is_running(pid: u32) -> bool {
-    use nix::{errno::Errno, sys::signal, unistd::Pid};
-
-    match signal::kill(Pid::from_raw(pid as i32), None) {
-        Ok(()) => true,
-        Err(Errno::EPERM) => true,
-        Err(_) => false,
-    }
-}
-
-/// Returns whether a process appears to still exist.
-#[cfg(not(unix))]
-fn process_is_running(_pid: u32) -> bool {
-    false
-}
-
 /// Returns whether an execution record has not been completed.
 fn cron_record_is_incomplete(record: &CronExecutionRecord) -> bool {
     record.completed_at.is_none() && record.status.is_none() && record.exit_code.is_none()
@@ -95,17 +77,6 @@ fn same_run(left: SystemTime, right: SystemTime) -> bool {
             .duration_since(UNIX_EPOCH)
             .ok()
             .map(|value| value.as_secs())
-}
-
-/// Returns whether a previously persisted in-progress execution is still live.
-fn incomplete_execution_is_live(record: &CronExecutionRecord) -> bool {
-    cron_record_is_incomplete(record)
-        && record.pid.is_some_and(|pid| {
-            process_is_running(pid)
-                && record.process_start.is_none_or(|started| {
-                    crate::daemon::process_start_time(pid) == Some(started)
-                })
-        })
 }
 
 /// Provides systemtime serde support.
@@ -455,6 +426,12 @@ pub struct CronExecutionRecord {
     /// Kernel process start identity used to reject PID reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_start: Option<u64>,
+    /// Absolute timeout deadline in Unix milliseconds, fixed when supervision starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_deadline_ms: Option<u64>,
+    /// Original timeout label; an empty label denotes intentionally unlimited execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_label: Option<String>,
     /// User that executed the cron process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
@@ -510,6 +487,41 @@ pub struct CronDueJob {
     pub previous_last_execution: Option<SystemTime>,
 }
 
+/// Owns one cron worker's claim until completion, failed spawn, or unwind.
+#[derive(Debug)]
+pub struct CronRunOwner {
+    in_flight: Arc<Mutex<HashMap<String, SystemTime>>>,
+    service_hash: String,
+    started_at: SystemTime,
+}
+
+impl Drop for CronRunOwner {
+    fn drop(&mut self) {
+        let mut in_flight = lock_recover(&self.in_flight);
+        if in_flight
+            .get(&self.service_hash)
+            .is_some_and(|owned| *owned == self.started_at)
+        {
+            in_flight.remove(&self.service_hash);
+        }
+    }
+}
+
+/// An unfinished persisted run claimed for recovery before new due admission.
+#[derive(Debug)]
+pub struct CronRecoveredRun {
+    /// Worker claim released automatically if dispatch fails or the worker unwinds.
+    pub owner: CronRunOwner,
+    /// Project that owns the execution and its state file.
+    pub project_id: String,
+    /// Service whose execution must be supervised.
+    pub service_name: String,
+    /// Stable key of the service configuration.
+    pub service_hash: String,
+    /// Captured PID, birth identity, and original deadline for this execution.
+    pub record: CronExecutionRecord,
+}
+
 impl CronJobState {
     /// Creates a new cron job state, optionally restoring from persisted state.
     pub fn new(
@@ -542,12 +554,9 @@ impl CronJobState {
             while state.execution_history.len() > MAX_EXECUTION_HISTORY {
                 state.execution_history.pop_front();
             }
-            let live_execution = state
-                .active_record()
-                .filter(|record| incomplete_execution_is_live(record))
-                .map(|record| record.started_at);
-            state.currently_running = live_execution.is_some();
-            state.close_stale_running_executions(live_execution);
+            let unfinished = state.active_record().map(|record| record.started_at);
+            state.currently_running = unfinished.is_some();
+            state.close_stale_running_executions(unfinished);
         }
 
         state
@@ -587,7 +596,7 @@ impl CronJobState {
         self.next_execution = compute_next_execution(&self.schedule, self.timezone);
     }
 
-    /// Marks stale unfinished executions interrupted while retaining one live run.
+    /// Marks older unfinished executions interrupted while retaining one recovery run.
     fn close_stale_running_executions(&mut self, live_execution: Option<SystemTime>) {
         for record in self
             .execution_history
@@ -808,6 +817,7 @@ impl CronManager {
         I: IntoIterator<Item = &'a Config>,
     {
         let mut active_jobs = Vec::new();
+        let mut jobs_guard = lock_recover(&self.jobs);
 
         for config in configs {
             let project_id = config.project.id.clone();
@@ -815,7 +825,7 @@ impl CronManager {
             for (service_name, service_config) in &config.services {
                 if let Some(cron_config) = &service_config.cron {
                     let service_hash = config.state_key(service_name);
-                    let (job_state, normalized, normalized_expression) = self
+                    let (mut job_state, normalized, normalized_expression) = self
                         .build_job_state(
                             &project_id,
                             service_name,
@@ -842,6 +852,28 @@ impl CronManager {
                         continue;
                     }
                     let timezone_label = job_state.timezone_label.clone();
+
+                    let claimed = lock_recover(&self.in_flight)
+                        .get(&service_hash)
+                        .copied();
+                    if let Some(started_at) = claimed
+                        && let Some(previous) = jobs_guard
+                            .iter()
+                            .find(|job| job.service_hash == service_hash)
+                        && let Some(record) =
+                            previous.execution_history.iter().find(|record| {
+                                same_run(record.started_at, started_at)
+                                    && cron_record_is_incomplete(record)
+                            })
+                    {
+                        job_state.close_stale_running_executions(Some(started_at));
+                        job_state.execution_history.retain(|existing| {
+                            !same_run(existing.started_at, started_at)
+                        });
+                        job_state.add_execution_record(record.clone());
+                        job_state.currently_running = true;
+                        job_state.last_execution = previous.last_execution;
+                    }
 
                     self.persist_job_state(&job_state);
                     if normalized {
@@ -872,12 +904,49 @@ impl CronManager {
             }
         }
 
-        {
-            let mut jobs_guard = lock_recover(&self.jobs);
-            *jobs_guard = active_jobs;
-        }
+        *jobs_guard = active_jobs;
 
         Ok(())
+    }
+
+    /// Owns an already-claimed fresh run without creating another scheduler claim.
+    pub fn owner_for_run(
+        &self,
+        service_hash: &str,
+        started_at: SystemTime,
+    ) -> CronRunOwner {
+        CronRunOwner {
+            in_flight: Arc::clone(&self.in_flight),
+            service_hash: service_hash.to_string(),
+            started_at,
+        }
+    }
+
+    /// Claims every unfinished run with no local worker before new due admission.
+    /// Missing or stale PID identities are returned for interruption recording,
+    /// never as authority to signal a process.
+    pub fn claim_recovered_runs(&self) -> Vec<CronRecoveredRun> {
+        let mut jobs = lock_recover(&self.jobs);
+        let mut in_flight = lock_recover(&self.in_flight);
+        let mut recovered = Vec::new();
+        for job in jobs.iter_mut() {
+            if in_flight.contains_key(&job.service_hash) {
+                continue;
+            }
+            let Some(record) = job.active_record().cloned() else {
+                continue;
+            };
+            in_flight.insert(job.service_hash.clone(), record.started_at);
+            job.currently_running = true;
+            recovered.push(CronRecoveredRun {
+                owner: self.owner_for_run(&job.service_hash, record.started_at),
+                project_id: job.project_id.clone(),
+                service_name: job.service_name.clone(),
+                service_hash: job.service_hash.clone(),
+                record,
+            });
+        }
+        recovered
     }
 
     /// Check if any cron jobs are due to run and return their service names.
@@ -926,6 +995,8 @@ impl CronManager {
                         exit_code: None,
                         pid: None,
                         process_start: None,
+                        timeout_deadline_ms: None,
+                        timeout_label: None,
                         user: None,
                         command: None,
                         metrics: vec![],
@@ -961,6 +1032,8 @@ impl CronManager {
                         exit_code: None,
                         pid: None,
                         process_start: None,
+                        timeout_deadline_ms: None,
+                        timeout_label: None,
                         user: None,
                         command: None,
                         metrics: vec![],
@@ -1035,12 +1108,6 @@ impl CronManager {
         exit_code: Option<i32>,
         metrics: Vec<crate::metrics::MetricSample>,
     ) {
-        // Released unconditionally, BEFORE the job lookup: a resync may have
-        // removed this job while its worker ran, and ownership keyed on a job
-        // that no longer exists would never be dropped — re-adding the same
-        // service would then find itself permanently claimed, logging overlap
-        // errors and never running again.
-        self.release_claim(service_hash, started_at);
         self.mark_job_completed_by(
             |job| job.service_hash == service_hash,
             Some(started_at),
@@ -1048,6 +1115,7 @@ impl CronManager {
             exit_code,
             metrics,
         );
+        self.release_claim(service_hash, started_at);
     }
 
     /// Withdraws the provisional run a due job staked, leaving no execution.
@@ -1059,7 +1127,6 @@ impl CronManager {
     /// drops the claim instead: the boundary is consumed and `next_execution`
     /// stands, but no record, exit code, or metrics are recorded.
     pub fn withdraw_job_run(&self, claim: &CronDueJob) {
-        self.release_claim(&claim.service_hash, claim.started_at);
         let mut jobs = lock_recover(&self.jobs);
         for job in jobs
             .iter_mut()
@@ -1095,6 +1162,8 @@ impl CronManager {
             }
             self.persist_job_state(job);
         }
+        drop(jobs);
+        self.release_claim(&claim.service_hash, claim.started_at);
     }
 
     /// Drops a claim whose job disappeared before its unit could be dispatched.
@@ -1116,7 +1185,7 @@ impl CronManager {
         let mut in_flight = lock_recover(&self.in_flight);
         if in_flight
             .get(service_hash)
-            .is_some_and(|owned| same_run(*owned, started_at))
+            .is_some_and(|owned| *owned == started_at)
         {
             in_flight.remove(service_hash);
         }
@@ -1218,6 +1287,57 @@ impl CronManager {
             user,
             command,
         );
+    }
+
+    /// Persists the original timeout deadline and returns this run's captured identity.
+    /// Re-arming a recovered run never extends a previously recorded deadline.
+    pub fn arm_job_run(
+        &self,
+        service_hash: &str,
+        started_at: SystemTime,
+        timeout_deadline_ms: Option<u64>,
+        timeout_label: Option<String>,
+    ) -> Option<CronExecutionRecord> {
+        let mut jobs = lock_recover(&self.jobs);
+        let job = jobs
+            .iter_mut()
+            .find(|job| job.service_hash == service_hash)?;
+        let record = job.execution_history.iter_mut().rev().find(|record| {
+            same_run(record.started_at, started_at)
+                && cron_record_is_incomplete(record)
+        })?;
+        if record.timeout_deadline_ms.is_none() {
+            record.timeout_deadline_ms = timeout_deadline_ms;
+        }
+        if record.timeout_label.is_none() {
+            record.timeout_label = timeout_label;
+        }
+        let armed = record.clone();
+        self.persist_job_state(job);
+        Some(armed)
+    }
+
+    /// Publishes one launch's captured identity and deadline together.
+    pub fn attach_job_run(
+        &self,
+        service_hash: &str,
+        launch: &CronExecutionRecord,
+    ) -> Option<CronExecutionRecord> {
+        let mut jobs = lock_recover(&self.jobs);
+        let job = jobs.iter_mut().find(|job| job.service_hash == service_hash)?;
+        let record = job.execution_history.iter_mut().rev().find(|record| {
+            same_run(record.started_at, launch.started_at)
+                && cron_record_is_incomplete(record)
+        })?;
+        record.pid = launch.pid;
+        record.process_start = launch.process_start;
+        record.user = launch.user.clone();
+        record.command = launch.command.clone();
+        record.timeout_deadline_ms = launch.timeout_deadline_ms;
+        record.timeout_label = launch.timeout_label.clone();
+        let attached = record.clone();
+        self.persist_job_state(job);
+        Some(attached)
     }
 
     /// Annotate the most recent execution record matching predicate.
@@ -1758,6 +1878,8 @@ mod tests {
             exit_code: None,
             pid: Some(current_pid),
             process_start: crate::daemon::process_start_time(current_pid),
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: Some("rashad".to_string()),
             command: Some("/bin/true".to_string()),
             metrics: vec![],
@@ -1825,6 +1947,8 @@ mod tests {
             exit_code: Some(0),
             pid: None,
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: None,
             command: None,
             metrics: vec![],
@@ -1898,6 +2022,8 @@ mod tests {
             exit_code: None,
             pid: None,
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: None,
             command: None,
             metrics: vec![],
@@ -2102,6 +2228,8 @@ mod tests {
             exit_code: None,
             pid: None,
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: None,
             command: None,
             metrics: vec![],
@@ -2113,6 +2241,8 @@ mod tests {
             exit_code: None,
             pid: None,
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: None,
             command: None,
             metrics: vec![],
@@ -2174,6 +2304,8 @@ mod tests {
             exit_code: None,
             pid: Some(i32::MAX as u32),
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: Some("rashad".to_string()),
             command: Some("/bin/true".to_string()),
             metrics: vec![],
@@ -2427,6 +2559,8 @@ mod tests {
             exit_code: Some(0),
             pid: None,
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: None,
             command: None,
             metrics: vec![],
@@ -2465,6 +2599,8 @@ mod tests {
             exit_code: None,
             pid: Some(1234),
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: Some("ubuntu".to_string()),
             command: Some("/bin/true".to_string()),
             metrics: vec![],
@@ -2508,6 +2644,8 @@ mod tests {
             exit_code: None,
             pid: None,
             process_start: None,
+            timeout_deadline_ms: None,
+            timeout_label: None,
             user: None,
             command: Some("fetch http://u:hunter2@proxy:7000".to_string()),
             metrics: Vec::new(),
