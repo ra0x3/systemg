@@ -2,10 +2,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        Arc, Mutex, MutexGuard,
-        atomic::AtomicBool,
-    },
+    sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -363,7 +360,9 @@ impl DynamicSpawnManager {
             let removed = self.remove_subtree(root_pid);
             Self::retain_cleanup(&mut cleanup, removed, pid_file, true);
         }
-        let mut pending_roots: Vec<_> = cleanup.pending.iter()
+        let mut pending_roots: Vec<_> = cleanup
+            .pending
+            .iter()
             .filter(|(_, entry)| {
                 entry.child.pid == root_pid && entry.child.started_at == started_at
             })
@@ -384,10 +383,9 @@ impl DynamicSpawnManager {
             }
         }
         if let Some(child) = unwaited
-            && let Some(entry) = cleanup.pending.values_mut()
-                .find(|entry| {
-                    entry.child.pid == root_pid && entry.child.started_at == started_at
-                })
+            && let Some(entry) = cleanup.pending.values_mut().find(|entry| {
+                entry.child.pid == root_pid && entry.child.started_at == started_at
+            })
         {
             *lock_recover(&entry.unwaited) = Some(child);
         }
@@ -414,18 +412,26 @@ impl DynamicSpawnManager {
         terminate: bool,
     ) {
         for child in children {
-            let (token, process_start, wait_done, parent_token) = match cleanup.births.remove(&child.pid) {
-                Some(birth) if birth.started_at == child.started_at => {
-                    (birth.token, birth.process_start, birth.wait_done, birth.parent_token)
-                }
-                _ => {
-                    cleanup.next = cleanup.next.checked_add(1)
-                        .expect("spawn generation exhausted");
-                    (cleanup.next, None, Arc::new(AtomicBool::new(false)), None)
-                }
-            };
-            let targets = process_start.map(|birth| (child.pid, birth))
-                .into_iter().collect();
+            let (token, process_start, wait_done, parent_token) =
+                match cleanup.births.remove(&child.pid) {
+                    Some(birth) if birth.started_at == child.started_at => (
+                        birth.token,
+                        birth.process_start,
+                        birth.wait_done,
+                        birth.parent_token,
+                    ),
+                    _ => {
+                        cleanup.next = cleanup
+                            .next
+                            .checked_add(1)
+                            .expect("spawn generation exhausted");
+                        (cleanup.next, None, Arc::new(AtomicBool::new(false)), None)
+                    }
+                };
+            let targets = process_start
+                .map(|birth| (child.pid, birth))
+                .into_iter()
+                .collect();
             cleanup.pending.entry(token).or_insert(CleanupEntry {
                 child,
                 pid_file: Arc::clone(&pid_file),
@@ -442,7 +448,9 @@ impl DynamicSpawnManager {
     /// Claims pending work without holding registry locks during teardown.
     pub(crate) fn claim_cleanup(&self) -> Vec<SpawnCleanup> {
         let mut cleanup = lock_recover(&self.cleanup);
-        cleanup.pending.iter_mut()
+        cleanup
+            .pending
+            .iter_mut()
             .filter_map(|(&token, entry)| {
                 if entry.claimed {
                     return None;
@@ -475,7 +483,9 @@ impl DynamicSpawnManager {
         {
             return Arc::clone(&birth.wait_done);
         }
-        cleanup.pending.values()
+        cleanup
+            .pending
+            .values()
             .find(|entry| entry.child.pid == pid && entry.child.started_at == started_at)
             .map(|entry| Arc::clone(&entry.wait_done))
             .unwrap_or_else(|| Arc::new(AtomicBool::new(true)))
@@ -493,8 +503,12 @@ impl DynamicSpawnManager {
         {
             return Some(Self::generation_key(started_at, birth.token));
         }
-        cleanup.pending.iter()
-            .find(|(_, entry)| entry.child.pid == pid && entry.child.started_at == started_at)
+        cleanup
+            .pending
+            .iter()
+            .find(|(_, entry)| {
+                entry.child.pid == pid && entry.child.started_at == started_at
+            })
             .map(|(&token, _)| Self::generation_key(started_at, token))
     }
 
@@ -567,14 +581,18 @@ impl DynamicSpawnManager {
         _child_name: &str,
     ) -> Result<SpawnAuthorization, ProcessManagerError> {
         let cleanup = lock_recover(&self.cleanup);
-        if cleanup.pending.values().any(|entry| entry.child.pid == parent_pid) {
+        if cleanup
+            .pending
+            .values()
+            .any(|entry| entry.child.pid == parent_pid)
+        {
             return Err(ProcessManagerError::SpawnAuthorizationFailed(
                 "Parent generation is terminating".into(),
             ));
         }
         let parent_start = crate::daemon::process_start_time(parent_pid);
-        let parent_registration = cleanup.births.get(&parent_pid)
-            .map(|birth| birth.token);
+        let parent_registration =
+            cleanup.births.get(&parent_pid).map(|birth| birth.token);
         drop(cleanup);
         self.check_rate_limit(parent_pid)?;
 
@@ -661,10 +679,14 @@ impl DynamicSpawnManager {
     ) -> Result<Option<String>, ProcessManagerError> {
         let mut cleanup = lock_recover(&self.cleanup);
         let registered = match authorization.parent_registration {
-            Some(token) => cleanup.births.get(&parent_pid)
+            Some(token) => cleanup
+                .births
+                .get(&parent_pid)
                 .is_some_and(|birth| birth.token == token),
-            None => lock_recover(&self.service_pids).get(&parent_pid)
-                == authorization.root_service.as_ref(),
+            None => {
+                lock_recover(&self.service_pids).get(&parent_pid)
+                    == authorization.root_service.as_ref()
+            }
         };
         if !registered
             || authorization.parent_start.is_none()
@@ -675,7 +697,10 @@ impl DynamicSpawnManager {
             ));
         }
         self.record_spawn_locked(
-            parent_pid, child, authorization.root_service.clone(), &mut cleanup,
+            parent_pid,
+            child,
+            authorization.root_service.clone(),
+            &mut cleanup,
         )
     }
 
@@ -697,17 +722,22 @@ impl DynamicSpawnManager {
         root_hint: Option<String>,
         cleanup: &mut CleanupState,
     ) -> Result<Option<String>, ProcessManagerError> {
-        cleanup.next = cleanup.next.checked_add(1)
+        cleanup.next = cleanup
+            .next
+            .checked_add(1)
             .expect("spawn generation exhausted");
         let token = cleanup.next;
         let parent_token = cleanup.births.get(&parent_pid).map(|birth| birth.token);
-        cleanup.births.insert(child.pid, SpawnBirth {
-            started_at: child.started_at,
-            token,
-            process_start: crate::daemon::process_start_time(child.pid),
-            wait_done: Arc::new(AtomicBool::new(false)),
-            parent_token,
-        });
+        cleanup.births.insert(
+            child.pid,
+            SpawnBirth {
+                started_at: child.started_at,
+                token,
+                process_start: crate::daemon::process_start_time(child.pid),
+                wait_done: Arc::new(AtomicBool::new(false)),
+                parent_token,
+            },
+        );
         {
             let mut children_by_parent = lock_recover(&self.children_by_parent);
             children_by_parent
@@ -779,7 +809,8 @@ impl DynamicSpawnManager {
     ) -> Option<SpawnedChild> {
         let mut children_by_pid = lock_recover(&self.children_by_pid);
         if let Some(started_at) = started_at
-            && children_by_pid.get(&child_pid)
+            && children_by_pid
+                .get(&child_pid)
                 .is_none_or(|child| child.started_at != started_at)
         {
             return None;

@@ -853,9 +853,8 @@ impl CronManager {
                     }
                     let timezone_label = job_state.timezone_label.clone();
 
-                    let claimed = lock_recover(&self.in_flight)
-                        .get(&service_hash)
-                        .copied();
+                    let claimed =
+                        lock_recover(&self.in_flight).get(&service_hash).copied();
                     if let Some(started_at) = claimed
                         && let Some(previous) = jobs_guard
                             .iter()
@@ -1303,8 +1302,7 @@ impl CronManager {
             .iter_mut()
             .find(|job| job.service_hash == service_hash)?;
         let record = job.execution_history.iter_mut().rev().find(|record| {
-            same_run(record.started_at, started_at)
-                && cron_record_is_incomplete(record)
+            same_run(record.started_at, started_at) && cron_record_is_incomplete(record)
         })?;
         if record.timeout_deadline_ms.is_none() {
             record.timeout_deadline_ms = timeout_deadline_ms;
@@ -1324,7 +1322,9 @@ impl CronManager {
         launch: &CronExecutionRecord,
     ) -> Option<CronExecutionRecord> {
         let mut jobs = lock_recover(&self.jobs);
-        let job = jobs.iter_mut().find(|job| job.service_hash == service_hash)?;
+        let job = jobs
+            .iter_mut()
+            .find(|job| job.service_hash == service_hash)?;
         let record = job.execution_history.iter_mut().rev().find(|record| {
             same_run(record.started_at, launch.started_at)
                 && cron_record_is_incomplete(record)

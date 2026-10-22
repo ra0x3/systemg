@@ -1360,7 +1360,10 @@ impl PidFile {
         self.reload_into(&path)?;
 
         if let Some(generation) = generation
-            && self.spawn_metadata.get(&child_pid).is_none_or(|row| row.generation.as_deref() != Some(generation))
+            && self
+                .spawn_metadata
+                .get(&child_pid)
+                .is_none_or(|row| row.generation.as_deref() != Some(generation))
         {
             return Ok(false);
         }
@@ -1378,68 +1381,6 @@ impl PidFile {
 
         self.write_at(&path)?;
         Ok(true)
-    }
-
-    /// Removes spawn subtree.
-    pub(crate) fn remove_spawn_subtree(
-        &mut self,
-        root_pid: u32,
-    ) -> Result<Vec<u32>, PidFileError> {
-        let _lock = self.acquire_lock()?;
-
-        let path = self.path();
-        self.reload_into(&path)?;
-
-        let removed = self.remove_spawn_subtree_in_memory(root_pid);
-
-        self.write_at(&path)?;
-
-        Ok(removed)
-    }
-
-    /// Removes a subtree rooted at `root_pid` from the in-memory tracking maps.
-    pub(crate) fn remove_spawn_subtree_in_memory(&mut self, _root_pid: u32) -> Vec<u32> {
-        let root_pid = _root_pid;
-        if !self.parent_map.contains_key(&root_pid)
-            && !self.children_map.contains_key(&root_pid)
-            && !self.spawn_metadata.contains_key(&root_pid)
-        {
-            return Vec::new();
-        }
-
-        let root_parent = self.parent_map.get(&root_pid).copied();
-
-        let mut removed = Vec::new();
-        let mut stack = vec![root_pid];
-
-        while let Some(pid) = stack.pop() {
-            if let Some(children) = self.children_map.remove(&pid) {
-                for child_pid in children.into_iter().rev() {
-                    stack.push(child_pid);
-                }
-            }
-
-            self.parent_map.remove(&pid);
-            self.spawn_depth.remove(&pid);
-            self.spawn_metadata.remove(&pid);
-            removed.push(pid);
-        }
-
-        if let Some(parent_pid) = root_parent {
-            let remove_parent_entry =
-                if let Some(children) = self.children_map.get_mut(&parent_pid) {
-                    children.retain(|child| *child != root_pid);
-                    children.is_empty()
-                } else {
-                    false
-                };
-
-            if remove_parent_entry {
-                self.children_map.remove(&parent_pid);
-            }
-        }
-
-        removed
     }
 
     /// Gets the parent PID for a child process.
@@ -1972,76 +1913,6 @@ mod pidfile_tests {
             Some(ServiceLifecycleStatus::Skipped),
             "the monitor still held `running` in memory and must not act on it"
         );
-    }
-
-    #[test]
-    /// Removes spawn subtree in memory prunes all descendants.
-    fn remove_spawn_subtree_in_memory_prunes_all_descendants() {
-        let mut pid_file = PidFile {
-            services: HashMap::new(),
-            service_groups: HashMap::new(),
-            service_starts: HashMap::new(),
-            generations: Vec::new(),
-            parent_map: HashMap::from([(2, 1), (3, 2)]),
-            children_map: HashMap::from([(1, vec![2]), (2, vec![3])]),
-            spawn_depth: HashMap::from([(1, 0), (2, 1), (3, 2)]),
-            store: StateStore::for_project("test"),
-            spawn_metadata: HashMap::from([
-                (
-                    2,
-                    PersistedSpawnChild {
-                        pid: 2,
-                        name: "child".into(),
-                        command: "cmd".into(),
-                        started_at: SystemTime::now(),
-                        generation: None,
-                        ttl_secs: None,
-                        depth: 1,
-                        parent_pid: 1,
-                        service_hash: None,
-                        cpu_percent: None,
-                        rss_bytes: None,
-                        last_exit: None,
-                    },
-                ),
-                (
-                    3,
-                    PersistedSpawnChild {
-                        pid: 3,
-                        name: "grandchild".into(),
-                        command: "cmd".into(),
-                        started_at: SystemTime::now(),
-                        generation: None,
-                        ttl_secs: None,
-                        depth: 2,
-                        parent_pid: 2,
-                        service_hash: None,
-                        cpu_percent: None,
-                        rss_bytes: None,
-                        last_exit: None,
-                    },
-                ),
-            ]),
-        };
-
-        let removed = pid_file.remove_spawn_subtree_in_memory(2);
-        assert_eq!(
-            removed,
-            vec![2, 3],
-            "subtree removal should return root and descendants"
-        );
-        assert!(!pid_file.parent_map.contains_key(&2));
-        assert!(!pid_file.parent_map.contains_key(&3));
-        assert!(!pid_file.children_map.contains_key(&2));
-        assert!(
-            pid_file
-                .children_map
-                .get(&1)
-                .map(|children| children.is_empty())
-                .unwrap_or(true)
-        );
-        assert!(!pid_file.spawn_metadata.contains_key(&2));
-        assert!(!pid_file.spawn_metadata.contains_key(&3));
     }
 
     #[test]
@@ -4829,8 +4700,10 @@ impl Daemon {
         root_pid: u32,
         targets: &Mutex<HashMap<u32, u64>>,
     ) -> Result<(), ProcessManagerError> {
-        use nix::sys::signal::{Signal, kill};
-        use nix::unistd::Pid;
+        use nix::{
+            sys::signal::{Signal, kill},
+            unistd::Pid,
+        };
 
         let failure = |reason: &str| ProcessManagerError::ServiceStopError {
             service: service_name.to_string(),
@@ -4838,13 +4711,21 @@ impl Daemon {
         };
         for signal in [Signal::SIGTERM, Signal::SIGKILL] {
             for _ in 0..PROCESS_READY_CHECKS {
-                let known = targets.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-                let mut members = Self::try_collect_process_group_members(root_pid as libc::pid_t)
-                    .ok_or_else(|| failure("Cannot verify dynamic process group"))?;
-                members.extend(Self::try_collect_session_members(root_pid as libc::pid_t)
-                    .ok_or_else(|| failure("Cannot verify dynamic process session"))?);
-                let anchors: Vec<_> = known.iter()
+                let known = targets
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let mut members =
+                    Self::try_collect_process_group_members(root_pid as libc::pid_t)
+                        .ok_or_else(|| failure("Cannot verify dynamic process group"))?;
+                members.extend(
+                    Self::try_collect_session_members(root_pid as libc::pid_t)
+                        .ok_or_else(|| {
+                            failure("Cannot verify dynamic process session")
+                        })?,
+                );
+                let anchors: Vec<_> = known
+                    .iter()
                     .filter(|(pid, birth)| process_start_time(**pid) == Some(**birth))
                     .map(|(&pid, &birth)| (pid, birth))
                     .collect();
@@ -4864,22 +4745,30 @@ impl Daemon {
                         }
                     }
                 }
-                if group_anchor.is_some_and(|(pid, birth)| process_start_time(*pid) == Some(*birth)) {
+                if group_anchor
+                    .is_some_and(|(pid, birth)| process_start_time(*pid) == Some(*birth))
+                {
                     for pid in &members {
                         if let Some(birth) = process_start_time(*pid) {
                             discovered.insert(*pid, birth);
                         }
                     }
                 }
-                if anchors.iter().any(|(pid, birth)| process_start_time(*pid) == Some(*birth)) {
-                    let mut retained = targets.lock()
+                if anchors
+                    .iter()
+                    .any(|(pid, birth)| process_start_time(*pid) == Some(*birth))
+                {
+                    let mut retained = targets
+                        .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     for (pid, birth) in discovered {
                         retained.entry(pid).or_insert(birth);
                     }
                 }
-                let known = targets.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                let known = targets
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 let mut live = Vec::new();
                 let mut uncertain = false;
                 for (&pid, &birth) in &known {
@@ -4899,14 +4788,20 @@ impl Daemon {
                     if process_start_time(pid) == Some(birth) {
                         match kill(Pid::from_raw(pid as i32), signal) {
                             Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                            Err(err) => return Err(failure(&format!("Cannot signal dynamic child: {err}"))),
+                            Err(err) => {
+                                return Err(failure(&format!(
+                                    "Cannot signal dynamic child: {err}"
+                                )));
+                            }
                         }
                     }
                 }
                 thread::sleep(PROCESS_CHECK_INTERVAL);
             }
         }
-        Err(failure("Dynamic process generation is still live or cannot be verified"))
+        Err(failure(
+            "Dynamic process generation is still live or cannot be verified",
+        ))
     }
 
     /// Confirms intentional orphaning has no remaining process ownership to transfer.
@@ -4914,16 +4809,21 @@ impl Daemon {
         root_pid: u32,
         targets: &Mutex<HashMap<u32, u64>>,
     ) -> bool {
-        let empty_group = Self::try_collect_process_group_members(root_pid as libc::pid_t)
-            .is_some_and(|members| members.is_empty());
+        let empty_group =
+            Self::try_collect_process_group_members(root_pid as libc::pid_t)
+                .is_some_and(|members| members.is_empty());
         let empty_session = Self::try_collect_session_members(root_pid as libc::pid_t)
             .is_some_and(|members| members.is_empty());
-        let known = targets.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        empty_group && empty_session && known.iter().all(|(&pid, &birth)| {
-            !Self::pid_is_alive(pid)
-                || process_start_time(pid).is_some_and(|actual| actual != birth)
-        })
+        let known = targets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        empty_group
+            && empty_session
+            && known.iter().all(|(&pid, &birth)| {
+                !Self::pid_is_alive(pid)
+                    || process_start_time(pid).is_some_and(|actual| actual != birth)
+            })
     }
 
     /// Terminates any live members still lingering in a service's previous process group before
@@ -6024,9 +5924,8 @@ impl Daemon {
                             .name(SERVICE_STDERR_THREAD.into())
                             .spawn(move || {
                                 let mut stdout = io::stdout();
-                                let _ = crate::logs::read_bounded_log_lines(
-                                    err,
-                                    |line| {
+                                let _ =
+                                    crate::logs::read_bounded_log_lines(err, |line| {
                                         let _ = writeln!(
                                             stdout,
                                             "[{}:stderr] {}",
@@ -6035,8 +5934,7 @@ impl Daemon {
                                         );
                                         let _ = stdout.flush();
                                         Ok(())
-                                    },
-                                );
+                                    });
                             })
                             .map(|_| ())
                     } else {

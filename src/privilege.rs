@@ -1070,7 +1070,9 @@ mod linux_tests {
             ..PrivilegeContext::default()
         };
 
-        let fault = ctx.apply_isolation().expect_err("PID isolation is unsupported");
+        let fault = ctx
+            .apply_isolation()
+            .expect_err("PID isolation is unsupported");
         assert_eq!(fault.fault, ChildFault::KeyUnenforceable);
         assert_eq!(fault.errno, libc::ENOTSUP);
     }

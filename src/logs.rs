@@ -2335,9 +2335,7 @@ impl LogSender {
                 line,
                 _budget: LogBudget(charge),
             }))
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "log writer stopped")
-            })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "log writer stopped"))
     }
 
     /// Enqueues the handoff barrier without waiting beyond its existing deadline.

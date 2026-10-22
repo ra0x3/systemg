@@ -2747,7 +2747,10 @@ fn expand_manifest_env(
                 .ok_or_else(|| env_config_error("project id must be a string"))?;
             let id = expand_env_vars(id, &values)?;
             let entry = loader.block(entry, config, Some(id.clone()))?;
-            if entries.insert(Value::String(id), Value::Mapping(entry)).is_some() {
+            if entries
+                .insert(Value::String(id), Value::Mapping(entry))
+                .is_some()
+            {
                 return Err(env_config_error(
                     "duplicate project after environment expansion",
                 ));
@@ -2964,11 +2967,9 @@ projects:
         unsafe {
             env::remove_var("SYSTEMG_DEFINITELY_UNSET_VAR");
         }
-        let err = expand_env_vars(
-            "value: ${SYSTEMG_DEFINITELY_UNSET_VAR}",
-            &HashMap::new(),
-        )
-        .expect_err("missing variable should error");
+        let err =
+            expand_env_vars("value: ${SYSTEMG_DEFINITELY_UNSET_VAR}", &HashMap::new())
+                .expect_err("missing variable should error");
         assert!(
             matches!(err, ProcessManagerError::MissingEnvVar(name) if name == "SYSTEMG_DEFINITELY_UNSET_VAR")
         );

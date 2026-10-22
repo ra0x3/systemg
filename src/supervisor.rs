@@ -42,7 +42,9 @@ use crate::{
     opslot::{OpParts, OpSlot},
     restart::RestartScope,
     runtime,
-    spawn::{DynamicSpawnManager, SpawnCleanup, SpawnedChild, SpawnedChildKind, SpawnedExit},
+    spawn::{
+        DynamicSpawnManager, SpawnCleanup, SpawnedChild, SpawnedChildKind, SpawnedExit,
+    },
     start::{self, BootFrame, BootJournal},
     status::{
         BootStatus, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
@@ -442,18 +444,27 @@ fn persist_cron_state(
     pid: u32,
     process_start: Option<u64>,
 ) {
-    let Some(process_start) = process_start else { return; };
+    let Some(process_start) = process_start else {
+        return;
+    };
     let pid_file = daemon.pid_file_handle();
-    let pid_file = pid_file.lock()
+    let pid_file = pid_file
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if pid_file.start_for(service_name) != Some(process_start)
-        || pid_file.get(service_name).is_some_and(|current| current != pid)
+        || pid_file
+            .get(service_name)
+            .is_some_and(|current| current != pid)
     {
         return;
     }
     if let Ok(mut state_file) = ServiceStateFile::load(daemon.store())
         && let Err(err) = state_file.set_exit_unless_superseded(
-            service_hash, pid, status, exit_code, None,
+            service_hash,
+            pid,
+            status,
+            exit_code,
+            None,
         )
     {
         warn!("Failed to persist cron job '{service_name}' exit state: {err}");
@@ -503,12 +514,16 @@ fn clear_cron_pid(
     expected_pid: u32,
     process_start: Option<u64>,
 ) {
-    let Some(process_start) = process_start else { return; };
+    let Some(process_start) = process_start else {
+        return;
+    };
     let pid_file = daemon.pid_file_handle();
     let mut pid_file = pid_file
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Err(err) = pid_file.clear_pid_if_generation(service_name, expected_pid, process_start) {
+    if let Err(err) =
+        pid_file.clear_pid_if_generation(service_name, expected_pid, process_start)
+    {
         debug!("Failed to clear cron job '{service_name}' PID: {err}");
     }
 }
@@ -4986,9 +5001,16 @@ impl Supervisor {
         ) {
             Ok(root) => root,
             Err(err) => {
-                self.spawn_manager.record_spawn(parent_pid, spawned_child, spawn_auth.root_service.clone())?;
+                self.spawn_manager.record_spawn(
+                    parent_pid,
+                    spawned_child,
+                    spawn_auth.root_service.clone(),
+                )?;
                 self.spawn_manager.begin_subtree_cleanup_with_child(
-                    child_pid, started_at, Arc::clone(&pid_file_handle), Some(child),
+                    child_pid,
+                    started_at,
+                    Arc::clone(&pid_file_handle),
+                    Some(child),
                 );
                 Self::finish_spawn_cleanup(self.spawn_manager.claim_cleanup());
                 return Err(err.into());
@@ -4996,7 +5018,9 @@ impl Supervisor {
         };
         let termination_policy = spawn_auth.termination_policy.clone();
         let effective_root = root_service.or(spawn_auth.root_service);
-        let generation = self.spawn_manager.generation_for(child_pid, started_at)
+        let generation = self
+            .spawn_manager
+            .generation_for(child_pid, started_at)
             .ok_or_else(|| io::Error::other("Dynamic child lost its registration"))?;
         // The registry key is `{project}:{service}`; log paths and service
         // hashes are addressed by the bare service name, resolved against the
@@ -5033,7 +5057,10 @@ impl Supervisor {
         })();
         if let Err(err) = log_result {
             self.spawn_manager.begin_subtree_cleanup_with_child(
-                child_pid, started_at, Arc::clone(&pid_file_handle), Some(child),
+                child_pid,
+                started_at,
+                Arc::clone(&pid_file_handle),
+                Some(child),
             );
             Self::finish_spawn_cleanup(self.spawn_manager.claim_cleanup());
             return Err(err.into());
@@ -5078,7 +5105,11 @@ impl Supervisor {
                         return;
                     }
                     info!("Dynamic child '{ttl_name}' (pid {child_pid}) reached its TTL");
-                    ttl_manager.begin_subtree_cleanup(child_pid, started_at, ttl_pid_file);
+                    ttl_manager.begin_subtree_cleanup(
+                        child_pid,
+                        started_at,
+                        ttl_pid_file,
+                    );
                     Self::finish_spawn_cleanup(ttl_manager.claim_cleanup());
                 })
             {
@@ -5094,12 +5125,20 @@ impl Supervisor {
         if let Err(err) = thread::Builder::new()
             .name(format!("sysg-child-{child_pid}"))
             .spawn(move || {
-                let Some(mut child) = wait_child_for_exit.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner).take()
-                else { return; };
-                let waited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::reaper::wait(&mut child)
-                })).unwrap_or_else(|_| Err(io::Error::other("Dynamic child waiter panicked")));
+                let Some(mut child) = wait_child_for_exit
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                else {
+                    return;
+                };
+                let waited =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::reaper::wait(&mut child)
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(io::Error::other("Dynamic child waiter panicked"))
+                    });
                 match waited {
                     Ok(status) => {
                         // From here the pid is reaped and may be reused; stand the
@@ -5120,9 +5159,12 @@ impl Supervisor {
                                 started_at,
                                 Arc::clone(&pid_file_for_exit),
                             );
-                            Self::finish_spawn_cleanup(spawn_manager_for_exit.claim_cleanup());
+                            Self::finish_spawn_cleanup(
+                                spawn_manager_for_exit.claim_cleanup(),
+                            );
                         } else {
-                            let persisted = pid_file_for_exit.lock()
+                            let persisted = pid_file_for_exit
+                                .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .record_spawn_exit(child_pid, &generation, exit.clone());
                             match persisted {
@@ -5131,24 +5173,36 @@ impl Supervisor {
                                         child_pid, started_at, exit,
                                     );
                                 }
-                                Err(err) => warn!("Failed to record spawn exit for {child_pid}: {err}"),
+                                Err(err) => warn!(
+                                    "Failed to record spawn exit for {child_pid}: {err}"
+                                ),
                             }
                         }
                     }
                     Err(err) => {
                         error!("Failed to wait for spawned child {child_pid}: {err}");
                         spawn_manager_for_exit.begin_subtree_cleanup_with_child(
-                            child_pid, started_at, Arc::clone(&pid_file_for_exit), Some(child),
+                            child_pid,
+                            started_at,
+                            Arc::clone(&pid_file_for_exit),
+                            Some(child),
                         );
-                        Self::finish_spawn_cleanup(spawn_manager_for_exit.claim_cleanup());
+                        Self::finish_spawn_cleanup(
+                            spawn_manager_for_exit.claim_cleanup(),
+                        );
                     }
                 }
             })
         {
-            let child = wait_child.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            let child = wait_child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             self.spawn_manager.begin_subtree_cleanup_with_child(
-                child_pid, started_at, Arc::clone(&pid_file_handle), child,
+                child_pid,
+                started_at,
+                Arc::clone(&pid_file_handle),
+                child,
             );
             Self::finish_spawn_cleanup(self.spawn_manager.claim_cleanup());
             return Err(err.into());
@@ -6498,7 +6552,11 @@ running project does not declare; restart the project to apply structural change
         let policy = spawn_manager.policy_for_unit(project, service);
         let cascade = matches!(policy, TerminationPolicy::Cascade);
         spawn_manager.begin_generation_cleanup(
-            project, service, root_pid, cascade, daemon.pid_file_handle(),
+            project,
+            service,
+            root_pid,
+            cascade,
+            daemon.pid_file_handle(),
         );
         Self::finish_spawn_cleanup(spawn_manager.claim_cleanup());
     }
@@ -6515,16 +6573,25 @@ running project does not declare; restart the project to apply structural change
             }
             if claim.terminate
                 && let Err(err) = Daemon::terminate_spawn_generation(
-                    &child.name, child.pid, &claim.targets,
+                    &child.name,
+                    child.pid,
+                    &claim.targets,
                 )
             {
-                warn!("Dynamic cleanup retained for '{}' (pid {}): {err}", child.name, child.pid);
+                warn!(
+                    "Dynamic cleanup retained for '{}' (pid {}): {err}",
+                    child.name, child.pid
+                );
                 continue;
             }
             if claim.terminate && !claim.wait_done.load(Ordering::Acquire) {
-                let mut unwaited = claim.unwaited.lock()
+                let mut unwaited = claim
+                    .unwaited
+                    .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let Some(wait_child) = unwaited.as_mut() else { continue; };
+                let Some(wait_child) = unwaited.as_mut() else {
+                    continue;
+                };
                 match wait_child.try_wait() {
                     Ok(Some(_)) => {}
                     Err(err) if err.raw_os_error() == Some(libc::ECHILD) => {}
@@ -6533,17 +6600,24 @@ running project does not declare; restart the project to apply structural change
                 *unwaited = None;
                 claim.wait_done.store(true, Ordering::Release);
             }
-            let retired = claim.pid_file.lock()
+            let retired = claim
+                .pid_file
+                .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove_spawn_generation(child.pid, &claim.generation);
             match retired {
                 Ok(removed) => {
                     if !removed {
-                        debug!("Completed dynamic generation {} without removing an absent, legacy, or superseding row for pid {}", claim.generation, child.pid);
+                        debug!(
+                            "Completed dynamic generation {} without removing an absent, legacy, or superseding row for pid {}",
+                            claim.generation, child.pid
+                        );
                     }
                     claim.finish();
                 }
-                Err(err) => warn!("Dynamic cleanup retained for pid {}: {err}", child.pid),
+                Err(err) => {
+                    warn!("Dynamic cleanup retained for pid {}: {err}", child.pid)
+                }
             }
         }
     }
@@ -6866,16 +6940,22 @@ running project does not declare; restart the project to apply structural change
         timeout: Option<&str>,
     ) -> (Option<u64>, Option<String>) {
         let Some((limit, label)) = timeout.and_then(|raw| {
-            crate::config::duration::parse_positive(raw).ok()
+            crate::config::duration::parse_positive(raw)
+                .ok()
                 .map(|limit| (limit, raw.trim().to_string()))
         }) else {
             return (None, Some(String::new()));
         };
-        let deadline = started.checked_add(limit)
+        let deadline = started
+            .checked_add(limit)
             .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
             .and_then(|duration| {
                 let rounded = duration.as_millis()
-                    + if duration.subsec_nanos() % 1_000_000 == 0 { 0 } else { 1 };
+                    + if duration.subsec_nanos() % 1_000_000 == 0 {
+                        0
+                    } else {
+                        1
+                    };
                 u64::try_from(rounded).ok()
             });
         (deadline, Some(label))
@@ -6891,9 +6971,15 @@ running project does not declare; restart the project to apply structural change
             return false;
         }
         let handle = daemon.pid_file_handle();
-        let pids = handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(pid) = pids.get(name).filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
-        else { return false; };
+        let pids = handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pid) = pids
+            .get(name)
+            .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
+        else {
+            return false;
+        };
         let live = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
             || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
         if live {
@@ -6906,12 +6992,18 @@ running project does not declare; restart the project to apply structural change
     /// Recovered and newly launched executions use the same terminal ordering.
     fn supervise_cron_run(run: CronRun, record: CronExecutionRecord) {
         let outcome = match Self::wait_for_cron_record(
-            &record, &run.name, &run.hash,
-            Duration::from_millis(100), CRON_ROUTE_GRACE,
+            &record,
+            &run.name,
+            &run.hash,
+            Duration::from_millis(100),
+            CRON_ROUTE_GRACE,
         ) {
             Ok(outcome) => outcome,
             Err(err) => {
-                warn!("Cron run '{}' remains unfinished for recovery: {err}", run.name);
+                warn!(
+                    "Cron run '{}' remains unfinished for recovery: {err}",
+                    run.name
+                );
                 return;
             }
         };
@@ -6923,18 +7015,32 @@ running project does not declare; restart the project to apply structural change
         };
         if let Some(pid) = record.pid {
             persist_cron_state(
-                &run.daemon, &run.hash, &run.name, lifecycle,
-                exit_code, pid, record.process_start,
+                &run.daemon,
+                &run.hash,
+                &run.name,
+                lifecycle,
+                exit_code,
+                pid,
+                record.process_start,
             );
             clear_cron_pid(&run.daemon, &run.name, pid, record.process_start);
         }
         let metrics = cron_run_metrics(&run.metrics, &run.hash, record.started_at);
         run.manager.complete_job_run(
-            &run.hash, record.started_at, status.clone(), exit_code, metrics,
+            &run.hash,
+            record.started_at,
+            status.clone(),
+            exit_code,
+            metrics,
         );
         notify_cron_failure(
-            &run.daemon, &run.name, &run.service, &status,
-            exit_code, run.scheduled_at, None,
+            &run.daemon,
+            &run.name,
+            &run.service,
+            &status,
+            exit_code,
+            run.scheduled_at,
+            None,
         );
     }
 
@@ -6949,7 +7055,8 @@ running project does not declare; restart the project to apply structural change
         route_grace: Duration,
     ) -> Result<CronCompletionOutcome, SupervisorError> {
         let started_at = SystemTime::now();
-        let (timeout_deadline_ms, timeout_label) = Self::cron_deadline(started_at, timeout);
+        let (timeout_deadline_ms, timeout_label) =
+            Self::cron_deadline(started_at, timeout);
         let record = CronExecutionRecord {
             started_at,
             completed_at: None,
@@ -6963,7 +7070,13 @@ running project does not declare; restart the project to apply structural change
             command: None,
             metrics: Vec::new(),
         };
-        Self::wait_for_cron_record(&record, job_name, claim_key, poll_interval, route_grace)
+        Self::wait_for_cron_record(
+            &record,
+            job_name,
+            claim_key,
+            poll_interval,
+            route_grace,
+        )
     }
 
     /// Owns one persisted run until its exact process exits or timeout cleanup settles.
@@ -6995,12 +7108,16 @@ running project does not declare; restart the project to apply structural change
             .map(|millis| {
                 std::time::UNIX_EPOCH
                     .checked_add(Duration::from_millis(millis))
-                    .ok_or_else(|| io::Error::other("Cron deadline is outside the clock range"))
+                    .ok_or_else(|| {
+                        io::Error::other("Cron deadline is outside the clock range")
+                    })
             })
             .transpose()?;
         let monotonic_deadline = wall_deadline.and_then(|deadline| {
             Instant::now().checked_add(
-                deadline.duration_since(SystemTime::now()).unwrap_or_default(),
+                deadline
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default(),
             )
         });
         let targets = Mutex::new(
@@ -7018,7 +7135,8 @@ running project does not declare; restart the project to apply structural change
                 match Daemon::terminate_spawn_generation(job_name, pid, &targets) {
                     Ok(()) => {
                         if record.process_start.is_some()
-                            && crate::daemon::process_start_time(pid) == record.process_start
+                            && crate::daemon::process_start_time(pid)
+                                == record.process_start
                         {
                             let _ = waitpid(wait_pid, Some(WaitPidFlag::WNOHANG));
                         }
@@ -7033,14 +7151,17 @@ running project does not declare; restart the project to apply structural change
                         });
                     }
                     Err(err) => {
-                        warn!("Cron timeout cleanup for '{job_name}' remains owned: {err}");
+                        warn!(
+                            "Cron timeout cleanup for '{job_name}' remains owned: {err}"
+                        );
                     }
                 }
                 thread::sleep(poll_interval);
                 continue;
             }
 
-            let expired = wall_deadline.is_some_and(|deadline| SystemTime::now() >= deadline)
+            let expired = wall_deadline
+                .is_some_and(|deadline| SystemTime::now() >= deadline)
                 || monotonic_deadline.is_some_and(|deadline| Instant::now() >= deadline);
             if expired
                 && record.process_start.is_some()
@@ -7059,7 +7180,8 @@ running project does not declare; restart the project to apply structural change
                 return Ok(interrupted());
             }
             let live = Daemon::pid_is_alive(pid);
-            let verified = record.process_start.is_some() && actual_birth == record.process_start;
+            let verified =
+                record.process_start.is_some() && actual_birth == record.process_start;
             if !live || verified {
                 if let Some(status) = crate::reaper::take_for(pid as i32, claim_key) {
                     return Ok(Self::cron_outcome_from_status(job_name, status));
