@@ -7008,6 +7008,24 @@ running project does not declare; restart the project to apply structural change
             }
         };
         let CronCompletionOutcome { status, exit_code } = outcome;
+        match &status {
+            CronExecutionStatus::Success => {
+                info!("Cron job '{}' completed successfully", run.name)
+            }
+            CronExecutionStatus::Failed(reason) => {
+                warn!("Cron job '{}' failed: {}", run.name, reason)
+            }
+            CronExecutionStatus::Interrupted(reason) => {
+                warn!("Cron job '{}' was interrupted: {}", run.name, reason)
+            }
+            CronExecutionStatus::OverlapError => warn!(
+                "Cron job '{}' reported overlap state unexpectedly",
+                run.name
+            ),
+            CronExecutionStatus::TimedOut(limit) => {
+                warn!("Cron job '{}' timed out after {}", run.name, limit)
+            }
+        }
         let lifecycle = match &status {
             CronExecutionStatus::Success => ServiceLifecycleStatus::ExitedSuccessfully,
             CronExecutionStatus::Interrupted(_) => ServiceLifecycleStatus::Stopped,
