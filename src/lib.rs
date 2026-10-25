@@ -125,5 +125,8 @@ pub mod privilege;
 /// Reports this binary's version alongside the resident supervisor's.
 pub mod version;
 
+/// Staged unit manifests written by `sysg start -- <cmd>`.
+pub mod units;
+
 /// Boot integration: the service-manager unit that starts a manifest at boot.
 pub mod boot;

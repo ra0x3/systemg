@@ -13,7 +13,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Local, Utc};
@@ -60,9 +60,6 @@ use systemg::{
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-const UNIT_CONFIG_MAX_FILES: usize = 200;
-const UNIT_CONFIG_MAX_AGE_DAYS: u64 = 30;
-const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 const INSPECT_CRON_HISTORY_LIMIT: usize = 10;
 const FETCH_SPINNER_DELAY: Duration = Duration::from_millis(120);
 /// Bound on waiting for the progress stream's final frames after the operation
@@ -4244,56 +4241,6 @@ mod tests {
     }
 
     #[test]
-    fn prune_unit_configs_respects_max_files() {
-        let temp = tempfile::tempdir().expect("create tempdir");
-        let units_dir = temp.path();
-        let now = SystemTime::now();
-
-        for idx in 0..3 {
-            let path = units_dir.join(format!("unit-{idx}.yaml"));
-            fs::write(path, "version: \"2\"\nservices: {}\n").expect("write unit file");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        prune_unit_configs_with_limits(
-            units_dir,
-            now + Duration::from_secs(1),
-            2,
-            Duration::from_secs(60),
-        )
-        .expect("prune configs");
-
-        let yaml_count = fs::read_dir(units_dir)
-            .expect("read units dir")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.path().extension().and_then(|ext| ext.to_str()) == Some("yaml")
-            })
-            .count();
-        assert_eq!(yaml_count, 2);
-    }
-
-    #[test]
-    fn prune_unit_configs_respects_max_age() {
-        let temp = tempfile::tempdir().expect("create tempdir");
-        let units_dir = temp.path();
-        let now = SystemTime::now();
-
-        let path = units_dir.join("old.yaml");
-        fs::write(&path, "version: \"2\"\nservices: {}\n").expect("write unit file");
-
-        prune_unit_configs_with_limits(
-            units_dir,
-            now + Duration::from_secs(5),
-            10,
-            Duration::from_secs(1),
-        )
-        .expect("prune configs");
-
-        assert!(!path.exists(), "file older than max age should be pruned");
-    }
-
-    #[test]
     fn inspect_stream_event_action_exits_on_escape() {
         let action = inspect_stream_event_action(Event::Key(KeyEvent::new(
             KeyCode::Esc,
@@ -8021,7 +7968,7 @@ fn write_ad_hoc_config(
         shell_escape_arg(cwd),
         render_shell_command(command)
     );
-    let units_dir = runtime::state_dir().join("units");
+    let units_dir = systemg::units::dir();
     fs::create_dir_all(&units_dir)?;
 
     let config_path = units_dir.join(format!("{service_name}-{hash}.yaml"));
@@ -8032,63 +7979,7 @@ fn write_ad_hoc_config(
         command = yaml_single_quoted(&shell_command)
     );
     fs::write(&config_path, yaml)?;
-    if let Err(err) = prune_unit_configs(&units_dir) {
-        warn!("Failed to prune unit configs in {:?}: {err}", units_dir);
-    }
     Ok(config_path)
-}
-
-/// Prunes unit configs.
-fn prune_unit_configs(units_dir: &Path) -> io::Result<()> {
-    let max_age = Duration::from_secs(UNIT_CONFIG_MAX_AGE_DAYS * SECONDS_PER_DAY);
-    prune_unit_configs_with_limits(
-        units_dir,
-        SystemTime::now(),
-        UNIT_CONFIG_MAX_FILES,
-        max_age,
-    )
-}
-
-/// Prunes unit configs with limits.
-fn prune_unit_configs_with_limits(
-    units_dir: &Path,
-    now: SystemTime,
-    max_files: usize,
-    max_age: Duration,
-) -> io::Result<()> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(units_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        entries.push((path, modified));
-    }
-
-    let mut fresh_entries = Vec::new();
-    for (path, modified) in entries {
-        let is_stale = now
-            .duration_since(modified)
-            .map(|age| age > max_age)
-            .unwrap_or(false);
-        if is_stale {
-            let _ = fs::remove_file(&path);
-        } else {
-            fresh_entries.push((path, modified));
-        }
-    }
-
-    fresh_entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-    for (path, _) in fresh_entries.into_iter().skip(max_files) {
-        let _ = fs::remove_file(path);
-    }
-
-    Ok(())
 }
 
 /// Returns the default child name.

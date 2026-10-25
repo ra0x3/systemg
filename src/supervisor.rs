@@ -1711,6 +1711,12 @@ impl Supervisor {
                 .join(path)
         };
         let resolved = resolved.canonicalize().unwrap_or(resolved);
+        if !resolved.exists() {
+            return Err(ProcessManagerError::Diag(Box::new(
+                crate::restart::manifest_missing(&resolved),
+            ))
+            .into());
+        }
         let loaded = (|| -> Result<Vec<Config>, SupervisorError> {
             let file = runtime::open_trusted_config(&resolved)?;
             let configs = load_projects_from_file(file, &resolved)?;
@@ -4544,6 +4550,7 @@ impl Supervisor {
             } => {
                 let project_id =
                     self.add_project_config(Path::new(&config), service, mode)?;
+                self.prune_staged_units();
                 Ok(ControlResponse::Message(format!(
                     "Project '{project_id}' loaded"
                 )))
@@ -5535,6 +5542,43 @@ impl Supervisor {
             )
             .into()
         })
+    }
+
+    /// Prunes old staged unit manifests, keeping every manifest a loaded
+    /// project or the loose registry still points at.
+    ///
+    /// Best-effort, and skipped entirely when the registry cannot be read: an
+    /// unknown keep set could delete a manifest a cold boot would restore.
+    fn prune_staged_units(&self) {
+        let registry = match crate::loose_registry::LooseRegistry::load() {
+            Ok(registry) => registry,
+            Err(err) => {
+                warn!("Loose registry unreadable, skipping unit pruning: {err}");
+                return;
+            }
+        };
+        let keep: HashSet<PathBuf> = std::iter::once(self.config_path.clone())
+            .chain(
+                self.extra_projects
+                    .values()
+                    .map(|runtime| runtime.config_path.clone()),
+            )
+            .chain(
+                registry
+                    .entries()
+                    .map(|entry| PathBuf::from(&entry.config_path)),
+            )
+            .collect();
+        let units_dir = crate::units::dir();
+        if !units_dir.is_dir() {
+            return;
+        }
+        if let Err(err) = crate::units::prune(&units_dir, &keep) {
+            warn!(
+                "Failed to prune unit configs in {}: {err}",
+                units_dir.display()
+            );
+        }
     }
 
     /// Records a loose manifest so a cold boot can restore it.

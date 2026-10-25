@@ -8,8 +8,8 @@ pub mod plan;
 pub mod reconcile;
 
 pub use plan::{
-    Preflight, RestartPlan, World, manifest_rejected, preflight, reconcile_incomplete,
-    recycle_failed, recycle_manager_owned, recycle_refused, resolve_plan,
-    restart_touched_nothing,
+    Preflight, RestartPlan, World, manifest_missing, manifest_rejected, preflight,
+    reconcile_incomplete, recycle_failed, recycle_manager_owned, recycle_refused,
+    resolve_plan, restart_touched_nothing,
 };
 pub use reconcile::{ManifestDiff, RestartScope};

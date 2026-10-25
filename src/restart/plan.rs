@@ -172,6 +172,18 @@ pub fn manifest_rejected(reason: impl Into<String>) -> Diagnostic {
     .help_docs()
 }
 
+/// Builds the SG0301 diagnostic for a restart whose stored manifest no longer
+/// exists on disk, naming the path and how to recover.
+pub fn manifest_missing(path: &std::path::Path) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::ManifestRejected,
+        "the project's manifest no longer exists; the restart was refused and nothing was changed",
+    )
+    .note(format!("missing: {}", path.display()))
+    .note("restore the file, re-stage it with the same `sysg start --name <name> -- <cmd>`, or pass `-c <manifest>`")
+    .help_docs()
+}
+
 /// Builds the SG0303 diagnostic for a supervisor recycle that was refused
 /// because the replacement config failed to validate. The old supervisor is
 /// left running — a bad config never costs you the working stack.
