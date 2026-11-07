@@ -244,23 +244,23 @@ version = "0.3.31"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-core]]
-version = "0.3.31"
+version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-io]]
-version = "0.3.31"
+version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-sink]]
-version = "0.3.31"
+version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-task]]
-version = "0.3.31"
+version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-util]]
-version = "0.3.31"
+version = "0.3.34"
 criteria = "safe-to-deploy"
 
 [[exemptions.generic-array]]
@@ -541,10 +541,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pin-project-lite]]
 version = "0.2.16"
-criteria = "safe-to-deploy"
-
-[[exemptions.pin-utils]]
-version = "0.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.pkg-config]]

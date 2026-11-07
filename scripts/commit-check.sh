@@ -85,6 +85,16 @@ run_labeled \
   "cd \"${REPO_ROOT}\" && cargo rustdoc --lib -- -D warnings -D missing_docs"
 
 run_labeled \
+  "rust:audit" \
+  "${YELLOW}" \
+  "cd \"${REPO_ROOT}\" && cargo audit"
+
+run_labeled \
+  "rust:vet" \
+  "${YELLOW}" \
+  "cd \"${REPO_ROOT}\" && cargo vet --locked"
+
+run_labeled \
   "sysg.dev" \
   "${BLUE}" \
   "cd \"${REPO_ROOT}/sysg.dev\" && npm run format:check && npm run lint && npm run typecheck && npm run build && npm run links"
