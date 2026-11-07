@@ -159,10 +159,14 @@ Useful status options:
 - `--project <id>`: filter by stable project id.
 - `--service <name>`: filter to one unit.
 - `--all`: include orphaned state outside the selected project/config set.
-- `--live`: force immediate runtime collection instead of using the configured
-  snapshot mode.
-- `--stream <duration>`: continuously refresh status. Avoid this for one-shot
-  LLM calls unless streaming is explicitly requested.
+- `--no-cache`: collect fresh runtime data for this one read instead of the
+  supervisor's cached snapshot. Use this when you need an accurate reading.
+- `--live`: redraw every second with fresh data. Needs an interactive terminal,
+  so it refuses with `--format`, `--plain`, or piped output. Agents should use
+  `--no-cache` instead.
+- `--stream [duration]`: continuously refresh status, every second when no
+  value is given. Avoid this for one-shot LLM calls unless streaming is
+  explicitly requested.
 
 Exit-code convention for rendered status and inspect views:
 
@@ -188,8 +192,11 @@ Useful inspect options:
 - `--format xml`: XML detail.
 - `--plain`: inherited global flag for agent-friendly output.
 - `--project <id>`: disambiguate duplicate service names.
-- `--live`: force immediate runtime collection.
-- `--stream <duration>`: continuously refresh. Avoid for one-shot agent calls.
+- `--no-cache`: collect fresh runtime data for this one read.
+- `--live`: redraw every second with fresh data. Needs an interactive terminal;
+  agents should use `--no-cache`.
+- `--stream [duration]`: continuously refresh, every second when no value is
+  given. Avoid for one-shot agent calls.
 
 ## Validate
 

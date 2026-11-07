@@ -38,7 +38,10 @@ use crate::{
         LogManager, LogSection, get_service_log_path, resolve_log_path,
         spawn_dynamic_child_log_writer, write_log_section_header,
     },
-    metrics::{self, MetricSample, MetricsCollector, MetricsHandle},
+    metrics::{
+        self, MetricSample, MetricsCollector, MetricsHandle, UnitTarget,
+        gather_unit_targets,
+    },
     opslot::{OpParts, OpSlot},
     restart::RestartScope,
     runtime,
@@ -1246,11 +1249,13 @@ impl Supervisor {
     /// Builds an aggregate status snapshot across every managed project from the
     /// shared project list, so the background refresher reflects extra projects
     /// (including those a multi-project file fanned out) without holding `&self`.
+    ///
+    /// Each project is collected in its own `status.snapshot_mode`, with `off`
+    /// promoted to `summary` because a collection is happening either way.
     fn collect_projects_snapshot(
         projects: &Arc<RwLock<Vec<CronProjectRuntime>>>,
         metrics_store: &MetricsHandle,
         spawn_manager: &DynamicSpawnManager,
-        mode: StatusSnapshotMode,
     ) -> Result<StatusSnapshot, StatusError> {
         let runtimes = match projects.read() {
             Ok(guard) => guard.clone(),
@@ -1275,7 +1280,7 @@ impl Supervisor {
                 &runtime.daemon,
                 metrics_store,
                 spawn_manager,
-                mode,
+                Self::live_status_snapshot_mode(runtime.config.as_ref()),
                 runtime.mode,
                 &runtime.config_path,
                 Some(&valid_cron_hashes),
@@ -1913,12 +1918,7 @@ impl Supervisor {
     fn start_primary_workers(&mut self) -> Result<(), SupervisorError> {
         self.refresh_status_cache();
         self.respawn_status_refresher()?;
-        self.metrics_collector = Some(MetricsCollector::spawn(
-            self.metrics_store.clone(),
-            self.daemon.config(),
-            self.daemon.pid_file_handle(),
-            self.daemon.service_state_handle(),
-        )?);
+        self.respawn_metrics_collector()?;
         Ok(())
     }
 
@@ -3616,10 +3616,6 @@ impl Supervisor {
             self.boot_tally()
         };
 
-        let config_handle = self.daemon.config();
-        let pid_handle = self.daemon.pid_file_handle();
-        let state_handle = self.daemon.service_state_handle();
-
         // Seed the cache from ALL managed projects, not just the primary, so a
         // multi-project boot (which registers extra projects before this point)
         // is reflected in status from the first read.
@@ -3651,34 +3647,8 @@ impl Supervisor {
 
         self.boot_journal.push(BootFrame::Done { started, failed });
 
-        let cache_clone = self.status_cache.clone();
-        let refresh_interval = Self::status_snapshot_interval(config_handle.as_ref());
-        let refresh_mode = Self::status_snapshot_mode(config_handle.as_ref());
-        let refresh_projects = Arc::clone(&self.cron_projects);
-        let refresh_metrics = self.metrics_store.clone();
-        let refresh_spawn = self.spawn_manager.clone();
-        if !matches!(refresh_mode, StatusSnapshotMode::Off) {
-            self.status_refresher = Some(StatusRefresher::spawn(
-                cache_clone,
-                refresh_interval,
-                move || {
-                    Supervisor::collect_projects_snapshot(
-                        &refresh_projects,
-                        &refresh_metrics,
-                        &refresh_spawn,
-                        refresh_mode,
-                    )
-                },
-            )?);
-        }
-
-        let metrics_handle = self.metrics_store.clone();
-        self.metrics_collector = Some(MetricsCollector::spawn(
-            metrics_handle,
-            Arc::clone(&config_handle),
-            pid_handle,
-            state_handle,
-        )?);
+        self.respawn_status_refresher()?;
+        self.respawn_metrics_collector()?;
 
         let cron_manager = self.cron_manager.clone();
         let cron_projects = Arc::clone(&self.cron_projects);
@@ -5841,7 +5811,6 @@ impl Supervisor {
             let boot_projects = Arc::clone(&self.cron_projects);
             let boot_metrics = self.metrics_store.clone();
             let boot_spawn = self.spawn_manager.clone();
-            let boot_mode = Self::status_snapshot_mode(self.daemon.config().as_ref());
             let boots = Arc::clone(&self.boots);
             boots
                 .write()
@@ -5911,7 +5880,6 @@ impl Supervisor {
                         &boot_projects,
                         &boot_metrics,
                         &boot_spawn,
-                        Self::live_snapshot_mode(boot_mode),
                     ) {
                         Ok(snapshot) if snapshot.has_project(&boot_project) => {
                             boot_cache.replace(snapshot);
@@ -6413,11 +6381,10 @@ running project does not declare; restart the project to apply structural change
         if let Some(collector) = self.metrics_collector.take() {
             collector.stop();
         }
+        let projects = Arc::clone(&self.cron_projects);
         self.metrics_collector = Some(MetricsCollector::spawn(
             self.metrics_store.clone(),
-            self.daemon.config(),
-            self.daemon.pid_file_handle(),
-            self.daemon.service_state_handle(),
+            move || Supervisor::metrics_targets(&projects),
         )?);
         Ok(())
     }
@@ -6709,14 +6676,13 @@ running project does not declare; restart the project to apply structural change
             refresher.stop();
         }
 
-        let refresh_mode = Self::status_snapshot_mode(self.daemon.config().as_ref());
-        if matches!(refresh_mode, StatusSnapshotMode::Off) {
+        let Some(refresh_interval) =
+            Self::status_refresh_interval(&self.cron_project_runtimes())
+        else {
             return Ok(());
-        }
+        };
 
         let cache_clone = self.status_cache.clone();
-        let refresh_interval =
-            Self::status_snapshot_interval(self.daemon.config().as_ref());
         let refresh_projects = Arc::clone(&self.cron_projects);
         let refresh_metrics = self.metrics_store.clone();
         let refresh_spawn = self.spawn_manager.clone();
@@ -6728,11 +6694,49 @@ running project does not declare; restart the project to apply structural change
                     &refresh_projects,
                     &refresh_metrics,
                     &refresh_spawn,
-                    refresh_mode,
                 )
             },
         )?);
         Ok(())
+    }
+
+    /// The shortest refresh interval any managed project asks for, or `None`
+    /// when every project has status collection switched off.
+    ///
+    /// Each project's own `status.snapshot_mode` decides how it is collected
+    /// on every tick, so a project added to a running supervisor gets the
+    /// detail it configured rather than whatever the primary chose.
+    fn status_refresh_interval(projects: &[CronProjectRuntime]) -> Option<Duration> {
+        projects
+            .iter()
+            .filter(|project| {
+                !matches!(
+                    Self::status_snapshot_mode(project.config.as_ref()),
+                    StatusSnapshotMode::Off
+                )
+            })
+            .map(|project| Self::status_snapshot_interval(project.config.as_ref()))
+            .min()
+    }
+
+    /// Every unit the metrics sampler should read, across all managed projects.
+    fn metrics_targets(
+        projects: &Arc<RwLock<Vec<CronProjectRuntime>>>,
+    ) -> Vec<UnitTarget> {
+        let runtimes = match projects.read() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return Vec::new(),
+        };
+        runtimes
+            .iter()
+            .flat_map(|runtime| {
+                gather_unit_targets(
+                    runtime.daemon.config().as_ref(),
+                    &runtime.daemon.pid_file_handle(),
+                    &runtime.daemon.service_state_handle(),
+                )
+            })
+            .collect()
     }
 
     /// Records every dynamic unit's current generation pid before a project-wide

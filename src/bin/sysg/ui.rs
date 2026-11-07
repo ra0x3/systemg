@@ -149,14 +149,14 @@ struct StatusReading {
 /// the on-disk state marked `Offline`, never dressed up as a supervised reading.
 fn fetch_status_reading(
     config_path: Option<&str>,
-    live: bool,
+    no_cache: bool,
 ) -> Result<StatusReading, Box<dyn Error>> {
     let health = supervisor_health();
     if health == SupervisorHealth::Serving {
-        if let Some(reading) = try_live_status(live) {
+        if let Some(reading) = try_live_status(no_cache) {
             return Ok(reading);
         }
-        if live
+        if no_cache
             && let Some(reading) = try_live_status(false)
         {
             return Ok(reading);
@@ -249,16 +249,16 @@ fn status_exit_code(presence: SupervisorPresence, health: OverallHealth) -> i32 
 /// only need the unit list, such as the log commands.
 fn fetch_status_snapshot(
     config_path: Option<&str>,
-    live: bool,
+    no_cache: bool,
 ) -> Result<StatusSnapshot, Box<dyn Error>> {
-    fetch_status_reading(config_path, live).map(|reading| reading.snapshot)
+    fetch_status_reading(config_path, no_cache).map(|reading| reading.snapshot)
 }
 
 /// Asks a serving supervisor for its snapshot within the probe deadline. Returns
 /// `None` if the daemon stops serving between the health check and the request.
-fn try_live_status(live: bool) -> Option<StatusReading> {
+fn try_live_status(no_cache: bool) -> Option<StatusReading> {
     match ipc::send_command_with_timeout(
-        &ControlCommand::Status { live },
+        &ControlCommand::Status { live: no_cache },
         SUPERVISOR_PROBE_TIMEOUT,
     ) {
         Ok(ipc::CommandAck::Response(ControlResponse::Status(snapshot))) => {
@@ -2869,14 +2869,14 @@ fn fetch_inspect(
     unit: &str,
     project: Option<&str>,
     samples: usize,
-    live: bool,
+    no_cache: bool,
 ) -> Result<InspectPayload, Box<dyn Error>> {
     let limit = samples.min(u32::MAX as usize) as u32;
     match ipc::send_command(&ControlCommand::Inspect {
         unit: unit.to_string(),
         project: project.map(str::to_string),
         samples: limit,
-        live,
+        live: no_cache,
     }) {
         Ok(ControlResponse::Inspect(payload)) => {
             let mut payload = *payload;
@@ -4819,7 +4819,11 @@ fn format_row_cells(values: &[String], columns: &[Column], _no_color: bool) -> S
 }
 
 /// Normalizes cell text to a single printable line while preserving ANSI color escape sequences.
+///
+/// A leading tree indent (`"│  └─ "`) is kept verbatim: its spaces are what
+/// put a child one level under its parent, so collapsing them flattens the tree.
 fn sanitize_table_cell(value: &str) -> String {
+    let (indent, value) = split_tree_indent(value);
     let mut collapsed = String::new();
     let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -4847,7 +4851,21 @@ fn sanitize_table_cell(value: &str) -> String {
         collapsed.push(ch);
     }
 
-    collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
+    format!(
+        "{indent}{}",
+        collapsed.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
+}
+
+/// Splits a tree-drawing indent such as `"│     └─ "` off the front of a cell.
+fn split_tree_indent(value: &str) -> (&str, &str) {
+    let rest = value.trim_start_matches([' ', '│']);
+    let lead = value.len() - rest.len();
+    ["├─ ", "└─ "]
+        .iter()
+        .find(|branch| rest.starts_with(**branch))
+        .map(|branch| value.split_at(lead + branch.len()))
+        .unwrap_or(("", value))
 }
 
 /// Returns a display-friendly process name from sysinfo process metadata.

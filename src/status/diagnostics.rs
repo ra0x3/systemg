@@ -61,7 +61,7 @@ pub fn state_inconsistent(detail: impl Into<String>) -> Diagnostic {
         "recorded state disagrees with the live process table",
     )
     .note(detail)
-    .help_cmd("see what's running", "sysg status --live")
+    .help_cmd("see what's running", "sysg status --no-cache")
     .help_docs()
 }
 
@@ -81,7 +81,20 @@ pub fn snapshot_unavailable(detail: impl Into<String>) -> Diagnostic {
         "service startup ran; until the next refresh `sysg status` may still \
          report those units as not yet running",
     )
-    .help_cmd("read live state instead", "sysg status --live")
+    .help_cmd("read fresh state instead", "sysg status --no-cache")
+    .help_docs()
+}
+
+/// `--live` was asked for where a redrawing screen cannot work: machine-readable
+/// output, agent mode, or a stdout that is not a terminal. A loop there would
+/// never return, so point the caller at the single fresh read instead.
+pub fn live_needs_terminal(reason: impl Into<String>, no_cache_cmd: &str) -> Diagnostic {
+    Diagnostic::error(
+        SgCode::Catchall,
+        "`--live` redraws the screen and needs an interactive terminal",
+    )
+    .note(reason)
+    .help_cmd("read fresh data once instead", no_cache_cmd)
     .help_docs()
 }
 

@@ -30,7 +30,7 @@ OS_KB="$(ps -o rss= -p "$PID" | tr -d ' ')"
 OS_BYTES=$((OS_KB * 1024))
 echo "OS ps rss: ${OS_KB}KB = ${OS_BYTES} bytes"
 
-SYSG_BYTES="$(sysg status --config "$CONFIG" --live --format json 2>/dev/null \
+SYSG_BYTES="$(sysg status --config "$CONFIG" --no-cache --format json 2>/dev/null \
   | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 m=(d["units"][0].get("metrics") or {})

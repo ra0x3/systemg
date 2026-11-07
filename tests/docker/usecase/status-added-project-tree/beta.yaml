@@ -1,0 +1,11 @@
+version: "2"
+status:
+  snapshot_mode: detailed
+  snapshot_interval_secs: 1
+projects:
+  beta:
+    name: Beta
+    services:
+      tree:
+        command: "python3 -c 'import subprocess,time; subprocess.Popen([\"sh\",\"-c\",\"sleep 3000; true\"]); time.sleep(3000)'"
+        restart_policy: "always"

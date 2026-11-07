@@ -13,8 +13,9 @@ $ sysg inspect -s myservice
 When a supervisor is running, `sysg inspect` reads current persisted state such
 as cron history and attaches recent metric samples from the supervisor's metrics
 store. It does not rebuild the full process tree on every invocation unless
-`status.snapshot_mode` is configured as `detailed`. Use `--live` to force
-immediate runtime collection for a specific inspect request.
+`status.snapshot_mode` is configured as `detailed`. Use `--no-cache` to collect
+fresh runtime data for one inspect request, or `--live` to watch it redraw every
+second with fresh data.
 
 ## Options
 
@@ -22,7 +23,7 @@ immediate runtime collection for a specific inspect request.
 |-------|------|-------------|
 | `-s` | `--service` | Name of the service to inspect |
 | `-p` | `--project` | Select the stable project id containing the service |
-| `-` | `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`) |
+| `-` | `--stream` | Continuously refresh output and render a rolling metrics window of the provided duration (e.g., `5`, `1s`, `2m`). With no value, refreshes every second |
 | `-c` | `--config` | Path to configuration file |
 | `-` | `--format` | Emit machine-readable output (`json` or `xml`) instead of a report; defaults to `json` when no value is provided |
 | `-v` | `--verbose` | Print operation progress |
@@ -30,7 +31,8 @@ immediate runtime collection for a specific inspect request.
 | `-` | `--drop-privileges` | Accepted globally but ignored; inspect does not spawn services |
 | `-` | `--no-color` | Disable ANSI colors in output |
 | `-` | `--plain` | Disable terminal decoration for automation |
-| `-` | `--live` | Force immediate runtime collection instead of the configured snapshot mode |
+| `-` | `--live` | Redraw every second with fresh data, skipping the supervisor's cached snapshot. Same as `--stream --no-cache`. Needs an interactive terminal |
+| `-` | `--no-cache` | Collect fresh runtime data for this one read instead of serving the supervisor's cached snapshot |
 | `-` | `--log-level` | Set logging verbosity for this invocation (`trace` through `off`, or 5-0) |
 
 ## Stream Mode Controls
@@ -112,15 +114,24 @@ Stream mode refreshes inspect output using the configured snapshot mode and
 recent metric samples. The rolling window controls the charted sample range, not
 how much runtime detail systemg collects.
 
-### Force fresh inspect data
+### Watch a unit live
 
 ```sh
 $ sysg inspect -s api --live
 ```
 
-`--live` forces immediate runtime collection before selecting the inspected unit
-and loading recent metric samples. Regular inspect requests still read current
-persisted state such as cron history, while `status.snapshot_mode` controls
+`--live` redraws every second and collects fresh runtime data on each redraw.
+It needs an interactive terminal. With `--format`, `--plain`, or output that
+isn't a terminal, it refuses and points you at `--no-cache`.
+
+### Skip the cache for one read
+
+```sh
+$ sysg inspect -s api --no-cache
+```
+
+`--no-cache` collects fresh runtime data before selecting the inspected unit and
+loading recent metric samples, then exits. `status.snapshot_mode` still controls
 runtime command lines and process/spawn descendants.
 
 ## Metrics shown

@@ -5,7 +5,7 @@
 //! of the plan is to reject up front the selectors inspect cannot serve (a whole
 //! project, or nothing) rather than discover them mid-fetch.
 //!
-//! - [`InspectPlan`] — the one service to inspect, its project, and `live`.
+//! - [`InspectPlan`] — the one service to inspect, its project, and `no_cache`.
 //! - [`resolve_plan`] — resolves `-s`/`-p` into the plan, or a typed error.
 
 use crate::selector::{ProjectMismatch, Target, resolve_target};
@@ -18,8 +18,8 @@ pub struct InspectPlan {
     /// The project the service belongs to, when known from `-p` or a
     /// `project/service` selector. `None` resolves from the resident supervisor.
     pub project: Option<String>,
-    /// Force immediate runtime collection instead of the configured snapshot.
-    pub live: bool,
+    /// Collect fresh data instead of serving the supervisor's cached snapshot.
+    pub no_cache: bool,
 }
 
 /// Why an `inspect` invocation could not resolve to a plan.
@@ -39,13 +39,13 @@ pub enum InspectPlanError {
 pub fn resolve_plan(
     service: &str,
     project: Option<&str>,
-    live: bool,
+    no_cache: bool,
 ) -> Result<InspectPlan, InspectPlanError> {
     match resolve_target(Some(service), project).map_err(InspectPlanError::Mismatch)? {
         Target::Service { service, project } => Ok(InspectPlan {
             service,
             project,
-            live,
+            no_cache,
         }),
         Target::Everything | Target::Project { .. } => Err(InspectPlanError::NotAService),
     }
@@ -62,7 +62,7 @@ mod tests {
             InspectPlan {
                 service: "web".into(),
                 project: None,
-                live: false
+                no_cache: false
             }
         );
     }
@@ -74,7 +74,7 @@ mod tests {
             InspectPlan {
                 service: "web".into(),
                 project: Some("demo".into()),
-                live: true
+                no_cache: true
             }
         );
     }
@@ -86,7 +86,7 @@ mod tests {
             InspectPlan {
                 service: "web".into(),
                 project: Some("demo".into()),
-                live: false
+                no_cache: false
             }
         );
     }

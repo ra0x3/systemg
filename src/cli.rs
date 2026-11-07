@@ -334,12 +334,24 @@ pub enum Commands {
         #[arg(long = "full-cmd")]
         full_cmd: bool,
 
-        /// Force immediate runtime collection instead of the configured snapshot mode.
+        /// Redraw every second with fresh data, skipping the supervisor's cached
+        /// snapshot. Same as `--stream --no-cache`; needs an interactive terminal.
         #[arg(long)]
         live: bool,
 
-        /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
-        #[arg(long, value_name = "DURATION")]
+        /// Collect fresh data for this one read instead of serving the
+        /// supervisor's cached snapshot.
+        #[arg(long = "no-cache")]
+        no_cache: bool,
+
+        /// Continuously refresh output at the provided interval (e.g., "5", "1s",
+        /// "2m"). With no value, refreshes every second.
+        #[arg(
+            long,
+            value_name = "DURATION",
+            num_args = 0..=1,
+            default_missing_value = "1"
+        )]
         stream: Option<String>,
     },
 
@@ -371,12 +383,24 @@ pub enum Commands {
         #[arg(long = "no-color")]
         no_color: bool,
 
-        /// Force immediate runtime collection instead of the configured snapshot mode.
+        /// Redraw every second with fresh data, skipping the supervisor's cached
+        /// snapshot. Same as `--stream --no-cache`; needs an interactive terminal.
         #[arg(long)]
         live: bool,
 
-        /// Continuously refresh output and use a rolling metrics window (e.g., "5", "1s", "2m").
-        #[arg(long, value_name = "DURATION")]
+        /// Collect fresh data for this one read instead of serving the
+        /// supervisor's cached snapshot.
+        #[arg(long = "no-cache")]
+        no_cache: bool,
+
+        /// Continuously refresh output and use a rolling metrics window (e.g., "5",
+        /// "1s", "2m"). With no value, refreshes every second.
+        #[arg(
+            long,
+            value_name = "DURATION",
+            num_args = 0..=1,
+            default_missing_value = "1"
+        )]
         stream: Option<String>,
     },
 
@@ -483,8 +507,14 @@ pub enum Commands {
         #[arg(long = "no-strip-ansi", conflicts_with = "strip_ansi")]
         no_strip_ansi: bool,
 
-        /// Continuously refresh output at the provided interval (e.g., "5", "1s", "2m").
-        #[arg(long, value_name = "DURATION")]
+        /// Continuously refresh output at the provided interval (e.g., "5", "1s",
+        /// "2m"). With no value, refreshes every second.
+        #[arg(
+            long,
+            value_name = "DURATION",
+            num_args = 0..=1,
+            default_missing_value = "1"
+        )]
         stream: Option<String>,
     },
 

@@ -1257,8 +1257,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             no_color,
             full_cmd,
             live,
+            no_cache,
             stream,
         } => {
+            if live {
+                refuse_live_without_terminal("sysg status --no-cache", format.is_some())?;
+            }
+            let no_cache = no_cache || live;
+            let stream = stream.or_else(|| live.then(|| "1".to_string()));
             let target_project =
                 resolve_status_project_filter(config.as_deref(), project.clone())?;
             let render_config = config.as_deref().unwrap_or(DEFAULT_CONFIG_PATH);
@@ -1293,7 +1299,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         && libc::isatty(libc::STDOUT_FILENO) == 1
                 };
                 loop {
-                    match fetch_status_reading(config.as_deref(), live) {
+                    match fetch_status_reading(config.as_deref(), no_cache) {
                         Ok(reading) => {
                             print!("\x1B[2J\x1B[H");
                             print_presence_banner(reading.presence);
@@ -1333,7 +1339,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 }
             } else {
                 let (reading, meters) = with_progress_spinner("Computing", || {
-                    let reading = fetch_status_reading(config.as_deref(), live)?;
+                    let reading = fetch_status_reading(config.as_deref(), no_cache)?;
                     Ok((reading, sampler.as_mut().map(MeterSampler::sample)))
                 })?;
 
@@ -1363,15 +1369,28 @@ fn run() -> Result<(), Box<dyn Error>> {
             format,
             no_color,
             live,
+            no_cache,
             stream,
         } => {
+            if live {
+                let scope = project
+                    .as_deref()
+                    .map(|project| format!(" -p {project}"))
+                    .unwrap_or_default();
+                refuse_live_without_terminal(
+                    &format!("sysg inspect -s {service}{scope} --no-cache"),
+                    format.is_some(),
+                )?;
+            }
+            let no_cache = no_cache || live;
+            let stream = stream.or_else(|| live.then(|| "1".to_string()));
             let config_readable = load_config(Some(&config)).is_ok();
             let mut effective_config = config.clone();
             if !config_readable && let Ok(Some(hint)) = ipc::read_config_hint() {
                 effective_config = hint.to_string_lossy().to_string();
             }
             if let Err(err) =
-                systemg::inspect::resolve_plan(&service, project.as_deref(), live)
+                systemg::inspect::resolve_plan(&service, project.as_deref(), no_cache)
             {
                 use systemg::inspect::InspectPlanError;
                 let diag = match err {
@@ -1398,7 +1417,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             // project is ambiguous — refuse with SG0006 rather than silently
             // inspecting whichever one resolves first, exactly as status does.
             if project.is_none()
-                && let Ok(snapshot) = fetch_status_snapshot(Some(&effective_config), live)
+                && let Ok(snapshot) =
+                    fetch_status_snapshot(Some(&effective_config), no_cache)
                 && let Some(diag) =
                     status_ambiguous_service(&snapshot, Some(&service), None)
             {
@@ -1453,7 +1473,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 &service,
                                 target_project.as_deref(),
                                 samples_limit,
-                                live,
+                                no_cache,
                             )?;
                             if payload.unit.is_none() {
                                 let _ = terminal::disable_raw_mode();
@@ -1524,7 +1544,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         &service,
                         target_project.as_deref(),
                         samples_limit,
-                        live,
+                        no_cache,
                     )?;
                     if payload.unit.is_none() {
                         eprintln!("Service '{service}' not found.");
@@ -1542,7 +1562,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         &service,
                         target_project.as_deref(),
                         samples_limit,
-                        live,
+                        no_cache,
                     )
                 })?;
                 if payload.unit.is_none() {
@@ -2350,6 +2370,26 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// Refuses `--live` where a redrawing screen cannot work, since the loop would
+/// never hand control back to a script or agent.
+fn refuse_live_without_terminal(
+    no_cache_cmd: &str,
+    format_requested: bool,
+) -> Result<(), Box<dyn Error>> {
+    let reason = if format_requested {
+        "`--format` asks for machine-readable output"
+    } else if agent_mode() {
+        "agent mode is on (`--plain` or `SYSTEMG_AGENT`)"
+    } else if unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1 {
+        "output is not a terminal"
+    } else {
+        return Ok(());
+    };
+    Err(Box::new(DiagError(Box::new(
+        systemg::status::diagnostics::live_needs_terminal(reason, no_cache_cmd),
+    ))))
 }
 
 /// Signal bridge for a supervisor that owns its own process — container-init
@@ -3824,6 +3864,7 @@ mod tests {
             full_cmd: false,
             stream: None,
             live: false,
+            no_cache: false,
         }));
     }
 

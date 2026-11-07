@@ -40,7 +40,7 @@ $ sysg logs -p myapp
 | `-` | `--raw` | Print only the application's original line, dropping systemg's timestamp/stream prefix |
 | `-` | `--strip-ansi` | Strip ANSI color/escape sequences (default on for `--format json`, `--raw`, and non-interactive output) |
 | `-` | `--no-strip-ansi` | Keep ANSI escape sequences even when they would be stripped by default |
-| `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`) |
+| `-` | `--stream` | Continuously refresh the latest log snapshot at the provided interval (e.g., `5`, `1s`, `2m`). With no value, refreshes every second |
 | `-v` | `--verbose` | Print operation progress |
 | `-` | `--sys` | Opt into privileged system mode. Requires running as root |
 | `-` | `--drop-privileges` | Accepted globally but ignored; logs does not spawn services |
@@ -273,7 +273,7 @@ $ sysg logs --service api --lines 200 --stream 2
 ```
 
 In stream mode, each refresh replaces the current frame with a new snapshot of
-the latest `--lines` entries. Without `--lines`, each frame contains the latest
+the latest `--lines` entries. `--stream` with no value refreshes every second. Without `--lines`, each frame contains the latest
 100 lines.
 
 ### Prune rotated backups

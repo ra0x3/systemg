@@ -793,17 +793,17 @@ pub struct MetricsCollector {
 }
 
 impl MetricsCollector {
-    #[allow(clippy::too_many_arguments)]
     /// Starts the metrics collector and returns its shutdown handle.
+    ///
+    /// `targets` is asked for the units to sample on every tick, so projects
+    /// added to a running supervisor are picked up without a restart.
     ///
     /// Thread creation errors are returned to the supervisor so it can fail the
     /// worker startup transaction instead of running without metric collection.
-    pub fn spawn(
-        store: MetricsHandle,
-        config: Arc<Config>,
-        pid_file: Arc<Mutex<PidFile>>,
-        service_state: Arc<Mutex<ServiceStateFile>>,
-    ) -> io::Result<Self> {
+    pub fn spawn<F>(store: MetricsHandle, targets: F) -> io::Result<Self>
+    where
+        F: Fn() -> Vec<UnitTarget> + Send + 'static,
+    {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop);
         let store_clone = Arc::clone(&store);
@@ -821,8 +821,7 @@ impl MetricsCollector {
                 let mut system = System::new();
 
                 while !stop_clone.load(Ordering::SeqCst) {
-                    let targets =
-                        gather_unit_targets(config.as_ref(), &pid_file, &service_state);
+                    let targets = targets();
                     refresh_targets(&mut system, &targets);
 
                     let mut collected = Vec::with_capacity(targets.len());
@@ -891,8 +890,8 @@ impl Drop for MetricsCollector {
     }
 }
 
-/// Gathers unit targets.
-fn gather_unit_targets(
+/// Every unit in one project the metrics sampler should read.
+pub fn gather_unit_targets(
     config: &Config,
     pid_file: &Arc<Mutex<PidFile>>,
     service_state: &Arc<Mutex<ServiceStateFile>>,

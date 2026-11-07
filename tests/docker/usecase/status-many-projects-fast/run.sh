@@ -6,14 +6,14 @@
 #   project = 40 projects / 120 units, all under one supervisor (registered via 4
 #   separate `start -c` calls). status must (a) report EVERY one of the 120 units
 #   accurately (ps == status, no dropped project/service at scale) and (b) return
-#   quickly — both the cached path and the --live re-probe path under a ceiling.
+#   quickly — both the cached path and the --no-cache re-probe path under a ceiling.
 #   A status that goes O(n^2) or serial-forks per unit would blow the budget.
 #
 # EXPECTED OUTCOME
 #   - 4 configs x 10 projects x 3 services boot into one supervisor.
 #   - status lists all 120 units; every unit is running on an alive pid.
 #   - cached `status --format json` returns under CACHED_CEIL_MS.
-#   - `status --live --format json` returns under LIVE_CEIL_MS.
+#   - `status --no-cache --format json` returns under LIVE_CEIL_MS.
 #
 #   NOTE: RED until the status-cache staleness fix lands. At scale the cached
 #   snapshot is built in configured mode and reports live processes as
@@ -97,9 +97,9 @@ echo "cached status latency: ${CACHED_MS}ms (ceiling ${CACHED_CEIL_MS}ms)"
 [ "$CACHED_MS" -lt "$CACHED_CEIL_MS" ]
 check "$?" "cached status under ${CACHED_CEIL_MS}ms"
 
-section "latency: --live status returns under ${LIVE_CEIL_MS}ms"
+section "latency: --no-cache status returns under ${LIVE_CEIL_MS}ms"
 T0=$(date +%s%3N)
-sysg status --live --format json >/dev/null 2>&1
+sysg status --no-cache --format json >/dev/null 2>&1
 T1=$(date +%s%3N)
 LIVE_MS=$((T1 - T0))
 echo "live status latency: ${LIVE_MS}ms (ceiling ${LIVE_CEIL_MS}ms)"
