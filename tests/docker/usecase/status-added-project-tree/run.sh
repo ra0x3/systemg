@@ -3,13 +3,18 @@
 #
 # WHAT THIS TESTS
 #   alpha boots the supervisor with the default summary snapshot mode. beta is
-#   registered afterwards with `status.snapshot_mode: detailed`, and its unit
-#   runs python3 -> sh -> sleep (under sysg's shell wrapper on Linux).
+#   registered afterwards with `status.snapshot_mode: detailed`. Its `tree`
+#   unit runs python3 -> sh -> sleep (under sysg's shell wrapper on Linux), and
+#   its `burner` unit runs four nested /usr/bin/python3 children, one of them
+#   spinning a CPU.
 #
 # HARD INVARIANTS
 #   - cached `status -p beta` carries the tree (beta's own mode, not alpha's),
 #   - beta's unit row has CPU/RSS metrics, like its children do,
 #   - the text table draws sleep one level under sh,
+#   - a busy child reports real CPU, not the 0% of a fresh process table,
+#   - a child started by full path is named by its file name (`python3`),
+#   - every row of a 4-deep tree still shows its name in a squeezed table,
 #   - `--live` refuses with --format or without a TTY and points at --no-cache,
 #   - `--no-cache` reads once, and a bare `--stream` keeps redrawing.
 set -u
@@ -77,6 +82,33 @@ T="$(sysg status -p beta --no-color 2>/dev/null)"
 echo "$T"
 echo "$T" | grep -qE '[║│] {4}└─ '
 check "$?" "grandchild row is indented under its parent"
+
+section "child processes report real CPU and short names"
+for flag in "" "--no-cache"; do
+  sysg status -p beta $flag --format json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+u = [u for u in d["units"] if u["name"] == "burner"][0]
+def walk(nodes):
+    for n in nodes:
+        yield n
+        yield from walk(n.get("children", []))
+kids = [n["child"] for n in walk(u.get("spawned_children", []))]
+for c in kids:
+    print("  %s name=%r cpu=%s :: %s" % (c["pid"], c["name"], c.get("cpu_percent"), c["command"][:40]))
+busy = [c for c in kids if c["command"].startswith("/usr/bin/python3") and c["command"].endswith(" 1")]
+assert busy and (busy[0].get("cpu_percent") or 0) > 20, busy
+full = [c for c in kids if c["command"].startswith("/usr/bin/python3")]
+assert len(full) == 3 and all(c["name"] == "python3" for c in full), full
+'
+  check "$?" "busy child shows real CPU and full-path children are named python3 (${flag:-cached})"
+done
+
+section "a 4-deep tree keeps every name in a squeezed table"
+B="$(sysg status -p beta --no-color 2>/dev/null)"
+echo "$B" | grep -E 'burner|python3'
+[ "$(echo "$B" | grep -cE '└─ python3 ')" -ge 4 ]
+check "$?" "all four python3 rows show their name"
 
 section "--live refuses where it cannot redraw"
 OUT="$(sysg status --live --format json 2>&1)"

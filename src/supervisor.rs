@@ -50,7 +50,7 @@ use crate::{
     },
     start::{self, BootFrame, BootJournal},
     status::{
-        BootStatus, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
+        BootStatus, ProcTable, ProjectRunMode, StatusCache, StatusError, StatusRefresher,
         StatusSnapshot, collect_runtime_snapshot,
         collect_runtime_snapshot_with_cron_hashes, compute_overall_health,
         cron_hashes_for_config,
@@ -161,6 +161,8 @@ pub struct Supervisor {
     metrics_collector: Option<MetricsCollector>,
     /// Dynamic child-process ownership and limits.
     spawn_manager: DynamicSpawnManager,
+    /// Process table shared by every status snapshot, so child CPU has history.
+    procs: ProcTable,
     /// Whether service stderr is forwarded to supervisor stdout.
     pipe_stderr: bool,
     /// Attachment mode of the primary project.
@@ -1209,10 +1211,12 @@ impl Supervisor {
     }
 
     /// Collects a status snapshot for one project daemon.
+    #[allow(clippy::too_many_arguments)]
     fn collect_daemon_snapshot(
         daemon: &Daemon,
         metrics_store: &MetricsHandle,
         spawn_manager: &DynamicSpawnManager,
+        procs: &ProcTable,
         mode: StatusSnapshotMode,
         run_mode: ProjectRunMode,
         config_path: &Path,
@@ -1229,6 +1233,7 @@ impl Supervisor {
                 &state_handle,
                 Some(metrics_store),
                 Some(spawn_manager),
+                Some(procs),
                 mode,
                 Some(valid_cron_hashes),
             ),
@@ -1238,6 +1243,7 @@ impl Supervisor {
                 &state_handle,
                 Some(metrics_store),
                 Some(spawn_manager),
+                Some(procs),
                 mode,
             ),
         }
@@ -1256,6 +1262,7 @@ impl Supervisor {
         projects: &Arc<RwLock<Vec<CronProjectRuntime>>>,
         metrics_store: &MetricsHandle,
         spawn_manager: &DynamicSpawnManager,
+        procs: &ProcTable,
     ) -> Result<StatusSnapshot, StatusError> {
         let runtimes = match projects.read() {
             Ok(guard) => guard.clone(),
@@ -1280,6 +1287,7 @@ impl Supervisor {
                 &runtime.daemon,
                 metrics_store,
                 spawn_manager,
+                procs,
                 Self::live_status_snapshot_mode(runtime.config.as_ref()),
                 runtime.mode,
                 &runtime.config_path,
@@ -1326,6 +1334,7 @@ impl Supervisor {
                 &self.daemon,
                 &self.metrics_store,
                 &self.spawn_manager,
+                &self.procs,
                 primary_mode,
                 self.primary_project_mode,
                 &self.config_path,
@@ -1344,6 +1353,7 @@ impl Supervisor {
                 &project.daemon,
                 &self.metrics_store,
                 &self.spawn_manager,
+                &self.procs,
                 mode,
                 project.mode,
                 &project.config_path,
@@ -2265,6 +2275,7 @@ impl Supervisor {
             service_filter,
             status_cache,
             status_refresher: None,
+            procs: ProcTable::default(),
             metrics_store,
             metrics_collector: None,
             spawn_manager,
@@ -5811,6 +5822,7 @@ impl Supervisor {
             let boot_projects = Arc::clone(&self.cron_projects);
             let boot_metrics = self.metrics_store.clone();
             let boot_spawn = self.spawn_manager.clone();
+            let boot_procs = self.procs.clone();
             let boots = Arc::clone(&self.boots);
             boots
                 .write()
@@ -5880,6 +5892,7 @@ impl Supervisor {
                         &boot_projects,
                         &boot_metrics,
                         &boot_spawn,
+                        &boot_procs,
                     ) {
                         Ok(snapshot) if snapshot.has_project(&boot_project) => {
                             boot_cache.replace(snapshot);
@@ -6686,6 +6699,7 @@ running project does not declare; restart the project to apply structural change
         let refresh_projects = Arc::clone(&self.cron_projects);
         let refresh_metrics = self.metrics_store.clone();
         let refresh_spawn = self.spawn_manager.clone();
+        let refresh_procs = self.procs.clone();
         self.status_refresher = Some(StatusRefresher::spawn(
             cache_clone,
             refresh_interval,
@@ -6694,6 +6708,7 @@ running project does not declare; restart the project to apply structural change
                     &refresh_projects,
                     &refresh_metrics,
                     &refresh_spawn,
+                    &refresh_procs,
                 )
             },
         )?);

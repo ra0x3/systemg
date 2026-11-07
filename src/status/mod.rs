@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 #[cfg(target_os = "linux")]
 use std::{fs, path::Path};
@@ -29,7 +29,7 @@ use nix::sys::signal;
 use nix::unistd::{Pid, getpgid};
 pub use plan::{StatusPlan, resolve_plan};
 use serde::{Deserialize, Serialize};
-use sysinfo::{Pid as SysPid, ProcessesToUpdate, System};
+use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid as SysPid, ProcessesToUpdate, System};
 use thiserror::Error;
 use tracing::{debug, error};
 
@@ -326,11 +326,14 @@ fn hide_spawn_tree_commands(nodes: &mut [SpawnedProcessNode]) {
 }
 
 /// Names a process sysg found in the process table rather than one a
-/// service spawned by name: the first word of its shown command.
+/// service spawned by name: the file name of its shown command's first word,
+/// so `/usr/bin/python3 app.py` reads as `python3`.
 fn peripheral_name(command: &str, pid: u32) -> String {
     command
         .split_whitespace()
         .next()
+        .map(|program| program.rsplit('/').next().unwrap_or(program))
+        .filter(|name| !name.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| format!("pid-{pid}"))
 }
@@ -566,14 +569,7 @@ fn build_spawn_tree_from_system(
             let (cpu_percent, rss_bytes) =
                 sample_process_metrics(Some(index.system), child_pid);
             let command = redact_command(&StatusManager::get_process_cmdline(child_pid));
-            let mut display_name = command
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string();
-            if display_name.is_empty() {
-                display_name = format!("pid-{child_pid}");
-            }
+            let display_name = peripheral_name(&command, child_pid);
             let started_at = if let Some(process) = index.process(child_pid) {
                 process_started_at(index.system, process)
             } else {
@@ -614,14 +610,7 @@ fn build_spawn_tree_from_system(
                 let (cpu_percent, rss_bytes) = sample_process_metrics(system, child_pid);
                 let command =
                     redact_command(&StatusManager::get_process_cmdline(child_pid));
-                let mut display_name = command
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or_default()
-                    .to_string();
-                if display_name.is_empty() {
-                    display_name = format!("pid-{child_pid}");
-                }
+                let display_name = peripheral_name(&command, child_pid);
 
                 let started_at = if let Some(index) = process_index
                     && let Some(process) = index.process(child_pid)
@@ -954,6 +943,69 @@ impl Drop for StatusRefresher {
     }
 }
 
+/// A process table kept across snapshots.
+///
+/// sysinfo works out a process's CPU by comparing two reads of the same table,
+/// so a table built fresh for every snapshot reports 0% for every child. The
+/// supervisor holds one of these and hands it to each snapshot instead.
+#[derive(Clone)]
+pub struct ProcTable {
+    inner: Arc<Mutex<ProcTableState>>,
+}
+
+/// The table and when it was last read.
+struct ProcTableState {
+    system: System,
+    refreshed: Option<Instant>,
+}
+
+/// A refreshed table, plus whether its CPU numbers have an earlier read behind them.
+struct ProcRead<'a> {
+    state: std::sync::MutexGuard<'a, ProcTableState>,
+    cpu_ready: bool,
+}
+
+impl Default for ProcTable {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ProcTableState {
+                system: System::new(),
+                refreshed: None,
+            })),
+        }
+    }
+}
+
+impl ProcTable {
+    /// Refreshes the table unless it was read less than sysinfo's minimum CPU
+    /// interval ago, in which case the previous read is reused rather than
+    /// measuring CPU over a window too short to mean anything.
+    fn read(&self) -> ProcRead<'_> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cpu_ready = match state.refreshed {
+            Some(at) if at.elapsed() < MINIMUM_CPU_UPDATE_INTERVAL => true,
+            previous => {
+                state.system.refresh_processes(ProcessesToUpdate::All, true);
+                state.refreshed = Some(Instant::now());
+                previous.is_some()
+            }
+        };
+        ProcRead { state, cpu_ready }
+    }
+}
+
+/// Drops CPU numbers that came from a table's first read, which sysinfo
+/// always reports as 0%; an unknown is shown as `-` rather than a false idle.
+fn clear_cold_cpu(nodes: &mut [SpawnedProcessNode]) {
+    for node in nodes {
+        node.child.cpu_percent = None;
+        clear_cold_cpu(&mut node.children);
+    }
+}
+
 /// Builds a fresh snapshot from the supervisor runtime, locking shared state while collecting.
 pub fn collect_runtime_snapshot(
     config: Arc<Config>,
@@ -961,6 +1013,7 @@ pub fn collect_runtime_snapshot(
     service_state: &Arc<Mutex<ServiceStateFile>>,
     metrics: Option<&MetricsHandle>,
     spawn_manager: Option<&DynamicSpawnManager>,
+    procs: Option<&ProcTable>,
     mode: StatusSnapshotMode,
 ) -> Result<StatusSnapshot, StatusError> {
     collect_runtime_snapshot_with_cron_hashes(
@@ -969,18 +1022,21 @@ pub fn collect_runtime_snapshot(
         service_state,
         metrics,
         spawn_manager,
+        procs,
         mode,
         None,
     )
 }
 
 /// Builds a fresh snapshot using a caller-provided set of valid cron hashes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_runtime_snapshot_with_cron_hashes(
     config: Arc<Config>,
     pid_file: &Arc<Mutex<PidFile>>,
     service_state: &Arc<Mutex<ServiceStateFile>>,
     metrics: Option<&MetricsHandle>,
     spawn_manager: Option<&DynamicSpawnManager>,
+    procs: Option<&ProcTable>,
     mode: StatusSnapshotMode,
     _valid_cron_hashes: Option<&HashSet<String>>,
 ) -> Result<StatusSnapshot, StatusError> {
@@ -1002,6 +1058,7 @@ pub(crate) fn collect_runtime_snapshot_with_cron_hashes(
         &mut cron_state,
         metrics_guard.as_deref(),
         spawn_manager,
+        procs,
         mode,
     ))
 }
@@ -1036,6 +1093,7 @@ pub fn collect_disk_snapshot(
         &mut cron_state,
         None,
         None,
+        None,
         StatusSnapshotMode::Detailed,
     ))
 }
@@ -1067,6 +1125,7 @@ fn reconcile_cron_hashes_by_name(cron_state: &CronStateFile) -> HashMap<String, 
 }
 
 /// Builds snapshot.
+#[allow(clippy::too_many_arguments)]
 fn build_snapshot(
     config: Option<&Config>,
     pid_file: &PidFile,
@@ -1074,6 +1133,7 @@ fn build_snapshot(
     cron_state: &mut CronStateFile,
     metrics_store: Option<&MetricsStore>,
     spawn_manager: Option<&DynamicSpawnManager>,
+    procs: Option<&ProcTable>,
     mode: StatusSnapshotMode,
 ) -> StatusSnapshot {
     let mut hash_to_name: HashMap<String, String> = HashMap::new();
@@ -1101,14 +1161,22 @@ fn build_snapshot(
 
     let mut units = Vec::new();
 
-    let process_system = if matches!(mode, StatusSnapshotMode::Detailed) {
-        let mut sys = System::new();
-        sys.refresh_processes(ProcessesToUpdate::All, true);
-        Some(sys)
-    } else {
-        None
+    let shared_read;
+    let one_shot;
+    let (process_system, cpu_ready) = match (mode, procs) {
+        (StatusSnapshotMode::Detailed, Some(table)) => {
+            shared_read = table.read();
+            (Some(&shared_read.state.system), shared_read.cpu_ready)
+        }
+        (StatusSnapshotMode::Detailed, None) => {
+            let mut sys = System::new();
+            sys.refresh_processes(ProcessesToUpdate::All, true);
+            one_shot = sys;
+            (Some(&one_shot), false)
+        }
+        _ => (None, false),
     };
-    let process_index = process_system.as_ref().map(ProcessIndex::new);
+    let process_index = process_system.map(ProcessIndex::new);
 
     for hash in unit_hashes {
         let actual_name = hash_to_name.get(&hash).cloned();
@@ -1288,14 +1356,13 @@ fn build_snapshot(
             let mut nodes = Vec::new();
 
             if let Some(manager) = spawn_manager {
-                let managed =
-                    build_spawn_tree(manager, runtime.pid, process_system.as_ref());
+                let managed = build_spawn_tree(manager, runtime.pid, process_system);
                 collect_tracked_pids(&managed, &mut seen);
                 nodes.extend(managed);
             }
 
             let pidfile_system = if spawn_manager.is_some() {
-                process_system.as_ref()
+                process_system
             } else {
                 None
             };
@@ -1331,6 +1398,9 @@ fn build_snapshot(
                     restore_spawn_tree_commands(&mut nodes, service_config)
                 }
                 None => hide_spawn_tree_commands(&mut nodes),
+            }
+            if !cpu_ready {
+                clear_cold_cpu(&mut nodes);
             }
             nodes
         } else {
@@ -1399,14 +1469,14 @@ fn build_snapshot(
         let mut spawned_children = if matches!(mode, StatusSnapshotMode::Detailed)
             && let Some(manager) = spawn_manager
         {
-            build_spawn_tree(manager, pid_value, process_system.as_ref())
+            build_spawn_tree(manager, pid_value, process_system)
         } else {
             Vec::new()
         };
 
         if matches!(mode, StatusSnapshotMode::Detailed) && spawned_children.is_empty() {
             let pidfile_system = if spawn_manager.is_some() {
-                process_system.as_ref()
+                process_system
             } else {
                 None
             };
@@ -1420,6 +1490,9 @@ fn build_snapshot(
         }
 
         hide_spawn_tree_commands(&mut spawned_children);
+        if !cpu_ready {
+            clear_cold_cpu(&mut spawned_children);
+        }
 
         units.push(UnitStatus {
             name: service_name.clone(),
@@ -3400,6 +3473,7 @@ services:
             &mut cron_state,
             None,
             None,
+            None,
             StatusSnapshotMode::Off,
         );
 
@@ -3471,6 +3545,7 @@ services:
             &pid_file,
             &mut service_state,
             &mut cron_state,
+            None,
             None,
             None,
             StatusSnapshotMode::Summary,
@@ -3546,6 +3621,7 @@ services:
             &mut cron_state,
             None,
             None,
+            None,
             StatusSnapshotMode::Summary,
         );
 
@@ -3601,6 +3677,7 @@ services:
             &pid_file,
             &mut service_state,
             &mut cron_state,
+            None,
             None,
             None,
             StatusSnapshotMode::Summary,
@@ -3659,6 +3736,7 @@ services:
             &pid_file,
             &mut service_state,
             &mut cron_state,
+            None,
             None,
             None,
             StatusSnapshotMode::Summary,
@@ -3924,6 +4002,7 @@ services:
             &pid_file,
             &mut service_state,
             &mut cron_state,
+            None,
             None,
             None,
             StatusSnapshotMode::Summary,

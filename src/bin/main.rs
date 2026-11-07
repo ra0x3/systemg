@@ -3696,10 +3696,18 @@ mod tests {
     }
 
     #[test]
-    fn truncate_nested_unit_label_truncates_prefix_if_no_room_for_name() {
+    fn truncate_nested_unit_label_keeps_the_name_when_no_room_for_prefix() {
         let prefix = "   │  └─ ";
         let label = truncate_nested_unit_label(prefix, "child", 6);
-        assert_eq!(label, "   ...");
+        assert_eq!(label, "child");
+    }
+
+    #[test]
+    fn truncate_nested_unit_label_trims_deep_indent_from_the_left() {
+        let prefix = "         └─ ";
+        let label = truncate_nested_unit_label(prefix, "sleep", 12);
+        assert_eq!(label, "…   └─ sleep");
+        assert_eq!(visible_length(&label), 12);
     }
 
     #[test]
@@ -3881,7 +3889,7 @@ mod tests {
     #[test]
     fn status_widths_fit_terminal_width() {
         let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
-        shrink_status_widths_to_fit(&mut widths, 120);
+        shrink_status_widths_to_fit(&mut widths, &STATUS_SOFT_MIN_WIDTHS, 120);
         assert!(status_row_width(&widths) <= 120);
     }
 
@@ -3889,7 +3897,7 @@ mod tests {
     fn status_widths_fit_target_table_width() {
         let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
         let target_width = target_table_width(120);
-        shrink_status_widths_to_fit(&mut widths, target_width);
+        shrink_status_widths_to_fit(&mut widths, &STATUS_SOFT_MIN_WIDTHS, target_width);
         assert!(status_row_width(&widths) <= target_width);
     }
 
@@ -3930,7 +3938,7 @@ mod tests {
     fn status_width_shrink_priority_preserves_critical_columns() {
         let mut widths = [30, 4, 7, 8, 7, 6, 8, 10, 30, 20, 8];
         let original = widths;
-        shrink_status_widths_to_fit(&mut widths, 120);
+        shrink_status_widths_to_fit(&mut widths, &STATUS_SOFT_MIN_WIDTHS, 120);
 
         assert_eq!(widths[STATUS_COL_PID], original[STATUS_COL_PID]);
         assert_eq!(widths[STATUS_COL_CPU], original[STATUS_COL_CPU]);
@@ -3961,14 +3969,14 @@ mod tests {
         };
         let widths = compute_status_preferred_widths(&[unit], true);
         let mut fitted = widths;
-        shrink_status_widths_to_fit(&mut fitted, 240);
+        shrink_status_widths_to_fit(&mut fitted, &STATUS_SOFT_MIN_WIDTHS, 240);
         assert_eq!(fitted, widths);
     }
 
     #[test]
     fn status_widths_balance_unit_and_cmd_columns() {
         let mut widths = [8, 4, 7, 8, 7, 6, 8, 10, 90, 20, 8];
-        shrink_status_widths_to_fit(&mut widths, 120);
+        shrink_status_widths_to_fit(&mut widths, &STATUS_SOFT_MIN_WIDTHS, 120);
 
         let diff = widths[STATUS_COL_UNIT].abs_diff(widths[STATUS_COL_CMD]);
         assert!(

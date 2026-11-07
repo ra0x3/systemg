@@ -685,6 +685,10 @@ const STATUS_SOFT_MIN_WIDTHS: [usize; STATUS_COLUMN_COUNT] =
 const STATUS_SHRINK_PRIORITY: [usize; STATUS_COLUMN_COUNT] =
     [8, 9, 3, 2, 7, 1, 10, 0, 6, 5, 4];
 const STATUS_UNIT_CMD_MAX_DIFF: usize = 4;
+/// Fewest characters of a child's name a nested UNIT label keeps visible.
+const NESTED_NAME_MIN: usize = 8;
+/// Widest the UNIT column's floor grows to make room for a deep process tree.
+const STATUS_UNIT_FLOOR_MAX: usize = 24;
 
 #[cfg(test)]
 fn status_row_width(content_widths: &[usize; STATUS_COLUMN_COUNT]) -> usize {
@@ -696,9 +700,25 @@ fn status_content_budget(terminal_width: usize) -> usize {
     terminal_width.saturating_sub((3 * STATUS_COLUMN_COUNT) + 1)
 }
 
+/// Soft minimum widths for one table. The UNIT floor grows with the deepest
+/// process-tree indent, so a squeezed table still shows each child's name.
+fn status_soft_min_widths(units: &[UnitStatus]) -> [usize; STATUS_COLUMN_COUNT] {
+    let mut deepest = 0;
+    for unit in units {
+        visit_spawn_tree(&unit.spawned_children, "", &mut |_, prefix, _| {
+            deepest = deepest.max(visible_length(prefix));
+        });
+    }
+    let mut mins = STATUS_SOFT_MIN_WIDTHS;
+    mins[STATUS_COL_UNIT] = (deepest + NESTED_NAME_MIN)
+        .clamp(STATUS_SOFT_MIN_WIDTHS[STATUS_COL_UNIT], STATUS_UNIT_FLOOR_MAX);
+    mins
+}
+
 /// Shrinks status widths to fit.
 fn shrink_status_widths_to_fit(
     widths: &mut [usize; STATUS_COLUMN_COUNT],
+    soft_mins: &[usize; STATUS_COLUMN_COUNT],
     terminal_width: usize,
 ) {
     let budget = status_content_budget(terminal_width);
@@ -707,15 +727,15 @@ fn shrink_status_widths_to_fit(
         return;
     }
 
-    reduce_status_widths(widths, &STATUS_SOFT_MIN_WIDTHS, budget);
+    reduce_status_widths(widths, soft_mins, budget);
 
     if widths.iter().sum::<usize>() <= budget {
-        rebalance_status_unit_cmd_widths(widths);
+        rebalance_status_unit_cmd_widths(widths, soft_mins);
         return;
     }
 
     reduce_status_widths(widths, &[1; STATUS_COLUMN_COUNT], budget);
-    rebalance_status_unit_cmd_widths(widths);
+    rebalance_status_unit_cmd_widths(widths, soft_mins);
 }
 
 /// Reduces status widths.
@@ -755,22 +775,24 @@ fn reduce_status_widths(
 }
 
 /// Rebalances status table widths so UNIT and CMD stay close in visible width.
-fn rebalance_status_unit_cmd_widths(widths: &mut [usize; STATUS_COLUMN_COUNT]) {
+fn rebalance_status_unit_cmd_widths(
+    widths: &mut [usize; STATUS_COLUMN_COUNT],
+    soft_mins: &[usize; STATUS_COLUMN_COUNT],
+) {
     let unit = STATUS_COL_UNIT;
     let cmd = STATUS_COL_CMD;
 
     if widths[cmd] > widths[unit] + STATUS_UNIT_CMD_MAX_DIFF {
         let diff = widths[cmd] - widths[unit] - STATUS_UNIT_CMD_MAX_DIFF;
         let needed = diff.div_ceil(2);
-        let cmd_floor = STATUS_SOFT_MIN_WIDTHS[cmd].max(STATUS_COLUMN_TITLES[cmd].len());
+        let cmd_floor = soft_mins[cmd].max(STATUS_COLUMN_TITLES[cmd].len());
         let transfer = needed.min(widths[cmd].saturating_sub(cmd_floor));
         widths[cmd] -= transfer;
         widths[unit] += transfer;
     } else if widths[unit] > widths[cmd] + STATUS_UNIT_CMD_MAX_DIFF {
         let diff = widths[unit] - widths[cmd] - STATUS_UNIT_CMD_MAX_DIFF;
         let needed = diff.div_ceil(2);
-        let unit_floor =
-            STATUS_SOFT_MIN_WIDTHS[unit].max(STATUS_COLUMN_TITLES[unit].len());
+        let unit_floor = soft_mins[unit].max(STATUS_COLUMN_TITLES[unit].len());
         let transfer = needed.min(widths[unit].saturating_sub(unit_floor));
         widths[unit] -= transfer;
         widths[cmd] += transfer;
@@ -1447,7 +1469,11 @@ fn render_status_table_with_focus(
     let terminal_width = detect_target_table_width(120);
     let mut widths = compute_status_preferred_widths(units, opts.no_color);
     if !agent_mode() {
-        shrink_status_widths_to_fit(&mut widths, terminal_width);
+        shrink_status_widths_to_fit(
+            &mut widths,
+            &status_soft_min_widths(units),
+            terminal_width,
+        );
     }
 
     let columns_array = [
@@ -1588,7 +1614,11 @@ fn render_status_non_interactive(
     let terminal_width = detect_target_table_width(120);
     let mut widths = compute_status_preferred_widths(&units, opts.no_color);
     if !agent_mode() {
-        shrink_status_widths_to_fit(&mut widths, terminal_width);
+        shrink_status_widths_to_fit(
+            &mut widths,
+            &status_soft_min_widths(&units),
+            terminal_width,
+        );
     }
 
     let columns_array = [
@@ -2821,15 +2851,24 @@ fn truncate_unit_name(name: &str, width: usize) -> String {
     ellipsize(name, width)
 }
 
-/// Truncates nested unit label.
+/// Fits a tree prefix and a child's name into `width`.
+///
+/// The name always keeps at least [`NESTED_NAME_MIN`] characters. When the
+/// indent is too deep for that, it is trimmed from the left behind a `…`, so
+/// the row still shows its branch and whose row it is.
 fn truncate_nested_unit_label(prefix: &str, name: &str, width: usize) -> String {
     let prefix_len = visible_length(prefix);
-    if prefix_len >= width {
-        return ellipsize(prefix, width);
+    let name_floor = visible_length(name).min(NESTED_NAME_MIN);
+    if prefix_len + name_floor <= width {
+        return format!("{prefix}{}", truncate_unit_name(name, width - prefix_len));
     }
 
-    let name_budget = width - prefix_len;
-    format!("{}{}", prefix, truncate_unit_name(name, name_budget))
+    let keep = width.saturating_sub(name_floor);
+    if keep < 4 {
+        return truncate_unit_name(name, width);
+    }
+    let tail: String = prefix.chars().skip(prefix_len - (keep - 1)).collect();
+    format!("…{tail}{}", truncate_unit_name(name, width - keep))
 }
 
 /// Formats cpu column.
@@ -4857,9 +4896,10 @@ fn sanitize_table_cell(value: &str) -> String {
     )
 }
 
-/// Splits a tree-drawing indent such as `"│     └─ "` off the front of a cell.
+/// Splits a tree-drawing indent such as `"│     └─ "` (or a trimmed `"…  └─ "`)
+/// off the front of a cell.
 fn split_tree_indent(value: &str) -> (&str, &str) {
-    let rest = value.trim_start_matches([' ', '│']);
+    let rest = value.trim_start_matches([' ', '│', '…']);
     let lead = value.len() - rest.len();
     ["├─ ", "└─ "]
         .iter()
